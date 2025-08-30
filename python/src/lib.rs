@@ -630,33 +630,32 @@ impl PyGrammarConstraintState {
         let mut out = std::collections::BTreeMap::new();
         self.inner.with_inner(|state| {
             for (tokenizer_state_id, glr_state) in &state.state {
-                if glr_state.active_state.stack.is_empty() {
-                    continue;
-                }
-                // Build forbidden tokens from disallowed terminals across ranges
-                let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
-                let mut forbidden = RustHybridBitset::zeros();
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
+            let mut forbidden = RustHybridBitset::zeros();
 
-                for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
-                    if disallowed_terminals_for_range.is_empty() { continue; }
-                    let possible_matches = &state.parent.possible_matches;
-                    let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
-                    for (_sid, per_state) in slice {
-                        for (terminal_id, llm_bv) in per_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                forbidden |= llm_bv;
-                            }
+            for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
+                if disallowed_terminals_for_range.is_empty() { continue; }
+                let possible_matches = &state.parent.possible_matches;
+                let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
+                for (_sid, per_state) in slice {
+                    for (terminal_id, llm_bv) in per_state {
+                        if disallowed_terminals_for_range.contains(terminal_id.0) {
+                            forbidden |= llm_bv.clone();
                         }
                     }
                 }
-
-                let mut gss_arc = glr_state.active_state.stack.clone();
-                if !forbidden.is_empty() {
-                    let allowed = &RustHybridBitset::max_ones() - &forbidden;
-                    sep1::datastructures::gss::allow_only_llm_tokens_and_prune(&mut gss_arc, &allowed);
                 }
-                out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
+
+            let mut gss_arc = glr_state.active_state.stack.clone();
+            if !forbidden.is_empty() {
+                let allowed = &RustHybridBitset::max_ones() - &forbidden;
+                rust_allow_only(&mut gss_arc, &allowed);
             }
+            out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
+        }
         });
         Ok(out)
     }

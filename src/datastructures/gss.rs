@@ -33,7 +33,7 @@ pub(crate) type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub(crate) type TerminalInfo = HybridL2Bitset;
+pub type TerminalInfo = HybridL2Bitset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PrecomputedNodeContents {
@@ -698,7 +698,7 @@ impl GSSNode {
         timeit!(format!("GSSNode::merge_many_with_depth({})", merge_depth), {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
-            let mut merged = first.as_ref().clone();
+            let mut merged = (*first).clone();
             for other in iter {
                 merged.merge_with_depth(merge_depth, &other);
             }
