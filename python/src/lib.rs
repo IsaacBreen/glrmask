@@ -217,6 +217,14 @@ impl PyGrammarDefinition {
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
+    #[staticmethod]
+    fn from_ebnf_file(path: &str) -> PyResult<Self> {
+        let grammar_def = GrammarDefinition::from_ebnf_file(path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
+                format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
+        Ok(PyGrammarDefinition { inner: grammar_def })
+    }
+
     fn simplify(&mut self) {
         self.inner.simplify();
     }
