@@ -11,7 +11,7 @@
       <excludeFolder url="file://$MODULE_DIR$/json_convertible_derive/target" />
       <excludeFolder url="file://$MODULE_DIR$/llm_logs" />
     </content>
-    <orderEntry type="inheritedJdk" />
+    <orderEntry type="jdk" jdkName="py312" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
