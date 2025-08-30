@@ -44,7 +44,6 @@ StateID = int
 # We treat those objects as opaque but callable via duck typing. We do not redefine RangeSet here.
 
 
-@dataclass(frozen=True, slots=True)
 class MultiEdge:
     """
     Compact edge representation:
@@ -53,10 +52,13 @@ class MultiEdge:
       - dest: destination node index
       - bv: token bitvector (RangeSet from the scorer)
     """
-    pop: int
-    sid_set: Optional[FrozenSet[int]]
-    dest: TrieNodeIndex
-    bv: Any  # scorer-provided RangeSet
+    __slots__ = ('pop', 'sid_set', 'dest', 'bv')
+
+    def __init__(self, pop: int, sid_set: Optional[FrozenSet[int]], dest: TrieNodeIndex, bv: Any):
+        self.pop = pop
+        self.sid_set = sid_set
+        self.dest = dest
+        self.bv = bv
 
 
 class CompressedTrie:
