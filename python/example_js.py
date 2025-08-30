@@ -125,7 +125,7 @@ def main():
     print("GrammarConstraint constructed successfully.")
 
     # 5. Load and tokenize the example JS code using our simple greedy tokenizer.
-    example_code_path = "src/example_code.js"
+    example_code_path = "../src/example_code.js"
     print(f"\nLoading and tokenizing example code from: {example_code_path}")
     with open(example_code_path, 'rb') as f:
         js_code_bytes = f.read()
