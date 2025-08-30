@@ -926,153 +926,6 @@ def collect_all_state_ids(arena: Arena) -> List[StateID]:
     return list(pool) or [0]
 
 
-def mutate_path(path: NormalizedPath, rng: random.Random, state_pool: List[StateID]) -> NormalizedPath:
-    """
-    Create a mutated variant of a path. Mutations may create invalid paths (by design).
-    """
-    if not path:
-        # If empty, likely mutations are insert or keep empty
-        ops = ["insert", "noop"]
-    else:
-        ops = ["insert", "delete", "modify_k", "modify_sid", "dup", "swap"]
-        if len(path) >= 2:
-            ops.extend(["merge"])
-
-    op = rng.choice(ops)
-    p = list(path)
-
-    if op == "noop":
-        return p
-
-    if op == "insert":
-        k = max(0, int(rng.gauss(1, 2)))
-        sid = rng.choice(state_pool) if rng.random() < 0.8 else rng.randint(-10, 10_000_000)
-        pos = rng.randint(0, len(p))
-        p.insert(pos, (k, sid))
-        return p
-
-    if op == "delete" and p:
-        pos = rng.randrange(len(p))
-        del p[pos]
-        return p
-
-    if op == "modify_k" and p:
-        pos = rng.randrange(len(p))
-        k, sid = p[pos]
-        delta = rng.randint(-2, 3)
-        p[pos] = (max(0, k + delta), sid)
-        return p
-
-    if op == "modify_sid" and p:
-        pos = rng.randrange(len(p))
-        k, _sid = p[pos]
-        # 70% from pool, 30% random possibly invalid
-        sid = rng.choice(state_pool) if rng.random() < 0.7 else rng.randint(-10, 10_000_000)
-        p[pos] = (k, sid)
-        return p
-
-    if op == "dup" and p:
-        pos = rng.randrange(len(p))
-        p.insert(pos, p[pos])
-        return p
-
-    if op == "swap" and len(p) >= 2:
-        i, j = rng.sample(range(len(p)), 2)
-        p[i], p[j] = p[j], p[i]
-        return p
-
-    if op == "merge" and len(p) >= 2:
-        idx = rng.randrange(len(p) - 1)
-        k1, sid1 = p[idx]
-        k2, sid2 = p[idx + 1]
-        # Merge by accumulating k and keeping next sid
-        p[idx:idx + 2] = [(k1 + k2, sid2)]
-        return p
-
-    return p
-
-
-def sample_paths_with_mutations(
-    root_index: TrieNodeIndex,
-    arena: Arena,
-    base_samples: int,
-    max_len: int,
-    mutations_per_base: int,
-    rng: random.Random,
-    state_pool: List[StateID],
-) -> List[NormalizedPath]:
-    """
-    Sample base paths from the reference trie, then create mutated variants.
-    Ensures deduplication of resulting test paths.
-    """
-    base: List[NormalizedPath] = []
-    seen: Set[Tuple[Tuple[int, int], ...]] = set()
-
-    # Attempt to include the empty path if it's valid to terminate at root (or to test contestant behavior)
-    empty_candidate: NormalizedPath = []
-    if tuple(empty_candidate) not in seen:
-        seen.add(tuple(empty_candidate))
-        base.append(empty_candidate)
-
-    attempts = 0
-    while len(base) < base_samples and attempts < base_samples * 20:
-        attempts += 1
-        p = sample_normalized_path(root_index, max_len, arena, rng)
-        if p is None:
-            continue
-        key = tuple((int(k), int(s)) for k, s in p)
-        if key in seen:
-            continue
-        seen.add(key)
-        base.append(p)
-
-    # Mutate
-    out_paths: Set[Tuple[Tuple[int, int], ...]] = set(seen)
-    for p in base:
-        for _ in range(mutations_per_base):
-            mp = mutate_path(p, rng, state_pool)
-            out_paths.add(tuple((int(k), int(s)) for k, s in mp))
-
-    return [list(p) for p in out_paths]
-
-
-def _coerce_rangeset(obj: Any) -> Optional[RangeSet]:
-    """
-    Try to coerce a competitor-returned object into a RangeSet. Supports:
-      - RangeSet
-      - JSON-like [[s,e], ...]
-      - None (returns None)
-    """
-    if obj is None:
-        return None
-    if isinstance(obj, RangeSet):
-        return obj
-    if isinstance(obj, list) and all(isinstance(x, list) and len(x) == 2 for x in obj):
-        try:
-            return RangeSet.from_json(obj)
-        except Exception:
-            return None
-    return None
-
-
-def _try_call_legacy_plugin_query(func: Callable, structure: Any, state_id: int, path: NormalizedPath) -> Any:
-    """
-    Call a plugin function supporting flexible signatures by trying:
-      1) func(structure, state_id, path)
-      2) func(state_id, path)
-      3) func(path)
-    """
-    try:
-        return func(structure, state_id, path)
-    except TypeError:
-        pass
-    try:
-        return func(state_id, path)
-    except TypeError:
-        pass
-    return func(path)
-
-
 def _try_call_plugin(func: Callable, structure: Any, *args) -> Any:
     """
     Call a plugin function supporting flexible signatures by trying:
@@ -1134,29 +987,6 @@ def _build_competitor_structure(
     return None
 
 
-def _get_competitor_functions(plugin_module: Any) -> Tuple[Optional[Callable], Optional[Callable]]:
-    """
-    Return a pair (get_bv_func, is_member_func) from the plugin, if present.
-    get_bv_func should return a RangeSet (or JSON), is_member_func returns bool.
-    """
-    get_bv_candidates = ["get_bv", "get_bitvector", "tokens_for_path", "bv_for_path"]
-    is_member_candidates = ["is_member", "membership", "is_path_member", "contains"]
-
-    get_bv_func = None
-    is_member_func = None
-
-    for name in get_bv_candidates:
-        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
-            get_bv_func = getattr(plugin_module, name)
-            break
-    for name in is_member_candidates:
-        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
-            is_member_func = getattr(plugin_module, name)
-            break
-
-    return get_bv_func, is_member_func
-
-
 def _get_competitor_size_functions(plugin_module: Any) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
     """
     Return potential functions: (nodes_func, edges_func, stats_func)
@@ -1193,75 +1023,87 @@ def _get_competitor_size_functions(plugin_module: Any) -> Tuple[Optional[Callabl
 def score_competitor_on_file(
     precompute_path: Path,
     plugin_module_path: str,
-    base_samples: int = 200,
-    max_len: int = 32,
-    mutations_per_base: int = 3,
-    seed: Optional[int] = None,
     state_id_filter: Optional[int] = None,
-    max_roots: Optional[int] = None,
-    verbose_mismatches: int = 20,
+    tokens: Optional[str] = None,
+    sample_tokens: Optional[int] = 256,
+    seed: Optional[int] = 0,
+    max_closure_expansions: int = 200000,
+    max_product_states: int = 200000,
 ) -> None:
     """
     End-to-end scorer:
       - loads reference precompute2
       - imports competitor plugin module
-      - builds competitor structure (if builder provided)
-      - generates test paths from reference + mutated variants
-      - evaluates membership (and BV, if provided by plugin) against reference
-    Prints a summary report with accuracy metrics, size metrics (nodes/edges), and sample mismatches.
+      - builds competitor structure
+      - runs a deterministic equivalence check against the reference.
+      - if equivalent, the score is based on the plugin-reported edge count.
+    Prints a summary report with correctness and size metrics.
     """
-    rng = random.Random(seed)
-
     t0 = time.time()
+
+    # Load reference and plugin
+    print(f"Loading reference file: {precompute_path}")
     roots_map, arena = load_precompute2(precompute_path)
-    state_ids = [sid for sid, _ in roots_map]
-    state_to_root: Dict[int, int] = dict(roots_map)
+    print(f"Loading plugin: {plugin_module_path}")
+    plugin_module = _load_plugin(plugin_module_path)
+    print("Building plugin structure...")
+    structure = _build_competitor_structure(plugin_module, precompute_path, roots_map, arena)
 
+    # Check for graph API, which is required for scoring.
+    iter_edges_func, is_end_func, get_root_func = _get_plugin_graph_api(plugin_module)
+    if iter_edges_func is None or is_end_func is None or get_root_func is None:
+        print("\nERROR: Plugin does not expose the required graph API for equivalence checking.")
+        print("Please implement: get_root(...), iter_edges(...), and is_end(...)")
+        print("Scoring aborted.")
+        return
+
+    # Determine which state IDs to test
+    state_ids_to_test: List[int]
     if state_id_filter is not None:
-        if state_id_filter not in state_to_root:
+        if state_id_filter not in dict(roots_map):
             raise ValueError(f"state-id {state_id_filter} not found in roots map")
-        roots_to_test = [(state_id_filter, state_to_root[state_id_filter])]
+        state_ids_to_test = [state_id_filter]
     else:
-        roots_to_test = roots_map
+        state_ids_to_test = sorted([sid for sid, _ in roots_map])
 
-    if max_roots is not None:
-        roots_to_test = roots_to_test[: max(0, max_roots)]
+    # Token selection logic
+    tokens_list: Optional[List[int]] = None
+    sample_n: Optional[int] = sample_tokens
+    if tokens is not None:
+        if tokens.strip() == "@all":
+            tokens_list = None
+            sample_n = None
+        else:
+            tokens_list = [int(x) for x in tokens.split(",") if x.strip() != ""]
+            sample_n = None
 
-    # Load plugin and build competitor structure
-    plugin = _load_plugin(plugin_module_path)
-    structure = _build_competitor_structure(plugin, precompute_path, roots_map, arena)
-    get_bv_func, is_member_func = _get_competitor_functions(plugin)
-    nodes_func, edges_func, stats_func = _get_competitor_size_functions(plugin)
+    # Run equivalence check
+    overall_ok = True
+    failed_states: List[int] = []
 
-    if get_bv_func is None and is_member_func is None:
-        raise ValueError(
-            "Plugin must define at least one of: get_bv(...), is_member(...). "
-            "Supported names/signatures documented in the template."
+    for i, state_id in enumerate(state_ids_to_test, 1):
+        print("-" * 40)
+        print(f"[{i}/{len(state_ids_to_test)}] Scoring State ID: {state_id}")
+        ok = run_equivalence_check_for_state(
+            roots_map=roots_map,
+            arena=arena,
+            plugin_module=plugin_module,
+            structure=structure,
+            state_id=state_id,
+            tokens=tokens_list,
+            sample_tokens=sample_n,
+            seed=seed,
+            max_closure_expansions=max_closure_expansions,
+            max_product_states=max_product_states,
         )
+        if not ok:
+            overall_ok = False
+            failed_states.append(state_id)
 
-    # Unified wrappers
-    def plugin_get_bv(sid: int, path: NormalizedPath) -> Optional[RangeSet]:
-        if get_bv_func is None:
-            return None
-        try:
-            out = _try_call_legacy_plugin_query(get_bv_func, structure, sid, path)
-        except TypeError as e:
-            raise TypeError(
-                f"get_bv incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
-            )
-        rs = _coerce_rangeset(out)
-        return rs
+    dur = time.time() - t0
 
-    def plugin_is_member(sid: int, path: NormalizedPath) -> Optional[bool]:
-        if is_member_func is None:
-            return None
-        try:
-            out = _try_call_legacy_plugin_query(is_member_func, structure, sid, path)
-        except TypeError as e:
-            raise TypeError(
-                f"is_member incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
-            )
-        return bool(out)
+    # Get size stats
+    nodes_func, edges_func, stats_func = _get_competitor_size_functions(plugin_module)
 
     def plugin_counts() -> Tuple[Optional[int], Optional[int], Dict[str, Any]]:
         """
@@ -1305,137 +1147,39 @@ def score_competitor_on_file(
 
         # As a very last resort, allow module-level constants
         if nodes is None:
-            mn = getattr(plugin, "NODES", None)
+            mn = getattr(plugin_module, "NODES", None)
             if isinstance(mn, int) and mn >= 0:
                 nodes = mn
         if edges is None:
-            me = getattr(plugin, "EDGES", None)
+            me = getattr(plugin_module, "EDGES", None)
             if isinstance(me, int) and me >= 0:
                 edges = me
 
         return nodes, edges, stats
 
-    # Prepare mutation pool
-    state_pool = collect_all_state_ids(arena)
-
-    # Run
-    total_paths = 0
-    membership_agree = 0
-
-    bv_attempted = 0
-    bv_exact_equal = 0
-
-    mismatches: List[Dict[str, Any]] = []
-
-    for sid, root_idx in roots_to_test:
-        test_paths = sample_paths_with_mutations(
-            root_idx,
-            arena,
-            base_samples=base_samples,
-            max_len=max_len,
-            mutations_per_base=mutations_per_base,
-            rng=rng,
-            state_pool=state_pool,
-        )
-
-        for path in test_paths:
-            total_paths += 1
-
-            # Reference
-            ref_bv = get_bv_for_normalized_path(root_idx, path, arena)
-            print(f"Testing SID={sid} Path={path} => Ref BV: {format_bitvector(ref_bv)}")
-            ref_member = not ref_bv.is_empty()
-
-            # Competitor membership
-            comp_bv = plugin_get_bv(sid, path)
-            comp_member_from_bv = (comp_bv is not None) and (not comp_bv.is_empty())
-            comp_member = comp_member_from_bv
-            comp_member_src = "get_bv"
-
-            if comp_bv is None:
-                im = plugin_is_member(sid, path)
-                if im is None:
-                    raise RuntimeError("Plugin returned neither BV nor membership result.")
-                comp_member = bool(im)
-                comp_member_src = "is_member"
-
-            if comp_member == ref_member:
-                membership_agree += 1
-            else:
-                if len(mismatches) < verbose_mismatches:
-                    mismatches.append(
-                        {
-                            "sid": sid,
-                            "path": path,
-                            "ref_member": ref_member,
-                            "comp_member": comp_member,
-                            "src": comp_member_src,
-                            "ref_bv": ref_bv.to_json(),
-                            "comp_bv": comp_bv.to_json() if comp_bv is not None else None,
-                        }
-                    )
-
-            # If competitor returned BV, compare exact equality
-            if comp_bv is not None:
-                bv_attempted += 1
-                if comp_bv == ref_bv:
-                    bv_exact_equal += 1
-                else:
-                    if len(mismatches) < verbose_mismatches:
-                        mismatches.append(
-                            {
-                                "sid": sid,
-                                "path": path,
-                                "ref_member": ref_member,
-                                "comp_member": comp_member,
-                                "src": "get_bv",
-                                "ref_bv": ref_bv.to_json(),
-                                "comp_bv": comp_bv.to_json(),
-                            }
-                        )
-
-    dur = time.time() - t0
-
-    # Attempt to fetch plugin-reported size metrics
     nodes_reported, edges_reported, stats_raw = plugin_counts()
-    correctness_pass = (membership_agree == total_paths)
 
-    print("\n=== Scoring Summary ===")
+    print("\n" + "=" * 40)
+    print("Overall Scoring Summary")
     print(f"File: {precompute_path}")
     print(f"Plugin: {plugin_module_path}")
-    print(f"Roots tested: {len(roots_to_test)} (of {len(state_ids)})")
-    print(f"Base samples per root: {base_samples}, mutations per base: {mutations_per_base}, max path len: {max_len}")
-    print(f"Random seed: {seed}")
-    print(f"Total test paths: {total_paths}")
-    print(f"Membership agreement: {membership_agree}/{total_paths} ({(membership_agree/total_paths*100):.2f}%)")
-    print(f"Correctness: {'PASS' if correctness_pass else 'FAIL'} (requires 100% agreement)")
+    print(f"Total states tested: {len(state_ids_to_test)}")
+    print(f"Correctness: {'PASS' if overall_ok else 'FAIL'}")
+    if not overall_ok:
+        print(f"  Mismatches found in states: {failed_states}")
 
-    if nodes_reported is not None or edges_reported is not None:
-        print("\n--- Contestant-reported size ---")
-        if nodes_reported is not None:
-            print(f"Nodes: {nodes_reported}")
-        if edges_reported is not None:
-            print(f"Edges: {edges_reported}  [Used for ranking; subject to organizer verification]")
-        if stats_raw:
-            # Print any extra stats keys tersely
-            extra = {k: v for k, v in stats_raw.items() if k not in ("nodes", "edges")}
-            if extra:
-                print(f"Other stats: {extra}")
-
-    if bv_attempted > 0:
-        print(f"\nBV exact equality (subset where plugin returned BV): {bv_exact_equal}/{bv_attempted} ({(bv_exact_equal/bv_attempted*100):.2f}%)")
+    print("\n--- Contestant-reported size ---")
+    if nodes_reported is not None:
+        print(f"Nodes: {nodes_reported}")
+    if edges_reported is not None:
+        print(f"Edges: {edges_reported}  [Score is based on this if Correctness=PASS]")
     else:
-        print("\nBV exact equality: plugin did not provide get_bv; skipped.")
+        print("Edges: Not reported. [This is the primary scoring metric]")
 
-    if mismatches:
-        print("\n--- Sample mismatches ---")
-        for i, m in enumerate(mismatches, 1):
-            print(f"[{i}] sid={m['sid']} path={m['path']}")
-            print(f"    ref_member={m['ref_member']} comp_member={m['comp_member']} (via {m['src']})")
-            if m.get("ref_bv") is not None:
-                print(f"    ref_bv={m['ref_bv']}")
-            if m.get("comp_bv") is not None:
-                print(f"    comp_bv={m['comp_bv']}")
+    if stats_raw:
+        extra = {k: v for k, v in stats_raw.items() if k not in ("nodes", "edges")}
+        if extra:
+            print(f"Other stats: {extra}")
 
     print(f"\nDone in {dur:.2f}s.")
 
@@ -1697,17 +1441,17 @@ def main() -> None:
     inspect_p.add_argument("--root-index", type=int, default=None, help="Print from this root node index.")
     inspect_p.add_argument("--max-roots", type=int, default=None, help="Limit the number of roots to print.")
 
-    # Score command (legacy; uses normalized-path-based checker)
-    score_p = subparsers.add_parser("score", help="Score a contestant module by membership/BV accuracy (legacy semantics)")
+    # Score command
+    score_p = subparsers.add_parser("score", help="Score a contestant module by correctness (via equivalence check) and size.")
     score_p.add_argument("file", help="Path to a precompute2 gzipped JSON file.")
     score_p.add_argument("plugin", help="Path or module name for the contestant plugin.")
-    score_p.add_argument("--samples", type=int, default=200, help="Base samples per root.")
-    score_p.add_argument("--mutations", type=int, default=0, help="Mutations per base sample.")
-    score_p.add_argument("--max-len", type=int, default=32, help="Maximum path length when sampling.")
-    score_p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility.")
     score_p.add_argument("--state-id", type=int, default=None, help="If provided, score only this tokenizer state ID.")
-    score_p.add_argument("--max-roots", type=int, default=None, help="Limit number of roots to score (for large files).")
-    score_p.add_argument("--verbose-mismatches", type=int, default=20, help="Print up to this many mismatches.")
+    group = score_p.add_mutually_exclusive_group()
+    group.add_argument("--tokens", type=str, default=None, help="Comma-separated list of token IDs to test, or '@all' to test all tokens present in reference ranges.")
+    group.add_argument("--sample", type=int, default=256, help="Number of tokens to sample for equivalence checks (default: 256).")
+    score_p.add_argument("--seed", type=int, default=0, help="Random seed for token sampling.")
+    score_p.add_argument("--max-closure", type=int, default=200000, help="Limit for None-closure expansions during normalization.")
+    score_p.add_argument("--max-states", type=int, default=200000, help="Limit for product DFA states during equivalence.")
 
     # Equivalence command (NEW): compare plugin vs reference by per-token normalized NFA equivalence
     equiv_p = subparsers.add_parser("equiv", help="Equivalence check: plugin vs reference by token-normalized NFA equivalence")
@@ -1774,13 +1518,12 @@ def main() -> None:
         score_competitor_on_file(
             precompute_path=file_path,
             plugin_module_path=args.plugin,
-            base_samples=args.samples,
-            max_len=args.max_len,
-            mutations_per_base=args.mutations,
-            seed=args.seed,
             state_id_filter=args.state_id,
-            max_roots=args.max_roots,
-            verbose_mismatches=args.verbose_mismatches,
+            tokens=args.tokens,
+            sample_tokens=args.sample,
+            seed=args.seed,
+            max_closure_expansions=args.max_closure,
+            max_product_states=args.max_states,
         )
         return
 
