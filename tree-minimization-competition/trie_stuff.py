@@ -418,7 +418,16 @@ def sample_normalized_path(
 
     current_bv: RangeSet = ((root_node.get("value", {}) or {}).get("live_tokens")) or RangeSet.empty()
 
-    for _ in range(max_len):
+    # Loop until the normalized path reaches max_len, with a safety break
+    # for long chains of (k, None) edges. This matches the Rust reference logic.
+    max_total_edges = max_len * 100  # A reasonable upper bound
+    edges_walked = 0
+
+    while len(path) < max_len:
+        if edges_walked >= max_total_edges:
+            break  # Safety break
+        edges_walked += 1
+
         node = arena.get(current_node_idx)
         if not node:
             return None
