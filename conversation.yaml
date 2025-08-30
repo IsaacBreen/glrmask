@@ -3320,16 +3320,26 @@ local_system:
               equivalence_passed = False
               equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
           else:
-              for sid in sorted(list(ref_roots)):
+              sorted_roots = sorted(list(ref_roots))
+              total_roots = len(sorted_roots)
+              print(f"Checking equivalence across {total_roots} tokenizer states...")
+              for i, sid in enumerate(sorted_roots):
+                  # Progress indicator
+                  if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                      print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
                   passed, details = are_equivalent_for_state(
                       reference_model, reference_model.get_root(sid),
                       competitor_model, competitor_model.get_root(sid),
                       verbose=False
                   )
                   if not passed:
+                      print() # Newline to clear the progress indicator
                       equivalence_passed = False
                       equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
                       break
+              if equivalence_passed:
+                  print() # Final newline after progress indicator
           
           if equivalence_passed:
               print("✅ Equivalence check passed.")
@@ -6655,5 +6665,135 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correctly load benchmark data for
       competitor models and improve precompute3 equivalence check"'
+    metadata:
+  - user: |-
+      Diff of python/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/example_js.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/precompute2_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/precompute3_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```
+      ===================================
+      Dump Complete.
+      Loading competitor model from: aug25/precompute3_model.py
+      -> Using precompute3 JSON for competitor model.
+      Competitor model loaded in 0.0053 seconds.
+      Loading reference model from: aug25/precompute2_model.py
+      Running equivalence check against reference model: precompute2_model.py
+      ```
+      It takes a long time for the equivalence check to complete. It'd be nice to have some notion of how it's progressing.
+    metadata:
+  - assistant: |-
+      Of course. The equivalence check iterates through every tokenizer state, which can be time-consuming. I'll add a progress indicator to the benchmark runner so you can see how many states have been verified.
+
+      Here is the patch for `python/aug25/benchmark_runner.py`:
+
+      ```diff
+      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
+      --- a/python/aug25/benchmark_runner.py
+      +++ b/python/aug25/benchmark_runner.py
+      @@ -121,16 +121,25 @@
+               equivalence_passed = False
+               equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+           else:
+      -        for sid in sorted(list(ref_roots)):
+      +        sorted_roots = sorted(list(ref_roots))
+      +        total_roots = len(sorted_roots)
+      +        print(f"Checking equivalence across {total_roots} tokenizer states...")
+      +        for i, sid in enumerate(sorted_roots):
+      +            # Progress indicator
+      +            if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+      +                print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+      +
+                   passed, details = are_equivalent_for_state(
+                       reference_model, reference_model.get_root(sid),
+                       competitor_model, competitor_model.get_root(sid),
+                       verbose=False
+                   )
+                   if not passed:
+      +                print() # Newline to clear the progress indicator
+                       equivalence_passed = False
+                       equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                       break
+      +        if equivalence_passed:
+      +            print() # Final newline after progress indicator
+           
+           if equivalence_passed:
+               print("✅ Equivalence check passed.")
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_runner.py
+      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
+    metadata:
+  - user: 'Changes committed with message: "Feat: Add progress indicator for equivalence
+      check"'
     metadata:
 ...

@@ -127,16 +127,26 @@ def run_benchmark(args):
         equivalence_passed = False
         equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
     else:
-        for sid in sorted(list(ref_roots)):
+        sorted_roots = sorted(list(ref_roots))
+        total_roots = len(sorted_roots)
+        print(f"Checking equivalence across {total_roots} tokenizer states...")
+        for i, sid in enumerate(sorted_roots):
+            # Progress indicator
+            if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
             passed, details = are_equivalent_for_state(
                 reference_model, reference_model.get_root(sid),
                 competitor_model, competitor_model.get_root(sid),
                 verbose=False
             )
             if not passed:
+                print() # Newline to clear the progress indicator
                 equivalence_passed = False
                 equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
                 break
+        if equivalence_passed:
+            print() # Final newline after progress indicator
     
     if equivalence_passed:
         print("✅ Equivalence check passed.")
