@@ -3,10 +3,8 @@ import collections
 import gzip
 import importlib
 import importlib.util
-import inspect
 import json
 import random
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,18 +21,18 @@ EdgeKey = Tuple[int, Optional[StateID]]  # (pop_count, state_id or None)
 TrieNode = Dict[str, Any]
 Arena = Dict[TrieNodeIndex, TrieNode]
 NormalizedPath = List[Tuple[int, StateID]]  # List of (k, state_id)
-# JSON encoding for BVs: List of [start, end] inclusive ranges
-LLMTokenBVJSON = List[List[int]]
+LLMTokenBVJSON = List[List[int]]  # JSON encoding for BVs: List of [start, end] inclusive ranges
 
 
 # ----------------------------
 # Efficient RangeSet for token bitvectors
 # ----------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RangeSet:
     """
     Efficient, normalized (sorted, disjoint, inclusive) intervals for large, sparse token sets.
+    Designed for very few, very large intervals (acts like a compact bitset of contiguous runs).
     Internally represented as a tuple of (start, end) pairs, both inclusive.
     """
     intervals: Tuple[Tuple[int, int], ...]  # sorted, non-overlapping, inclusive
@@ -75,6 +73,7 @@ class RangeSet:
             return other
         if other.is_empty():
             return self
+        # Merge like a merge-sorted union with coalescing
         merged: List[Tuple[int, int]] = []
         i, j = 0, 0
         a, b = self.intervals, other.intervals
@@ -117,8 +116,8 @@ class RangeSet:
         while i < len(a) and j < len(b):
             s1, e1 = a[i]
             s2, e2 = b[j]
-            start = max(s1, s2)
-            end = min(e1, e2)
+            start = s1 if s1 >= s2 else s2
+            end = e1 if e1 <= e2 else e2
             if start <= end:
                 out.append((start, end))
             if e1 < e2:
@@ -144,6 +143,7 @@ class RangeSet:
         j = 0
 
         for s1, e1 in a:
+            # skip b intervals that end before s1
             while j < len(b) and b[j][1] < s1:
                 j += 1
 
@@ -195,7 +195,7 @@ class RangeSet:
         cs, ce = items[0]
         for ns, ne in items[1:]:
             if ns <= ce + 1:
-                ce = max(ce, ne)
+                ce = ce if ce >= ne else ne
             else:
                 merged.append((cs, ce))
                 cs, ce = ns, ne
@@ -517,7 +517,7 @@ def _convert_node_bvs_inplace(arena: Arena) -> None:
     Convert all BV lists in the arena into RangeSet instances, in-place.
     Mutates each node's 'value.live_tokens' and each edge's BV.
     """
-    for node_idx, node in arena.items():
+    for node in arena.values():
         val = node.get("value", {}) or {}
         if "live_tokens" in val:
             val["live_tokens"] = RangeSet.from_json(val.get("live_tokens"))
@@ -532,7 +532,13 @@ def _convert_node_bvs_inplace(arena: Arena) -> None:
             new_dest_map = []
             for dest_idx, edge_bv in dest_map_json:
                 new_dest_map.append((int(dest_idx), RangeSet.from_json(edge_bv)))
-            new_children.append((tuple(edge_key_json), new_dest_map))
+            # normalize edge key to tuple
+            if isinstance(edge_key_json, (list, tuple)) and len(edge_key_json) == 2:
+                pop_count = int(edge_key_json[0])
+                state_id = None if edge_key_json[1] is None else int(edge_key_json[1])
+                new_children.append(((pop_count, state_id), new_dest_map))
+            else:
+                raise ValueError(f"Invalid edge key format: {edge_key_json!r}")
         node["children"] = new_children
 
 
@@ -674,8 +680,8 @@ def sample_paths_with_mutations(
     base: List[NormalizedPath] = []
     seen: Set[Tuple[Tuple[int, int], ...]] = set()
 
-    # Attempt to include the empty path if it's valid to terminate at root
-    empty_candidate = []
+    # Attempt to include the empty path if it's valid to terminate at root (or to test contestant behavior)
+    empty_candidate: NormalizedPath = []
     if tuple(empty_candidate) not in seen:
         seen.add(tuple(empty_candidate))
         base.append(empty_candidate)
@@ -739,6 +745,18 @@ def _try_call_plugin(func: Callable, structure: Any, state_id: int, path: Normal
     return func(path)
 
 
+def _try_call_stat(func: Callable, structure: Any) -> Any:
+    """
+    Call a plugin stat function by trying:
+      1) func(structure)
+      2) func()
+    """
+    try:
+        return func(structure)
+    except TypeError:
+        return func()
+
+
 def _load_plugin(module_path_or_name: str):
     """
     Load a competitor plugin module either by file path or module name.
@@ -799,6 +817,39 @@ def _get_competitor_functions(plugin_module: Any) -> Tuple[Optional[Callable], O
     return get_bv_func, is_member_func
 
 
+def _get_competitor_size_functions(plugin_module: Any) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+    """
+    Return potential functions: (nodes_func, edges_func, stats_func)
+    Where:
+      - nodes_func: returns node count (int)
+      - edges_func: returns edge count (int)
+      - stats_func: returns dict-like with keys 'nodes' and/or 'edges'
+    Any or all can be None.
+    """
+    nodes_candidates = ["count_nodes", "num_nodes", "node_count", "nodes", "get_node_count"]
+    edges_candidates = ["count_edges", "num_edges", "edge_count", "edges", "get_edge_count"]
+    stats_candidates = ["stats", "get_stats", "summary", "info"]
+
+    nodes_func = None
+    edges_func = None
+    stats_func = None
+
+    for name in nodes_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            nodes_func = getattr(plugin_module, name)
+            break
+    for name in edges_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            edges_func = getattr(plugin_module, name)
+            break
+    for name in stats_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            stats_func = getattr(plugin_module, name)
+            break
+
+    return nodes_func, edges_func, stats_func
+
+
 def score_competitor_on_file(
     precompute_path: Path,
     plugin_module_path: str,
@@ -817,7 +868,7 @@ def score_competitor_on_file(
       - builds competitor structure (if builder provided)
       - generates test paths from reference + mutated variants
       - evaluates membership (and BV, if provided by plugin) against reference
-    Prints a summary report with accuracy metrics and sample mismatches.
+    Prints a summary report with accuracy metrics, size metrics (nodes/edges), and sample mismatches.
     """
     rng = random.Random(seed)
 
@@ -840,11 +891,12 @@ def score_competitor_on_file(
     plugin = _load_plugin(plugin_module_path)
     structure = _build_competitor_structure(plugin, precompute_path, roots_map, arena)
     get_bv_func, is_member_func = _get_competitor_functions(plugin)
+    nodes_func, edges_func, stats_func = _get_competitor_size_functions(plugin)
 
     if get_bv_func is None and is_member_func is None:
         raise ValueError(
             "Plugin must define at least one of: get_bv(...), is_member(...). "
-            "See scorer help for supported names/signatures."
+            "Supported names/signatures documented in the template."
         )
 
     # Unified wrappers
@@ -870,6 +922,58 @@ def score_competitor_on_file(
                 f"is_member incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
             )
         return bool(out)
+
+    def plugin_counts() -> Tuple[Optional[int], Optional[int], Dict[str, Any]]:
+        """
+        Attempt to obtain (nodes, edges, raw_stats_dict) from plugin.
+        Returns (nodes, edges, stats_dict). Any element may be None if unavailable.
+        """
+        stats: Dict[str, Any] = {}
+        nodes: Optional[int] = None
+        edges: Optional[int] = None
+
+        # Prefer stats() if available
+        if stats_func is not None:
+            try:
+                s = _try_call_stat(stats_func, structure)
+                if isinstance(s, dict):
+                    stats = dict(s)
+                    n = s.get("nodes")
+                    e = s.get("edges")
+                    if isinstance(n, int) and n >= 0:
+                        nodes = n
+                    if isinstance(e, int) and e >= 0:
+                        edges = e
+            except Exception:
+                pass
+
+        # Direct node/edge funcs override or fill gaps
+        if nodes is None and nodes_func is not None:
+            try:
+                n = _try_call_stat(nodes_func, structure)
+                if isinstance(n, int) and n >= 0:
+                    nodes = n
+            except Exception:
+                pass
+        if edges is None and edges_func is not None:
+            try:
+                e = _try_call_stat(edges_func, structure)
+                if isinstance(e, int) and e >= 0:
+                    edges = e
+            except Exception:
+                pass
+
+        # As a very last resort, allow module-level constants
+        if nodes is None:
+            mn = getattr(plugin, "NODES", None)
+            if isinstance(mn, int) and mn >= 0:
+                nodes = mn
+        if edges is None:
+            me = getattr(plugin, "EDGES", None)
+            if isinstance(me, int) and me >= 0:
+                edges = me
+
+        return nodes, edges, stats
 
     # Prepare mutation pool
     state_pool = collect_all_state_ids(arena)
@@ -950,6 +1054,11 @@ def score_competitor_on_file(
                         )
 
     dur = time.time() - t0
+
+    # Attempt to fetch plugin-reported size metrics
+    nodes_reported, edges_reported, stats_raw = plugin_counts()
+    correctness_pass = (membership_agree == total_paths)
+
     print("\n=== Scoring Summary ===")
     print(f"File: {precompute_path}")
     print(f"Plugin: {plugin_module_path}")
@@ -958,11 +1067,24 @@ def score_competitor_on_file(
     print(f"Random seed: {seed}")
     print(f"Total test paths: {total_paths}")
     print(f"Membership agreement: {membership_agree}/{total_paths} ({(membership_agree/total_paths*100):.2f}%)")
+    print(f"Correctness: {'PASS' if correctness_pass else 'FAIL'} (requires 100% agreement)")
+
+    if nodes_reported is not None or edges_reported is not None:
+        print("\n--- Contestant-reported size ---")
+        if nodes_reported is not None:
+            print(f"Nodes: {nodes_reported}")
+        if edges_reported is not None:
+            print(f"Edges: {edges_reported}  [Used for ranking; subject to organizer verification]")
+        if stats_raw:
+            # Print any extra stats keys tersely
+            extra = {k: v for k, v in stats_raw.items() if k not in ("nodes", "edges")}
+            if extra:
+                print(f"Other stats: {extra}")
 
     if bv_attempted > 0:
-        print(f"BV exact equality (subset where plugin returned BV): {bv_exact_equal}/{bv_attempted} ({(bv_exact_equal/bv_attempted*100):.2f}%)")
+        print(f"\nBV exact equality (subset where plugin returned BV): {bv_exact_equal}/{bv_attempted} ({(bv_exact_equal/bv_attempted*100):.2f}%)")
     else:
-        print("BV exact equality: plugin did not provide get_bv; skipped.")
+        print("\nBV exact equality: plugin did not provide get_bv; skipped.")
 
     if mismatches:
         print("\n--- Sample mismatches ---")
@@ -973,11 +1095,12 @@ def score_competitor_on_file(
                 print(f"    ref_bv={m['ref_bv']}")
             if m.get("comp_bv") is not None:
                 print(f"    comp_bv={m['comp_bv']}")
+
     print(f"\nDone in {dur:.2f}s.")
 
 
 # ----------------------------
-# CLI: Inspect / Score
+# CLI: Inspect / Score / Equiv
 # ----------------------------
 
 def main() -> None:
