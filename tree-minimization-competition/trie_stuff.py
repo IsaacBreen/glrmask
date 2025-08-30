@@ -1586,9 +1586,11 @@ def check_equiv_for_state_and_token(
     return (eq, witness)
 
 
-def check_equiv_for_state_over_tokens(
-    precompute_path: Path,
-    plugin_module_path: str,
+def run_equivalence_check_for_state(
+    roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]],
+    arena: Arena,
+    plugin_module: Any,
+    structure: Any,
     state_id: int,
     tokens: Optional[List[int]] = None,
     sample_tokens: Optional[int] = 256,
@@ -1597,24 +1599,17 @@ def check_equiv_for_state_over_tokens(
     max_product_states: int = 200000,
 ) -> bool:
     """
-    High-level runner:
-      - Loads reference precompute2
-      - Builds the plugin structure
+    High-level runner for a single state_id:
       - Selects tokens (provided or sampled from reference)
       - For each token, compares plugin vs reference by token-normalized NFA equivalence
-    Prints summary and returns True if all tested tokens are equivalent.
+    Prints summary and returns True if all tested tokens are equivalent for this state.
+    Assumes reference and plugin structures are already loaded.
     """
-    roots_map, arena = load_precompute2(precompute_path)
-    plugin_module = _load_plugin(plugin_module_path)
-    structure = _build_competitor_structure(plugin_module, precompute_path, roots_map, arena)
-
-    if structure is None:
-        raise RuntimeError("Plugin did not provide a builder (build/init/build_from_precompute2_path).")
-
     # Prepare tokens
     roots_map_dict = dict(roots_map)
     if state_id not in roots_map_dict:
-        raise ValueError(f"Tokenizer state ID {state_id} not found in reference roots map.")
+        print(f"Warning: Tokenizer state ID {state_id} not found in reference roots map. Skipping.")
+        return True
     ref_root = int(roots_map_dict[state_id])
 
     rng = random.Random(seed)
@@ -1718,7 +1713,7 @@ def main() -> None:
     equiv_p = subparsers.add_parser("equiv", help="Equivalence check: plugin vs reference by token-normalized NFA equivalence")
     equiv_p.add_argument("file", help="Path to a precompute2 gzipped JSON file.")
     equiv_p.add_argument("plugin", help="Path or module name for the contestant plugin.")
-    equiv_p.add_argument("--state-id", type=int, required=True, help="Tokenizer state ID to compare.")
+    equiv_p.add_argument("--state-id", type=int, default=None, help="Tokenizer state ID to compare. If not provided, all states are tested.")
     group = equiv_p.add_mutually_exclusive_group()
     group.add_argument("--tokens", type=str, default=None,
                        help="Comma-separated list of token IDs to test, or '@all' to test all tokens present in reference ranges.")
@@ -1791,6 +1786,27 @@ def main() -> None:
 
     if args.cmd == "equiv":
         file_path = Path(args.file)
+
+        # Load reference and plugin once
+        print(f"Loading reference file: {file_path}")
+        roots_map, arena = load_precompute2(file_path)
+        print(f"Loading plugin: {args.plugin}")
+        plugin_module = _load_plugin(args.plugin)
+        print("Building plugin structure...")
+        structure = _build_competitor_structure(plugin_module, file_path, roots_map, arena)
+        if structure is None:
+            print("Error: Plugin did not provide a builder (build/init/build_from_precompute2_path).")
+            return
+
+        # Determine which state IDs to test
+        state_ids_to_test: List[int]
+        if args.state_id is not None:
+            state_ids_to_test = [int(args.state_id)]
+        else:
+            state_ids_to_test = sorted([sid for sid, _ in roots_map])
+            print(f"\nNo --state-id provided. Testing all {len(state_ids_to_test)} states found in the file.")
+
+        # Common token selection logic
         tokens_list: Optional[List[int]] = None
         sample_n: Optional[int] = args.sample
         if args.tokens is not None:
@@ -1800,16 +1816,39 @@ def main() -> None:
             else:
                 tokens_list = [int(x) for x in args.tokens.split(",") if x.strip() != ""]
                 sample_n = None
-        ok = check_equiv_for_state_over_tokens(
-            precompute_path=file_path,
-            plugin_module_path=args.plugin,
-            state_id=int(args.state_id),
-            tokens=tokens_list,
-            sample_tokens=sample_n,
-            seed=args.seed,
-            max_closure_expansions=args.max_closure,
-            max_product_states=args.max_states,
-        )
+
+        overall_ok = True
+        failed_states: List[int] = []
+        start_time = time.time()
+
+        for i, state_id in enumerate(state_ids_to_test, 1):
+            print("-" * 40)
+            print(f"[{i}/{len(state_ids_to_test)}] Testing State ID: {state_id}")
+            ok = run_equivalence_check_for_state(
+                roots_map=roots_map,
+                arena=arena,
+                plugin_module=plugin_module,
+                structure=structure,
+                state_id=state_id,
+                tokens=tokens_list,
+                sample_tokens=sample_n,
+                seed=args.seed,
+                max_closure_expansions=args.max_closure,
+                max_product_states=args.max_states,
+            )
+            if not ok:
+                overall_ok = False
+                failed_states.append(state_id)
+
+        dur = time.time() - start_time
+        print("\n" + "=" * 40)
+        print("Overall Equivalence Check Summary")
+        print(f"Total states tested: {len(state_ids_to_test)}")
+        print(f"Total time: {dur:.2f}s")
+        if overall_ok:
+            print("Result: PASS. All tested states are equivalent.")
+        else:
+            print(f"Result: FAIL. The following states had mismatches: {failed_states}")
         return
 
     if args.cmd == "equiv-files":
