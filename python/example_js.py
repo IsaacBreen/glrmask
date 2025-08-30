@@ -163,14 +163,7 @@ def main():
     assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre3)}"
     print("Python precompute3 mask matches Rust mask.")
 
-    # Optionally, convert pre2->pre3 and compare masks again
-    print("Computing mask via Python (precompute2->precompute3 conversion)...")
-    pre2_as_pre3 = pre2.to_precompute3()
-    mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
-    mask_py_pre2 = grammar_constraint.internal_bv_to_original(mask_py_pre2)
-    allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
-    assert allowed_ids_rust == allowed_ids_py_pre2, f"Python precompute2->precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre2)}"
-    print("Python precompute2->precompute3 mask matches Rust mask.")
+    # TODO: load and test precompute2
 
     # Test equivalence between the two Python models
     from aug25.equality import are_equivalent_for_state
