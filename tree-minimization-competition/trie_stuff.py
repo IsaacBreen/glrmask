@@ -1022,6 +1022,24 @@ def _coerce_rangeset(obj: Any) -> Optional[RangeSet]:
     return None
 
 
+def _try_call_legacy_plugin_query(func: Callable, structure: Any, state_id: int, path: NormalizedPath) -> Any:
+    """
+    Call a plugin function supporting flexible signatures by trying:
+      1) func(structure, state_id, path)
+      2) func(state_id, path)
+      3) func(path)
+    """
+    try:
+        return func(structure, state_id, path)
+    except TypeError:
+        pass
+    try:
+        return func(state_id, path)
+    except TypeError:
+        pass
+    return func(path)
+
+
 def _try_call_plugin(func: Callable, structure: Any, *args) -> Any:
     """
     Call a plugin function supporting flexible signatures by trying:
@@ -1137,6 +1155,256 @@ def _get_competitor_size_functions(plugin_module: Any) -> Tuple[Optional[Callabl
             break
 
     return nodes_func, edges_func, stats_func
+
+
+def score_competitor_on_file(
+    precompute_path: Path,
+    plugin_module_path: str,
+    base_samples: int = 200,
+    max_len: int = 32,
+    mutations_per_base: int = 3,
+    seed: Optional[int] = None,
+    state_id_filter: Optional[int] = None,
+    max_roots: Optional[int] = None,
+    verbose_mismatches: int = 20,
+) -> None:
+    """
+    End-to-end scorer:
+      - loads reference precompute2
+      - imports competitor plugin module
+      - builds competitor structure (if builder provided)
+      - generates test paths from reference + mutated variants
+      - evaluates membership (and BV, if provided by plugin) against reference
+    Prints a summary report with accuracy metrics, size metrics (nodes/edges), and sample mismatches.
+    """
+    rng = random.Random(seed)
+
+    t0 = time.time()
+    roots_map, arena = load_precompute2(precompute_path)
+    state_ids = [sid for sid, _ in roots_map]
+    state_to_root: Dict[int, int] = dict(roots_map)
+
+    if state_id_filter is not None:
+        if state_id_filter not in state_to_root:
+            raise ValueError(f"state-id {state_id_filter} not found in roots map")
+        roots_to_test = [(state_id_filter, state_to_root[state_id_filter])]
+    else:
+        roots_to_test = roots_map
+
+    if max_roots is not None:
+        roots_to_test = roots_to_test[: max(0, max_roots)]
+
+    # Load plugin and build competitor structure
+    plugin = _load_plugin(plugin_module_path)
+    structure = _build_competitor_structure(plugin, precompute_path, roots_map, arena)
+    get_bv_func, is_member_func = _get_competitor_functions(plugin)
+    nodes_func, edges_func, stats_func = _get_competitor_size_functions(plugin)
+
+    if get_bv_func is None and is_member_func is None:
+        raise ValueError(
+            "Plugin must define at least one of: get_bv(...), is_member(...). "
+            "Supported names/signatures documented in the template."
+        )
+
+    # Unified wrappers
+    def plugin_get_bv(sid: int, path: NormalizedPath) -> Optional[RangeSet]:
+        if get_bv_func is None:
+            return None
+        try:
+            out = _try_call_legacy_plugin_query(get_bv_func, structure, sid, path)
+        except TypeError as e:
+            raise TypeError(
+                f"get_bv incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
+            )
+        rs = _coerce_rangeset(out)
+        return rs
+
+    def plugin_is_member(sid: int, path: NormalizedPath) -> Optional[bool]:
+        if is_member_func is None:
+            return None
+        try:
+            out = _try_call_legacy_plugin_query(is_member_func, structure, sid, path)
+        except TypeError as e:
+            raise TypeError(
+                f"is_member incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
+            )
+        return bool(out)
+
+    def plugin_counts() -> Tuple[Optional[int], Optional[int], Dict[str, Any]]:
+        """
+        Attempt to obtain (nodes, edges, raw_stats_dict) from plugin.
+        Returns (nodes, edges, stats_dict). Any element may be None if unavailable.
+        """
+        stats: Dict[str, Any] = {}
+        nodes: Optional[int] = None
+        edges: Optional[int] = None
+
+        # Prefer stats() if available
+        if stats_func is not None:
+            try:
+                s = _try_call_stat(stats_func, structure)
+                if isinstance(s, dict):
+                    stats = dict(s)
+                    n = s.get("nodes")
+                    e = s.get("edges")
+                    if isinstance(n, int) and n >= 0:
+                        nodes = n
+                    if isinstance(e, int) and e >= 0:
+                        edges = e
+            except Exception:
+                pass
+
+        # Direct node/edge funcs override or fill gaps
+        if nodes is None and nodes_func is not None:
+            try:
+                n = _try_call_stat(nodes_func, structure)
+                if isinstance(n, int) and n >= 0:
+                    nodes = n
+            except Exception:
+                pass
+        if edges is None and edges_func is not None:
+            try:
+                e = _try_call_stat(edges_func, structure)
+                if isinstance(e, int) and e >= 0:
+                    edges = e
+            except Exception:
+                pass
+
+        # As a very last resort, allow module-level constants
+        if nodes is None:
+            mn = getattr(plugin, "NODES", None)
+            if isinstance(mn, int) and mn >= 0:
+                nodes = mn
+        if edges is None:
+            me = getattr(plugin, "EDGES", None)
+            if isinstance(me, int) and me >= 0:
+                edges = me
+
+        return nodes, edges, stats
+
+    # Prepare mutation pool
+    state_pool = collect_all_state_ids(arena)
+
+    # Run
+    total_paths = 0
+    membership_agree = 0
+
+    bv_attempted = 0
+    bv_exact_equal = 0
+
+    mismatches: List[Dict[str, Any]] = []
+
+    for sid, root_idx in roots_to_test:
+        test_paths = sample_paths_with_mutations(
+            root_idx,
+            arena,
+            base_samples=base_samples,
+            max_len=max_len,
+            mutations_per_base=mutations_per_base,
+            rng=rng,
+            state_pool=state_pool,
+        )
+
+        for path in test_paths:
+            total_paths += 1
+
+            # Reference
+            ref_bv = get_bv_for_normalized_path(root_idx, path, arena)
+            print(f"Testing SID={sid} Path={path} => Ref BV: {format_bitvector(ref_bv)}")
+            ref_member = not ref_bv.is_empty()
+
+            # Competitor membership
+            comp_bv = plugin_get_bv(sid, path)
+            comp_member_from_bv = (comp_bv is not None) and (not comp_bv.is_empty())
+            comp_member = comp_member_from_bv
+            comp_member_src = "get_bv"
+
+            if comp_bv is None:
+                im = plugin_is_member(sid, path)
+                if im is None:
+                    raise RuntimeError("Plugin returned neither BV nor membership result.")
+                comp_member = bool(im)
+                comp_member_src = "is_member"
+
+            if comp_member == ref_member:
+                membership_agree += 1
+            else:
+                if len(mismatches) < verbose_mismatches:
+                    mismatches.append(
+                        {
+                            "sid": sid,
+                            "path": path,
+                            "ref_member": ref_member,
+                            "comp_member": comp_member,
+                            "src": comp_member_src,
+                            "ref_bv": ref_bv.to_json(),
+                            "comp_bv": comp_bv.to_json() if comp_bv is not None else None,
+                        }
+                    )
+
+            # If competitor returned BV, compare exact equality
+            if comp_bv is not None:
+                bv_attempted += 1
+                if comp_bv == ref_bv:
+                    bv_exact_equal += 1
+                else:
+                    if len(mismatches) < verbose_mismatches:
+                        mismatches.append(
+                            {
+                                "sid": sid,
+                                "path": path,
+                                "ref_member": ref_member,
+                                "comp_member": comp_member,
+                                "src": "get_bv",
+                                "ref_bv": ref_bv.to_json(),
+                                "comp_bv": comp_bv.to_json(),
+                            }
+                        )
+
+    dur = time.time() - t0
+
+    # Attempt to fetch plugin-reported size metrics
+    nodes_reported, edges_reported, stats_raw = plugin_counts()
+    correctness_pass = (membership_agree == total_paths)
+
+    print("\n=== Scoring Summary ===")
+    print(f"File: {precompute_path}")
+    print(f"Plugin: {plugin_module_path}")
+    print(f"Roots tested: {len(roots_to_test)} (of {len(state_ids)})")
+    print(f"Base samples per root: {base_samples}, mutations per base: {mutations_per_base}, max path len: {max_len}")
+    print(f"Random seed: {seed}")
+    print(f"Total test paths: {total_paths}")
+    print(f"Membership agreement: {membership_agree}/{total_paths} ({(membership_agree/total_paths*100):.2f}%)")
+    print(f"Correctness: {'PASS' if correctness_pass else 'FAIL'} (requires 100% agreement)")
+
+    if nodes_reported is not None or edges_reported is not None:
+        print("\n--- Contestant-reported size ---")
+        if nodes_reported is not None:
+            print(f"Nodes: {nodes_reported}")
+        if edges_reported is not None:
+            print(f"Edges: {edges_reported}  [Used for ranking; subject to organizer verification]")
+        if stats_raw:
+            # Print any extra stats keys tersely
+            extra = {k: v for k, v in stats_raw.items() if k not in ("nodes", "edges")}
+            if extra:
+                print(f"Other stats: {extra}")
+
+    if bv_attempted > 0:
+        print(f"\nBV exact equality (subset where plugin returned BV): {bv_exact_equal}/{bv_attempted} ({(bv_exact_equal/bv_attempted*100):.2f}%)")
+    else:
+        print("\nBV exact equality: plugin did not provide get_bv; skipped.")
+
+    if mismatches:
+        print("\n--- Sample mismatches ---")
+        for i, m in enumerate(mismatches, 1):
+            print(f"[{i}] sid={m['sid']} path={m['path']}")
+            print(f"    ref_member={m['ref_member']} comp_member={m['comp_member']} (via {m['src']})")
+            if m.get("ref_bv") is not None:
+                print(f"    ref_bv={m['ref_bv']}")
+            if m.get("comp_bv") is not None:
+                print(f"    comp_bv={m['comp_bv']}")
+
+    print(f"\nDone in {dur:.2f}s.")
 
 
 # New: plugin graph API helpers
