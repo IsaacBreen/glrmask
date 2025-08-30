@@ -236,7 +236,7 @@ def run_benchmark(args):
                 "details": equivalence_details,
             },
             "mask_correctness_check": {
-                "enabled": not args.no_verify_masks,
+                "enabled": args.verify_masks,
                 "passed": mask_correctness_passed,
                 "details": mask_correctness_details,
             },
