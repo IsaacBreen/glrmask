@@ -24,7 +24,13 @@ def load_or_download_gpt2_vocab(cache_dir, file_name, url):
         response.raise_for_status()
         with open(cache_path, 'w', encoding='utf-8') as f:
             f.write(response.text)
-    return json.loads(cache_path.read_text(encoding='utf-8'))
+
+    vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
+
+    # Exclude tokens longer than 5
+    vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
+    return vocab_map
 
 def greedy_tokenizer(text_bytes, id_to_token):
     token_to_id = {v: k for k, v in id_to_token.items()}
