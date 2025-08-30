@@ -132,8 +132,8 @@ def main():
     pre2_json = grammar_constraint.precompute2_json_string()
     pre3_json = grammar_constraint.precompute3_json_string()
 
-    from aug25.precompute2_model import Precompute2
-    from aug25.precompute3_model import Precompute3
+    from aug25.precompute2_model import Model as Precompute2
+    from aug25.precompute3_model import Model as Precompute3
 
     pre2 = Precompute2.from_json_string(pre2_json)
     pre3 = Precompute3.from_json_string(pre3_json)
@@ -154,8 +154,8 @@ def main():
     # Convert the Rust mask (numpy bool array) to a set of indices for comparison
     allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
     allowed_ids_py_pre3 = set(mask_py_pre3.to_indices())
- 
-    assert allowed_ids_rust == allowed_ids_py_pre3, "Python precompute3 mask != Rust mask"
+
+    assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={allowed_ids_rust}, py={allowed_ids_py_pre3}"
     print("Python precompute3 mask matches Rust mask.")
  
     # Optionally, convert pre2->pre3 and compare masks again
