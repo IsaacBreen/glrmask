@@ -8988,6 +8988,12 @@ local_system:
               PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
           }
 
+          fn ptr(&self) -> usize {
+              // Stable identity for the inner Arc<GSSNode>; useful for change detection
+              let raw = std::sync::Arc::as_ptr(&self.inner);
+              raw as usize
+          }
+
           fn is_alive(&self) -> bool {
               self.inner.is_alive()
           }
@@ -9337,6 +9343,7 @@ local_system:
 
           print("Computing mask via Python (precompute3 model)...")
           mask_py_pre3 = pre3.get_mask(state_to_gss)
+          mask_py_pre3 = grammar_constraint.internal_bv_to_original(mask_py_pre3)
 
           # Convert the Rust mask (numpy bool array) to a set of indices for comparison
           allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
@@ -9345,13 +9352,7 @@ local_system:
           assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre3)}"
           print("Python precompute3 mask matches Rust mask.")
 
-          # Optionally, convert pre2->pre3 and compare masks again
-          print("Computing mask via Python (precompute2->precompute3 conversion)...")
-          pre2_as_pre3 = pre2.to_precompute3()
-          mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
-          allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
-          assert allowed_ids_rust == allowed_ids_py_pre2, f"Python precompute2->precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre2)}"
-          print("Python precompute2->precompute3 mask matches Rust mask.")
+          # TODO: load and test precompute2
 
           # Test equivalence between the two Python models
           from aug25.equality import are_equivalent_for_state
@@ -11621,11 +11622,10 @@ local_system:
                   else: merged.append((cs, ce)); cs, ce = ns, ne
               merged.append((cs, ce))
               return merged
-    python/aug25/precompute2_model.py: |
+    python/aug25/precompute2_model.py: |-
       import json
       from typing import Dict, List, Tuple
       from .common_interface import GraphProvider, RangeSet
-      from .precompute3_model import Model as Precompute3Model
       import _sep1 as ffi
 
       class Model(GraphProvider):
@@ -11674,52 +11674,12 @@ local_system:
                       if rs.contains(token):
                           yield (int(pop), sid, int(dest))
 
-          def to_precompute3(self) -> 'Precompute3Model':
-              arena3: Dict[int, dict] = {}
-              for u, node in self.arena.items():
-                  out_children = []
-                  groups: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, set]] = {}
-                  for (pop, sid), dests in node.get("children") or []:
-                      for dest, llm_rs in dests:
-                          key = (pop, llm_rs.intervals)
-                          dmap = groups.setdefault(key, {})
-                          dmap.setdefault(dest, set()).add(sid if sid is not None else -1)
-                  for (pop, llm_key), dmap in groups.items():
-                      llm_bv = list(list(p) for p in llm_key)
-                      dest_map = []
-                      for dest, sids in dmap.items():
-                          if -1 in sids:
-                              state_bv = [[0, 2**31 - 1]]
-                          else:
-                              sids_list = sorted([s for s in sids if s is not None])
-                              rngs = []
-                              if sids_list:
-                                  cs = ce = sids_list[0]
-                                  for v in sids_list[1:]:
-                                      if v == ce + 1:
-                                          ce = v
-                                      else:
-                                          rngs.append([cs, ce])
-                                          cs = ce = v
-                                  rngs.append([cs, ce])
-                              state_bv = rngs
-                          dest_map.append([int(dest), state_bv])
-                      out_children.append([[int(pop), llm_bv], dest_map])
-                  arena3[u] = {
-                      "value": {"end": bool((node.get("value") or {}).get("end", False))},
-                      "children": out_children,
-                  }
-              roots = list(self.roots_map.items())
-              return Precompute3Model(roots, arena3)
-
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              # This is inefficient as it converts on every call.
-              # A real competitor would implement this directly.
-              p3_model = self.to_precompute3()
-              return p3_model.get_mask(state_to_gss)
-    python/aug25/precompute3_model.py: |
+              ...
+    python/aug25/precompute3_model.py: |-
       import json
       from typing import Dict, List, Tuple
+      from collections import defaultdict
       from .common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
 
@@ -11727,9 +11687,16 @@ local_system:
           def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-              for n in self.arena.values():
-                  ch = n.get("children") or []
+              self.max_depth: Dict[int, int] = {}
+              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
+              for uid, node in self.arena.items():
+                  # Record node max_depth (if absent, assume 0)
+                  try:
+                      self.max_depth[int(uid)] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[int(uid)] = 0
+
+                  ch = node.get("children") or []
                   newch = []
                   for edge_key, dest_map in ch:
                       pop, llm_bv_json = edge_key
@@ -11738,7 +11705,7 @@ local_system:
                       for dest_idx, state_bv in dest_map:
                           newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
                       newch.append(((int(pop), llm_rs), newdm))
-                  n["children"] = newch
+                  node["children"] = newch
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -11763,62 +11730,96 @@ local_system:
                           yield (int(pop), None, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              # Final mask to return
               final_mask = ffi.Bitset.zeros()
-              from collections import deque
-              q = deque()
-              visited: Dict[int, ffi.GSSNode] = {}
 
-              # Seed from roots
+              # values: pending value per trie node (accumulated GSS after merges)
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (GSS not ok)
+              stopped: set[int] = set()
+              # depth scheduler: depth -> set(node_idx)
+              todo: Dict[int, set[int]] = defaultdict(set)
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
               for sid, gss in state_to_gss.items():
-                  if sid in self.roots_map:
-                      root_idx = self.roots_map[sid]
-                      if root_idx in visited:
-                          existing_gss = visited[root_idx]
-                          merged = ffi.gss_merge_many_with_depth([existing_gss, gss.clone_node()], 1)
-                          if id(merged) != id(existing_gss):
-                              visited[root_idx] = merged
-                              q.append((root_idx, merged))
-                      else:
-                          cloned_gss = gss.clone_node()
-                          visited[root_idx] = cloned_gss
-                          q.append((root_idx, cloned_gss))
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  if root_idx in values:
+                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+                      # Re-enqueue only if the merge structurally changes the node
+                      if merged.ptr() != values[root_idx].ptr():
+                          values[root_idx] = merged
+                  else:
+                      values[root_idx] = gss.clone_node()
+                  depth = self.max_depth.get(root_idx, 0)
+                  todo[depth].add(root_idx)
 
-              while q:
-                  u, gss = q.popleft()
+              # Main scheduler loop (depth-ascending)
+              while todo:
+                  # Pop the smallest depth bucket
+                  current_depth = min(todo.keys())
+                  node_indices = todo.pop(current_depth)
 
-                  if self.is_end(u):
-                      final_mask = final_mask.union(gss.allowed_llm_tokens())
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          continue
 
-                  for (pop, llm_rs), dests in self.arena.get(u, {}).get("children") or []:
-                      peeks = ffi.gss_popn_collect(gss, int(pop))
-                      if not peeks: continue
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue
 
-                      for dest_idx, state_bv in dests:
-                          matched = []
-                          for (sid_val, parent_node) in peeks:
-                              ok = False
-                              for (a, b) in state_bv:
-                                  if a <= sid_val <= b: ok = True; break
-                              if ok:
-                                  matched.append(parent_node)
-                          if not matched: continue
+                      # Process callback (end-node handling + stop condition)
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+                      keep_going = agg.is_ok()
+                      if not keep_going:
+                          stopped.add(node_idx)
+                          continue
 
-                          merged = ffi.gss_merge_many_with_depth(matched, 1)
-                          if llm_rs.intervals:
-                              bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                              ffi.gss_allow_only_llm_tokens_and_prune(merged, bv)
+                      # Grouped step over (pop, llm_rs)
+                      node = self.arena.get(node_idx, {})
+                      children = node.get("children") or []
+                      for (pop, llm_rs), dests in children:
+                          peeks = ffi.gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
 
-                          if merged.is_ok():
-                              dest_idx_int = int(dest_idx)
-                              if dest_idx_int in visited:
-                                  existing_gss = visited[dest_idx_int]
-                                  newly_merged = ffi.gss_merge_many_with_depth([existing_gss, merged], 1)
-                                  if id(newly_merged) != id(existing_gss):
-                                      visited[dest_idx_int] = newly_merged
-                                      q.append((dest_idx_int, newly_merged))
+                          for dest_idx, state_bv in dests:
+                              # Filter popped parents by state bitset
+                              matched = []
+                              if state_bv:
+                                  for (sid_val, parent_node) in peeks:
+                                      for (a, b) in state_bv:
+                                          if a <= sid_val <= b:
+                                              matched.append(parent_node)
+                                              break
+                              if not matched:
+                                  continue
+
+                              # Merge matched parents
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                              # Restrict by this edge's LLM token BV
+                              if llm_rs.intervals:
+                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
+                              if not child_gss.is_ok():
+                                  continue
+
+                              d = int(dest_idx)
+                              if d in values:
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                                  # Only re-enqueue if effectively changed
+                                  if combined.ptr() == values[d].ptr():
+                                      continue
+                                  values[d] = combined
                               else:
-                                  visited[dest_idx_int] = merged
-                                  q.append((dest_idx_int, merged))
+                                  values[d] = child_gss
+
+                              child_depth = self.max_depth.get(d, 0)
+                              todo[child_depth].add(d)
+
               return final_mask
     python/aug25/optimizer_general.py: |
       from typing import Any, Dict, List, Tuple, Optional, Iterable
@@ -21088,6 +21089,12 @@ local_system:
               PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
           }
 
+          fn ptr(&self) -> usize {
+              // Stable identity for the inner Arc<GSSNode>; useful for change detection
+              let raw = std::sync::Arc::as_ptr(&self.inner);
+              raw as usize
+          }
+
           fn is_alive(&self) -> bool {
               self.inner.is_alive()
           }
@@ -21437,6 +21444,7 @@ local_system:
 
           print("Computing mask via Python (precompute3 model)...")
           mask_py_pre3 = pre3.get_mask(state_to_gss)
+          mask_py_pre3 = grammar_constraint.internal_bv_to_original(mask_py_pre3)
 
           # Convert the Rust mask (numpy bool array) to a set of indices for comparison
           allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
@@ -21445,13 +21453,7 @@ local_system:
           assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre3)}"
           print("Python precompute3 mask matches Rust mask.")
 
-          # Optionally, convert pre2->pre3 and compare masks again
-          print("Computing mask via Python (precompute2->precompute3 conversion)...")
-          pre2_as_pre3 = pre2.to_precompute3()
-          mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
-          allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
-          assert allowed_ids_rust == allowed_ids_py_pre2, f"Python precompute2->precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre2)}"
-          print("Python precompute2->precompute3 mask matches Rust mask.")
+          # TODO: load and test precompute2
 
           # Test equivalence between the two Python models
           from aug25.equality import are_equivalent_for_state
@@ -23724,16 +23726,22 @@ local_system:
     python/aug25/precompute2_model.py: |
       import json
       from typing import Dict, List, Tuple
+      from collections import defaultdict
       from .common_interface import GraphProvider, RangeSet
-      from .precompute3_model import Model as Precompute3Model
       import _sep1 as ffi
 
       class Model(GraphProvider):
           def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
+              self.max_depth: Dict[int, int] = {}
               # Convert BVs in-place to RangeSet
-              for n in self.arena.values():
+              for uid, n in self.arena.items():
+                  try:
+                      self.max_depth[int(uid)] = int(n.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[int(uid)] = 0
+
                   val = n.get("value") or {}
                   if "live_tokens" in val and val["live_tokens"] is not None:
                       val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
@@ -23774,65 +23782,115 @@ local_system:
                       if rs.contains(token):
                           yield (int(pop), sid, int(dest))
 
-          def to_precompute3(self) -> 'Precompute3Model':
-              arena3: Dict[int, dict] = {}
-              for u, node in self.arena.items():
-                  out_children = []
-                  groups: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, set]] = {}
-                  for (pop, sid), dests in node.get("children") or []:
-                      for dest, llm_rs in dests:
-                          key = (pop, llm_rs.intervals)
-                          dmap = groups.setdefault(key, {})
-                          dmap.setdefault(dest, set()).add(sid if sid is not None else -1)
-                  for (pop, llm_key), dmap in groups.items():
-                      llm_bv = list(list(p) for p in llm_key)
-                      dest_map = []
-                      for dest, sids in dmap.items():
-                          if -1 in sids:
-                              state_bv = [[0, 2**31 - 1]]
-                          else:
-                              sids_list = sorted([s for s in sids if s is not None])
-                              rngs = []
-                              if sids_list:
-                                  cs = ce = sids_list[0]
-                                  for v in sids_list[1:]:
-                                      if v == ce + 1:
-                                          ce = v
-                                      else:
-                                          rngs.append([cs, ce])
-                                          cs = ce = v
-                                  rngs.append([cs, ce])
-                              state_bv = rngs
-                          dest_map.append([int(dest), state_bv])
-                      out_children.append([[int(pop), llm_bv], dest_map])
-                  arena3[u] = {
-                      "value": {"end": bool((node.get("value") or {}).get("end", False))},
-                      "children": out_children,
-                  }
-              roots = list(self.roots_map.items())
-              return Precompute3Model(roots, arena3)
-
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              # This is inefficient as it converts on every call.
-              # A real competitor would implement this directly.
-              p3_model = self.to_precompute3()
-              return p3_model.get_mask(state_to_gss)
-    python/aug25/precompute3_model.py: |
+              final_mask = ffi.Bitset.zeros()
+              values: Dict[int, ffi.GSSNode] = {}
+              stopped: set[int] = set()
+              todo: Dict[int, set[int]] = defaultdict(set)
+
+              # Seed
+              for sid, gss in state_to_gss.items():
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  if root_idx in values:
+                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+                      if merged.ptr() != values[root_idx].ptr():
+                          values[root_idx] = merged
+                  else:
+                      values[root_idx] = gss.clone_node()
+                  depth = self.max_depth.get(root_idx, 0)
+                  todo[depth].add(root_idx)
+
+              # Main loop
+              while todo:
+                  current_depth = min(todo.keys())
+                  node_indices = todo.pop(current_depth)
+
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          continue
+
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue
+
+                      # Process
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+
+                      if not agg.is_ok():
+                          stopped.add(node_idx)
+                          continue
+
+                      # Step
+                      node = self.arena.get(node_idx, {})
+                      children = node.get("children") or []
+                      for (pop, sid_opt), dests in children:
+                          peeks = ffi.gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
+
+                          # Filter peeks by state_id
+                          matched_parents = []
+                          if sid_opt is None:
+                              matched_parents = [p for _, p in peeks]
+                          else:
+                              sid_val = int(sid_opt)
+                              matched_parents = [p for sid, p in peeks if sid == sid_val]
+
+                          if not matched_parents:
+                              continue
+
+                          child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
+                          if not child_gss.is_ok():
+                              continue
+
+                          for dest_idx, llm_rs in dests:
+                              gss_for_dest = child_gss.clone_node()
+
+                              if llm_rs.intervals:
+                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+                                  ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+
+                              if not gss_for_dest.is_ok():
+                                  continue
+
+                              d = int(dest_idx)
+                              if d in values:
+                                  combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
+                                  if combined.ptr() == values[d].ptr():
+                                      continue
+                                  values[d] = combined
+                              else:
+                                  values[d] = gss_for_dest
+
+                              child_depth = self.max_depth.get(d, 0)
+                              todo[child_depth].add(d)
+
+              return final_mask
+    python/aug25/precompute3_model.py: |-
       import json
       from typing import Dict, List, Tuple
+      from collections import defaultdict
       from .common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      import heapq
-      import itertools
+      import _sep1 as ffi  # the compiled module
 
       class Model(GraphProvider):
           def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
-              # Add max_depth and normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-              for n in self.arena.values():
-                  ch = n.get("children") or []
+              self.max_depth: Dict[int, int] = {}
+              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
+              for uid, node in self.arena.items():
+                  # Record node max_depth (if absent, assume 0)
+                  try:
+                      self.max_depth[int(uid)] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[int(uid)] = 0
+
+                  ch = node.get("children") or []
                   newch = []
                   for edge_key, dest_map in ch:
                       pop, llm_bv_json = edge_key
@@ -23841,8 +23899,7 @@ local_system:
                       for dest_idx, state_bv in dest_map:
                           newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
                       newch.append(((int(pop), llm_rs), newdm))
-                  n["children"] = newch
-                  n['max_depth'] = n.get('max_depth', float('inf'))
+                  node["children"] = newch
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -23867,83 +23924,96 @@ local_system:
                           yield (int(pop), None, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              # Final mask to return
               final_mask = ffi.Bitset.zeros()
 
+              # values: pending value per trie node (accumulated GSS after merges)
               values: Dict[int, ffi.GSSNode] = {}
-              todo: List[Tuple[int, int, int]] = []  # (depth, counter, node_idx)
-              counter = itertools.count()
+              # nodes that decided to stop (GSS not ok)
+              stopped: set[int] = set()
+              # depth scheduler: depth -> set(node_idx)
+              todo: Dict[int, set[int]] = defaultdict(set)
 
-              # 1. Seed
-              initial_nodes: Dict[int, ffi.GSSNode] = {}
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
               for sid, gss in state_to_gss.items():
-                  if sid in self.roots_map:
-                      root_idx = self.roots_map[sid]
-                      if root_idx in initial_nodes:
-                          existing = initial_nodes[root_idx]
-                          initial_nodes[root_idx] = ffi.gss_merge_many_with_depth([existing, gss.clone_node()], 1)
-                      else:
-                          initial_nodes[root_idx] = gss.clone_node()
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  if root_idx in values:
+                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+                      # Re-enqueue only if the merge structurally changes the node
+                      if merged.ptr() != values[root_idx].ptr():
+                          values[root_idx] = merged
+                  else:
+                      values[root_idx] = gss.clone_node()
+                  depth = self.max_depth.get(root_idx, 0)
+                  todo[depth].add(root_idx)
 
-              for node_idx, gss in initial_nodes.items():
-                  values[node_idx] = gss
-                  depth = self.arena.get(node_idx, {}).get("max_depth", float('inf'))
-                  heapq.heappush(todo, (depth, next(counter), node_idx))
-
-              stopped_nodes: set[int] = set()
-
+              # Main scheduler loop (depth-ascending)
               while todo:
-                  _depth, _, u_idx = heapq.heappop(todo)
+                  # Pop the smallest depth bucket
+                  current_depth = min(todo.keys())
+                  node_indices = todo.pop(current_depth)
 
-                  if u_idx in stopped_nodes:
-                      continue
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          continue
 
-                  if u_idx not in values:
-                      continue
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue
 
-                  gss = values.pop(u_idx)
+                      # Process callback (end-node handling + stop condition)
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+                      keep_going = agg.is_ok()
+                      if not keep_going:
+                          stopped.add(node_idx)
+                          continue
 
-                  # process_fn
-                  u_node = self.arena.get(u_idx, {})
-                  is_end = (u_node.get("value") or {}).get("end", False)
+                      # Grouped step over (pop, llm_rs)
+                      node = self.arena.get(node_idx, {})
+                      children = node.get("children") or []
+                      for (pop, llm_rs), dests in children:
+                          peeks = ffi.gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
 
-                  keep_going = gss.is_ok()
-                  if is_end:
-                      final_mask = final_mask.union(gss.allowed_llm_tokens())
+                          for dest_idx, state_bv in dests:
+                              # Filter popped parents by state bitset
+                              matched = []
+                              if state_bv:
+                                  for (sid_val, parent_node) in peeks:
+                                      for (a, b) in state_bv:
+                                          if a <= sid_val <= b:
+                                              matched.append(parent_node)
+                                              break
+                              if not matched:
+                                  continue
 
-                  if not keep_going:
-                      stopped_nodes.add(u_idx)
-                      continue
+                              # Merge matched parents
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                              # Restrict by this edge's LLM token BV
+                              if llm_rs.intervals:
+                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
+                              if not child_gss.is_ok():
+                                  continue
 
-                  # step_fn (grouped)
-                  for (pop, llm_rs), dests in u_node.get("children", []):
-                      peeks = ffi.gss_popn_collect(gss, int(pop))
-                      if not peeks: continue
-
-                      for dest_idx, state_bv_ranges in dests:
-                          matched = []
-                          for (sid_val, parent_node) in peeks:
-                              ok = False
-                              for (a, b) in state_bv_ranges:
-                                  if a <= sid_val <= b: ok = True; break
-                              if ok:
-                                  matched.append(parent_node)
-                          if not matched: continue
-
-                          merged = ffi.gss_merge_many_with_depth(matched, 1)
-                          if not llm_rs.is_empty():
-                              bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                              ffi.gss_allow_only_llm_tokens_and_prune(merged, bv)
-
-                          if merged.is_ok():
-                              dest_idx_int = int(dest_idx)
-                              if dest_idx_int in values:
-                                  existing_gss = values[dest_idx_int]
-                                  values[dest_idx_int] = ffi.gss_merge_many_with_depth([existing_gss, merged], 1)
+                              d = int(dest_idx)
+                              if d in values:
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                                  # Only re-enqueue if effectively changed
+                                  if combined.ptr() == values[d].ptr():
+                                      continue
+                                  values[d] = combined
                               else:
-                                  values[dest_idx_int] = merged
+                                  values[d] = child_gss
 
-                              child_depth = self.arena.get(dest_idx_int, {}).get("max_depth", float('inf'))
-                              heapq.heappush(todo, (child_depth, next(counter), dest_idx_int))
+                              child_depth = self.max_depth.get(d, 0)
+                              todo[child_depth].add(d)
+
               return final_mask
     python/aug25/optimizer_general.py: |
       from typing import Any, Dict, List, Tuple, Optional, Iterable
@@ -33277,6 +33347,12 @@ messages:
               PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
           }
 
+          fn ptr(&self) -> usize {
+              // Stable identity for the inner Arc<GSSNode>; useful for change detection
+              let raw = std::sync::Arc::as_ptr(&self.inner);
+              raw as usize
+          }
+
           fn is_alive(&self) -> bool {
               self.inner.is_alive()
           }
@@ -33635,6 +33711,7 @@ messages:
 
           print("Computing mask via Python (precompute3 model)...")
           mask_py_pre3 = pre3.get_mask(state_to_gss)
+          mask_py_pre3 = grammar_constraint.internal_bv_to_original(mask_py_pre3)
 
           # Convert the Rust mask (numpy bool array) to a set of indices for comparison
           allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
@@ -33643,13 +33720,7 @@ messages:
           assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre3)}"
           print("Python precompute3 mask matches Rust mask.")
 
-          # Optionally, convert pre2->pre3 and compare masks again
-          print("Computing mask via Python (precompute2->precompute3 conversion)...")
-          pre2_as_pre3 = pre2.to_precompute3()
-          mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
-          allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
-          assert allowed_ids_rust == allowed_ids_py_pre2, f"Python precompute2->precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre2)}"
-          print("Python precompute2->precompute3 mask matches Rust mask.")
+          # TODO: load and test precompute2
 
           # Test equivalence between the two Python models
           from aug25.equality import are_equivalent_for_state
@@ -35942,7 +36013,6 @@ messages:
       import json
       from typing import Dict, List, Tuple
       from .common_interface import GraphProvider, RangeSet
-      from .precompute3_model import Model as Precompute3Model
       import _sep1 as ffi
 
       class Model(GraphProvider):
@@ -35991,50 +36061,8 @@ messages:
                       if rs.contains(token):
                           yield (int(pop), sid, int(dest))
 
-          def to_precompute3(self) -> 'Precompute3Model':
-              arena3: Dict[int, dict] = {}
-              for u, node in self.arena.items():
-                  out_children = []
-                  groups: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, set]] = {}
-                  for (pop, sid), dests in node.get("children") or []:
-                      for dest, llm_rs in dests:
-                          key = (pop, llm_rs.intervals)
-                          dmap = groups.setdefault(key, {})
-                          dmap.setdefault(dest, set()).add(sid if sid is not None else -1)
-                  for (pop, llm_key), dmap in groups.items():
-                      llm_bv = list(list(p) for p in llm_key)
-                      dest_map = []
-                      for dest, sids in dmap.items():
-                          if -1 in sids:
-                              state_bv = [[0, 2**31 - 1]]
-                          else:
-                              sids_list = sorted([s for s in sids if s is not None])
-                              rngs = []
-                              if sids_list:
-                                  cs = ce = sids_list[0]
-                                  for v in sids_list[1:]:
-                                      if v == ce + 1:
-                                          ce = v
-                                      else:
-                                          rngs.append([cs, ce])
-                                          cs = ce = v
-                                  rngs.append([cs, ce])
-                              state_bv = rngs
-                          dest_map.append([int(dest), state_bv])
-                      out_children.append([[int(pop), llm_bv], dest_map])
-                  arena3[u] = {
-                      "value": {"end": bool((node.get("value") or {}).get("end", False))},
-                      "children": out_children,
-                  }
-              roots = list(self.roots_map.items())
-              return Precompute3Model(roots, arena3)
-
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              # This is inefficient as it converts on every call.
-              # A real competitor would implement this directly.
-              p3_model = self.to_precompute3()
-              return p3_model.get_mask(state_to_gss)
-
+              ...
       ```
     metadata:
       filename: python/aug25/precompute2_model.py
@@ -36042,6 +36070,7 @@ messages:
       ```python 'python/aug25/precompute3_model.py'
       import json
       from typing import Dict, List, Tuple
+      from collections import defaultdict
       from .common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
 
@@ -36049,9 +36078,16 @@ messages:
           def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-              for n in self.arena.values():
-                  ch = n.get("children") or []
+              self.max_depth: Dict[int, int] = {}
+              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
+              for uid, node in self.arena.items():
+                  # Record node max_depth (if absent, assume 0)
+                  try:
+                      self.max_depth[int(uid)] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[int(uid)] = 0
+
+                  ch = node.get("children") or []
                   newch = []
                   for edge_key, dest_map in ch:
                       pop, llm_bv_json = edge_key
@@ -36060,7 +36096,7 @@ messages:
                       for dest_idx, state_bv in dest_map:
                           newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
                       newch.append(((int(pop), llm_rs), newdm))
-                  n["children"] = newch
+                  node["children"] = newch
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -36085,64 +36121,97 @@ messages:
                           yield (int(pop), None, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              # Final mask to return
               final_mask = ffi.Bitset.zeros()
-              from collections import deque
-              q = deque()
-              visited: Dict[int, ffi.GSSNode] = {}
 
-              # Seed from roots
+              # values: pending value per trie node (accumulated GSS after merges)
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (GSS not ok)
+              stopped: set[int] = set()
+              # depth scheduler: depth -> set(node_idx)
+              todo: Dict[int, set[int]] = defaultdict(set)
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
               for sid, gss in state_to_gss.items():
-                  if sid in self.roots_map:
-                      root_idx = self.roots_map[sid]
-                      if root_idx in visited:
-                          existing_gss = visited[root_idx]
-                          merged = ffi.gss_merge_many_with_depth([existing_gss, gss.clone_node()], 1)
-                          if id(merged) != id(existing_gss):
-                              visited[root_idx] = merged
-                              q.append((root_idx, merged))
-                      else:
-                          cloned_gss = gss.clone_node()
-                          visited[root_idx] = cloned_gss
-                          q.append((root_idx, cloned_gss))
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  if root_idx in values:
+                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+                      # Re-enqueue only if the merge structurally changes the node
+                      if merged.ptr() != values[root_idx].ptr():
+                          values[root_idx] = merged
+                  else:
+                      values[root_idx] = gss.clone_node()
+                  depth = self.max_depth.get(root_idx, 0)
+                  todo[depth].add(root_idx)
 
-              while q:
-                  u, gss = q.popleft()
+              # Main scheduler loop (depth-ascending)
+              while todo:
+                  # Pop the smallest depth bucket
+                  current_depth = min(todo.keys())
+                  node_indices = todo.pop(current_depth)
 
-                  if self.is_end(u):
-                      final_mask = final_mask.union(gss.allowed_llm_tokens())
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          continue
 
-                  for (pop, llm_rs), dests in self.arena.get(u, {}).get("children") or []:
-                      peeks = ffi.gss_popn_collect(gss, int(pop))
-                      if not peeks: continue
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue
 
-                      for dest_idx, state_bv in dests:
-                          matched = []
-                          for (sid_val, parent_node) in peeks:
-                              ok = False
-                              for (a, b) in state_bv:
-                                  if a <= sid_val <= b: ok = True; break
-                              if ok:
-                                  matched.append(parent_node)
-                          if not matched: continue
+                      # Process callback (end-node handling + stop condition)
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+                      keep_going = agg.is_ok()
+                      if not keep_going:
+                          stopped.add(node_idx)
+                          continue
 
-                          merged = ffi.gss_merge_many_with_depth(matched, 1)
-                          if llm_rs.intervals:
-                              bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                              ffi.gss_allow_only_llm_tokens_and_prune(merged, bv)
+                      # Grouped step over (pop, llm_rs)
+                      node = self.arena.get(node_idx, {})
+                      children = node.get("children") or []
+                      for (pop, llm_rs), dests in children:
+                          peeks = ffi.gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
 
-                          if merged.is_ok():
-                              dest_idx_int = int(dest_idx)
-                              if dest_idx_int in visited:
-                                  existing_gss = visited[dest_idx_int]
-                                  newly_merged = ffi.gss_merge_many_with_depth([existing_gss, merged], 1)
-                                  if id(newly_merged) != id(existing_gss):
-                                      visited[dest_idx_int] = newly_merged
-                                      q.append((dest_idx_int, newly_merged))
+                          for dest_idx, state_bv in dests:
+                              # Filter popped parents by state bitset
+                              matched = []
+                              if state_bv:
+                                  for (sid_val, parent_node) in peeks:
+                                      for (a, b) in state_bv:
+                                          if a <= sid_val <= b:
+                                              matched.append(parent_node)
+                                              break
+                              if not matched:
+                                  continue
+
+                              # Merge matched parents
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                              # Restrict by this edge's LLM token BV
+                              if llm_rs.intervals:
+                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
+                              if not child_gss.is_ok():
+                                  continue
+
+                              d = int(dest_idx)
+                              if d in values:
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                                  # Only re-enqueue if effectively changed
+                                  if combined.ptr() == values[d].ptr():
+                                      continue
+                                  values[d] = combined
                               else:
-                                  visited[dest_idx_int] = merged
-                                  q.append((dest_idx_int, merged))
-              return final_mask
+                                  values[d] = child_gss
 
+                              child_depth = self.max_depth.get(d, 0)
+                              todo[child_depth].add(d)
+
+              return final_mask
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
@@ -36494,8 +36563,7 @@ messages:
 
       ...
 
-      I've done most (all?) of the work already. BUT pay careful attention to `get_mask` in `python/aug25/precompute3_model.py`. It isn't equivalent to `get_mask3` in `src/constraint.rs`. Look closely at trie.rs, especially `special_map_grouped`, to see how it works. Notice how it queues using `max_depth`. Notice how it handles recursion (there *can* be recursion - it's not ok to just 'pass' when we see it). Notice how it handles merging, traversing edges.
-      Fix the implementation in `python/aug25/precompute3_model.py`. Try not to touch the rest of the code unless a fix is needed. Most of the work is already done.
+      I've done almost everything already. Complete `get_mask` in `python/aug25/precompute2_model.py`. Then we're done!
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -36512,149 +36580,126 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I will provide the necessary changes as a git diff patch. Based on your instructions, I've focused on correcting the `get_mask` implementation in `python/aug25/precompute3_model.py` to correctly replicate the scheduling and merging logic from the Rust `special_map_grouped` function. This involves using a priority queue for depth-based traversal and correctly handling the aggregation of states.
-
-      Here is the patch for the file:
+      I will complete the `get_mask` implementation in `python/aug25/precompute2_model.py` to replicate the logic from the Rust `get_mask2` function. This involves implementing a traversal similar to `special_map_grouped` using a depth-based scheduler.
 
       ```diff
-      diff --git a/python/aug25/precompute3_model.py b/python/aug25/precompute3_model.py
-      index 8144088..0951158 100644
-      --- a/python/aug25/precompute3_model.py
-      +++ b/python/aug25/precompute3_model.py
-      @@ -1,12 +1,15 @@
+      --- a/python/aug25/precompute2_model.py
+      +++ b/python/aug25/precompute2_model.py
+      @@ -1,12 +1,21 @@
        import json
        from typing import Dict, List, Tuple
+      +from collections import defaultdict
        from .common_interface import GraphProvider, RangeSet
-      -import _sep1 as ffi  # the compiled module
-      +import _sep1 as ffi
-      +import heapq
-      +import itertools
+       import _sep1 as ffi
        
        class Model(GraphProvider):
            def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
                self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
                self.arena = arena
-      +        # Add max_depth and normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-               # Normalize BVs to RangeSet; store stateIDBV as list of (s,e).
-               for n in self.arena.values():
-                   ch = n.get("children") or []
-      @@ -19,6 +22,7 @@
-                           newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
-                       newch.append(((int(pop), llm_rs), newdm))
-                   n["children"] = newch
-      +            n['max_depth'] = n.get('max_depth', float('inf'))
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      @@ -42,62 +46,81 @@
+      +        self.max_depth: Dict[int, int] = {}
+               # Convert BVs in-place to RangeSet
+      -        for n in self.arena.values():
+      +        for uid, n in self.arena.items():
+      +            try:
+      +                self.max_depth[int(uid)] = int(n.get("max_depth", 0))
+      +            except Exception:
+      +                self.max_depth[int(uid)] = 0
+      +
+                   val = n.get("value") or {}
+                   if "live_tokens" in val and val["live_tokens"] is not None:
+                       val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
+      @@ -45,4 +54,81 @@
+                           yield (int(pop), sid, int(dest))
        
            def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-               final_mask = ffi.Bitset.zeros()
-      -        from collections import deque
-      -        q = deque()
-      -        visited: Dict[int, ffi.GSSNode] = {}
-       
-      -        # Seed from roots
+      -        ...
+      +        final_mask = ffi.Bitset.zeros()
       +        values: Dict[int, ffi.GSSNode] = {}
-      +        todo: List[Tuple[int, int, int]] = []  # (depth, counter, node_idx)
-      +        counter = itertools.count()
+      +        stopped: set[int] = set()
+      +        todo: Dict[int, set[int]] = defaultdict(set)
       +
-      +        # 1. Seed
-      +        initial_nodes: Dict[int, ffi.GSSNode] = {}
-               for sid, gss in state_to_gss.items():
-                   if sid in self.roots_map:
-                       root_idx = self.roots_map[sid]
-      -                if root_idx in visited:
-      -                    existing_gss = visited[root_idx]
-      -                    merged = ffi.gss_merge_many_with_depth([existing_gss, gss.clone_node()], 1)
-      -                    if id(merged) != id(existing_gss):
-      -                        visited[root_idx] = merged
-      -                        q.append((root_idx, merged))
-      +                if root_idx in initial_nodes:
-      +                    existing = initial_nodes[root_idx]
-      +                    initial_nodes[root_idx] = ffi.gss_merge_many_with_depth([existing, gss.clone_node()], 1)
-                       else:
-      -                    cloned_gss = gss.clone_node()
-      -                    visited[root_idx] = cloned_gss
-      -                    q.append((root_idx, cloned_gss))
-      +                    initial_nodes[root_idx] = gss.clone_node()
-       
-      -        while q:
-      -            u, gss = q.popleft()
-      +        for node_idx, gss in initial_nodes.items():
-      +            values[node_idx] = gss
-      +            depth = self.arena.get(node_idx, {}).get("max_depth", float('inf'))
-      +            heapq.heappush(todo, (depth, next(counter), node_idx))
-       
-      -            if self.is_end(u):
-      +        stopped_nodes: set[int] = set()
+      +        # Seed
+      +        for sid, gss in state_to_gss.items():
+      +            root_idx = self.roots_map.get(int(sid))
+      +            if root_idx is None:
+      +                continue
+      +            root_idx = int(root_idx)
+      +            if root_idx in values:
+      +                merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+      +                if merged.ptr() != values[root_idx].ptr():
+      +                    values[root_idx] = merged
+      +            else:
+      +                values[root_idx] = gss.clone_node()
+      +            depth = self.max_depth.get(root_idx, 0)
+      +            todo[depth].add(root_idx)
       +
+      +        # Main loop
       +        while todo:
-      +            _depth, _, u_idx = heapq.heappop(todo)
+      +            current_depth = min(todo.keys())
+      +            node_indices = todo.pop(current_depth)
       +
-      +            if u_idx in stopped_nodes:
-      +                continue
+      +            for node_idx in list(node_indices):
+      +                if node_idx in stopped:
+      +                    continue
       +
-      +            if u_idx not in values:
-      +                continue
+      +                agg = values.pop(node_idx, None)
+      +                if agg is None:
+      +                    continue
       +
-      +            gss = values.pop(u_idx)
+      +                # Process
+      +                if self.is_end(node_idx):
+      +                    final_mask = final_mask.union(agg.allowed_llm_tokens())
       +
-      +            # process_fn
-      +            u_node = self.arena.get(u_idx, {})
-      +            is_end = (u_node.get("value") or {}).get("end", False)
+      +                if not agg.is_ok():
+      +                    stopped.add(node_idx)
+      +                    continue
       +
-      +            keep_going = gss.is_ok()
-      +            if is_end:
-                       final_mask = final_mask.union(gss.allowed_llm_tokens())
-       
-      -            for (pop, llm_rs), dests in self.arena.get(u, {}).get("children") or []:
-      +            if not keep_going:
-      +                stopped_nodes.add(u_idx)
-      +                continue
+      +                # Step
+      +                node = self.arena.get(node_idx, {})
+      +                children = node.get("children") or []
+      +                for (pop, sid_opt), dests in children:
+      +                    peeks = ffi.gss_popn_collect(agg, int(pop))
+      +                    if not peeks:
+      +                        continue
       +
-      +            # step_fn (grouped)
-      +            for (pop, llm_rs), dests in u_node.get("children", []):
-                       peeks = ffi.gss_popn_collect(gss, int(pop))
-                       if not peeks: continue
-       
-      -                for dest_idx, state_bv in dests:
-      +                for dest_idx, state_bv_ranges in dests:
-                           matched = []
-                           for (sid_val, parent_node) in peeks:
-                               ok = False
-      -                        for (a, b) in state_bv:
-      +                        for (a, b) in state_bv_ranges:
-                                   if a <= sid_val <= b: ok = True; break
-                               if ok:
-                                   matched.append(parent_node)
-                           if not matched: continue
-       
-                           merged = ffi.gss_merge_many_with_depth(matched, 1)
-      -                    if llm_rs.intervals:
-      +                    if not llm_rs.is_empty():
-                               bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                               ffi.gss_allow_only_llm_tokens_and_prune(merged, bv)
-       
-                           if merged.is_ok():
-                               dest_idx_int = int(dest_idx)
-      -                        if dest_idx_int in visited:
-      -                            existing_gss = visited[dest_idx_int]
-      -                            newly_merged = ffi.gss_merge_many_with_depth([existing_gss, merged], 1)
-      -                            if id(newly_merged) != id(existing_gss):
-      -                                visited[dest_idx_int] = newly_merged
-      -                                q.append((dest_idx_int, newly_merged))
-      +                        if dest_idx_int in values:
-      +                            existing_gss = values[dest_idx_int]
-      +                            values[dest_idx_int] = ffi.gss_merge_many_with_depth([existing_gss, merged], 1)
-                               else:
-      -                            visited[dest_idx_int] = merged
-      -                            q.append((dest_idx_int, merged))
-      +                            values[dest_idx_int] = merged
+      +                    # Filter peeks by state_id
+      +                    matched_parents = []
+      +                    if sid_opt is None:
+      +                        matched_parents = [p for _, p in peeks]
+      +                    else:
+      +                        sid_val = int(sid_opt)
+      +                        matched_parents = [p for sid, p in peeks if sid == sid_val]
       +
-      +                        child_depth = self.arena.get(dest_idx_int, {}).get("max_depth", float('inf'))
-      +                        heapq.heappush(todo, (child_depth, next(counter), dest_idx_int))
-               return final_mask
+      +                    if not matched_parents:
+      +                        continue
+      +
+      +                    child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
+      +                    if not child_gss.is_ok():
+      +                        continue
+      +
+      +                    for dest_idx, llm_rs in dests:
+      +                        gss_for_dest = child_gss.clone_node()
+      +
+      +                        if llm_rs.intervals:
+      +                            edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
+      +                            ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+      +
+      +                        if not gss_for_dest.is_ok():
+      +                            continue
+      +
+      +                        d = int(dest_idx)
+      +                        if d in values:
+      +                            combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
+      +                            if combined.ptr() == values[d].ptr():
+      +                                continue
+      +                            values[d] = combined
+      +                        else:
+      +                            values[d] = gss_for_dest
+      +
+      +                        child_depth = self.max_depth.get(d, 0)
+      +                        todo[child_depth].add(d)
+      +
+      +        return final_mask
 
       ```
     metadata:
@@ -36663,11 +36708,10 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/precompute3_model.py
-      Applying patch to 'python/aug25/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/precompute3_model.py.
+      Identified target file: python/aug25/precompute2_model.py
+      Applying patch to 'python/aug25/precompute2_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/precompute2_model.py.
     metadata:
-  - user: "Changes committed with message: \"Fix: Correct get_mask implementation
-      in precompute3_model to match Rust's special_map_grouped logic\""
+  - user: 'Changes committed with message: "feat: Implement get_mask for Precompute2Model"'
     metadata:
 ...
