@@ -132,8 +132,8 @@ def main():
     pre2_json = grammar_constraint.precompute2_json_string()
     pre3_json = grammar_constraint.precompute3_json_string()
 
-    from precompute2_model import Precompute2
-    from precompute3_model import Precompute3
+    from aug25.precompute2_model import Precompute2
+    from aug25.precompute3_model import Precompute3
 
     pre2 = Precompute2.from_json_string(pre2_json)
     pre3 = Precompute3.from_json_string(pre3_json)
@@ -167,7 +167,7 @@ def main():
     print("Python precompute2->precompute3 mask matches Rust mask.")
 
     # Test equivalence between the two Python models
-    from equality import are_equivalent_for_state
+    from aug25.equality import are_equivalent_for_state
     print("Testing equivalence between Python precompute2 and precompute3 models...")
     for sid in pre2.roots_map.keys():
         if sid in pre3.roots_map:
