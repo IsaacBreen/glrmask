@@ -51,7 +51,8 @@ def greedy_tokenizer(text_bytes, id_to_token):
 
 def load_competitor_model(competitor_path: Path):
     """Dynamically loads the 'Model' class from a Python file."""
-    module_name = competitor_path.stem
+    # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+    module_name = ".".join(competitor_path.with_suffix('').parts)
     spec = importlib.util.spec_from_file_location(module_name, competitor_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load spec for module at {competitor_path}")

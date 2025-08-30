@@ -3,6 +3,7 @@ local_system:
     - python/src/lib.rs
     - python/Cargo.toml
     - python/example_js.py
+    - python/aug25/__init__.py
     - python/aug25/benchmark_analyzer.py
     - python/aug25/benchmark_runner.py
     - python/aug25/common_interface.py
@@ -10,7 +11,6 @@ local_system:
     - python/aug25/optimizer_general.py
     - python/aug25/precompute2_model.py
     - python/aug25/precompute3_model.py
-    - python/run_benchmarks.sh
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -980,6 +980,7 @@ local_system:
 
       if __name__ == "__main__":
           main()
+    python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
       import json
@@ -1139,7 +1140,13 @@ local_system:
               response.raise_for_status()
               with open(cache_path, 'w', encoding='utf-8') as f:
                   f.write(response.text)
-          return json.loads(cache_path.read_text(encoding='utf-8'))
+
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
+
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
+          return vocab_map
 
       def greedy_tokenizer(text_bytes, id_to_token):
           token_to_id = {v: k for k, v in id_to_token.items()}
@@ -2083,107 +2090,6 @@ local_system:
                               todo[child_depth].add(d)
 
               return final_mask
-    python/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # comparing them against a reference implementation, and generating analysis plots.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   GRAMMAR_FILE: Path to the .ebnf grammar file.
-      #                 (Default: ../src/js_simplified3.ebnf)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${GRAMMAR_FILE:="../src/js_simplified3.ebnf"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 2 ]; then
-          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
-          echo "Error: At least two arguments are required: a reference model and one competitor model."
-          exit 1
-      fi
-
-      REFERENCE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      # Check that all provided files exist
-      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$GRAMMAR_FILE" ]; then
-          echo "Error: Grammar file not found: $GRAMMAR_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Reference Model: $REFERENCE_MODEL"
-      echo "Competitors: ${COMPETITORS[*]}"
-      echo "Grammar: $GRAMMAR_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for competitor in "${COMPETITORS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$competitor")"
-          python -m aug25.benchmark_runner \
-              --grammar "$GRAMMAR_FILE" \
-              --code "$CODE_FILE" \
-              --reference "$REFERENCE_MODEL" \
-              --competitor "$competitor" \
-              --output "$RESULTS_DIR"
-          echo ">>> Finished benchmark for: $(basename "$competitor")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      python -m aug25.benchmark_analyzer \
-          "${RESULTS_DIR}"/*.json \
-          --output-dir "$PLOTS_DIR"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
   prev_file_contents:
     python/src/lib.rs: |-
       use sep1::tokenizer::LLMTokenID;
@@ -3151,6 +3057,7 @@ local_system:
 
       if __name__ == "__main__":
           main()
+    python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
       import json
@@ -3310,7 +3217,13 @@ local_system:
               response.raise_for_status()
               with open(cache_path, 'w', encoding='utf-8') as f:
                   f.write(response.text)
-          return json.loads(cache_path.read_text(encoding='utf-8'))
+
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
+
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
+          return vocab_map
 
       def greedy_tokenizer(text_bytes, id_to_token):
           token_to_id = {v: k for k, v in id_to_token.items()}
@@ -3331,7 +3244,8 @@ local_system:
 
       def load_competitor_model(competitor_path: Path):
           """Dynamically loads the 'Model' class from a Python file."""
-          module_name = competitor_path.stem
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
           spec = importlib.util.spec_from_file_location(module_name, competitor_path)
           if spec is None or spec.loader is None:
               raise ImportError(f"Could not load spec for module at {competitor_path}")
@@ -4254,107 +4168,6 @@ local_system:
                               todo[child_depth].add(d)
 
               return final_mask
-    python/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # comparing them against a reference implementation, and generating analysis plots.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   GRAMMAR_FILE: Path to the .ebnf grammar file.
-      #                 (Default: ../src/js_simplified3.ebnf)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${GRAMMAR_FILE:="../src/js_simplified3.ebnf"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 2 ]; then
-          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
-          echo "Error: At least two arguments are required: a reference model and one competitor model."
-          exit 1
-      fi
-
-      REFERENCE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      # Check that all provided files exist
-      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$GRAMMAR_FILE" ]; then
-          echo "Error: Grammar file not found: $GRAMMAR_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Reference Model: $REFERENCE_MODEL"
-      echo "Competitors: ${COMPETITORS[*]}"
-      echo "Grammar: $GRAMMAR_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for competitor in "${COMPETITORS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$competitor")"
-          python -m aug25.benchmark_runner \
-              --grammar "$GRAMMAR_FILE" \
-              --code "$CODE_FILE" \
-              --reference "$REFERENCE_MODEL" \
-              --competitor "$competitor" \
-              --output "$RESULTS_DIR"
-          echo ">>> Finished benchmark for: $(basename "$competitor")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      python -m aug25.benchmark_analyzer \
-          "${RESULTS_DIR}"/*.json \
-          --output-dir "$PLOTS_DIR"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -5370,6 +5183,12 @@ messages:
     metadata:
       filename: python/example_js.py
   - user: |-
+      ```python 'python/aug25/__init__.py'
+
+      ```
+    metadata:
+      filename: python/aug25/__init__.py
+  - user: |-
       ```python 'python/aug25/benchmark_analyzer.py'
       import argparse
       import json
@@ -5534,7 +5353,13 @@ messages:
               response.raise_for_status()
               with open(cache_path, 'w', encoding='utf-8') as f:
                   f.write(response.text)
-          return json.loads(cache_path.read_text(encoding='utf-8'))
+
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
+
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
+          return vocab_map
 
       def greedy_tokenizer(text_bytes, id_to_token):
           token_to_id = {v: k for k, v in id_to_token.items()}
@@ -6506,9 +6331,68 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: Write a bash script that takes a reference model, and sequence of models
-      to test, runs the benchmarks for them, and outputs stats/graphs etc for all.
-      Should make it simple to do a bench.
+  - user: |-
+      ```
+      pwd
+      /Users/isaacbreen/Projects2/grammars2024/python
+      tre aug25/
+      [0] aug25/
+      ├── [1] __init__.py
+      ├── [2] benchmark_analyzer.py
+      ├── [3] benchmark_runner.py
+      ├── [4] common_interface.py
+      ├── [5] equality.py
+      ├── [6] optimizer_general.py
+      ├── [7] precompute2_model.py
+      └── [8] precompute3_model.py
+      ```
+      ```
+      bash run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      Benchmark results will be saved in: benchmark_results/2025-08-30_15-46-47
+      ---
+      Reference Model: aug25/precompute2_model.py
+      Competitors: aug25/precompute3_model.py
+      Grammar: ../src/js_simplified3.ebnf
+      Code: ../src/example_code.js
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: precompute3_model.py
+      --- Setting up benchmark environment ---
+      Loading grammar from: ../src/js_simplified3.ebnf
+      EBNF rules:
+      program -> Sequence([Optional(Ref("statement_list")), Ref("EOF")])
+      EOF -> Literal([60, 124, 69, 79, 70, 124, 62])
+      IGNORE -> Choice([Sequence([Choice([Literal([32]), Literal([9]), Literal([10]), Literal([13])]), Repeat(Choice([Literal([32]), Literal([9]), Literal([10]), Literal([13])]))]), Sequence([Literal([47, 47]), Repeat(CharClass("[^\\n\\r]"))])])
+
+      ...
+
+      --- Tokenizer State ID: 44 ---
+      Root Node Trie2Index(627) (MaxDepth: 0)
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      Loading competitor model from: aug25/precompute3_model.py
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 265, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 262, in main
+          run_benchmark(args)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 98, in run_benchmark
+          CompetitorModel = load_competitor_model(args.competitor)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 60, in load_competitor_model
+          spec.loader.exec_module(module)
+        File "<frozen importlib._bootstrap_external>", line 994, in exec_module
+        File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/precompute3_model.py", line 4, in <module>
+          from .common_interface import GraphProvider, RangeSet
+      ImportError: attempted relative import with no known parent package
+      ```
+      Fix this.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6525,115 +6409,26 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I will create a new bash script to automate the benchmark process. This script will handle running the benchmarks for a series of competitor models against a reference model and then analyzing the results to produce statistics and graphs.
+      The `ImportError` you're seeing is caused by running a file from within a package as a script, which confuses Python's relative import mechanism. The `benchmark_runner.py` script dynamically loads other modules from the `aug25` package, but it does so in a way that strips their package context.
+
+      The fix is to adjust `benchmark_runner.py` to load the competitor modules using their full package path (e.g., `aug25.precompute3_model`), which allows their internal relative imports to work correctly.
+
+      Here is the patch for `python/aug25/benchmark_runner.py`:
 
       ```diff
-      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
-      new file mode 100755
-      index 0000000..833316c
-      --- /dev/null
-      +++ b/python/run_benchmarks.sh
-      @@ -0,0 +1,91 @@
-      +#!/bin/bash
-      +set -euo pipefail
-      +
-      +# ==============================================================================
-      +# run_benchmarks.sh
-      +#
-      +# A script to automate running benchmarks for multiple grammar constraint models,
-      +# comparing them against a reference implementation, and generating analysis plots.
-      +#
-      +# This script should be run from the `python` directory.
-      +#
-      +# Usage:
-      +#   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
-      +#
-      +# Example:
-      +#   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      +#
-      +# Environment Variables:
-      +#   GRAMMAR_FILE: Path to the .ebnf grammar file.
-      +#                 (Default: ../src/js_simplified3.ebnf)
-      +#   CODE_FILE:    Path to the code file to use as input.
-      +#                 (Default: ../src/example_code.js)
-      +# ==============================================================================
-      +
-      +# --- Configuration ---
-      +# Use environment variables if set, otherwise use defaults.
-      +: "${GRAMMAR_FILE:="../src/js_simplified3.ebnf"}"
-      +: "${CODE_FILE:="../src/example_code.js"}"
-      +
-      +# --- Argument Validation ---
-      +if [ "$#" -lt 2 ]; then
-      +    echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
-      +    echo "Error: At least two arguments are required: a reference model and one competitor model."
-      +    exit 1
-      +fi
-      +
-      +REFERENCE_MODEL="$1"
-      +shift
-      +COMPETITORS=("$@")
-      +
-      +# Check that all provided files exist
-      +for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
-      +    if [ ! -f "$file" ]; then
-      +        echo "Error: Model file not found: $file"
-      +        exit 1
-      +    fi
-      +done
-      +if [ ! -f "$GRAMMAR_FILE" ]; then
-      +    echo "Error: Grammar file not found: $GRAMMAR_FILE"
-      +    exit 1
-      +fi
-      +if [ ! -f "$CODE_FILE" ]; then
-      +    echo "Error: Code file not found: $CODE_FILE"
-      +    exit 1
-      +fi
-      +
-      +
-      +# --- Setup ---
-      +# Create a unique directory for this benchmark run's results.
-      +RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      +mkdir -p "$RESULTS_DIR"
-      +echo "Benchmark results will be saved in: $RESULTS_DIR"
-      +echo "---"
-      +echo "Reference Model: $REFERENCE_MODEL"
-      +echo "Competitors: ${COMPETITORS[*]}"
-      +echo "Grammar: $GRAMMAR_FILE"
-      +echo "Code: $CODE_FILE"
-      +echo "---"
-      +
-      +
-      +# --- Run Benchmarks ---
-      +echo "Starting benchmark runs..."
-      +for competitor in "${COMPETITORS[@]}"; do
-      +    echo
-      +    echo ">>> Running benchmark for: $(basename "$competitor")"
-      +    python -m aug25.benchmark_runner \
-      +        --grammar "$GRAMMAR_FILE" \
-      +        --code "$CODE_FILE" \
-      +        --reference "$REFERENCE_MODEL" \
-      +        --competitor "$competitor" \
-      +        --output "$RESULTS_DIR"
-      +    echo ">>> Finished benchmark for: $(basename "$competitor")"
-      +done
-      +echo
-      +echo "All benchmark runs completed."
-      +echo "---"
-      +
-      +
-      +# --- Analyze Results ---
-      +echo "Analyzing results and generating plots..."
-      +PLOTS_DIR="${RESULTS_DIR}/analysis"
-      +python -m aug25.benchmark_analyzer \
-      +    "${RESULTS_DIR}"/*.json \
-      +    --output-dir "$PLOTS_DIR"
-      +
-      +echo
-      +echo "---"
-      +echo "Benchmark analysis complete."
-      +echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      +echo "Full JSON results are in: $RESULTS_DIR"
+      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
+      --- a/python/aug25/benchmark_runner.py
+      +++ b/python/aug25/benchmark_runner.py
+      @@ -51,7 +51,8 @@
+       
+       def load_competitor_model(competitor_path: Path):
+           """Dynamically loads the 'Model' class from a Python file."""
+      -    module_name = competitor_path.stem
+      +    # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+      +    module_name = ".".join(competitor_path.with_suffix('').parts)
+           spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+           if spec is None or spec.loader is None:
+               raise ImportError(f"Could not load spec for module at {competitor_path}")
 
       ```
     metadata:
@@ -6642,14 +6437,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/run_benchmarks.sh
-      Detected 'new file mode'.
-      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
-      Successfully applied patch and wrote to python/run_benchmarks.sh.
-      Confirmed creation of python/run_benchmarks.sh.
-      Added newly created file python/run_benchmarks.sh to attached files state.
+      Identified target file: python/aug25/benchmark_runner.py
+      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add script to run and analyze grammar
-      constraint benchmarks"'
+  - user: 'Changes committed with message: "Fix: Correctly load competitor models
+      with package context"'
     metadata:
 ...
