@@ -50,13 +50,13 @@ def greedy_tokenizer(text_bytes, id_to_token):
     would be used in a real application.
     """
     token_to_id = {v: k for k, v in id_to_token.items()}
-    
+
     # Sort tokens by length (descending) to ensure the longest match is found first.
     sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
-    
+
     token_ids = []
     token_strs = []
-    
+
     pos = 0
     while pos < len(text_bytes):
         match_found = False
@@ -70,7 +70,7 @@ def greedy_tokenizer(text_bytes, id_to_token):
         if not match_found:
             # This error indicates that the vocabulary cannot fully tokenize the input text.
             raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-            
+
     return token_ids, token_strs
 
 # --- Main Script ---
@@ -85,10 +85,10 @@ def main():
         print(f"Error: Grammar file not found at '{grammar_path}'.")
         print("Please run this script from the root directory of the project.")
         return
-        
+
     print(f"Loading grammar from: {grammar_path}")
     grammar_def = _sep1.GrammarDefinition.from_ebnf_file(grammar_path)
-    
+
     # 2. Compile the grammar into a format usable by the constraint.
     print("Compiling grammar...")
     compiled_grammar = grammar_def.compile()
@@ -112,12 +112,12 @@ def main():
         # We need to convert these back to their raw byte representations.
         processed_str = token_str.replace("Ġ", " ").replace("Ċ", "\n")
         token_bytes = processed_str.encode('utf-8')
-        
+
         token_to_id[token_bytes] = token_id
         id_to_token[token_id] = token_bytes
         if token_id > max_token_id:
             max_token_id = token_id
-            
+
     print(f"GPT-2 vocab loaded and processed ({len(token_to_id)} tokens, max_id: {max_token_id}).")
 
     # 4. Construct the GrammarConstraint object. This precomputes the constraint logic.
@@ -132,32 +132,33 @@ def main():
     pre2_json = grammar_constraint.precompute2_json_string()
     pre3_json = grammar_constraint.precompute3_json_string()
 
-    from aug25.precompute2_model import Model as Precompute2
-    from aug25.precompute3_model import Model as Precompute3
+    # Import the model classes, which are now named 'Model' in their respective files.
+    from aug25.precompute2_model import Model as Precompute2Model
+    from aug25.precompute3_model import Model as Precompute3Model
 
-    pre2 = Precompute2.from_json_string(pre2_json)
-    pre3 = Precompute3.from_json_string(pre3_json)
+    pre2 = Precompute2Model.from_json_string(pre2_json)
+    pre3 = Precompute3Model.from_json_string(pre3_json)
     print("Loaded precompute2/3 into Python models.")
- 
+
     # Build filtered GSS map (tokenizer state -> GSSNode) from the new API
     print("Building filtered state->GSS map (Python-visible)...")
     constraint_state_for_py = _sep1.GrammarConstraintState(grammar_constraint)
     state_to_gss = constraint_state_for_py.filtered_state_gss_map()
- 
+
     # Compute the mask via Rust (existing API) and via Python precompute3 model, and compare
     print("Computing mask via Rust (built-in)...")
     allowed_mask_rust = constraint_state_for_py.get_mask()  # existing numpy bool array
- 
+
     print("Computing mask via Python (precompute3 model)...")
     mask_py_pre3 = pre3.get_mask(state_to_gss)
- 
+
     # Convert the Rust mask (numpy bool array) to a set of indices for comparison
     allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
     allowed_ids_py_pre3 = set(mask_py_pre3.to_indices())
 
     assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={allowed_ids_rust}, py={allowed_ids_py_pre3}"
     print("Python precompute3 mask matches Rust mask.")
- 
+
     # Optionally, convert pre2->pre3 and compare masks again
     print("Computing mask via Python (precompute2->precompute3 conversion)...")
     pre2_as_pre3 = pre2.to_precompute3()
@@ -171,31 +172,32 @@ def main():
     print("Testing equivalence between Python precompute2 and precompute3 models...")
     for sid in pre2.roots_map.keys():
         if sid in pre3.roots_map:
-            ok = are_equivalent_for_state(pre2, pre2.get_root(sid), pre3, pre3.get_root(sid), verbose=True)
+            # are_equivalent_for_state now returns a (bool, Optional[str]) tuple
+            ok, details = are_equivalent_for_state(pre2, pre2.get_root(sid), pre3, pre3.get_root(sid), verbose=True)
             if not ok:
-                raise AssertionError(f"Equivalence failed for tokenizer state {sid}")
+                raise AssertionError(f"Equivalence failed for tokenizer state {sid}: {details}")
     print("Precompute2 and Precompute3 models are equivalent for all tested states.")
 
-    # 5. Load and tokenize the example JS code using our simple greedy tokenizer.
+    # 6. Load and tokenize the example JS code using our simple greedy tokenizer.
     example_code_path = "../src/example_code.js"
     print(f"\nLoading and tokenizing example code from: {example_code_path}")
     with open(example_code_path, 'rb') as f:
         js_code_bytes = f.read()
-    
+
     token_ids, token_strs = greedy_tokenizer(js_code_bytes, id_to_token)
     print(f"Tokenized into {len(token_ids)} tokens.")
 
-    # 6. Step through the token sequence, checking the mask at each step.
+    # 7. Step through the token sequence, checking the mask at each step.
     print("\nStepping through the token sequence...")
     constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
-    
+
     for i, (token_id, token_str) in enumerate(zip(token_ids, token_strs)):
         print(f"--- Step {i+1}/{len(token_ids)} ---")
         print(f"Next token: {token_str!r} (ID: {token_id})")
 
         # Get the mask of allowed tokens from the current state.
         allowed_mask = constraint_state.get_mask()
-        
+
         # Check if the next token in our sequence is allowed by the mask.
         if not allowed_mask[token_id]:
             print("\n--- ERROR ---")
@@ -205,9 +207,9 @@ def main():
             for allowed_id in allowed_ids[:10]:
                 print(f"  - ID {allowed_id}: {id_to_token.get(allowed_id, b'<unknown>')!r}")
             raise AssertionError(f"Validation failed at token {i+1}")
-        
+
         print("Token is allowed by the mask.")
-        
+
         # Commit the token to advance the constraint's internal state.
         constraint_state.commit(token_id)
         print("Committed token.")
