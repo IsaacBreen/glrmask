@@ -65,6 +65,7 @@ class Model(GraphProvider):
 
         while q:
             u, gss = q.popleft()
+            visited.pop(u)
 
             if self.is_end(u):
                 final_mask = final_mask.union(gss.allowed_llm_tokens())
