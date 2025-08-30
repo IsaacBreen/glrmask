@@ -32,6 +32,12 @@ class RangeSet:
         return RangeSet(tuple(normalized))
 
     @staticmethod
+    def from_indices(indices: Iterable[int]) -> "RangeSet":
+        ranges = [(x, x) for x in indices]
+        normalized = RangeSet._merge_unsorted(ranges)
+        return RangeSet(tuple(normalized))
+
+    @staticmethod
     def from_json(ranges_json: Optional[List[List[int]]]) -> "RangeSet":
         if not ranges_json:
             return RangeSet.empty()

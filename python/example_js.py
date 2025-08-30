@@ -15,6 +15,9 @@ import os
 import requests
 from pathlib import Path
 
+from aug25.common_interface import RangeSet
+
+
 # --- Helper Functions ---
 
 def load_or_download_gpt2_vocab(cache_dir, file_name, url):
@@ -156,7 +159,7 @@ def main():
     allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
     allowed_ids_py_pre3 = set(mask_py_pre3.to_indices())
 
-    assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={allowed_ids_rust}, py={allowed_ids_py_pre3}"
+    assert allowed_ids_rust == allowed_ids_py_pre3, f"Python precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre3)}"
     print("Python precompute3 mask matches Rust mask.")
 
     # Optionally, convert pre2->pre3 and compare masks again
