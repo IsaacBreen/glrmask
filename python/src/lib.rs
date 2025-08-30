@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
 use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyList};
+use pyo3::types::{PyDict, PyTuple};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
 use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
@@ -14,8 +13,6 @@ use bimap::BiBTreeMap;
 use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
-use sep1::datastructures::gss::{GSSNode, GSSPopper, GSSPopperItem, GSSPopperItemPeek, allow_only_llm_tokens_and_prune_arc, disallow_llm_tokens_and_prune_arc};
-use sep1::datastructures::hybrid_bitset::HybridBitset;
 use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -358,21 +355,6 @@ impl PyGrammarConstraint {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
         Ok(Self { inner: Arc::new(constraint) })
     }
-
-    fn precomputed3_to_json_string(&self) -> PyResult<String> {
-        let mut obj = BTreeMap::new();
-        obj.insert("precomputed3".to_string(), self.inner.precomputed3.to_json());
-        obj.insert("trie3_god".to_string(), self.inner.trie3_god.to_json());
-        Ok(JSONNode::Object(obj).to_json_string())
-    }
-
-    fn original_to_internal_llm_token_map(&self, py: Python) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
-        for (original, internal) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-            dict.set_item(original, internal)?;
-        }
-        Ok(dict.into())
-    }
 }
 
 
@@ -417,56 +399,6 @@ impl PyGrammarConstraintState {
             state.commit(LLMTokenID(llm_token_id));
         });
     }
-
-    fn get_initial_trie3_states(&self, py: Python) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
-        let state = self.inner.borrow_inner();
-
-        for (tokenizer_state_id, glr_state) in &state.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
-            }
-            if let Some(precomputed_trie_root_idx) = state.parent.precomputed3.get(tokenizer_state_id) {
-                let mut forbidden_llm_tokens = HybridBitset::zeros();
-                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
-
-                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
-                    if disallowed_terminals_for_range.is_empty() {
-                        continue;
-                    }
-
-                    let relevant_possible_matches = state.parent.possible_matches.range(
-                        sep1::tokenizer::TokenizerStateID(*tokenizer_state_range.start())..=sep1::tokenizer::TokenizerStateID(*tokenizer_state_range.end())
-                    );
-
-                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
-                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                            }
-                        }
-                    }
-                }
-
-                let mut gss_node = glr_state.active_state.stack.clone();
-                if !forbidden_llm_tokens.is_empty() {
-                    disallow_llm_tokens_and_prune_arc(&mut gss_node, &forbidden_llm_tokens, &mut HashMap::new());
-                }
-
-                let py_gss_node = PyGSSNode { inner: gss_node };
-                let trie_idx = precomputed_trie_root_idx.as_usize();
-
-                if let Some(existing_node_bound) = dict.get_item(trie_idx)? {
-                    let existing_node: PyGSSNode = existing_node_bound.extract()?;
-                    let merged_node = PyGSSNode { inner: GSSNode::merge_many_with_depth(1, vec![existing_node.inner, py_gss_node.inner]) };
-                    dict.set_item(trie_idx, merged_node.into_py(py))?;
-                } else {
-                    dict.set_item(trie_idx, py_gss_node.into_py(py))?;
-                }
-            }
-        }
-        Ok(dict.into())
-    }
 }
 
 #[self_referencing]
@@ -503,145 +435,6 @@ impl PyIncrementalParser {
     }
 }
 
-#[pyclass(name = "HybridBitset")]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PyHybridBitset {
-    inner: HybridBitset,
-}
-
-#[pymethods]
-impl PyHybridBitset {
-    #[new]
-    fn new() -> Self {
-        Self { inner: HybridBitset::zeros() }
-    }
-
-    #[staticmethod]
-    fn zeros() -> Self {
-        Self { inner: HybridBitset::zeros() }
-    }
-
-    #[staticmethod]
-    fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-        use std::iter::FromIterator;
-        let range_iter = ranges.into_iter().map(|(start, end)| start..=end);
-        Self { inner: HybridBitset::from_iter(range_iter) }
-    }
-
-    fn contains(&self, index: usize) -> bool {
-        self.inner.contains(index)
-    }
-
-    fn __and__(&self, other: &PyHybridBitset) -> Self {
-        Self { inner: &self.inner & &other.inner }
-    }
-
-    fn __or__(&self, other: &PyHybridBitset) -> Self {
-        Self { inner: &self.inner | &other.inner }
-    }
-
-    fn __ior__(&mut self, other: &PyHybridBitset) {
-        self.inner |= &other.inner;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn iter_bits<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let bools: Vec<bool> = self.inner.iter_bits().collect();
-        Ok(bools.into_pyarray_bound(py))
-    }
-}
-
-#[pyclass(name = "GSSNode")]
-#[derive(Clone)]
-pub struct PyGSSNode {
-    inner: Arc<GSSNode>,
-}
-
-#[pymethods]
-impl PyGSSNode {
-    fn allow_only_llm_tokens_and_prune(&mut self, allowed_tokens: &PyHybridBitset) {
-        allow_only_llm_tokens_and_prune_arc(&mut self.inner, &allowed_tokens.inner, &mut HashMap::new());
-    }
-
-    fn popn(&self, n: usize) -> PyGSSPopper {
-        PyGSSPopper { inner: self.inner.popn(n) }
-    }
-
-    #[staticmethod]
-    fn merge_many(nodes: &Bound<'_, PyList>, depth: usize) -> PyResult<Self> {
-        let mut inner_nodes = Vec::new();
-        for node_any in nodes.iter() {
-            let node: PyRef<'_, PyGSSNode> = node_any.extract()?;
-            inner_nodes.push(node.inner.clone());
-        }
-        Ok(Self { inner: GSSNode::merge_many_with_depth(depth, inner_nodes) })
-    }
-
-    fn is_ok(&self) -> bool {
-        !self.inner.is_empty()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn allowed_llm_tokens(&self) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.allowed_llm_tokens() }
-    }
-
-    fn clone(&self) -> Self {
-        self.clone()
-    }
-}
-
-#[pyclass(name = "GSSPopper")]
-pub struct PyGSSPopper {
-    inner: GSSPopper,
-}
-
-#[pymethods]
-impl PyGSSPopper {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PyGSSPopper>> {
-        Ok(slf.into())
-    }
-
-    fn __next__(&mut self) -> Option<PyGSSPopperItem> {
-        self.inner.next().map(|item| PyGSSPopperItem { inner: item })
-    }
-}
-
-#[pyclass(name = "GSSPopperItem")]
-pub struct PyGSSPopperItem {
-    inner: GSSPopperItem,
-}
-
-#[pymethods]
-impl PyGSSPopperItem {
-    fn peek_iter(&self) -> Vec<PyGSSPopperItemPeek> {
-        self.inner.peek_iter().map(|peek| PyGSSPopperItemPeek { inner: peek }).collect()
-    }
-}
-
-#[pyclass(name = "GSSPopperItemPeek")]
-#[derive(Clone)]
-pub struct PyGSSPopperItemPeek {
-    inner: GSSPopperItemPeek,
-}
-
-#[pymethods]
-impl PyGSSPopperItemPeek {
-    fn edge_value(&self) -> usize {
-        self.inner.edge_value().state_id.0
-    }
-
-    fn isolated_parent(&self) -> PyGSSNode {
-        PyGSSNode { inner: self.inner.isolated_parent() }
-    }
-}
-
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;
@@ -654,11 +447,6 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
-    m.add_class::<PyHybridBitset>()?;
-    m.add_class::<PyGSSNode>()?;
-    m.add_class::<PyGSSPopper>()?;
-    m.add_class::<PyGSSPopperItem>()?;
-    m.add_class::<PyGSSPopperItemPeek>()?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }

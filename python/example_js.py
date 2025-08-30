@@ -1,11 +1,9 @@
+# This script demonstrates how to use the `sep1` Python bindings to enforce a
+# grammar constraint during text generation.
+#
 # Requirements:
 # pip install requests numpy
 #
-# You may also need `pip install sortedcontainers` for the Python-side replication.
-#
-# You also need to build the Python bindings first:
-# cd python
-# maturin develop
 # You also need to build the Python bindings first:
 # cd python
 # maturin develop
@@ -15,8 +13,6 @@ import _sep1
 import json
 import os
 import requests
-import numpy as np
-from sortedcontainers import SortedDict
 from pathlib import Path
 
 # --- Helper Functions ---
@@ -73,108 +69,6 @@ def greedy_tokenizer(text_bytes, id_to_token):
             raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
             
     return token_ids, token_strs
-
-def replicate_get_mask3(constraint_state):
-    """
-    Replicates the logic of `get_mask3` in Python using the exposed bindings.
-    This is for demonstration and testing purposes.
-    """
-    print("\n--- Replicating get_mask3 in Python ---")
-    
-    # 1. Get initial states and precomputed data
-    grammar_constraint = constraint_state.inner.constraint
-    initial_states = constraint_state.get_initial_trie3_states() # dict[trie_idx, PyGSSNode]
-    
-    precomputed_data_str = grammar_constraint.precomputed3_to_json_string()
-    precomputed_data = json.loads(precomputed_data_str)
-    
-    # The 'values' in the arena JSON are [index, value] pairs. We convert this to a dict.
-    trie3_god = {item[0]: item[1] for item in precomputed_data['trie3_god']['values']}
-
-    # 2. Set up the traversal state
-    final_mask_internal = _sep1.HybridBitset.zeros()
-    
-    # `todo` is a priority queue mapping depth to a set of trie indices
-    todo = SortedDict()
-    # `values` maps a trie index to its aggregated GSSNode
-    values = {}
-
-    # 3. Seed the traversal with initial states
-    for trie_idx, gss_node in initial_states.items():
-        if trie_idx in values:
-            # Merge if another tokenizer state maps to the same trie root
-            existing_node = values[trie_idx]
-            values[trie_idx] = _sep1.GSSNode.merge_many([existing_node, gss_node], 1)
-        else:
-            values[trie_idx] = gss_node
-        
-        depth = trie3_god[trie_idx]['max_depth']
-        if depth not in todo:
-            todo[depth] = set()
-        todo[depth].add(trie_idx)
-
-    # 4. Main traversal loop (emulating special_map_grouped)
-    while todo:
-        depth, node_indices = todo.popitem(0) # Pop lowest depth
-        
-        for node_idx in node_indices:
-            if node_idx not in values:
-                continue
-            
-            gss_node = values.pop(node_idx)
-            node_data = trie3_god[node_idx]
-
-            # Process step: check if this node is a terminal state in the trie
-            if node_data['value']['end']:
-                final_mask_internal |= gss_node.allowed_llm_tokens()
-            
-            if not gss_node.is_ok():
-                continue
-
-            # Step to children
-            for edge_key_json, dest_map_json in node_data['children']:
-                pop, llm_token_bv_json = edge_key_json
-                
-                # Step function logic: pop from GSS
-                popped_items = gss_node.popn(pop)
-                
-                for dest_idx, state_id_bv_json in dest_map_json:
-                    # Create a bitset for the allowed state IDs on this edge
-                    state_id_ranges = [tuple(r) for r in state_id_bv_json]
-                    state_id_bv = _sep1.HybridBitset.from_ranges(state_id_ranges)
-                    
-                    valid_gss_parents = []
-                    for popper_item in popped_items:
-                        for peek in popper_item.peek_iter():
-                            if state_id_bv.contains(peek.edge_value()):
-                                valid_gss_parents.append(peek.isolated_parent())
-                    
-                    if not valid_gss_parents:
-                        continue
-                        
-                    merged_gss = _sep1.GSSNode.merge_many(valid_gss_parents, 1)
-                    
-                    # Create a bitset for the LLM tokens allowed on this edge
-                    llm_token_bv_ranges = [tuple(r) for r in llm_token_bv_json]
-                    llm_token_bv = _sep1.HybridBitset.from_ranges(llm_token_bv_ranges)
-                    
-                    # Filter the GSS to only include paths compatible with these LLM tokens
-                    merged_gss.allow_only_llm_tokens_and_prune(llm_token_bv)
-                    
-                    if merged_gss.is_ok():
-                        # Merge step: add the new GSS to the values for the destination node
-                        if dest_idx in values:
-                            values[dest_idx] = _sep1.GSSNode.merge_many([values[dest_idx], merged_gss], 1)
-                        else:
-                            values[dest_idx] = merged_gss
-                        
-                        # Add destination to the todo queue
-                        child_depth = trie3_god[dest_idx]['max_depth']
-                        if child_depth not in todo:
-                            todo[child_depth] = set()
-                        todo[child_depth].add(dest_idx)
-
-    return final_mask_internal
 
 # --- Main Script ---
 
@@ -250,10 +144,6 @@ def main():
         # Get the mask of allowed tokens from the current state.
         allowed_mask = constraint_state.get_mask()
         
-        # Replicate the mask calculation in Python and verify
-        # Note: This is slow and for validation only.
-        # replicated_mask_internal = replicate_get_mask3(constraint_state)
-        
         # Check if the next token in our sequence is allowed by the mask.
         if not allowed_mask[token_id]:
             print("\n--- ERROR ---")
@@ -269,31 +159,6 @@ def main():
         # Commit the token to advance the constraint's internal state.
         constraint_state.commit(token_id)
         print("Committed token.")
-
-    # Final check after all tokens are committed
-    print("\n--- Final Mask Check ---")
-    final_allowed_mask = constraint_state.get_mask()
-    final_allowed_ids = [idx for idx, is_allowed in enumerate(final_allowed_mask) if is_allowed]
-    print(f"Final mask allows {len(final_allowed_ids)} tokens.")
-    
-    # Replicate the final mask calculation and assert equality
-    print("Replicating final mask calculation in Python for verification...")
-    replicated_mask_internal = replicate_get_mask3(constraint_state)
-    
-    # The replicated mask is on internal token IDs. We need to convert it back to original IDs.
-    orig_to_internal = grammar_constraint.original_to_internal_llm_token_map()
-    internal_to_orig = {v: k for k, v in orig_to_internal.items()}
-    replicated_mask_internal_bools = replicated_mask_internal.iter_bits()
-    replicated_mask_orig = np.zeros_like(final_allowed_mask)
-    for internal_id, is_allowed in enumerate(replicated_mask_internal_bools):
-        if is_allowed and internal_id in internal_to_orig:
-            orig_id = internal_to_orig[internal_id]
-            if orig_id < len(replicated_mask_orig):
-                replicated_mask_orig[orig_id] = True
-    
-    print("Asserting that Rust mask and Python-replicated mask are identical...")
-    np.testing.assert_array_equal(final_allowed_mask, replicated_mask_orig)
-    print("Assertion passed!")
 
     print("\n--- SUCCESS ---")
     print("Successfully processed the entire token sequence according to the grammar.")
