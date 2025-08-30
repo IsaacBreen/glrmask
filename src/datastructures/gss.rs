@@ -36,7 +36,7 @@ type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeCon
 pub type TerminalInfo = HybridL2Bitset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct PrecomputedNodeContents {
+pub struct PrecomputedNodeContents {
     pub(crate) end: bool,
     pub(crate) live_tokens: LLMTokenBV,
 }
@@ -148,7 +148,7 @@ impl Acc {
 /// A node in the Graph-Structured Stack (GSS).
 /// Simplified design: only root nodes carry Acc; internal nodes carry only predecessors.
 #[derive(Debug, Clone)]
-pub(crate) enum GSSNode {
+pub enum GSSNode {
     Root(GSSRoot),
     Internal(GSSInternal),
 }
@@ -594,7 +594,7 @@ impl GSSNode {
         Self::new_with_map(Arc::new(Acc::new_fresh()), predecessors_map)
     }
 
-    pub(crate) fn new_fresh() -> Self {
+    pub fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
 
@@ -684,7 +684,7 @@ impl GSSNode {
         self.acc().terminals_union.complement()
     }
 
-    pub(crate) fn is_empty(&self) -> bool { self.predecessors().is_empty() }
+    pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
 
     pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
 

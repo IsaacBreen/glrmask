@@ -96,7 +96,7 @@ pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 pub struct LLMVocab {
     pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub(crate) max_original_llm_token_id: usize,
-    pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
+    pub original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
     pub(crate) internal_max_llm_token: usize
 }
 
@@ -133,14 +133,14 @@ pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
-    pub(crate) precomputed2:     Precomputed2,
-    pub(crate) precomputed3:     Precomputed3,
-    pub(crate) llm_vocab:        Arc<LLMVocab>,
+    pub precomputed2:     Precomputed2,
+    pub precomputed3:     Precomputed3,
+    pub llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
-    pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     pub(crate) trie1_god: Trie1GodWrapper,
-    pub(crate) trie2_god: Trie2GodWrapper,
-    pub(crate) trie3_god: Trie3GodWrapper,
+    pub trie2_god: Trie2GodWrapper,
+    pub trie3_god: Trie3GodWrapper,
 }
 
 impl GrammarConstraint {
@@ -1853,8 +1853,8 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
-    pub(crate) parent: &'a GrammarConstraint,
-    pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+    pub parent: &'a GrammarConstraint,
+    pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
 pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
