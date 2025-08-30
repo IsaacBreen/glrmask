@@ -1443,54 +1443,27 @@ def _get_plugin_graph_api(plugin_module: Any) -> Tuple[Optional[Callable], Optio
 # Token utilities: collect/iterate tokens from arena
 # ----------------------------
 
-def collect_token_ranges_from_arena(arena: Arena) -> RangeSet:
+def collect_interesting_tokens_from_arena(arena: Arena) -> List[int]:
     """
-    Collect union of all token ranges that appear on edges in the arena.
+    Collects tokens that are likely to expose behavioral differences.
+    These are the start/end points of ranges, and the points adjacent to them.
     """
-    acc = RangeSet.empty()
+    points: Set[int] = set()
+    # Add 0 as a baseline token to test, as it's often special.
+    points.add(0)
     for node in arena.values():
         for _ek, dest_map in node.get("children", []) or []:
             for _dest, bv in dest_map:
-                if isinstance(bv, RangeSet):
-                    acc = acc.union(bv)
-                else:
-                    acc = acc.union(RangeSet.from_json(bv))
-    return acc
-
-
-def sample_tokens_from_ranges(rs: RangeSet, count: int, rng: Optional[random.Random] = None) -> List[int]:
-    """
-    Randomly sample 'count' token IDs from RangeSet 'rs' uniformly by integer.
-    """
-    if rng is None:
-        rng = random.Random()
-    if rs.is_empty():
-        return []
-
-    intervals = list(rs.intervals)
-    lengths = [e - s + 1 for s, e in intervals]
-    total = sum(lengths)
-
-    out: List[int] = []
-    for _ in range(max(0, int(count))):
-        r = rng.randrange(total)
-        # find interval
-        acc = 0
-        for (s, e), L in zip(intervals, lengths):
-            if r < acc + L:
-                out.append(s + (r - acc))
-                break
-            acc += L
-    return out
-
-
-def iter_all_tokens_from_ranges(rs: RangeSet) -> Iterator[int]:
-    """
-    Iterate all token IDs contained in RangeSet 'rs'. Use with caution (may be very large).
-    """
-    for s, e in rs.intervals:
-        for x in range(s, e + 1):
-            yield x
+                # The loader ensures bv is a RangeSet
+                rs: RangeSet = bv
+                for s, e in rs.intervals:
+                    if s > 0:
+                        points.add(s - 1)
+                    points.add(s)
+                    points.add(e)
+                    # Python handles large integers, so overflow isn't an issue.
+                    points.add(e + 1)
+    return sorted(list(points))
 
 
 # ----------------------------
@@ -1575,17 +1548,21 @@ def check_equiv_for_state_over_tokens(
     if tokens:
         tested_tokens = [int(t) for t in tokens]
     else:
-        # Sample from union of all edge BVs
-        rs = collect_token_ranges_from_arena(arena)
-        if rs.is_empty():
+        # Sample from interesting boundary tokens
+        interesting_tokens = collect_interesting_tokens_from_arena(arena)
+        if not interesting_tokens:
             print("Reference contains no tokens in any edge. Nothing to compare.")
             return True
-        if sample_tokens is None:
-            # Exhaustive (dangerous if RS large)
-            tested_tokens = list(iter_all_tokens_from_ranges(rs))
-        else:
-            tested_tokens = sample_tokens_from_ranges(rs, int(sample_tokens), rng)
 
+        if sample_tokens is None:
+            # Exhaustive: use all interesting tokens
+            tested_tokens = interesting_tokens
+        else:
+            num_to_sample = int(sample_tokens)
+            if len(interesting_tokens) <= num_to_sample:
+                tested_tokens = interesting_tokens
+            else:
+                tested_tokens = rng.sample(interesting_tokens, num_to_sample)
     all_ok = True
     start_time = time.time()
     print(f"Testing equivalence for state-id={state_id} over {len(tested_tokens)} token(s).")
