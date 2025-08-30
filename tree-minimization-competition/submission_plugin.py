@@ -78,13 +78,25 @@ LLMTokenBVJSON = List[List[int]]
 # Lightweight RangeSet implementation (independent of scorer's RangeSet)
 # -----------------------------------------------------------------------------
 
-@dataclass(slots=True)
 class RangeSet:
     """
     Immutable representation of a set of integers as a normalized tuple of inclusive ranges.
     intervals: tuple of (start, end) pairs, sorted, non-overlapping, inclusive.
     """
-    intervals: Tuple[Tuple[int, int], ...]
+    __slots__ = ('intervals',)
+
+    def __init__(self, intervals: Tuple[Tuple[int, int], ...]):
+        self.intervals = intervals
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        return self.intervals == other.intervals
+
+    def __repr__(self) -> str:
+        if not self.intervals:
+            return "RangeSet(())"
+        return f"RangeSet(intervals={self.intervals!r})"
 
     # ---------- Constructors ----------
 
@@ -228,12 +240,17 @@ class RangeSet:
 # Internal compact edge representation for the quotient graph
 # -----------------------------------------------------------------------------
 
-@dataclass(slots=True)
 class CompEdge:
-    pop: PopCount
-    sid: MaybeSID
-    dest: ClassID
-    bv: RangeSet  # token set enabling this transition (inclusive intervals)
+    __slots__ = ('pop', 'sid', 'dest', 'bv')
+
+    def __init__(self, pop: PopCount, sid: MaybeSID, dest: ClassID, bv: RangeSet):
+        self.pop = pop
+        self.sid = sid
+        self.dest = dest
+        self.bv = bv
+
+    def __repr__(self) -> str:
+        return f"CompEdge(pop={self.pop}, sid={self.sid}, dest={self.dest}, bv={self.bv!r})"
 
 
 class CompressedTrie:
