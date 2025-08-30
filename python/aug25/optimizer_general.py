@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Tuple, Optional, Iterable
-from common_interface import GraphProvider, RangeSet
+from .common_interface import GraphProvider, RangeSet
 
 class CompEdge:
     __slots__ = ("pop", "sid", "dest", "bv")

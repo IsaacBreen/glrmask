@@ -1,5 +1,5 @@
 from typing import Dict, List, Tuple, Optional, Iterable, Set, Deque
-from common_interface import GraphProvider, RangeSet
+from .common_interface import GraphProvider, RangeSet
 import collections
 
 # The alphabet for normalized graphs: labels are pairs (k, sid)

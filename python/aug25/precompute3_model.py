@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Tuple
 from collections import defaultdict
-from common_interface import GraphProvider, RangeSet
+from .common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 
 class Model(GraphProvider):
