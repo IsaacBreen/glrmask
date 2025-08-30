@@ -178,7 +178,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
     println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
 
     // 1. Load and compile the JavaScript grammar.
-    let grammar_path = "src/js_simplified3.ebnf";
+    let grammar_path = "src/js_simplified2.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -192,7 +192,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
     let vocab_file_name = "gpt2_vocab.json";
     let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
     // Keep a smaller subset to speed up the test
-    gpt2_raw_vocab.retain(|s| s.len() < 2);
+    gpt2_raw_vocab.retain(|s| s.len() < 5);
     println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
 
     let mut llm_token_map = LLMTokenMap::new();
