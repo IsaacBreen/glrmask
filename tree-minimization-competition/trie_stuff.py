@@ -790,7 +790,12 @@ def nfa_equivalence_on_labels(
     max_product_states: int = 200000,
 ) -> Tuple[bool, Optional[List[Label]]]:
     """
-    Language equivalence check for two epsilon-free NFAs over alphabet of (k, sid) labels.
+    Language equivalence check for two epsilon-free NFAs over alphabet of (k, sid) labels,
+    with an added structural sanity check:
+      - If at any reachable pair of subset-states, the sets of outgoing labels differ,
+        we immediately report a mismatch and return a witness label sequence that exposes
+        the divergence.
+
     Uses on-the-fly subset construction product and BFS.
     Returns (equivalent, counterexample_label_sequence_if_not).
     """
@@ -826,6 +831,21 @@ def nfa_equivalence_on_labels(
     # Parent map to reconstruct counterexample
     ParentKey = Tuple[frozenset, frozenset]
     parent: Dict[ParentKey, Tuple[Optional[ParentKey], Optional[Label]]] = {}
+
+    def _reconstruct_path(to_key: ParentKey) -> List[Label]:
+        """
+        Reconstruct label sequence from start pair to 'to_key' (exclusive of any extra
+        step taken afterwards). The start pair has (None, None).
+        """
+        seq: List[Label] = []
+        cur: Optional[ParentKey] = to_key
+        while cur is not None:
+            par, edge_lab = parent[cur]
+            if edge_lab is not None:
+                seq.append(edge_lab)
+            cur = par
+        seq.reverse()
+        return seq
     parent[(startA, startB)] = (None, None)
 
     # Visited pairs
@@ -848,7 +868,20 @@ def nfa_equivalence_on_labels(
             raise RuntimeError("Equivalence check exceeded product state limit; graph too large or highly nondeterministic.")
 
         # Collect all labels from either side
-        labels = labels_from_subset(set(SA), normA) | labels_from_subset(set(SB), normB)
+        labels_A = labels_from_subset(set(SA), normA)
+        labels_B = labels_from_subset(set(SB), normB)
+        labels = labels_A | labels_B
+
+        # Structural sanity: if outgoing label sets differ at this reachable product state,
+        # consider it a mismatch and return a short witness (path to here + a differing label).
+        if labels_A != labels_B:
+            # Choose any differing label as the final step of the witness
+            diff_labels = (labels_A - labels_B) or (labels_B - labels_A)
+            witness_step = next(iter(diff_labels))
+            # Reconstruct path to this state and append the differing label
+            seq = _reconstruct_path((SA, SB))
+            seq.append(witness_step)
+            return (False, seq)
 
         for lab in labels:
             NSA = frozenset(next_subset(set(SA), normA, lab))
@@ -1466,6 +1499,42 @@ def collect_interesting_tokens_from_arena(arena: Arena) -> List[int]:
     return sorted(list(points))
 
 
+# New: collect tokens only from the subgraph reachable from a specific root
+def collect_interesting_tokens_from_root(arena: Arena, root_index: TrieNodeIndex) -> List[int]:
+    """
+    Collects interesting tokens (range boundaries +/- 1) that appear on edges reachable
+    from the provided root node. This focuses token sampling on what the chosen state
+    can actually see, making equivalence checks harder to spoof by returning unrelated edges.
+    """
+    if root_index not in arena:
+        return []
+
+    points: Set[int] = set()
+    points.add(0)  # baseline token
+
+    visited: Set[TrieNodeIndex] = set()
+    q: Deque[TrieNodeIndex] = collections.deque([root_index])
+
+    while q:
+        u = q.popleft()
+        if u in visited:
+            continue
+        visited.add(u)
+        node = arena.get(u)
+        if not node:
+            continue
+        for _ek, dest_map in node.get("children", []) or []:
+            for dest, bv in dest_map:
+                rs: RangeSet = bv
+                for s, e in rs.intervals:
+                    if s > 0:
+                        points.add(s - 1)
+                    points.add(s)
+                    points.add(e)
+                    points.add(e + 1)
+                q.append(int(dest))
+    return sorted(list(points))
+
 # ----------------------------
 # New equivalence runner (plugin vs reference), per-token
 # ----------------------------
@@ -1543,13 +1612,26 @@ def check_equiv_for_state_over_tokens(
         raise RuntimeError("Plugin did not provide a builder (build/init/build_from_precompute2_path).")
 
     # Prepare tokens
+    roots_map_dict = dict(roots_map)
+    if state_id not in roots_map_dict:
+        raise ValueError(f"Tokenizer state ID {state_id} not found in reference roots map.")
+    ref_root = int(roots_map_dict[state_id])
+
     rng = random.Random(seed)
     tested_tokens: List[int] = []
     if tokens:
         tested_tokens = [int(t) for t in tokens]
     else:
-        # Sample from interesting boundary tokens
-        interesting_tokens = collect_interesting_tokens_from_arena(arena)
+        # Prefer tokens that are reachable from the chosen state's root
+        interesting_tokens = collect_interesting_tokens_from_root(arena, ref_root)
+        if not interesting_tokens:
+            # Fallback: use global arena tokens (should be rare; e.g., missing root)
+            interesting_tokens = collect_interesting_tokens_from_arena(arena)
+
+        # If still empty, nothing to compare for this state
+        if not interesting_tokens:
+            print("Reference contains no tokens reachable from the specified state. Nothing to compare.")
+            return True
         if not interesting_tokens:
             print("Reference contains no tokens in any edge. Nothing to compare.")
             return True
