@@ -154,6 +154,7 @@ def main():
 
     print("Computing mask via Python (precompute3 model)...")
     mask_py_pre3 = pre3.get_mask(state_to_gss)
+    mask_py_pre3 = grammar_constraint.internal_bv_to_original(mask_py_pre3)
 
     # Convert the Rust mask (numpy bool array) to a set of indices for comparison
     allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
@@ -166,6 +167,7 @@ def main():
     print("Computing mask via Python (precompute2->precompute3 conversion)...")
     pre2_as_pre3 = pre2.to_precompute3()
     mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
+    mask_py_pre2 = grammar_constraint.internal_bv_to_original(mask_py_pre2)
     allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
     assert allowed_ids_rust == allowed_ids_py_pre2, f"Python precompute2->precompute3 mask != Rust mask: rust={RangeSet.from_indices(allowed_ids_rust)}, py={RangeSet.from_indices(allowed_ids_py_pre2)}"
     print("Python precompute2->precompute3 mask matches Rust mask.")
