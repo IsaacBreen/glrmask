@@ -1,30 +1,32 @@
 """
 Example Plugin Submission for the Precompute2 Trie Competition.
 
-This plugin demonstrates the required API for the scoring harness (`trie_stuff.py`).
-It implements a basic, unoptimized version that should pass all correctness checks.
+This plugin demonstrates two supported APIs used by the harness (`trie_stuff.py`):
 
-Key components:
-1.  A `RangeSet` class: Copied directly from the scorer to ensure identical bitvector
-    logic. This is a safe strategy for any competitor.
-2.  A `MyTrie` class: A simple container for the trie data. A real submission would
-    replace this with a custom, optimized data structure.
-3.  `build(roots_map, arena)`: The builder function that initializes the plugin's
-    internal state from the data loaded by the scorer.
-4.  `get_bv(structure, state_id, path)`: The core query function. It must replicate
-    the logic of `get_bv_for_normalized_path` from the scorer. This implementation
-    does so, ensuring correctness. It returns the result in the specified JSON format.
-5.  `stats(structure)`: Reports the size of the internal data structure. For this
-    example, it's just the original node and edge count. A competitive entry would
-    report the size of its compressed representation.
+1) New graph API for robust equivalence (preferred):
+   - build(roots_map, arena): initialize internal structure
+   - get_root(structure, state_id) -> node
+   - iter_edges(structure, node, token) -> iterator of (pop_count, state_id or None, dest)
+   - is_end(structure, node) -> bool
+
+   The harness will build a token-normalized, epsilon-free NFA from your graph by
+   following only the edges whose per-edge token bitvector contains the queried token.
+
+2) Legacy API (kept for backward compatibility with legacy scoring mode):
+   - get_bv(structure, state_id, path) -> JSON list of [start, end] (RangeSet JSON)
+   - stats(structure) -> dict with keys 'nodes' and 'edges'
+
+This example plugin is a simple pass-through that uses the original arena as-is,
+so it is not memory efficient. A competitive entry would instead build a compact
+representation and implement iter_edges/is_end accordingly.
 """
 
 import collections
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 # -----------------------------------------------------------------------------
-# Type Aliases (for clarity, matching the scorer)
+# Type Aliases
 # -----------------------------------------------------------------------------
 
 TrieNodeIndex = int
@@ -35,12 +37,7 @@ LLMTokenBVJSON = List[List[int]]
 
 
 # -----------------------------------------------------------------------------
-# Self-Contained RangeSet Implementation
-#
-# It is highly recommended to copy the reference RangeSet implementation from
-# the scorer script (`trie_stuff.py`) directly into your plugin. This ensures
-# that your bitvector operations are bit-for-bit identical to the reference
-# implementation, avoiding subtle bugs and correctness failures.
+# Self-Contained RangeSet Implementation (with 'contains')
 # -----------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +53,27 @@ class RangeSet:
         normalized = RangeSet._merge_unsorted(ranges)
         return RangeSet(tuple(normalized))
 
+    @staticmethod
+    def from_json(ranges_json: Optional[LLMTokenBVJSON]) -> "RangeSet":
+        if not ranges_json:
+            return RangeSet.empty()
+        return RangeSet.from_ranges(ranges_json)
+
     def is_empty(self) -> bool:
         return not self.intervals
+
+    def contains(self, x: int) -> bool:
+        a = self.intervals
+        if not a:
+            return False
+        # binary search on starts
+        starts = [s for s, _ in a]
+        import bisect as _bis
+        i = _bis.bisect_right(starts, x) - 1
+        if i < 0:
+            return False
+        s, e = a[i]
+        return s <= x <= e
 
     def union(self, other: "RangeSet") -> "RangeSet":
         if self.is_empty(): return other
@@ -67,8 +83,7 @@ class RangeSet:
         a, b = self.intervals, other.intervals
         def append_or_merge(start: int, end: int) -> None:
             if not merged:
-                merged.append((start, end))
-                return
+                merged.append((start, end)); return
             ps, pe = merged[-1]
             if start <= pe + 1: merged[-1] = (ps, max(pe, end))
             else: merged.append((start, end))
@@ -125,6 +140,77 @@ class RangeSet:
         merged.append((cs, ce))
         return merged
 
+
+# -----------------------------------------------------------------------------
+# Plugin Data Structure
+# -----------------------------------------------------------------------------
+
+class MyTrie:
+    """A simple container for the trie data passed by the scorer."""
+    def __init__(self, roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]], arena: Dict[TrieNodeIndex, Dict]):
+        self.roots: Dict[TokenizerStateID, TrieNodeIndex] = dict(roots_map)
+        self.arena: Dict[TrieNodeIndex, Dict] = arena
+
+        # Pre-calculate size metrics for the `stats` function (legacy).
+        self.node_count = len(arena)
+        self.edge_count = 0
+        for node in arena.values():
+            for _edge_key, dest_map in node.get("children", []):
+                self.edge_count += len(dest_map)
+
+
+# -----------------------------------------------------------------------------
+# Graph API implementation (new, preferred)
+# -----------------------------------------------------------------------------
+
+def build(roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]], arena: Dict) -> MyTrie:
+    """
+    API function: Builds and returns the plugin's internal data structure.
+    The scorer calls this once at the beginning.
+    """
+    print("Example plugin: Building data structure...")
+    t = MyTrie(roots_map, arena)
+    print("Example plugin: Build complete.")
+    return t
+
+
+def get_root(structure: MyTrie, state_id: TokenizerStateID) -> TrieNodeIndex:
+    """
+    API function (new): Returns the root node index corresponding to the tokenizer state_id.
+    """
+    return int(structure.roots.get(int(state_id), -1))
+
+
+def iter_edges(structure: MyTrie, node: TrieNodeIndex, token: int) -> Iterator[Tuple[int, Optional[int], TrieNodeIndex]]:
+    """
+    API function (new): Yields outgoing edges for a given node, filtered by the provided token.
+    Each yielded edge is a tuple (pop_count, state_id or None, dest_node).
+    """
+    n = structure.arena.get(int(node))
+    if not n:
+        return
+    children = n.get("children", []) or []
+    for (pop_count, sid_opt), dest_map in children:
+        for dest_idx, edge_bv in dest_map:
+            rs: RangeSet = edge_bv  # scorer converts to RangeSet on load
+            if rs.contains(int(token)):
+                yield (int(pop_count), int(sid_opt) if sid_opt is not None else None, int(dest_idx))
+
+
+def is_end(structure: MyTrie, node: TrieNodeIndex) -> bool:
+    """
+    API function (new): Returns whether the given node is an accepting (end) node.
+    """
+    n = structure.arena.get(int(node))
+    if not n:
+        return False
+    return bool((n.get("value", {}) or {}).get("end", False))
+
+
+# -----------------------------------------------------------------------------
+# Legacy logic kept for compatibility with legacy scoring mode
+# -----------------------------------------------------------------------------
+
 def _update_visited_bv(store: Dict[Any, RangeSet], key: Any, incoming_bv: RangeSet) -> Optional[RangeSet]:
     if key in store:
         existing = store[key]
@@ -136,35 +222,6 @@ def _update_visited_bv(store: Dict[Any, RangeSet], key: Any, incoming_bv: RangeS
         store[key] = incoming_bv
         return incoming_bv
 
-
-# -----------------------------------------------------------------------------
-# Plugin Data Structure
-#
-# This is where you would define your custom, optimized data structure.
-# For this example, we just use a simple class to hold the original data.
-# -----------------------------------------------------------------------------
-
-class MyTrie:
-    """A simple container for the trie data passed by the scorer."""
-    def __init__(self, roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]], arena: Dict[TrieNodeIndex, Dict]):
-        self.roots: Dict[TokenizerStateID, TrieNodeIndex] = dict(roots_map)
-        self.arena: Dict[TrieNodeIndex, Dict] = arena
-
-        # Pre-calculate size metrics for the `stats` function.
-        # A real submission would calculate this based on its compressed format.
-        self.node_count = len(arena)
-        self.edge_count = 0
-        for node in arena.values():
-            for _edge_key, dest_map in node.get("children", []):
-                self.edge_count += len(dest_map)
-
-
-# -----------------------------------------------------------------------------
-# Core Logic (Re-implementation of Scorer's Traversal)
-#
-# To pass correctness, the plugin's query logic must be semantically
-# identical to the reference implementation in `trie_stuff.py`.
-# -----------------------------------------------------------------------------
 
 def _find_end_bv_from_node_via_none_edges(
     start_node_index: TrieNodeIndex,
@@ -247,31 +304,9 @@ def _get_bv_for_normalized_path_internal(
     return final_bv
 
 
-# -----------------------------------------------------------------------------
-# COMPETITION API IMPLEMENTATION
-#
-# The scorer script will import and call these functions.
-# -----------------------------------------------------------------------------
-
-# Global variable to hold the data structure instance.
-_my_trie_instance: Optional[MyTrie] = None
-
-def build(roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]], arena: Dict) -> MyTrie:
-    """
-    API function: Builds and returns the plugin's internal data structure.
-    The scorer calls this once at the beginning.
-    """
-    global _my_trie_instance
-    print("Example plugin: Building data structure...")
-    _my_trie_instance = MyTrie(roots_map, arena)
-    print("Example plugin: Build complete.")
-    return _my_trie_instance
-
-
 def get_bv(structure: MyTrie, state_id: TokenizerStateID, path: NormalizedPath) -> LLMTokenBVJSON:
     """
-    API function: Returns the token bitvector for a path from a given state_id.
-    The scorer calls this repeatedly to check for correctness.
+    API function (legacy): Returns the token bitvector for a path from a given state_id.
     The return value must be JSON-serializable (list of [start, end] pairs).
     """
     if not isinstance(structure, MyTrie):
@@ -281,17 +316,14 @@ def get_bv(structure: MyTrie, state_id: TokenizerStateID, path: NormalizedPath) 
     if root_index is None:
         return []  # No root for this state_id, so the path is invalid.
 
-    # Use our internal logic to compute the result.
     final_bv = _get_bv_for_normalized_path_internal(root_index, path, structure.arena)
-
-    # Return as JSON as required by the scorer.
     return final_bv.to_json()
 
 
 def stats(structure: MyTrie) -> Dict[str, Any]:
     """
     API function: Returns a dictionary of statistics about the internal data structure.
-    The 'nodes' and 'edges' keys are used for scoring.
+    The 'nodes' and 'edges' keys are used for scoring (legacy).
     """
     if not isinstance(structure, MyTrie):
         return {"nodes": 0, "edges": 0, "error": "Structure not initialized or wrong type."}

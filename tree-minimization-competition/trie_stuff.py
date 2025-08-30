@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import collections
 import gzip
 import importlib
@@ -8,7 +9,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 # ----------------------------
 # Type aliases for clarity
@@ -65,6 +66,21 @@ class RangeSet:
 
     def __bool__(self) -> bool:
         return not self.is_empty()
+
+    def contains(self, x: int) -> bool:
+        """
+        Test whether integer x is in the set. Uses binary search over disjoint intervals.
+        """
+        a = self.intervals
+        if not a:
+            return False
+        # Search by interval starts
+        starts = [s for s, _ in a]
+        i = bisect.bisect_right(starts, x) - 1
+        if i < 0:
+            return False
+        s, e = a[i]
+        return s <= x <= e
 
     # ---------- Set operations (all return new RangeSet) ----------
 
@@ -261,7 +277,7 @@ def print_trie_recursive(
 
 
 # ----------------------------------
-# Core Equivalence / Traversal Logic
+# Core Equivalence / Traversal Logic (legacy, kept for backward compatibility)
 # ----------------------------------
 
 def _update_visited_bv(store: Dict[Any, RangeSet], key: Any, incoming_bv: RangeSet) -> Optional[RangeSet]:
@@ -489,7 +505,7 @@ def are_precompute2_trees_equivalent(
                 continue
             bv_b = get_bv_for_normalized_path(root_b, path, arena_b)
             if bv_a != bv_b:
-                print("\n--- Precompute2 Equivalence Mismatch ---")
+                print("\n--- Precompute2 Equivalence Mismatch (legacy) ---")
                 print("Path sampled from Tree A:")
                 print(f"  Path: {path}")
                 print(f"  BV from A: {format_bitvector(bv_a)}")
@@ -506,7 +522,7 @@ def are_precompute2_trees_equivalent(
                 continue
             bv_a = get_bv_for_normalized_path(root_a, path, arena_a)
             if bv_a != bv_b:
-                print("\n--- Precompute2 Equivalence Mismatch ---")
+                print("\n--- Precompute2 Equivalence Mismatch (legacy) ---")
                 print("Path sampled from Tree B:")
                 print(f"  Path: {path}")
                 print(f"  BV from A: {format_bitvector(bv_a)}")
@@ -592,7 +608,277 @@ def load_precompute2(path: Path) -> Tuple[List[Tuple[TokenizerStateID, TrieNodeI
 
 
 # ----------------------------
-# Scoring utilities (competition)
+# Normalized (token-specific) NFA construction and equivalence
+# ----------------------------
+
+# The alphabet for normalized graphs: labels are pairs (k, sid)
+Label = Tuple[int, int]  # (k, state_id)
+NormEdge = Tuple[Label, TrieNodeIndex]  # (label, dest_node_index)
+
+
+class EdgeProvider:
+    """
+    Abstract thin adapter around a graph that supports:
+      - iter_edges(node, token) -> iterator of (pop_count, state_id or None, dest_node)
+      - is_end(node) -> bool
+    """
+    def iter_edges(self, node: TrieNodeIndex, token: int) -> Iterator[Tuple[int, Optional[int], TrieNodeIndex]]:
+        raise NotImplementedError
+
+    def is_end(self, node: TrieNodeIndex) -> bool:
+        raise NotImplementedError
+
+
+class RefEdgeProvider(EdgeProvider):
+    """
+    EdgeProvider for the reference precompute2 arena.
+    Filters edges by checking the LLM token membership in per-edge RangeSet.
+    """
+    def __init__(self, arena: Arena):
+        self.arena = arena
+
+    def iter_edges(self, node: TrieNodeIndex, token: int) -> Iterator[Tuple[int, Optional[int], TrieNodeIndex]]:
+        n = self.arena.get(node)
+        if not n:
+            return
+        for (pop_count, sid_opt), dest_map in n.get("children", []) or []:
+            for dest_idx, edge_bv in dest_map:
+                edge_bv_rs: RangeSet = edge_bv
+                if edge_bv_rs.contains(token):
+                    yield (int(pop_count), int(sid_opt) if sid_opt is not None else None, int(dest_idx))
+
+    def is_end(self, node: TrieNodeIndex) -> bool:
+        n = self.arena.get(node)
+        if not n:
+            return False
+        return bool((n.get("value", {}) or {}).get("end", False))
+
+
+class PluginEdgeProvider(EdgeProvider):
+    """
+    EdgeProvider that delegates to a plugin's API functions.
+    """
+    def __init__(
+        self,
+        structure: Any,
+        iter_edges_func: Callable[..., Iterable[Tuple[int, Optional[int], TrieNodeIndex]]],
+        is_end_func: Callable[..., bool],
+    ):
+        self.structure = structure
+        self._iter_edges_func = iter_edges_func
+        self._is_end_func = is_end_func
+
+    def iter_edges(self, node: TrieNodeIndex, token: int) -> Iterator[Tuple[int, Optional[int], TrieNodeIndex]]:
+        # Allow flexible signatures: (structure, node, token) | (node, token)
+        try:
+            out = self._iter_edges_func(self.structure, node, token)
+        except TypeError:
+            out = self._iter_edges_func(node, token)
+        for pop_count, sid_opt, dest in out:
+            yield (int(pop_count), int(sid_opt) if sid_opt is not None else None, int(dest))
+
+    def is_end(self, node: TrieNodeIndex) -> bool:
+        # Allow flexible signatures: (structure, node) | (node)
+        try:
+            return bool(self._is_end_func(self.structure, node))
+        except TypeError:
+            return bool(self._is_end_func(node))
+
+
+class TokenNormalizer:
+    """
+    Builds token-specific normalized edges (epsilon-free) on demand.
+    - Edges: from a node u, explore all 0+ (None) edges whose BVs contain 'token'.
+             For each path to a node v where we see a (Some state_id) edge e=(p, sid, w),
+             we add a normalized edge from u to w labeled (k_sum + p, sid),
+             where k_sum is the sum of pop_counts along the None-only path.
+    - Accepting: a node u is accepting if there exists a path through only (None) edges
+                 (filtered by token) from u to any node with end=True.
+    """
+    def __init__(self, provider: EdgeProvider, token: int, max_closure_expansions: int = 200000):
+        self.provider = provider
+        self.token = int(token)
+        self._accept_cache: Dict[TrieNodeIndex, bool] = {}
+        self._edges_cache: Dict[TrieNodeIndex, List[NormEdge]] = {}
+        self._max_closure_expansions = max(1, int(max_closure_expansions))
+
+    def accepting(self, node: TrieNodeIndex) -> bool:
+        if node in self._accept_cache:
+            return self._accept_cache[node]
+        # BFS over None-edges only
+        q: Deque[TrieNodeIndex] = collections.deque([node])
+        seen: Set[TrieNodeIndex] = set()
+        accepts = False
+        while q:
+            u = q.popleft()
+            if u in seen:
+                continue
+            seen.add(u)
+            if self.provider.is_end(u):
+                accepts = True
+                break
+            for pop, sid_opt, v in self.provider.iter_edges(u, self.token):
+                if sid_opt is None:
+                    # pop_count is ignored for acceptance test at end-of-path
+                    q.append(v)
+        self._accept_cache[node] = accepts
+        return accepts
+
+    def out_edges(self, node: TrieNodeIndex) -> List[NormEdge]:
+        if node in self._edges_cache:
+            return self._edges_cache[node]
+
+        # Enumerate all None-only paths from node; collect (k_sum, u) pairs
+        # Then for each u, add normalized edges via its Some-edges.
+        out: List[NormEdge] = []
+
+        # Track expansions to avoid runaway in pathological graphs
+        expansions = 0
+
+        # Each state in the stack: (u, k_sum)
+        stack: List[Tuple[TrieNodeIndex, int]] = [(node, 0)]
+        # We must allow visiting the same u with different k_sum (they yield distinct labels).
+        seen: Set[Tuple[TrieNodeIndex, int]] = set()
+
+        while stack:
+            u, ksum = stack.pop()
+            key = (u, ksum)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Add edges for Some transitions at u
+            for p, sid_opt, v in self.provider.iter_edges(u, self.token):
+                if sid_opt is not None:
+                    label: Label = (ksum + p, sid_opt)
+                    out.append((label, v))
+
+            # Continue exploring None transitions at u
+            for p, sid_opt, v in self.provider.iter_edges(u, self.token):
+                if sid_opt is None:
+                    # accumulate pop_count into ksum
+                    new_ksum = ksum + p
+                    stack.append((v, new_ksum))
+                    expansions += 1
+                    if expansions > self._max_closure_expansions:
+                        raise RuntimeError(
+                            "Exceeded maximum None-closure expansions while normalizing for token "
+                            f"{self.token}. Detected potentially unbounded None-edge cycles with positive pop. "
+                            "Normalization aborted to avoid infinite enumeration."
+                        )
+
+        # Deduplicate edges (there can be duplicates by design)
+        # Use a dict keyed by (k, sid, dest) to remove duplicates but preserve determinism.
+        dedup: Dict[Tuple[int, int, int], None] = {}
+        norm_edges: List[NormEdge] = []
+        for (label, dest) in out:
+            k, sid = label
+            key = (k, sid, dest)
+            if key not in dedup:
+                dedup[key] = None
+                norm_edges.append((label, dest))
+
+        self._edges_cache[node] = norm_edges
+        return norm_edges
+
+
+def nfa_equivalence_on_labels(
+    normA: TokenNormalizer,
+    rootA: TrieNodeIndex,
+    normB: TokenNormalizer,
+    rootB: TrieNodeIndex,
+    max_product_states: int = 200000,
+) -> Tuple[bool, Optional[List[Label]]]:
+    """
+    Language equivalence check for two epsilon-free NFAs over alphabet of (k, sid) labels.
+    Uses on-the-fly subset construction product and BFS.
+    Returns (equivalent, counterexample_label_sequence_if_not).
+    """
+    # Helper to get acceptance for subset
+    def subset_accepts(nodes: Set[TrieNodeIndex], norm: TokenNormalizer) -> bool:
+        for n in nodes:
+            if norm.accepting(n):
+                return True
+        return False
+
+    # Helper to get next subset under a label from a subset
+    def next_subset(nodes: Set[TrieNodeIndex], norm: TokenNormalizer, label: Label) -> Set[TrieNodeIndex]:
+        k, sid = label
+        out: Set[TrieNodeIndex] = set()
+        for n in nodes:
+            for (lbl, dest) in norm.out_edges(n):
+                if lbl == label:
+                    out.add(dest)
+        return out
+
+    # Helper to collect all outgoing labels from a subset
+    def labels_from_subset(nodes: Set[TrieNodeIndex], norm: TokenNormalizer) -> Set[Label]:
+        lab: Set[Label] = set()
+        for n in nodes:
+            for (lbl, _dest) in norm.out_edges(n):
+                lab.add(lbl)
+        return lab
+
+    # BFS over pairs of subsets
+    startA: frozenset = frozenset({rootA})
+    startB: frozenset = frozenset({rootB})
+
+    # Parent map to reconstruct counterexample
+    ParentKey = Tuple[frozenset, frozenset]
+    parent: Dict[ParentKey, Tuple[Optional[ParentKey], Optional[Label]]] = {}
+    parent[(startA, startB)] = (None, None)
+
+    # Visited pairs
+    visited: Set[ParentKey] = set()
+    q: Deque[ParentKey] = collections.deque()
+    q.append((startA, startB))
+
+    # Early acceptance mismatch on empty sequence
+    if subset_accepts(set(startA), normA) != subset_accepts(set(startB), normB):
+        return (False, [])  # empty label sequence witnesses mismatch
+
+    explored = 0
+    while q:
+        SA, SB = q.popleft()
+        if (SA, SB) in visited:
+            continue
+        visited.add((SA, SB))
+        explored += 1
+        if explored > max_product_states:
+            raise RuntimeError("Equivalence check exceeded product state limit; graph too large or highly nondeterministic.")
+
+        # Collect all labels from either side
+        labels = labels_from_subset(set(SA), normA) | labels_from_subset(set(SB), normB)
+
+        for lab in labels:
+            NSA = frozenset(next_subset(set(SA), normA, lab))
+            NSB = frozenset(next_subset(set(SB), normB, lab))
+
+            key = (NSA, NSB)
+            if key not in parent:
+                parent[key] = ((SA, SB), lab)
+
+            # Check acceptance mismatch at this DFA state (i.e., empty suffix)
+            if subset_accepts(set(NSA), normA) != subset_accepts(set(NSB), normB):
+                # Reconstruct counterexample: the path of labels leading to key
+                seq: List[Label] = []
+                cur: Optional[ParentKey] = key
+                while cur is not None:
+                    par, edge_lab = parent[cur]
+                    if edge_lab is not None:
+                        seq.append(edge_lab)
+                    cur = par
+                seq.reverse()
+                return (False, seq)
+
+            if key not in visited:
+                q.append(key)
+
+    return (True, None)
+
+
+# ----------------------------
+# Scoring utilities (competition) (legacy score preserved)
 # ----------------------------
 
 def collect_all_state_ids(arena: Arena) -> List[StateID]:
@@ -736,22 +1022,16 @@ def _coerce_rangeset(obj: Any) -> Optional[RangeSet]:
     return None
 
 
-def _try_call_plugin(func: Callable, structure: Any, state_id: int, path: NormalizedPath) -> Any:
+def _try_call_plugin(func: Callable, structure: Any, *args) -> Any:
     """
     Call a plugin function supporting flexible signatures by trying:
-      1) func(structure, state_id, path)
-      2) func(state_id, path)
-      3) func(path)
+      1) func(structure, *args)
+      2) func(*args)
     """
     try:
-        return func(structure, state_id, path)
+        return func(structure, *args)
     except TypeError:
-        pass
-    try:
-        return func(state_id, path)
-    except TypeError:
-        pass
-    return func(path)
+        return func(*args)
 
 
 def _try_call_stat(func: Callable, structure: Any) -> Any:
@@ -859,254 +1139,218 @@ def _get_competitor_size_functions(plugin_module: Any) -> Tuple[Optional[Callabl
     return nodes_func, edges_func, stats_func
 
 
-def score_competitor_on_file(
+# New: plugin graph API helpers
+def _get_plugin_graph_api(plugin_module: Any) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+    """
+    Returns (iter_edges_func, is_end_func, get_root_func) from the plugin if present.
+    - iter_edges(structure, node, token) -> iterable of (pop_count, state_id or None, dest)
+    - is_end(structure, node) -> bool
+    - get_root(structure, state_id) -> node
+    """
+    iter_edges_candidates = ["iter_edges", "edges_for_token", "edges"]
+    is_end_candidates = ["is_end", "is_accepting", "end"]
+    get_root_candidates = ["get_root", "root_for_state", "get_root_for_state", "root"]
+
+    iter_edges_func = None
+    is_end_func = None
+    get_root_func = None
+
+    for name in iter_edges_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            iter_edges_func = getattr(plugin_module, name)
+            break
+    for name in is_end_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            is_end_func = getattr(plugin_module, name)
+            break
+    for name in get_root_candidates:
+        if hasattr(plugin_module, name) and callable(getattr(plugin_module, name)):
+            get_root_func = getattr(plugin_module, name)
+            break
+
+    return iter_edges_func, is_end_func, get_root_func
+
+
+# ----------------------------
+# Token utilities: collect/iterate tokens from arena
+# ----------------------------
+
+def collect_token_ranges_from_arena(arena: Arena) -> RangeSet:
+    """
+    Collect union of all token ranges that appear on edges in the arena.
+    """
+    acc = RangeSet.empty()
+    for node in arena.values():
+        for _ek, dest_map in node.get("children", []) or []:
+            for _dest, bv in dest_map:
+                if isinstance(bv, RangeSet):
+                    acc = acc.union(bv)
+                else:
+                    acc = acc.union(RangeSet.from_json(bv))
+    return acc
+
+
+def sample_tokens_from_ranges(rs: RangeSet, count: int, rng: Optional[random.Random] = None) -> List[int]:
+    """
+    Randomly sample 'count' token IDs from RangeSet 'rs' uniformly by integer.
+    """
+    if rng is None:
+        rng = random.Random()
+    if rs.is_empty():
+        return []
+
+    intervals = list(rs.intervals)
+    lengths = [e - s + 1 for s, e in intervals]
+    total = sum(lengths)
+
+    out: List[int] = []
+    for _ in range(max(0, int(count))):
+        r = rng.randrange(total)
+        # find interval
+        acc = 0
+        for (s, e), L in zip(intervals, lengths):
+            if r < acc + L:
+                out.append(s + (r - acc))
+                break
+            acc += L
+    return out
+
+
+def iter_all_tokens_from_ranges(rs: RangeSet) -> Iterator[int]:
+    """
+    Iterate all token IDs contained in RangeSet 'rs'. Use with caution (may be very large).
+    """
+    for s, e in rs.intervals:
+        for x in range(s, e + 1):
+            yield x
+
+
+# ----------------------------
+# New equivalence runner (plugin vs reference), per-token
+# ----------------------------
+
+def check_equiv_for_state_and_token(
+    roots_map: List[Tuple[TokenizerStateID, TrieNodeIndex]],
+    arena: Arena,
+    plugin_module: Any,
+    structure: Any,
+    state_id: int,
+    token: int,
+    max_closure_expansions: int = 200000,
+    max_product_states: int = 200000,
+) -> Tuple[bool, Optional[List[Label]]]:
+    """
+    For a given tokenizer state and token, build token-specific normalized NFAs
+    for both the reference arena and the plugin and test language equivalence.
+    Returns (equivalent, counterexample_label_sequence_if_not).
+    """
+    # Resolve reference root
+    roots_map_dict = dict(roots_map)
+    if state_id not in roots_map_dict:
+        raise ValueError(f"State-id {state_id} not found in reference roots map.")
+    ref_root = int(roots_map_dict[state_id])
+
+    # Resolve plugin root
+    iter_edges_func, is_end_func, get_root_func = _get_plugin_graph_api(plugin_module)
+    if iter_edges_func is None or is_end_func is None or get_root_func is None:
+        raise ValueError(
+            "Plugin must provide graph API: iter_edges(...), is_end(...), get_root(...). "
+            "See example_plugin.py for the required signatures."
+        )
+    try:
+        plugin_root = int(_try_call_plugin(get_root_func, structure, int(state_id)))
+    except Exception as e:
+        raise RuntimeError(f"Error obtaining plugin root for state {state_id}: {e}") from e
+
+    # Build providers and normalizers
+    ref_provider = RefEdgeProvider(arena)
+    plugin_provider = PluginEdgeProvider(structure, iter_edges_func, is_end_func)
+
+    ref_norm = TokenNormalizer(ref_provider, token, max_closure_expansions=max_closure_expansions)
+    plugin_norm = TokenNormalizer(plugin_provider, token, max_closure_expansions=max_closure_expansions)
+
+    # Check equivalence
+    eq, witness = nfa_equivalence_on_labels(
+        ref_norm, ref_root, plugin_norm, plugin_root, max_product_states=max_product_states
+    )
+    return (eq, witness)
+
+
+def check_equiv_for_state_over_tokens(
     precompute_path: Path,
     plugin_module_path: str,
-    base_samples: int = 200,
-    max_len: int = 32,
-    mutations_per_base: int = 3,
-    seed: Optional[int] = None,
-    state_id_filter: Optional[int] = None,
-    max_roots: Optional[int] = None,
-    verbose_mismatches: int = 20,
-) -> None:
+    state_id: int,
+    tokens: Optional[List[int]] = None,
+    sample_tokens: Optional[int] = 256,
+    seed: Optional[int] = 0,
+    max_closure_expansions: int = 200000,
+    max_product_states: int = 200000,
+) -> bool:
     """
-    End-to-end scorer:
-      - loads reference precompute2
-      - imports competitor plugin module
-      - builds competitor structure (if builder provided)
-      - generates test paths from reference + mutated variants
-      - evaluates membership (and BV, if provided by plugin) against reference
-    Prints a summary report with accuracy metrics, size metrics (nodes/edges), and sample mismatches.
+    High-level runner:
+      - Loads reference precompute2
+      - Builds the plugin structure
+      - Selects tokens (provided or sampled from reference)
+      - For each token, compares plugin vs reference by token-normalized NFA equivalence
+    Prints summary and returns True if all tested tokens are equivalent.
     """
-    rng = random.Random(seed)
-
-    t0 = time.time()
     roots_map, arena = load_precompute2(precompute_path)
-    state_ids = [sid for sid, _ in roots_map]
-    state_to_root: Dict[int, int] = dict(roots_map)
+    plugin_module = _load_plugin(plugin_module_path)
+    structure = _build_competitor_structure(plugin_module, precompute_path, roots_map, arena)
 
-    if state_id_filter is not None:
-        if state_id_filter not in state_to_root:
-            raise ValueError(f"state-id {state_id_filter} not found in roots map")
-        roots_to_test = [(state_id_filter, state_to_root[state_id_filter])]
+    if structure is None:
+        raise RuntimeError("Plugin did not provide a builder (build/init/build_from_precompute2_path).")
+
+    # Prepare tokens
+    rng = random.Random(seed)
+    tested_tokens: List[int] = []
+    if tokens:
+        tested_tokens = [int(t) for t in tokens]
     else:
-        roots_to_test = roots_map
+        # Sample from union of all edge BVs
+        rs = collect_token_ranges_from_arena(arena)
+        if rs.is_empty():
+            print("Reference contains no tokens in any edge. Nothing to compare.")
+            return True
+        if sample_tokens is None:
+            # Exhaustive (dangerous if RS large)
+            tested_tokens = list(iter_all_tokens_from_ranges(rs))
+        else:
+            tested_tokens = sample_tokens_from_ranges(rs, int(sample_tokens), rng)
 
-    if max_roots is not None:
-        roots_to_test = roots_to_test[: max(0, max_roots)]
-
-    # Load plugin and build competitor structure
-    plugin = _load_plugin(plugin_module_path)
-    structure = _build_competitor_structure(plugin, precompute_path, roots_map, arena)
-    get_bv_func, is_member_func = _get_competitor_functions(plugin)
-    nodes_func, edges_func, stats_func = _get_competitor_size_functions(plugin)
-
-    if get_bv_func is None and is_member_func is None:
-        raise ValueError(
-            "Plugin must define at least one of: get_bv(...), is_member(...). "
-            "Supported names/signatures documented in the template."
-        )
-
-    # Unified wrappers
-    def plugin_get_bv(sid: int, path: NormalizedPath) -> Optional[RangeSet]:
-        if get_bv_func is None:
-            return None
+    all_ok = True
+    start_time = time.time()
+    print(f"Testing equivalence for state-id={state_id} over {len(tested_tokens)} token(s).")
+    for idx, tok in enumerate(tested_tokens, 1):
         try:
-            out = _try_call_plugin(get_bv_func, structure, sid, path)
-        except TypeError as e:
-            raise TypeError(
-                f"get_bv incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
+            ok, witness = check_equiv_for_state_and_token(
+                roots_map,
+                arena,
+                plugin_module,
+                structure,
+                int(state_id),
+                int(tok),
+                max_closure_expansions=max_closure_expansions,
+                max_product_states=max_product_states,
             )
-        rs = _coerce_rangeset(out)
-        return rs
+        except RuntimeError as e:
+            print(f"[{idx}/{len(tested_tokens)}] token={tok}: ERROR during normalization/equivalence: {e}")
+            all_ok = False
+            continue
 
-    def plugin_is_member(sid: int, path: NormalizedPath) -> Optional[bool]:
-        if is_member_func is None:
-            return None
-        try:
-            out = _try_call_plugin(is_member_func, structure, sid, path)
-        except TypeError as e:
-            raise TypeError(
-                f"is_member incompatible signature: expected one of (structure, sid, path) | (sid, path) | (path). {e}"
-            )
-        return bool(out)
+        if not ok:
+            all_ok = False
+            print(f"[{idx}/{len(tested_tokens)}] token={tok}: NOT EQUIVALENT.")
+            if witness is not None:
+                # Pretty print the label sequence
+                seq_str = " -> ".join(f"(k={k}, sid={sid})" for (k, sid) in witness) if witness else "(empty)"
+                print(f"  Counterexample label sequence: {seq_str}")
+        else:
+            print(f"[{idx}/{len(tested_tokens)}] token={tok}: OK")
 
-    def plugin_counts() -> Tuple[Optional[int], Optional[int], Dict[str, Any]]:
-        """
-        Attempt to obtain (nodes, edges, raw_stats_dict) from plugin.
-        Returns (nodes, edges, stats_dict). Any element may be None if unavailable.
-        """
-        stats: Dict[str, Any] = {}
-        nodes: Optional[int] = None
-        edges: Optional[int] = None
-
-        # Prefer stats() if available
-        if stats_func is not None:
-            try:
-                s = _try_call_stat(stats_func, structure)
-                if isinstance(s, dict):
-                    stats = dict(s)
-                    n = s.get("nodes")
-                    e = s.get("edges")
-                    if isinstance(n, int) and n >= 0:
-                        nodes = n
-                    if isinstance(e, int) and e >= 0:
-                        edges = e
-            except Exception:
-                pass
-
-        # Direct node/edge funcs override or fill gaps
-        if nodes is None and nodes_func is not None:
-            try:
-                n = _try_call_stat(nodes_func, structure)
-                if isinstance(n, int) and n >= 0:
-                    nodes = n
-            except Exception:
-                pass
-        if edges is None and edges_func is not None:
-            try:
-                e = _try_call_stat(edges_func, structure)
-                if isinstance(e, int) and e >= 0:
-                    edges = e
-            except Exception:
-                pass
-
-        # As a very last resort, allow module-level constants
-        if nodes is None:
-            mn = getattr(plugin, "NODES", None)
-            if isinstance(mn, int) and mn >= 0:
-                nodes = mn
-        if edges is None:
-            me = getattr(plugin, "EDGES", None)
-            if isinstance(me, int) and me >= 0:
-                edges = me
-
-        return nodes, edges, stats
-
-    # Prepare mutation pool
-    state_pool = collect_all_state_ids(arena)
-
-    # Run
-    total_paths = 0
-    membership_agree = 0
-
-    bv_attempted = 0
-    bv_exact_equal = 0
-
-    mismatches: List[Dict[str, Any]] = []
-
-    for sid, root_idx in roots_to_test:
-        test_paths = sample_paths_with_mutations(
-            root_idx,
-            arena,
-            base_samples=base_samples,
-            max_len=max_len,
-            mutations_per_base=mutations_per_base,
-            rng=rng,
-            state_pool=state_pool,
-        )
-
-        for path in test_paths:
-            total_paths += 1
-
-            # Reference
-            ref_bv = get_bv_for_normalized_path(root_idx, path, arena)
-            print(f"Testing SID={sid} Path={path} => Ref BV: {format_bitvector(ref_bv)}")
-            ref_member = not ref_bv.is_empty()
-
-            # Competitor membership
-            comp_bv = plugin_get_bv(sid, path)
-            comp_member_from_bv = (comp_bv is not None) and (not comp_bv.is_empty())
-            comp_member = comp_member_from_bv
-            comp_member_src = "get_bv"
-
-            if comp_bv is None:
-                im = plugin_is_member(sid, path)
-                if im is None:
-                    raise RuntimeError("Plugin returned neither BV nor membership result.")
-                comp_member = bool(im)
-                comp_member_src = "is_member"
-
-            if comp_member == ref_member:
-                membership_agree += 1
-            else:
-                if len(mismatches) < verbose_mismatches:
-                    mismatches.append(
-                        {
-                            "sid": sid,
-                            "path": path,
-                            "ref_member": ref_member,
-                            "comp_member": comp_member,
-                            "src": comp_member_src,
-                            "ref_bv": ref_bv.to_json(),
-                            "comp_bv": comp_bv.to_json() if comp_bv is not None else None,
-                        }
-                    )
-
-            # If competitor returned BV, compare exact equality
-            if comp_bv is not None:
-                bv_attempted += 1
-                if comp_bv == ref_bv:
-                    bv_exact_equal += 1
-                else:
-                    if len(mismatches) < verbose_mismatches:
-                        mismatches.append(
-                            {
-                                "sid": sid,
-                                "path": path,
-                                "ref_member": ref_member,
-                                "comp_member": comp_member,
-                                "src": "get_bv",
-                                "ref_bv": ref_bv.to_json(),
-                                "comp_bv": comp_bv.to_json(),
-                            }
-                        )
-
-    dur = time.time() - t0
-
-    # Attempt to fetch plugin-reported size metrics
-    nodes_reported, edges_reported, stats_raw = plugin_counts()
-    correctness_pass = (membership_agree == total_paths)
-
-    print("\n=== Scoring Summary ===")
-    print(f"File: {precompute_path}")
-    print(f"Plugin: {plugin_module_path}")
-    print(f"Roots tested: {len(roots_to_test)} (of {len(state_ids)})")
-    print(f"Base samples per root: {base_samples}, mutations per base: {mutations_per_base}, max path len: {max_len}")
-    print(f"Random seed: {seed}")
-    print(f"Total test paths: {total_paths}")
-    print(f"Membership agreement: {membership_agree}/{total_paths} ({(membership_agree/total_paths*100):.2f}%)")
-    print(f"Correctness: {'PASS' if correctness_pass else 'FAIL'} (requires 100% agreement)")
-
-    if nodes_reported is not None or edges_reported is not None:
-        print("\n--- Contestant-reported size ---")
-        if nodes_reported is not None:
-            print(f"Nodes: {nodes_reported}")
-        if edges_reported is not None:
-            print(f"Edges: {edges_reported}  [Used for ranking; subject to organizer verification]")
-        if stats_raw:
-            # Print any extra stats keys tersely
-            extra = {k: v for k, v in stats_raw.items() if k not in ("nodes", "edges")}
-            if extra:
-                print(f"Other stats: {extra}")
-
-    if bv_attempted > 0:
-        print(f"\nBV exact equality (subset where plugin returned BV): {bv_exact_equal}/{bv_attempted} ({(bv_exact_equal/bv_attempted*100):.2f}%)")
-    else:
-        print("\nBV exact equality: plugin did not provide get_bv; skipped.")
-
-    if mismatches:
-        print("\n--- Sample mismatches ---")
-        for i, m in enumerate(mismatches, 1):
-            print(f"[{i}] sid={m['sid']} path={m['path']}")
-            print(f"    ref_member={m['ref_member']} comp_member={m['comp_member']} (via {m['src']})")
-            if m.get("ref_bv") is not None:
-                print(f"    ref_bv={m['ref_bv']}")
-            if m.get("comp_bv") is not None:
-                print(f"    comp_bv={m['comp_bv']}")
-
-    print(f"\nDone in {dur:.2f}s.")
+    dur = time.time() - start_time
+    print(f"\nDone in {dur:.2f}s. Result: {'EQUIVALENT' if all_ok else 'NOT EQUIVALENT'} over tested tokens.")
+    return all_ok
 
 
 # ----------------------------
@@ -1131,8 +1375,8 @@ def main() -> None:
     inspect_p.add_argument("--root-index", type=int, default=None, help="Print from this root node index.")
     inspect_p.add_argument("--max-roots", type=int, default=None, help="Limit the number of roots to print.")
 
-    # Score command
-    score_p = subparsers.add_parser("score", help="Score a contestant module by membership/BV accuracy")
+    # Score command (legacy; uses normalized-path-based checker)
+    score_p = subparsers.add_parser("score", help="Score a contestant module by membership/BV accuracy (legacy semantics)")
     score_p.add_argument("file", help="Path to a precompute2 gzipped JSON file.")
     score_p.add_argument("plugin", help="Path or module name for the contestant plugin.")
     score_p.add_argument("--samples", type=int, default=200, help="Base samples per root.")
@@ -1143,13 +1387,26 @@ def main() -> None:
     score_p.add_argument("--max-roots", type=int, default=None, help="Limit number of roots to score (for large files).")
     score_p.add_argument("--verbose-mismatches", type=int, default=20, help="Print up to this many mismatches.")
 
-    # Equivalence command (compare two precompute2 files on a given state)
-    equiv_p = subparsers.add_parser("equiv", help="Stochastic equivalence check between two precompute2 tries")
-    equiv_p.add_argument("file_a", help="Path to first precompute2 gzipped JSON file.")
-    equiv_p.add_argument("file_b", help="Path to second precompute2 gzipped JSON file.")
+    # Equivalence command (NEW): compare plugin vs reference by per-token normalized NFA equivalence
+    equiv_p = subparsers.add_parser("equiv", help="Equivalence check: plugin vs reference by token-normalized NFA equivalence")
+    equiv_p.add_argument("file", help="Path to a precompute2 gzipped JSON file.")
+    equiv_p.add_argument("plugin", help="Path or module name for the contestant plugin.")
     equiv_p.add_argument("--state-id", type=int, required=True, help="Tokenizer state ID to compare.")
-    equiv_p.add_argument("--root-a", type=int, default=None, help="Override root node index for A.")
-    equiv_p.add_argument("--root-b", type=int, default=None, help="Override root node index for B.")
+    group = equiv_p.add_mutually_exclusive_group()
+    group.add_argument("--tokens", type=str, default=None,
+                       help="Comma-separated list of token IDs to test, or '@all' to test all tokens present in reference ranges.")
+    group.add_argument("--sample", type=int, default=256, help="Number of tokens to sample from reference ranges (default: 256).")
+    equiv_p.add_argument("--seed", type=int, default=0, help="Random seed for token sampling.")
+    equiv_p.add_argument("--max-closure", type=int, default=200000, help="Limit for None-closure expansions during normalization.")
+    equiv_p.add_argument("--max-states", type=int, default=200000, help="Limit for product DFA states during equivalence.")
+
+    # Equivalence command (legacy files vs files checker)
+    equiv_files_p = subparsers.add_parser("equiv-files", help="Stochastic equivalence check between two precompute2 tries (legacy)")
+    equiv_files_p.add_argument("file_a", help="Path to first precompute2 gzipped JSON file.")
+    equiv_files_p.add_argument("file_b", help="Path to second precompute2 gzipped JSON file.")
+    equiv_files_p.add_argument("--state-id", type=int, required=True, help="Tokenizer state ID to compare.")
+    equiv_files_p.add_argument("--root-a", type=int, default=None, help="Override root node index for A.")
+    equiv_files_p.add_argument("--root-b", type=int, default=None, help="Override root node index for B.")
 
     args = parser.parse_args()
 
@@ -1206,6 +1463,29 @@ def main() -> None:
         return
 
     if args.cmd == "equiv":
+        file_path = Path(args.file)
+        tokens_list: Optional[List[int]] = None
+        sample_n: Optional[int] = args.sample
+        if args.tokens is not None:
+            if args.tokens.strip() == "@all":
+                tokens_list = None
+                sample_n = None
+            else:
+                tokens_list = [int(x) for x in args.tokens.split(",") if x.strip() != ""]
+                sample_n = None
+        ok = check_equiv_for_state_over_tokens(
+            precompute_path=file_path,
+            plugin_module_path=args.plugin,
+            state_id=int(args.state_id),
+            tokens=tokens_list,
+            sample_tokens=sample_n,
+            seed=args.seed,
+            max_closure_expansions=args.max_closure,
+            max_product_states=args.max_states,
+        )
+        return
+
+    if args.cmd == "equiv-files":
         file_a = Path(args.file_a)
         file_b = Path(args.file_b)
         sid = args.state_id
