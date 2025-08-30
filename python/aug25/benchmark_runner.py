@@ -11,7 +11,6 @@ import numpy as np
 
 import _sep1
 from aug25.equality import are_equivalent_for_state
-from aug25.precompute2_model import Model as Precompute2Model
 
 # --- Helper Functions (from former example_js.py) ---
 
@@ -98,8 +97,10 @@ def run_benchmark(args):
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
     # 5. Equivalence Check
-    print("Running equivalence check against reference precompute2 model...")
-    reference_model = Precompute2Model.from_json_string(pre2_json_str)
+    print(f"Loading reference model from: {args.reference}")
+    ReferenceModel = load_competitor_model(args.reference)
+    reference_model = ReferenceModel.from_json_string(pre2_json_str)
+    print(f"Running equivalence check against reference model: {args.reference.name}")
     
     equivalence_passed = True
     equivalence_details = "All tested states are equivalent."
@@ -239,6 +240,7 @@ def main():
     parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
     parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
     parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+    parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
     parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
     
     parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
@@ -247,7 +249,7 @@ def main():
 
     args = parser.parse_args()
 
-    for p in [args.grammar, args.code, args.competitor]:
+    for p in [args.grammar, args.code, args.competitor, args.reference]:
         if not p.exists():
             parser.error(f"File not found: {p}")
 
