@@ -77,7 +77,7 @@ def main():
 
     # 1. Load the JS grammar from the EBNF file.
     # This script assumes it is run from the root of the `sep1` project.
-    grammar_path = "src/js.ebnf"
+    grammar_path = "../src/js.ebnf"
     if not os.path.exists(grammar_path):
         print(f"Error: Grammar file not found at '{grammar_path}'.")
         print("Please run this script from the root directory of the project.")
