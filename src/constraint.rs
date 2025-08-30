@@ -894,7 +894,7 @@ impl GrammarConstraint {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+    pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
             let internal_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
@@ -904,7 +904,7 @@ impl GrammarConstraint {
     }
 
     #[time_it]
-    fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+    pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
         // for internal_id_val in internal_bv.iter() {

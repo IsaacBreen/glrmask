@@ -16,6 +16,8 @@ use numpy::{IntoPyArray, PyArray1, ToPyArray};
 use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
+use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -355,8 +357,232 @@ impl PyGrammarConstraint {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
         Ok(Self { inner: Arc::new(constraint) })
     }
+
+    fn precompute2_json_string(&self) -> PyResult<String> {
+        // Build [roots_map, arena] JSON array
+        let roots_arr = sep1::json_serialization::JSONNode::Array(
+            self.inner.precomputed2.iter()
+                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
+                    sid.0.to_json(), idx.to_json()
+                ]))
+                .collect()
+        );
+        let arena_json = self.inner.trie2_god.to_json();
+        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
+        Ok(top.to_json_string())
+    }
+
+    fn precompute3_json_string(&self) -> PyResult<String> {
+        let roots_arr = sep1::json_serialization::JSONNode::Array(
+            self.inner.precomputed3.iter()
+                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
+                    sid.0.to_json(), idx.to_json()
+                ]))
+                .collect()
+        );
+        let arena_json = self.inner.trie3_god.to_json();
+        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
+        Ok(top.to_json_string())
+    }
+
+    fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
+        let mut m = std::collections::BTreeMap::new();
+        for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
+            m.insert(*orig, *intl);
+        }
+        Ok(m)
+    }
+
+    fn internal_to_original_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
+        let mut m = std::collections::BTreeMap::new();
+        for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
+            m.insert(*intl, *orig);
+        }
+        Ok(m)
+    }
+
+    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.internal_bv_to_original(&bv.inner))
+    }
+
+    fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
+    }
 }
 
+#[pyclass(name = "Bitset")]
+#[derive(Clone)]
+pub struct PyHybridBitset {
+    inner: RustHybridBitset,
+}
+
+#[pymethods]
+impl PyHybridBitset {
+    #[new]
+    fn new() -> Self {
+        Self { inner: RustHybridBitset::zeros() }
+    }
+
+    #[staticmethod]
+    fn zeros() -> Self {
+        Self { inner: RustHybridBitset::zeros() }
+    }
+
+    #[staticmethod]
+    fn ones(len: usize) -> Self {
+        Self { inner: RustHybridBitset::ones(len) }
+    }
+
+    #[staticmethod]
+    fn from_indices(indices: Vec<usize>) -> Self {
+        Self { inner: RustHybridBitset::from_iter(indices) }
+    }
+
+    #[staticmethod]
+    fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
+        let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
+        let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
+            json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
+        )).expect("Bitset::from_ranges JSON");
+        Self { inner }
+    }
+
+    fn to_indices(&self) -> Vec<usize> {
+        self.inner.iter().collect()
+    }
+
+    fn to_ranges(&self) -> Vec<(usize, usize)> {
+        // reuse JSON conversion for simplicity
+        let json = self.inner.to_json();
+        let arr = match json {
+            sep1::json_serialization::JSONNode::Array(arr) => arr,
+            _ => vec![],
+        };
+        let mut out = Vec::new();
+        for pair in arr {
+            if let sep1::json_serialization::JSONNode::Array(v) = pair {
+                if v.len() == 2 {
+                    let s = usize::from_json(v[0].clone()).unwrap();
+                    let e = usize::from_json(v[1].clone()).unwrap();
+                    out.push((s,e));
+                }
+            }
+        }
+        out
+    }
+
+    fn contains(&self, idx: usize) -> bool {
+        self.inner.contains(idx)
+    }
+
+    fn insert(&mut self, idx: usize) {
+        let _ = self.inner.insert(idx);
+    }
+
+    fn remove(&mut self, idx: usize) {
+        let _ = self.inner.remove(idx);
+    }
+
+    fn set(&mut self, idx: usize, value: bool) {
+        self.inner.set(idx, value);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset { inner: &self.inner | &other.inner }
+    }
+
+    fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset { inner: &self.inner & &other.inner }
+    }
+
+    fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset { inner: &self.inner - &other.inner }
+    }
+
+    fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset { inner: &self.inner ^ &other.inner }
+    }
+
+    fn to_json_string(&self) -> String {
+        self.inner.to_json().to_json_string()
+    }
+
+    #[staticmethod]
+    fn from_json_string(s: &str) -> PyResult<Self> {
+        let node = sep1::json_serialization::JSONNode::from_json_string(s)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
+        let inner = RustHybridBitset::from_json(node)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
+        Ok(Self { inner })
+    }
+}
+
+impl From<RustHybridBitset> for PyHybridBitset {
+    fn from(inner: RustHybridBitset) -> Self { Self { inner } }
+}
+impl From<PyHybridBitset> for RustHybridBitset {
+    fn from(p: PyHybridBitset) -> Self { p.inner }
+}
+
+#[pyclass(name = "GSSNode")]
+#[derive(Clone)]
+pub struct PyGSSNode {
+    inner: std::sync::Arc<RustGSSNode>,
+}
+
+#[pymethods]
+impl PyGSSNode {
+    #[new]
+    fn new() -> Self {
+        PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.inner.is_alive()
+    }
+
+    fn is_ok(&self) -> bool {
+        self.inner.is_ok()
+    }
+
+    fn allowed_llm_tokens(&self) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.allowed_llm_tokens())
+    }
+
+    fn clone_node(&self) -> PyGSSNode {
+        self.clone()
+    }
+}
+
+#[pyfunction]
+fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
+    let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
+    let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
+    PyGSSNode { inner: merged }
+}
+
+#[pyfunction]
+fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
+    let mut arc = node.inner.clone();
+    rust_allow_only(&mut arc, &bv.inner);
+    node.inner = arc;
+}
+
+#[pyfunction]
+fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
+    let pairs = rust_popn_collect(&node.inner, n);
+    pairs.into_iter()
+        .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+        .collect()
+}
 
 #[self_referencing]
 struct PyGrammarConstraintStateWrapper {
@@ -379,7 +605,7 @@ impl PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
                 constraint,
                 inner_builder: |c: &PyGrammarConstraint| {
-                    let mut state = c.inner.init();
+                    let state = c.inner.init();
                     Ok::<_, PyErr>(state)
                 },
             }
@@ -398,6 +624,41 @@ impl PyGrammarConstraintState {
         self.inner.with_inner_mut(|state| {
             state.commit(LLMTokenID(llm_token_id));
         });
+    }
+
+    fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
+        let mut out = std::collections::BTreeMap::new();
+        self.inner.with_inner(|state| {
+            for (tokenizer_state_id, glr_state) in &state.state {
+                if glr_state.active_state.stack.is_empty() {
+                    continue;
+                }
+                // Build forbidden tokens from disallowed terminals across ranges
+                let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
+                let mut forbidden = RustHybridBitset::zeros();
+
+                for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
+                    if disallowed_terminals_for_range.is_empty() { continue; }
+                    let possible_matches = &state.parent.possible_matches;
+                    let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
+                    for (_sid, per_state) in slice {
+                        for (terminal_id, llm_bv) in per_state {
+                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+                                forbidden |= llm_bv;
+                            }
+                        }
+                    }
+                }
+
+                let mut gss_arc = glr_state.active_state.stack.clone();
+                if !forbidden.is_empty() {
+                    let allowed = &RustHybridBitset::max_ones() - &forbidden;
+                    sep1::datastructures::gss::allow_only_llm_tokens_and_prune(&mut gss_arc, &allowed);
+                }
+                out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
+            }
+        });
+        Ok(out)
     }
 }
 
@@ -447,6 +708,11 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
+    m.add_class::<PyHybridBitset>()?;
+    m.add_class::<PyGSSNode>()?;
+    m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }

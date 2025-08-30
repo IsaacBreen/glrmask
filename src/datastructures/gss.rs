@@ -29,7 +29,7 @@ pub(crate) type TerminalBV = HybridBitset;
 pub(crate) type MaxDepth = usize;
 pub(crate) type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
-type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
+pub(crate) type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
@@ -177,14 +177,14 @@ pub(crate) struct GSSPeek<'a> {
 /// Represents the result of a `pop` operation, containing a map of resulting nodes
 /// and the accumulated constraints (`Acc`) for each path leading to them.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct GSSPopper {
+pub struct GSSPopper {
     /// A map where the key is a node, and the value is the accumulated `Acc` for all paths leading to it.
     paths: BTreeMap<Arc<GSSNode>, Arc<Acc>>,
     /// Tracks how far below the bottom of the stack we've popped.
     /// Key is the number of extra pops beyond reaching the bottom (0 means exactly at bottom),
     /// and the value is the combined Acc for all paths that resulted in that depth.
     /// Multiple contributions to the same depth are merged via Acc::merge.
-    below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+    pub below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
 }
 
 /// An item yielded by iterating over a `GSSPopper`, representing a single resulting path.
@@ -195,7 +195,7 @@ pub(crate) struct GSSPopperItem<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct GSSPopperItemPeek<'a> {
+pub struct GSSPopperItemPeek<'a> {
     path_acc: &'a Arc<Acc>,
     parent_arc: &'a Arc<GSSNode>,
     edge_value: &'a ParseStateEdgeContent,
@@ -203,7 +203,7 @@ pub(crate) struct GSSPopperItemPeek<'a> {
 }
 
 impl GSSPopper {
-    pub(crate) fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
+    pub fn new_from_node(node: Arc<GSSNode>, acc: Arc<Acc>) -> Self {
         let mut popper = Self {
             paths: BTreeMap::new(),
             below_bottom: BTreeMap::new(),
@@ -218,22 +218,22 @@ impl GSSPopper {
     }
 
     /// Returns an iterator over the items in the popper.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = GSSPopperItem<'_>> {
+    pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem<'_>> {
         self.paths.iter().map(|(node, acc)| GSSPopperItem {
             node,
             path_acc: acc,
         })
     }
 
-    pub(crate) fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
+    pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
         &self.below_bottom
     }
 
-    pub(crate) fn num_predecessors(&self) -> usize {
+    pub fn num_predecessors(&self) -> usize {
         self.paths.len()
     }
 
-    pub(crate) fn popn(&mut self, n: usize) {
+    pub fn popn(&mut self, n: usize) {
         for _ in 0..n {
             // Shift existing "below bottom" entries down by 1, since we're popping one more time.
             let mut new_below: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> = BTreeMap::new();
@@ -293,7 +293,7 @@ impl<'a> GSSPopperItem<'a> {
         self.resolved_node().as_ref().push(edge_value)
     }
 
-    pub(crate) fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
         self.node.predecessors().iter().flat_map(move |(edge_val, preds_by_depth)| {
             preds_by_depth.values().flat_map(move |pred_vec| {
                 pred_vec.iter().map(move |pred_arc| {
@@ -310,7 +310,7 @@ impl<'a> GSSPopperItem<'a> {
 }
 
 impl<'a> GSSPopperItemPeek<'a> {
-    pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
     /// Returns the combined `Acc` of the path and the predecessor node.
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
@@ -328,7 +328,7 @@ impl<'a> GSSPopperItemPeek<'a> {
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
-    pub(crate) fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.isolated_parent().as_ref().push(edge_value)
     }
     #[allow(dead_code)] pub(crate) fn popn(&self, len: usize) -> GSSPopper {
@@ -338,7 +338,7 @@ impl<'a> GSSPopperItemPeek<'a> {
         popper
     }
 
-    pub(crate) fn isolated_parent(&self) -> Arc<GSSNode> {
+    pub fn isolated_parent(&self) -> Arc<GSSNode> {
         if self.parent_arc.num_predecessors() == 1 {
             return self.parent_arc.clone();
         }
@@ -674,25 +674,27 @@ impl GSSNode {
     fn dest_key(&self) -> DestKey { self.max_depth() }
 
     /// Returns the set of LLM tokens allowed by any root reachable from this node.
-    pub(crate) fn allowed_llm_tokens(&self) -> LLMTokenBV {
+    pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
         self.acc().llm_tokens_union.clone()
     }
 
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on every root reachable from this node.
-    pub(crate) fn disallowed_terminals(&self) -> TerminalInfo {
+    pub fn disallowed_terminals(&self) -> TerminalInfo {
         self.acc().terminals_union.complement()
     }
 
     pub(crate) fn is_empty(&self) -> bool { self.predecessors().is_empty() }
 
-    pub(crate) fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+    pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+
+    pub fn is_ok(&self) -> bool { self.is_alive() }
 
     pub(crate) fn is_root(&self) -> bool {
         matches!(self, GSSNode::Root(_))
     }
 
-    pub(crate) fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+    pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
         timeit!(format!("GSSNode::merge_many_with_depth({})", merge_depth), {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
@@ -720,7 +722,7 @@ impl GSSNode {
     }
 
     /// Performs a multi-level pop operation on this node.
-    pub(crate) fn popn(&self, n: usize) -> GSSPopper {
+    pub fn popn(&self, n: usize) -> GSSPopper {
         let mut popper = GSSPopper::new_from_node(Arc::new(self.clone()), Arc::new(Acc::new_fresh()));
         popper.popn(n);
         popper
@@ -827,7 +829,7 @@ impl GSSNode {
 
 
 impl<'a> GSSPeek<'a> {
-    pub(crate) fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
     #[allow(dead_code)] pub(crate) fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
@@ -837,7 +839,7 @@ impl<'a> GSSPeek<'a> {
     }
 
     /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
-    pub(crate) fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+    pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
         let parent = self.parent_arc.allowed_llm_tokens();
         let pred = self.predecessor_node.allowed_llm_tokens();
         &parent & &pred
@@ -853,10 +855,10 @@ impl<'a> GSSPeek<'a> {
         GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, Acc::new_fresh())
     }
 
-    pub(crate) fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
         self.isolated_parent().as_ref().push(edge_value)
     }
-    pub(crate) fn popn(&self, len: usize) -> GSSPopper {
+    pub fn popn(&self, len: usize) -> GSSPopper {
         let isolated_parent = self.isolated_parent();
         let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
         popper.popn(len);
@@ -864,7 +866,7 @@ impl<'a> GSSPeek<'a> {
     }
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
-    pub(crate) fn isolated_parent(&self) -> Arc<GSSNode> {
+    pub fn isolated_parent(&self) -> Arc<GSSNode> {
         if self.parent_arc.num_predecessors() == 1 {
             return self.parent_arc.clone();
         }
@@ -1026,6 +1028,14 @@ fn prune_and_transform_recursive(
 
     memo.insert(node_ptr, result.clone());
     result
+}
+
+pub fn allow_only_llm_tokens_and_prune(
+    root_arc: &mut Arc<GSSNode>,
+    allowed_tokens: &LLMTokenBV,
+) {
+    let mut memo = HashMap::new();
+    allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
 }
 
 pub(crate) fn allow_only_llm_tokens_and_prune_arc(
@@ -1668,6 +1678,20 @@ pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseSt
     }
 
     Some(path)
+}
+
+pub fn popn_collect_isolated_parents(
+    node_arc: &Arc<GSSNode>,
+    n: usize,
+) -> Vec<(crate::glr::table::StateID, Arc<GSSNode>)> {
+    let popper = node_arc.popn(n);
+    let mut out = Vec::new();
+    for item in popper.iter() {
+        for peek in item.peek_iter() {
+            out.push((peek.edge_value().state_id, peek.isolated_parent()));
+        }
+    }
+    out
 }
 
 pub(crate) struct GSSPrintConfig<'a> {

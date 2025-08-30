@@ -124,6 +124,45 @@ def main():
     grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, py_token_to_id, max_token_id)
     print("GrammarConstraint constructed successfully.")
 
+    # 5. Export precompute2/3, load into Python models, and test mask generation.
+    print("\nExporting precompute2 and precompute3 to JSON...")
+    pre2_json = grammar_constraint.precompute2_json_string()
+    pre3_json = grammar_constraint.precompute3_json_string()
+
+    from precompute2_model import Precompute2
+    from precompute3_model import Precompute3
+
+    pre2 = Precompute2.from_json_string(pre2_json)
+    pre3 = Precompute3.from_json_string(pre3_json)
+    print("Loaded precompute2/3 into Python models.")
+
+    # Build filtered GSS map (tokenizer state -> GSSNode) from the new API
+    print("Building filtered state->GSS map (Python-visible)...")
+    constraint_state_for_py = _sep1.GrammarConstraintState(grammar_constraint)
+    state_to_gss = constraint_state_for_py.filtered_state_gss_map()
+
+    # Compute the mask via Rust (existing API) and via Python precompute3 model, and compare
+    print("Computing mask via Rust (built-in)...")
+    allowed_mask_rust = constraint_state_for_py.get_mask()  # existing numpy bool array
+
+    print("Computing mask via Python (precompute3 model)...")
+    mask_py_pre3 = pre3.get_mask(state_to_gss)
+
+    # Convert the Rust mask (numpy bool array) to a set of indices for comparison
+    allowed_ids_rust = {i for i, v in enumerate(allowed_mask_rust) if v}
+    allowed_ids_py_pre3 = set(mask_py_pre3.to_indices())
+
+    assert allowed_ids_rust == allowed_ids_py_pre3, "Python precompute3 mask != Rust mask"
+    print("Python precompute3 mask matches Rust mask.")
+
+    # Optionally, convert pre2->pre3 and compare masks again
+    print("Computing mask via Python (precompute2->precompute3 conversion)...")
+    pre2_as_pre3 = pre2.to_precompute3()
+    mask_py_pre2 = pre2_as_pre3.get_mask(state_to_gss)
+    allowed_ids_py_pre2 = set(mask_py_pre2.to_indices())
+    assert allowed_ids_rust == allowed_ids_py_pre2, "Python precompute2->precompute3 mask != Rust mask"
+    print("Python precompute2->precompute3 mask matches Rust mask.")
+
     # 5. Load and tokenize the example JS code using our simple greedy tokenizer.
     example_code_path = "../src/example_code.js"
     print(f"\nLoading and tokenizing example code from: {example_code_path}")
