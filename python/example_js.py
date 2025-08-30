@@ -37,7 +37,10 @@ def load_or_download_gpt2_vocab(cache_dir, file_name, url):
             f.write(content)
         print(f"Saved GPT-2 vocab to cache: {cache_path}")
         vocab_map = json.loads(content)
-        
+
+    # Exclude tokens longer than 5
+    vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
     return vocab_map
 
 def greedy_tokenizer(text_bytes, id_to_token):
