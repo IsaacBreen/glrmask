@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 from .common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 
-class Precompute3(GraphProvider):
+class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
         self.arena = arena
@@ -21,12 +21,12 @@ class Precompute3(GraphProvider):
             n["children"] = newch
 
     @staticmethod
-    def from_json_string(s: str) -> 'Precompute3':
+    def from_json_string(s: str) -> 'Model':
         arr = json.loads(s)
         roots_map, arena_json = arr
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Precompute3(roots_map, arena)
+        return Model(roots_map, arena)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]

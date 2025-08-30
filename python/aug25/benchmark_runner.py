@@ -1,0 +1,257 @@
+import argparse
+import json
+import os
+import requests
+import time
+import sys
+import importlib.util
+from pathlib import Path
+from datetime import datetime, timezone
+import numpy as np
+
+import _sep1
+from aug25.equality import are_equivalent_for_state
+from aug25.precompute2_model import Model as Precompute2Model
+
+# --- Helper Functions (from former example_js.py) ---
+
+def load_or_download_gpt2_vocab(cache_dir, file_name, url):
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / file_name
+    if not cache_path.exists():
+        print(f"Downloading GPT-2 vocab from: {url}")
+        response = requests.get(url)
+        response.raise_for_status()
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            f.write(response.text)
+    return json.loads(cache_path.read_text(encoding='utf-8'))
+
+def greedy_tokenizer(text_bytes, id_to_token):
+    token_to_id = {v: k for k, v in id_to_token.items()}
+    sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+    token_ids = []
+    pos = 0
+    while pos < len(text_bytes):
+        match_found = False
+        for token_bytes in sorted_tokens:
+            if text_bytes[pos:].startswith(token_bytes):
+                token_ids.append(token_to_id[token_bytes])
+                pos += len(token_bytes)
+                match_found = True
+                break
+        if not match_found:
+            raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+    return token_ids
+
+def load_competitor_model(competitor_path: Path):
+    """Dynamically loads the 'Model' class from a Python file."""
+    module_name = competitor_path.stem
+    spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load spec for module at {competitor_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    
+    if not hasattr(module, 'Model'):
+        raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
+    
+    return getattr(module, 'Model')
+
+def run_benchmark(args):
+    """Main benchmark logic."""
+    print("--- Setting up benchmark environment ---")
+
+    # 1. Load and compile grammar
+    print(f"Loading grammar from: {args.grammar}")
+    grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
+    compiled_grammar = grammar_def.compile()
+
+    # 2. Load vocabulary
+    print("Loading GPT-2 vocabulary...")
+    vocab_map = load_or_download_gpt2_vocab(
+        ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
+        "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    )
+    token_to_id = {}
+    id_to_token = {}
+    max_token_id = 0
+    for token_str, token_id in vocab_map.items():
+        token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
+        token_to_id[token_bytes] = token_id
+        id_to_token[token_id] = token_bytes
+        max_token_id = max(max_token_id, token_id)
+
+    # 3. Construct GrammarConstraint and export reference precompute2 model
+    print("Constructing GrammarConstraint...")
+    grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
+    pre2_json_str = grammar_constraint.precompute2_json_string()
+
+    # 4. Load competitor model
+    print(f"Loading competitor model from: {args.competitor}")
+    CompetitorModel = load_competitor_model(args.competitor)
+    
+    t_start_load = time.perf_counter()
+    competitor_model = CompetitorModel.from_json_string(pre2_json_str)
+    load_time = time.perf_counter() - t_start_load
+    print(f"Competitor model loaded in {load_time:.4f} seconds.")
+
+    # 5. Equivalence Check
+    print("Running equivalence check against reference precompute2 model...")
+    reference_model = Precompute2Model.from_json_string(pre2_json_str)
+    
+    equivalence_passed = True
+    equivalence_details = "All tested states are equivalent."
+    
+    # Check that root sets are the same before proceeding
+    ref_roots = set(reference_model.roots_map.keys())
+    comp_roots = set(competitor_model.roots_map.keys())
+    if ref_roots != comp_roots:
+        equivalence_passed = False
+        equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+    else:
+        for sid in sorted(list(ref_roots)):
+            passed, details = are_equivalent_for_state(
+                reference_model, reference_model.get_root(sid),
+                competitor_model, competitor_model.get_root(sid),
+                verbose=False
+            )
+            if not passed:
+                equivalence_passed = False
+                equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                break
+    
+    if equivalence_passed:
+        print("✅ Equivalence check passed.")
+    else:
+        print(f"❌ Equivalence check failed: {equivalence_details}")
+
+    # 6. Prepare for benchmarking loop
+    print(f"Loading and tokenizing code from: {args.code}")
+    code_bytes = args.code.read_bytes()
+    token_ids = greedy_tokenizer(code_bytes, id_to_token)
+    print(f"Tokenized into {len(token_ids)} tokens.")
+
+    constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+    timings = []
+    mask_correctness_passed = True
+    mask_correctness_details = "All masks matched the reference implementation."
+
+    # 7. Run benchmark loop
+    print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+    for i, token_id in enumerate(token_ids):
+        # Get the reference mask to check correctness (if enabled)
+        if args.verify_masks:
+            reference_mask_np = constraint_state.get_mask()
+            if not reference_mask_np[token_id]:
+                # This indicates an issue with the grammar or tokenizer, not the competitor.
+                print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+                sys.exit(1)
+
+        # Get the state map for the competitor
+        state_to_gss = constraint_state.filtered_state_gss_map()
+
+        # --- TIMED SECTION ---
+        t_start_mask = time.perf_counter()
+        competitor_mask = competitor_model.get_mask(state_to_gss)
+        t_end_mask = time.perf_counter()
+        timings.append(t_end_mask - t_start_mask)
+        # --- END TIMED SECTION ---
+
+        # Verify the competitor's mask (if enabled)
+        if args.verify_masks:
+            # This check is expensive but crucial for validation
+            ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+            comp_indices = set(competitor_mask.to_indices())
+            if ref_indices != comp_indices:
+                mask_correctness_passed = False
+                mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
+                print(f"❌ {mask_correctness_details}")
+                # Stop verifying after first failure to avoid spamming output
+                args.verify_masks = False
+
+        # Advance the state
+        constraint_state.commit(token_id)
+        
+        # Progress indicator
+        if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
+            print(f"  ... completed step {i+1}/{len(token_ids)}")
+
+    print("--- Benchmark finished ---")
+
+    # 8. Compile and save results
+    if timings:
+        p = np.percentile(timings, [50, 90, 99])
+        summary_stats = {
+            "count": len(timings),
+            "mean": float(np.mean(timings)),
+            "stddev": float(np.std(timings)),
+            "min": float(np.min(timings)),
+            "max": float(np.max(timings)),
+            "p50": float(p[0]),
+            "p90": float(p[1]),
+            "p99": float(p[2]),
+        }
+    else:
+        summary_stats = {}
+
+    output_data = {
+        "competitor_script": str(args.competitor),
+        "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "inputs": {
+            "grammar_file": str(args.grammar),
+            "code_file": str(args.code),
+        },
+        "results": {
+            "load_time_seconds": load_time,
+            "equivalence_check": {
+                "passed": equivalence_passed,
+                "details": equivalence_details,
+            },
+            "mask_correctness_check": {
+                "enabled": not args.no_verify_masks,
+                "passed": mask_correctness_passed,
+                "details": mask_correctness_details,
+            },
+            "get_mask_timings_seconds": timings,
+            "summary_stats": summary_stats,
+        }
+    }
+
+    # Determine output path
+    if args.output:
+        output_path = Path(args.output)
+        if output_path.is_dir():
+            output_path = output_path / f"{args.competitor.stem}_results.json"
+    else:
+        output_path = Path(f"{args.competitor.stem}_results.json")
+    
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(output_data, f, indent=2)
+    
+    print(f"\nBenchmark results saved to: {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+    parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+    parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+    parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+    parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+    
+    parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                        help="Disable correctness verification of masks at each step (improves benchmark purity).")
+    parser.set_defaults(verify_masks=True)
+
+    args = parser.parse_args()
+
+    for p in [args.grammar, args.code, args.competitor]:
+        if not p.exists():
+            parser.error(f"File not found: {p}")
+
+    run_benchmark(args)
+
+if __name__ == "__main__":
+    main()

@@ -1,9 +1,10 @@
 import json
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from .common_interface import GraphProvider, RangeSet
-from .precompute3_model import Precompute3
+from .precompute3_model import Model as Precompute3Model
+import _sep1 as ffi
 
-class Precompute2(GraphProvider):
+class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
         self.arena = arena
@@ -29,12 +30,12 @@ class Precompute2(GraphProvider):
             n["children"] = newch
 
     @staticmethod
-    def from_json_string(s: str) -> 'Precompute2':
+    def from_json_string(s: str) -> 'Model':
         arr = json.loads(s)
         roots_map, arena_json = arr
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Precompute2(roots_map, arena)
+        return Model(roots_map, arena)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -49,7 +50,7 @@ class Precompute2(GraphProvider):
                 if rs.contains(token):
                     yield (int(pop), sid, int(dest))
 
-    def to_precompute3(self) -> 'Precompute3':
+    def to_precompute3(self) -> 'Precompute3Model':
         arena3: Dict[int, dict] = {}
         for u, node in self.arena.items():
             out_children = []
@@ -85,4 +86,10 @@ class Precompute2(GraphProvider):
                 "children": out_children,
             }
         roots = list(self.roots_map.items())
-        return Precompute3(roots, arena3)
+        return Precompute3Model(roots, arena3)
+
+    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+        # This is inefficient as it converts on every call.
+        # A real competitor would implement this directly.
+        p3_model = self.to_precompute3()
+        return p3_model.get_mask(state_to_gss)

@@ -159,20 +159,22 @@ def collect_interesting_tokens(provider: GraphProvider, root: int, arena_nodes: 
 
 
 def are_equivalent_for_state(provider_a: GraphProvider, root_a: int, provider_b: GraphProvider, root_b: int,
-                             tokens: Optional[List[int]] = None, verbose: bool = False) -> bool:
+                             tokens: Optional[List[int]] = None, verbose: bool = False) -> Tuple[bool, Optional[str]]:
     if tokens is None:
         # This is a placeholder. A real implementation would need a way to inspect all edge BVs.
         tokens = [0, 1, 10, 100, 1000]
 
     for token in tokens:
-        norm_a = TokenNormalizer(provider_a, token)
-        norm_b = TokenNormalizer(provider_b, token)
-        eq, witness = nfa_equivalence_on_labels(norm_a, root_a, norm_b, root_b)
-        if not eq:
-            if verbose:
-                print(f"Equivalence failed for token {token}")
+        try:
+            norm_a = TokenNormalizer(provider_a, token)
+            norm_b = TokenNormalizer(provider_b, token)
+            eq, witness = nfa_equivalence_on_labels(norm_a, root_a, norm_b, root_b)
+            if not eq:
+                msg = f"Equivalence failed for token {token}"
                 if witness is not None:
                     seq_str = " -> ".join(f"(k={k}, sid={sid})" for (k, sid) in witness) if witness else "(empty)"
-                    print(f"  Counterexample label sequence: {seq_str}")
-            return False
-    return True
+                    msg += f". Counterexample label sequence: {seq_str}"
+                return False, msg
+        except Exception as e:
+            return False, f"Equivalence check raised an exception for token {token}: {e}"
+    return True, None
