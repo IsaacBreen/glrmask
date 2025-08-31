@@ -296,18 +296,39 @@ pub fn compute_closure(
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
     while let Some(item) = worklist.pop_front() {
-        if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+        if let Some((Symbol::NonTerminal(nt), _next_item)) = item.next() {
             if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
-                for prod in prods_for_nt {
-                    for lookahead in lookaheads.iter().cloned() {
+                if lalr_mode {
+                    // LR(0)-style closure: ignore lookahead
+                    for prod in prods_for_nt {
                         let new_item = Item {
                             production: prod.clone(),
                             dot_position: 0,
-                            lookahead,
+                            lookahead: None,
                         };
                         if closure.insert(new_item.clone()) {
                             worklist.push_back(new_item);
+                        }
+                    }
+                } else {
+                    // LR(1) path (unchanged)
+                    let lookaheads = compute_first_set_for_item(
+                        // Use the existing next item in this branch only
+                        &item.next().unwrap().1,
+                        first_sets,
+                        nullable_nonterminals,
+                        first_set_cache,
+                    );
+                    for prod in prods_for_nt {
+                        for lookahead in lookaheads.iter().cloned() {
+                            let new_item = Item {
+                                production: prod.clone(),
+                                dot_position: 0,
+                                lookahead,
+                            };
+                            if closure.insert(new_item.clone()) {
+                                worklist.push_back(new_item);
+                            }
                         }
                     }
                 }
@@ -315,33 +336,10 @@ pub fn compute_closure(
         }
     }
 
-    if lalr_mode {
-        crate::debug!(4, "Computing LALR closure.");
-        let mut lalr_closure = BTreeSet::new();
-        let mut reduce_item_cores: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-
-        // Separate reduce and non-reduce items, and group reduce items by core
-        for item in closure {
-            reduce_item_cores.entry((item.production.clone(), item.dot_position)).or_default().insert(item.lookahead);
-        }
-
-        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-        for ((prod_arc, dot_pos), existing_lookaheads) in reduce_item_cores {
-            if let Some(follows) = follow_sets.get(&prod_arc.lhs) {
-                for lookahead in follows {
-                    if lookahead == &None && !existing_lookaheads.contains(&None) {
-                        continue;
-                    }
-                    lalr_closure.insert(Item { production: prod_arc.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-                }
-            }
-        }
-        lalr_closure
-    } else {
-        closure
-    }
+    closure
 }
 
+#[inline]
 pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
     items.iter()
         .filter_map(|item| item.next())
@@ -349,6 +347,7 @@ pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
         .collect()
 }
 
+#[inline]
 pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
     let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
     for item in items {

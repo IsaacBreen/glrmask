@@ -3699,18 +3699,39 @@ local_system:
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
           while let Some(item) = worklist.pop_front() {
-              if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+              if let Some((Symbol::NonTerminal(nt), _next_item)) = item.next() {
                   if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                      let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
-                      for prod in prods_for_nt {
-                          for lookahead in lookaheads.iter().cloned() {
+                      if lalr_mode {
+                          // LR(0)-style closure: ignore lookahead
+                          for prod in prods_for_nt {
                               let new_item = Item {
                                   production: prod.clone(),
                                   dot_position: 0,
-                                  lookahead,
+                                  lookahead: None,
                               };
                               if closure.insert(new_item.clone()) {
                                   worklist.push_back(new_item);
+                              }
+                          }
+                      } else {
+                          // LR(1) path (unchanged)
+                          let lookaheads = compute_first_set_for_item(
+                              // Use the existing next item in this branch only
+                              &item.next().unwrap().1,
+                              first_sets,
+                              nullable_nonterminals,
+                              first_set_cache,
+                          );
+                          for prod in prods_for_nt {
+                              for lookahead in lookaheads.iter().cloned() {
+                                  let new_item = Item {
+                                      production: prod.clone(),
+                                      dot_position: 0,
+                                      lookahead,
+                                  };
+                                  if closure.insert(new_item.clone()) {
+                                      worklist.push_back(new_item);
+                                  }
                               }
                           }
                       }
@@ -3718,33 +3739,10 @@ local_system:
               }
           }
 
-          if lalr_mode {
-              crate::debug!(4, "Computing LALR closure.");
-              let mut lalr_closure = BTreeSet::new();
-              let mut reduce_item_cores: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
-
-              // Separate reduce and non-reduce items, and group reduce items by core
-              for item in closure {
-                  reduce_item_cores.entry((item.production.clone(), item.dot_position)).or_default().insert(item.lookahead);
-              }
-
-              // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-              for ((prod_arc, dot_pos), existing_lookaheads) in reduce_item_cores {
-                  if let Some(follows) = follow_sets.get(&prod_arc.lhs) {
-                      for lookahead in follows {
-                          if lookahead == &None && !existing_lookaheads.contains(&None) {
-                              continue;
-                          }
-                          lalr_closure.insert(Item { production: prod_arc.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
-                      }
-                  }
-              }
-              lalr_closure
-          } else {
-              closure
-          }
+          closure
       }
 
+      #[inline]
       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
           items.iter()
               .filter_map(|item| item.next())
@@ -3752,6 +3750,7 @@ local_system:
               .collect()
       }
 
+      #[inline]
       pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
           let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
           for item in items {
@@ -4102,6 +4101,7 @@ local_system:
       use crate::json_serialization::{JSONConvertible, JSONNode};
       use std::collections::BTreeMap as StdMap;
       use profiler_macro::time_it;
+      use fxhash::FxHashSet;
       use std::sync::Arc;
       use crate::interface::display_productions;
       // Added for derive macro pattern
@@ -4436,13 +4436,30 @@ local_system:
           StateID,
       );
 
-      fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+      fn kernel_core_key(items: &BTreeSet<Item>) -> Vec<(usize, usize)> {
+          // Represent the kernel by sorted (production_ptr, dot_position) pairs.
+          // production_ptr uses the Arc pointer address; equal for clones of the same Arc.
+          let mut v: Vec<(usize, usize)> = Vec::with_capacity(items.len());
+          for it in items {
+              let prod_ptr = std::sync::Arc::as_ptr(&it.production) as usize;
+              v.push((prod_ptr, it.dot_position));
+          }
+          v.sort_unstable();
+          v
+      }
+
+      fn stage_1_row(
+          worklist: &mut VecDeque<BTreeSet<Item>>,
+          visited_cores: &mut FxHashSet<Vec<(usize, usize)>>,
+          splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>,
+      ) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
           let mut row = BTreeMap::new();
           for (symbol, items_in_split) in &splits {
               row.insert(symbol.clone(), items_in_split.clone());
               if symbol.is_some() {
                   let goto_set = compute_goto(items_in_split);
-                  if visited_kernels.insert(goto_set.clone()) {
+                  let key = kernel_core_key(&goto_set);
+                  if visited_cores.insert(key) {
                       worklist.push_back(goto_set);
                   }
               }
@@ -4474,7 +4491,8 @@ local_system:
 
           let mut worklist = VecDeque::from([initial_item_set.clone()]);
           let mut transitions: Stage1Table = BTreeMap::new();
-          let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+          let mut visited_cores: FxHashSet<Vec<(usize, usize)>> = FxHashSet::default();
+          visited_cores.insert(kernel_core_key(&initial_item_set));
 
           let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
 
@@ -4496,7 +4514,8 @@ local_system:
                   }
               }
               // Add the everything set to the worklist if it's not already there
-              if visited_kernels.insert(everything_item_set.clone()) {
+              let key = kernel_core_key(&everything_item_set);
+              if visited_cores.insert(key) {
                   worklist.push_back(everything_item_set);
               }
           }
@@ -4519,7 +4538,7 @@ local_system:
               };
               let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
               let splits = split_on_dot(&closure);
-              let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+              let row = stage_1_row(&mut worklist, &mut visited_cores, splits);
               transitions.insert(item_set, row);
           }
 
@@ -5246,9 +5265,9 @@ local_system:
       use crate::glr::parser::{GLRParser, ActionFn};
       use crate::profiler::{print_summary, print_summary_flat};
 
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: plan-git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -5256,7 +5275,6 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
     - cp
   code_completion_model:
     - cp
@@ -7932,5 +7950,497 @@ messages:
       filename: src/glr/table.rs
   - user: '`stage_1` takes a long time to execute. Like 10 seconds. How could we drastically
       speed it up? Should be very fast, well under 0.1s.'
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: llm
+      phase: instructions-only
+  - assistant: |-
+      Below are targeted, high-impact changes that will make stage_1 essentially LR(0)/LALR-style and eliminate the major hot spots (lookahead-heavy closures, BTreeSet key comparisons for visited kernels). These edits typically reduce stage_1 from seconds to well under 100ms on medium grammars.
+
+      Overview of what you’ll change
+      - Stop computing LR(1) lookaheads inside closure when in LALR mode. Build LR(0) closures instead, i.e., every item has lookahead = None. This removes the expensive compute_first_set_for_item and the combinatorial blow-up.
+      - Avoid using BTreeSet<BTreeSet<Item>> as the “visited kernels” structure. Instead track kernels by a compact, hashable core key independent of lookaheads: a sorted Vec of (prod_ptr, dot_position).
+      - Remove the incorrect “LALR closure post-processing” that tried to replace lookaheads on reduce items with FOLLOW sets (it also dropped non-reduce items entirely, which is wrong and expensive).
+
+      Notes
+      - GLR can handle the extra ambiguity induced by LR(0)-style construction; downstream stages already expand “None” lookaheads to all terminals (stage_5), so the semantics remain consistent for GLR.
+      - We do not change public types of the later stages; we only change internal logic and replace a couple of BTreeSet-based membership checks with hash-based ones.
+
+      1) Add fxhash dependency
+      File: Cargo.toml
+      - Add a fast hash set/map implementation.
+
+      Insert under [dependencies]:
+      fxhash = "0.2"
+
+      2) Use a compact hashed “kernel core” for visited checks in stage_1
+      File: src/glr/table.rs
+
+      a) Add the import
+      Near the other use lines at the top, add:
+      use fxhash::FxHashSet;
+
+      b) Add a helper to compute a hashable kernel key
+      Place this right above stage_1_row (or near stage_1):
+
+      Add:
+      - a small helper to compute a lightweight key for a kernel (item set), ignoring lookaheads and using Arc pointer identity to avoid hashing heavy productions.
+
+      Insert:
+      fn kernel_core_key(items: &BTreeSet<Item>) -> Vec<(usize, usize)> {
+          // Represent the kernel by sorted (production_ptr, dot_position) pairs.
+          // production_ptr uses the Arc pointer address; equal for clones of the same Arc.
+          let mut v: Vec<(usize, usize)> = Vec::with_capacity(items.len());
+          for it in items {
+              let prod_ptr = std::sync::Arc::as_ptr(&it.production) as usize;
+              v.push((prod_ptr, it.dot_position));
+          }
+          v.sort_unstable();
+          v
+      }
+
+      c) Change stage_1_row signature and visited check
+      - Replace the existing visited_kernels parameter type.
+      - Replace set insertion to use kernel_core_key and FxHashSet.
+
+      Find the function:
+      fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> { ... }
+
+      Change its signature to:
+      fn stage_1_row(
+          worklist: &mut VecDeque<BTreeSet<Item>>,
+          visited_cores: &mut FxHashSet<Vec<(usize, usize)>>,
+          splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>
+      ) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> { ... }
+
+      Inside the for (symbol, items_in_split) loop, replace the “visited” logic block with:
+      - Existing code:
+      if symbol.is_some() {
+          let goto_set = compute_goto(items_in_split);
+          if visited_kernels.insert(goto_set.clone()) {
+              worklist.push_back(goto_set);
+          }
+      }
+
+      - Replace with:
+      if symbol.is_some() {
+          let goto_set = compute_goto(items_in_split);
+          let key = kernel_core_key(&goto_set);
+          if visited_cores.insert(key) {
+              worklist.push_back(goto_set);
+          }
+      }
+
+      d) Update stage_1 to use FxHashSet<Vec<(usize,usize)>> for visited
+      - Replace the visited set’s type and initialization.
+
+      Find in stage_1:
+      let mut worklist = VecDeque::from([initial_item_set.clone()]);
+      let mut transitions: Stage1Table = BTreeMap::new();
+      let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+
+      Replace with:
+      let mut worklist = VecDeque::from([initial_item_set.clone()]);
+      let mut transitions: Stage1Table = BTreeMap::new();
+      let mut visited_cores: FxHashSet<Vec<(usize, usize)>> = FxHashSet::default();
+      visited_cores.insert(kernel_core_key(&initial_item_set));
+
+      - Update the call to stage_1_row accordingly:
+      Change:
+      let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+      to:
+      let row = stage_1_row(&mut worklist, &mut visited_cores, splits);
+
+      3) Make compute_closure LR(0)-style when lalr_mode is enabled
+      File: src/glr/automaton.rs
+
+      Goal: When lalr_mode == true, we do not compute FIRST(β a) at all. For every item whose next symbol is a non-terminal N, add items for every production of N with lookahead = None. Also, remove the final LALR post-processing block that tried to replace lookaheads with FOLLOW sets — it is incorrect and expensive.
+
+      a) Replace the inner expansion logic to skip compute_first_set_for_item in LALR mode
+      Inside compute_closure, find the while let Some(item) = worklist.pop_front() { ... } loop. Replace the body that expands on Symbol::NonTerminal(nt) with this pattern:
+
+      - Locate this block:
+      if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+          if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+              let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
+              for prod in prods_for_nt {
+                  for lookahead in lookaheads.iter().cloned() {
+                      let new_item = Item {
+                          production: prod.clone(),
+                          dot_position: 0,
+                          lookahead,
+                      };
+                      if closure.insert(new_item.clone()) {
+                          worklist.push_back(new_item);
+                      }
+                  }
+              }
+          }
+      }
+
+      - Replace with:
+      if let Some((Symbol::NonTerminal(nt), _next_item)) = item.next() {
+          if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+              if lalr_mode {
+                  // LR(0)-style closure: ignore lookahead
+                  for prod in prods_for_nt {
+                      let new_item = Item {
+                          production: prod.clone(),
+                          dot_position: 0,
+                          lookahead: None,
+                      };
+                      if closure.insert(new_item.clone()) {
+                          worklist.push_back(new_item);
+                      }
+                  }
+              } else {
+                  // LR(1) path (unchanged)
+                  let lookaheads = compute_first_set_for_item(
+                      // Use the existing next item in this branch only
+                      &item.next().unwrap().1,
+                      first_sets,
+                      nullable_nonterminals,
+                      cache,
+                  );
+                  for prod in prods_for_nt {
+                      for lookahead in lookaheads.iter().cloned() {
+                          let new_item = Item {
+                              production: prod.clone(),
+                              dot_position: 0,
+                              lookahead,
+                          };
+                          if closure.insert(new_item.clone()) {
+                              worklist.push_back(new_item);
+                          }
+                      }
+                  }
+              }
+          }
+      }
+
+      b) Remove the LALR post-processing block at the end
+      At the end of compute_closure, you have this branch:
+
+      if lalr_mode {
+          crate::debug!(4, "Computing LALR closure.");
+          let mut lalr_closure = BTreeSet::new();
+          let mut reduce_item_cores: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+          // ... collects reduce items and uses follow_sets ...
+          lalr_closure
+      } else {
+          closure
+      }
+
+      Delete the entire lalr_mode branch (from crate::debug!(4, ...) through the } else { closure }), and simply return closure for both modes:
+
+      Replace that whole tail with:
+      closure
+
+      Important: Keep the compute_closure signature unchanged to avoid cascading changes, even though the lalr_mode path will not use follow_sets or first_set_cache.
+
+      4) Optional minor inlining hints (small additional wins)
+      File: src/glr/automaton.rs
+      - Add #[inline] above compute_goto and split_on_dot to help the optimizer.
+
+      Example:
+      #[inline]
+      pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> { ... }
+
+      #[inline]
+      pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> { ... }
+
+      Why these changes work
+      - LR(1) lookaheads in closure are the primary blow-up. In LALR you usually build LR(0) states and propagate/merge lookaheads later; your pipeline already mimics this by expanding None lookaheads to all terminals in stage_5. Doing LR(0) closure eliminates the expensive compute_first_set_for_item calls and the massive number of distinct items that differ only by lookahead.
+      - Using a hash-based kernel identity that ignores lookahead prevents generating many duplicate states that only differ by lookahead (this is what classic LALR does by merging cores). It also avoids expensive BTreeSet comparisons for visited checks.
+      - Removing the incorrect LALR post-processing block prevents extra work and fixes correctness (it previously dropped non-reduce items from closure).
+
+      Expected impact
+      - In practice, these two changes (LR(0) closure + hashed kernel keys) usually reduce stage_1 by orders of magnitude. It should be comfortably below 100ms for typical grammars.
+
+      Validation steps
+      - Rebuild and run your parser generation pipeline.
+      - Confirm stage_1 logs show a drastic drop in time.
+      - Ensure the number of states is consistent with LALR cores (often fewer than LR(1) states).
+      - Optionally, run a couple of end-to-end parses to confirm GLR behavior remains correct.
+
+      If you still need LR(1)-quality lookaheads for some debug mode
+      - Implement a separate LR1 mode that uses a precomputed FIRST-of-suffix cache keyed by (production_id, position), returning (first_terminals, derives_epsilon). Then compute FIRST(β a) as FIRST(β) ∪ (a if ε ∈ FIRST(β)). This keeps LR(1) closure fast without per-Item caching. But for performance, prefer the LALR/LR(0) route above.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git
+      phase: diff-after-plan
+  - assistant: |-
+      Of course. Here are the git diffs to apply the performance improvements to `stage_1` as discussed.
+
+      First, you'll need to add the `fxhash` dependency to your project. I cannot generate a patch for `Cargo.toml` since it wasn't provided, but you can add this line under the `[dependencies]` section:
+
+      ```toml
+      fxhash = "0.2"
+      ```
+
+      Now, here are the patches for the Rust source files.
+
+      ```diff
+      diff --git a/src/glr/automaton.rs b/src/glr/automaton.rs
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -310,53 +310,52 @@
+           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+       
+           while let Some(item) = worklist.pop_front() {
+      -        if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+      +        if let Some((Symbol::NonTerminal(nt), _next_item)) = item.next() {
+                   if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+      -                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
+      -                for prod in prods_for_nt {
+      -                    for lookahead in lookaheads.iter().cloned() {
+      +                if lalr_mode {
+      +                    // LR(0)-style closure: ignore lookahead
+      +                    for prod in prods_for_nt {
+                               let new_item = Item {
+                                   production: prod.clone(),
+                                   dot_position: 0,
+      -                            lookahead,
+      +                            lookahead: None,
+                               };
+                               if closure.insert(new_item.clone()) {
+                                   worklist.push_back(new_item);
+                               }
+                           }
+      +                } else {
+      +                    // LR(1) path (unchanged)
+      +                    let lookaheads = compute_first_set_for_item(
+      +                        // Use the existing next item in this branch only
+      +                        &item.next().unwrap().1,
+      +                        first_sets,
+      +                        nullable_nonterminals,
+      +                        first_set_cache,
+      +                    );
+      +                    for prod in prods_for_nt {
+      +                        for lookahead in lookaheads.iter().cloned() {
+      +                            let new_item = Item {
+      +                                production: prod.clone(),
+      +                                dot_position: 0,
+      +                                lookahead,
+      +                            };
+      +                            if closure.insert(new_item.clone()) {
+      +                                worklist.push_back(new_item);
+      +                            }
+      +                        }
+      +                    }
+                       }
+                   }
+               }
+           }
+       
+      -    if lalr_mode {
+      -        crate::debug!(4, "Computing LALR closure.");
+      -        let mut lalr_closure = BTreeSet::new();
+      -        let mut reduce_item_cores: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+      -
+      -        // Separate reduce and non-reduce items, and group reduce items by core
+      -        for item in closure {
+      -            reduce_item_cores.entry((item.production.clone(), item.dot_position)).or_default().insert(item.lookahead);
+      -        }
+      -
+      -        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+      -        for ((prod_arc, dot_pos), existing_lookaheads) in reduce_item_cores {
+      -            if let Some(follows) = follow_sets.get(&prod_arc.lhs) {
+      -                for lookahead in follows {
+      -                    if lookahead == &None && !existing_lookaheads.contains(&None) {
+      -                        continue;
+      -                    }
+      -                    lalr_closure.insert(Item { production: prod_arc.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
+      -                }
+      -            }
+      -        }
+      -        lalr_closure
+      -    } else {
+      -        closure
+      -    }
+      +    closure
+       }
+       
+      +#[inline]
+       pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
+           items.iter()
+               .filter_map(|item| item.next())
+      @@ -364,6 +363,7 @@
+               .collect()
+       }
+       
+      +#[inline]
+       pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+           let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
+           for item in items {
+
+      ```
+      ```diff
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -7,6 +7,7 @@
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use std::collections::BTreeMap as StdMap;
+       use profiler_macro::time_it;
+      +use fxhash::FxHashSet;
+       use std::sync::Arc;
+       use crate::interface::display_productions;
+       // Added for derive macro pattern
+      @@ -421,22 +422,38 @@
+           StateID,
+       );
+       
+      -fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+      +fn kernel_core_key(items: &BTreeSet<Item>) -> Vec<(usize, usize)> {
+      +    // Represent the kernel by sorted (production_ptr, dot_position) pairs.
+      +    // production_ptr uses the Arc pointer address; equal for clones of the same Arc.
+      +    let mut v: Vec<(usize, usize)> = Vec::with_capacity(items.len());
+      +    for it in items {
+      +        let prod_ptr = std::sync::Arc::as_ptr(&it.production) as usize;
+      +        v.push((prod_ptr, it.dot_position));
+      +    }
+      +    v.sort_unstable();
+      +    v
+      +}
+      +
+      +fn stage_1_row(
+      +    worklist: &mut VecDeque<BTreeSet<Item>>,
+      +    visited_cores: &mut FxHashSet<Vec<(usize, usize)>>,
+      +    splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>,
+      +) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+           let mut row = BTreeMap::new();
+           for (symbol, items_in_split) in &splits {
+               row.insert(symbol.clone(), items_in_split.clone());
+               if symbol.is_some() {
+                   let goto_set = compute_goto(items_in_split);
+      -            if visited_kernels.insert(goto_set.clone()) {
+      +            let key = kernel_core_key(&goto_set);
+      +            if visited_cores.insert(key) {
+                       worklist.push_back(goto_set);
+                   }
+               }
+           }
+           row
+       }
+       
+       #[time_it]
+       fn stage_1(productions: &[Production]) -> Stage1Result {
+           let productions_arc: Vec<Arc<Production>> = productions.iter().cloned().map(Arc::new).collect();
+       
+           let start_production_id = 0;
+           let initial_item = Item {
+               production: productions_arc[start_production_id].clone(),
+               dot_position: 0,
+               lookahead: None,
+           };
+           let initial_item_set = BTreeSet::from([initial_item.clone()]);
+       
+           let first_sets = compute_first_sets_for_nonterminals(productions);
+           let nullable_nonterminals = compute_nullable_nonterminals(productions);
+           let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+       
+           // Pre-computation for compute_closure: group productions by their LHS non-terminal.
+           let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
+           for p in &productions_arc {
+               prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
+           }
+       
+           let mut worklist = VecDeque::from([initial_item_set.clone()]);
+           let mut transitions: Stage1Table = BTreeMap::new();
+      -    let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+      +    let mut visited_cores: FxHashSet<Vec<(usize, usize)>> = FxHashSet::default();
+      +    visited_cores.insert(kernel_core_key(&initial_item_set));
+       
+           let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
+       
+           // --- Create the 'everything' item set ---
+           if EVERYTHING {
+               let mut everything_item_set = BTreeSet::new();
+               for prod in &productions_arc {
+                   if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                       for dot_position in 0..=prod.rhs.len() {
+                           for lookahead in lookaheads {
+                               let item = Item {
+                                   production: prod.clone(),
+                                   dot_position,
+                                   lookahead: lookahead.clone(),
+                               };
+                               everything_item_set.insert(item);
+                           }
+                       }
+                   }
+               }
+               // Add the everything set to the worklist if it's not already there
+      -        if visited_kernels.insert(everything_item_set.clone()) {
+      +        let key = kernel_core_key(&everything_item_set);
+      +        if visited_cores.insert(key) {
+                   worklist.push_back(everything_item_set);
+               }
+           }
+       
+           while let Some(item_set) = worklist.pop_front() {
+               let lalr_mode = match LR_MODE {
+                   LRMode::LALR => true,
+                   LRMode::LR1 => false,
+                   LRMode::LALR_EX_SHIFT_STATES => {
+                       // Ensure we can't get to this state from a shift.
+                       let mut do_lalr = true;
+                       for item in &item_set {
+                           if matches!(item.prev(), Some((Symbol::Terminal(_), _))) {
+                               do_lalr = false;
+                               break;
+                           }
+                       }
+                       do_lalr
+                   }
+               };
+               let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
+               let splits = split_on_dot(&closure);
+      -        let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+      +        let row = stage_1_row(&mut worklist, &mut visited_cores, splits);
+               transitions.insert(item_set, row);
+           }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (plan-git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Optimize stage_1 by using LR(0)
+      closure and FxHashSet for visited states"'
     metadata:
 ...
