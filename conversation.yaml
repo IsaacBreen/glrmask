@@ -11,7 +11,7 @@ local_system:
     - python/aug25/optimizer_general.py
     - python/aug25/precompute2_model.py
     - python/aug25/precompute3_model.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/src/lib.rs: |-
@@ -1167,7 +1167,8 @@ local_system:
 
       def load_competitor_model(competitor_path: Path):
           """Dynamically loads the 'Model' class from a Python file."""
-          module_name = competitor_path.stem
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
           spec = importlib.util.spec_from_file_location(module_name, competitor_path)
           if spec is None or spec.loader is None:
               raise ImportError(f"Could not load spec for module at {competitor_path}")
@@ -1208,47 +1209,67 @@ local_system:
           print("Constructing GrammarConstraint...")
           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
           pre2_json_str = grammar_constraint.precompute2_json_string()
+          pre3_json_str = grammar_constraint.precompute3_json_string()
 
           # 4. Load competitor model
           print(f"Loading competitor model from: {args.competitor}")
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          competitor_model = CompetitorModel.from_json_string(pre2_json_str)
+          if 'precompute3' in args.competitor.name:
+              print("-> Using precompute3 JSON for competitor model.")
+              competitor_json_str = pre3_json_str
+          else:
+              print("-> Using precompute2 JSON for competitor model.")
+              competitor_json_str = pre2_json_str
+          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
+          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
           reference_model = ReferenceModel.from_json_string(pre2_json_str)
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
           equivalence_details = "All tested states are equivalent."
-          
-          # Check that root sets are the same before proceeding
-          ref_roots = set(reference_model.roots_map.keys())
-          comp_roots = set(competitor_model.roots_map.keys())
-          if ref_roots != comp_roots:
-              equivalence_passed = False
-              equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-          else:
-              for sid in sorted(list(ref_roots)):
-                  passed, details = are_equivalent_for_state(
-                      reference_model, reference_model.get_root(sid),
-                      competitor_model, competitor_model.get_root(sid),
-                      verbose=False
-                  )
-                  if not passed:
-                      equivalence_passed = False
-                      equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                      break
-          
-          if equivalence_passed:
-              print("✅ Equivalence check passed.")
-          else:
-              print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
+              if equivalence_passed:
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
 
           # 6. Prepare for benchmarking loop
           print(f"Loading and tokenizing code from: {args.code}")
@@ -1333,7 +1354,7 @@ local_system:
                       "details": equivalence_details,
                   },
                   "mask_correctness_check": {
-                      "enabled": not args.no_verify_masks,
+                      "enabled": args.verify_masks,
                       "passed": mask_correctness_passed,
                       "details": mask_correctness_details,
                   },
@@ -1991,12 +2012,18 @@ local_system:
               return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
 
           def iter_edges(self, node: int, token: int):
-              # For precompute3, llm BV filters at the edge label.
+              # For equivalence checking, we must "explode" the state_bv into individual
+              # state IDs to match the GraphProvider interface expected by the checker.
+              # This is not used by the performance-critical get_mask() method.
               for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
                   if llm_rs.contains(token):
-                      for dest_idx, _ in dests:
-                          # The common interface doesn't handle state_bv, so we yield None for state_id.
-                          yield (int(pop), None, int(dest_idx))
+                      for dest_idx, state_bv_ranges in dests:
+                          if not state_bv_ranges: # Epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv_ranges:
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
@@ -3293,58 +3320,57 @@ local_system:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          if 'precompute3' in args.competitor.name:
-              print("-> Using precompute3 JSON for competitor model.")
-              competitor_json_str = pre3_json_str
-          else:
-              print("-> Using precompute2 JSON for competitor model.")
-              competitor_json_str = pre2_json_str
-          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+          # All models now load from precompute3 JSON.
+          print("-> Using precompute3 JSON for competitor model.")
+          competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre2_json_str)
+          # The reference model also loads from precompute3 JSON for equivalence checks.
+          print("-> Using precompute3 JSON for reference model.")
+          reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
           equivalence_details = "All tested states are equivalent."
-          
-          # Check that root sets are the same before proceeding
-          ref_roots = set(reference_model.roots_map.keys())
-          comp_roots = set(competitor_model.roots_map.keys())
-          if ref_roots != comp_roots:
-              equivalence_passed = False
-              equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-          else:
-              sorted_roots = sorted(list(ref_roots))
-              total_roots = len(sorted_roots)
-              print(f"Checking equivalence across {total_roots} tokenizer states...")
-              for i, sid in enumerate(sorted_roots):
-                  # Progress indicator
-                  if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
-                      print(f"  ... verified {i+1}/{total_roots} states", end='\r')
 
-                  passed, details = are_equivalent_for_state(
-                      reference_model, reference_model.get_root(sid),
-                      competitor_model, competitor_model.get_root(sid),
-                      verbose=False
-                  )
-                  if not passed:
-                      print() # Newline to clear the progress indicator
-                      equivalence_passed = False
-                      equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                      break
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
               if equivalence_passed:
-                  print() # Final newline after progress indicator
-          
-          if equivalence_passed:
-              print("✅ Equivalence check passed.")
-          else:
-              print(f"❌ Equivalence check failed: {equivalence_details}")
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
 
           # 6. Prepare for benchmarking loop
           print(f"Loading and tokenizing code from: {args.code}")
@@ -3429,7 +3455,7 @@ local_system:
                       "details": equivalence_details,
                   },
                   "mask_correctness_check": {
-                      "enabled": not args.no_verify_masks,
+                      "enabled": args.verify_masks,
                       "passed": mask_correctness_passed,
                       "details": mask_correctness_details,
                   },
@@ -3490,6 +3516,11 @@ local_system:
               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
               """
+              raise NotImplementedError
+
+          @classmethod
+          def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
+              """Initializes a model from a precompute3-formatted JSON string."""
               raise NotImplementedError
 
       @dataclass(frozen=True, slots=True)
@@ -3940,6 +3971,53 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
+          @classmethod
+          def from_precompute3_json_string(cls, s: str) -> "Model":
+              """
+              Initializes a precompute2 model from a precompute3-formatted JSON string
+              by "exploding" the state ID bitsets from precompute3 edges.
+              """
+              import json
+              from collections import defaultdict
+              from .common_interface import RangeSet
+
+              arr = json.loads(s)
+              roots_map, arena_json_p3 = arr
+              arena_values_p3 = arena_json_p3.get("values", [])
+              arena_p3 = {int(k): v for k, v in arena_values_p3}
+
+              arena_p2 = {}
+              for uid, node_p3 in arena_p3.items():
+                  node_p2 = {
+                      "max_depth": node_p3.get("max_depth", 0),
+                      "value": node_p3.get("value", {}),
+                      "children": []
+                  }
+
+                  children_p3 = node_p3.get("children", [])
+                  grouped_edges = defaultdict(list)
+
+                  for (pop, llm_bv_json), dests in children_p3:
+                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      for dest_idx, state_bv_ranges in dests:
+                          if not state_bv_ranges:
+                              grouped_edges[(pop, None)].append((dest_idx, llm_rs))
+                          else:
+                              for start, end in state_bv_ranges:
+                                  for sid in range(start, end + 1):
+                                      grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
+                  
+                  p2_children = []
+                  for (pop, sid), dests_list in grouped_edges.items():
+                      dests_by_dest_idx = defaultdict(RangeSet.empty)
+                      for dest_idx, llm_rs in dests_list:
+                          dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
+                      final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
+                      p2_children.append(((pop, sid), final_dests))
+                  node_p2["children"] = p2_children
+                  arena_p2[uid] = node_p2
+              return cls(roots_map, arena_p2)
+
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -4079,6 +4157,11 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
+
+          @classmethod
+          def from_precompute3_json_string(cls, s: str) -> "Model":
+              """Initializes a precompute3 model from its JSON representation."""
+              return cls.from_json_string(s)
 
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
@@ -5404,7 +5487,8 @@ messages:
 
       def load_competitor_model(competitor_path: Path):
           """Dynamically loads the 'Model' class from a Python file."""
-          module_name = competitor_path.stem
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
           spec = importlib.util.spec_from_file_location(module_name, competitor_path)
           if spec is None or spec.loader is None:
               raise ImportError(f"Could not load spec for module at {competitor_path}")
@@ -5445,47 +5529,67 @@ messages:
           print("Constructing GrammarConstraint...")
           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
           pre2_json_str = grammar_constraint.precompute2_json_string()
+          pre3_json_str = grammar_constraint.precompute3_json_string()
 
           # 4. Load competitor model
           print(f"Loading competitor model from: {args.competitor}")
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          competitor_model = CompetitorModel.from_json_string(pre2_json_str)
+          if 'precompute3' in args.competitor.name:
+              print("-> Using precompute3 JSON for competitor model.")
+              competitor_json_str = pre3_json_str
+          else:
+              print("-> Using precompute2 JSON for competitor model.")
+              competitor_json_str = pre2_json_str
+          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
+          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
           reference_model = ReferenceModel.from_json_string(pre2_json_str)
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
           equivalence_details = "All tested states are equivalent."
-          
-          # Check that root sets are the same before proceeding
-          ref_roots = set(reference_model.roots_map.keys())
-          comp_roots = set(competitor_model.roots_map.keys())
-          if ref_roots != comp_roots:
-              equivalence_passed = False
-              equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-          else:
-              for sid in sorted(list(ref_roots)):
-                  passed, details = are_equivalent_for_state(
-                      reference_model, reference_model.get_root(sid),
-                      competitor_model, competitor_model.get_root(sid),
-                      verbose=False
-                  )
-                  if not passed:
-                      equivalence_passed = False
-                      equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                      break
-          
-          if equivalence_passed:
-              print("✅ Equivalence check passed.")
-          else:
-              print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
+              if equivalence_passed:
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
 
           # 6. Prepare for benchmarking loop
           print(f"Loading and tokenizing code from: {args.code}")
@@ -5570,7 +5674,7 @@ messages:
                       "details": equivalence_details,
                   },
                   "mask_correctness_check": {
-                      "enabled": not args.no_verify_masks,
+                      "enabled": args.verify_masks,
                       "passed": mask_correctness_passed,
                       "details": mask_correctness_details,
                   },
@@ -6253,12 +6357,18 @@ messages:
               return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
 
           def iter_edges(self, node: int, token: int):
-              # For precompute3, llm BV filters at the edge label.
+              # For equivalence checking, we must "explode" the state_bv into individual
+              # state IDs to match the GraphProvider interface expected by the checker.
+              # This is not used by the performance-critical get_mask() method.
               for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
                   if llm_rs.contains(token):
-                      for dest_idx, _ in dests:
-                          # The common interface doesn't handle state_bv, so we yield None for state_id.
-                          yield (int(pop), None, int(dest_idx))
+                      for dest_idx, state_bv_ranges in dests:
+                          if not state_bv_ranges: # Epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv_ranges:
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
@@ -6355,68 +6465,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: |-
-      ```
-      pwd
-      /Users/isaacbreen/Projects2/grammars2024/python
-      tre aug25/
-      [0] aug25/
-      ├── [1] __init__.py
-      ├── [2] benchmark_analyzer.py
-      ├── [3] benchmark_runner.py
-      ├── [4] common_interface.py
-      ├── [5] equality.py
-      ├── [6] optimizer_general.py
-      ├── [7] precompute2_model.py
-      └── [8] precompute3_model.py
-      ```
-      ```
-      bash run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      Benchmark results will be saved in: benchmark_results/2025-08-30_15-46-47
-      ---
-      Reference Model: aug25/precompute2_model.py
-      Competitors: aug25/precompute3_model.py
-      Grammar: ../src/js_simplified3.ebnf
-      Code: ../src/example_code.js
-      ---
-      Starting benchmark runs...
-
-      >>> Running benchmark for: precompute3_model.py
-      --- Setting up benchmark environment ---
-      Loading grammar from: ../src/js_simplified3.ebnf
-      EBNF rules:
-      program -> Sequence([Optional(Ref("statement_list")), Ref("EOF")])
-      EOF -> Literal([60, 124, 69, 79, 70, 124, 62])
-      IGNORE -> Choice([Sequence([Choice([Literal([32]), Literal([9]), Literal([10]), Literal([13])]), Repeat(Choice([Literal([32]), Literal([9]), Literal([10]), Literal([13])]))]), Sequence([Literal([47, 47]), Repeat(CharClass("[^\\n\\r]"))])])
-
-      ...
-
-      --- Tokenizer State ID: 44 ---
-      Root Node Trie2Index(627) (MaxDepth: 0)
-        (Root already visited)
-
-      ===================================
-      Dump Complete.
-      Loading competitor model from: aug25/precompute3_model.py
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 265, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 262, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 98, in run_benchmark
-          CompetitorModel = load_competitor_model(args.competitor)
-                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 60, in load_competitor_model
-          spec.loader.exec_module(module)
-        File "<frozen importlib._bootstrap_external>", line 994, in exec_module
-        File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/precompute3_model.py", line 4, in <module>
-          from .common_interface import GraphProvider, RangeSet
-      ImportError: attempted relative import with no known parent package
-      ```
-      Fix this.
+  - user: Add to the model abstract interface (the with get_mask) a method for initialising
+      it from precompute3. They should all initialize from precompute3, even precompute2
+      (should be pretty straightforward).
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6433,225 +6484,136 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The `ImportError` you're seeing is caused by running a file from within a package as a script, which confuses Python's relative import mechanism. The `benchmark_runner.py` script dynamically loads other modules from the `aug25` package, but it does so in a way that strips their package context.
-
-      The fix is to adjust `benchmark_runner.py` to load the competitor modules using their full package path (e.g., `aug25.precompute3_model`), which allows their internal relative imports to work correctly.
-
-      Here is the patch for `python/aug25/benchmark_runner.py`:
+      I've updated the model interface and implementations to allow initialization from the `precompute3` data format, as you requested. Here are the git diff patches for the changes.
 
       ```diff
-      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -51,7 +51,8 @@
-       
-       def load_competitor_model(competitor_path: Path):
-           """Dynamically loads the 'Model' class from a Python file."""
-      -    module_name = competitor_path.stem
-      +    # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
-      +    module_name = ".".join(competitor_path.with_suffix('').parts)
-           spec = importlib.util.spec_from_file_location(module_name, competitor_path)
-           if spec is None or spec.loader is None:
-               raise ImportError(f"Could not load spec for module at {competitor_path}")
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/benchmark_runner.py
-      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Correctly load competitor models
-      with package context"'
-    metadata:
-  - user: |-
-      Diff of python/src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/example_js.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/benchmark_analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/benchmark_runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/common_interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/equality.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/optimizer_general.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/precompute2_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/precompute3_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |2-
-        (Root already visited)
-
-      ===================================
-      Dump Complete.
-      Loading competitor model from: aug25/precompute3_model.py
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 266, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 263, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 102, in run_benchmark
-          competitor_model = CompetitorModel.from_json_string(pre2_json_str)
-                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/precompute3_model.py", line 37, in from_json_string
-          return Model(roots_map, arena)
-                 ^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/precompute3_model.py", line 24, in __init__
-          llm_rs = RangeSet.from_json(llm_bv_json)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/common_interface.py", line 44, in from_json
-          return RangeSet.from_ranges(ranges_json)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/common_interface.py", line 31, in from_ranges
-          normalized = RangeSet._merge_unsorted(ranges)
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/common_interface.py", line 112, in _merge_unsorted
-          items = sorted([(int(s), int(e)) for s, e in ranges if s is not None and e is not None])
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      TypeError: 'int' object is not iterable
-    metadata:
-  - user: Fix this now.
-    metadata:
-  - assistant: |-
-      Of course. The `TypeError` you're encountering happens because the benchmark runner is trying to load the `precompute3` model using data formatted for the `precompute2` model. Their internal data structures are different, leading to the error when parsing the edge information.
-
-      Additionally, once that loading error is fixed, the equivalence check between the two models would fail because the `precompute3` model's implementation of the graph traversal interface (`iter_edges`) was incorrect for comparison purposes.
-
-      I'll provide patches for both `benchmark_runner.py` to load the correct data and `precompute3_model.py` to ensure the equivalence check can succeed.
-
-      Here is the patch for `python/aug25/benchmark_runner.py`:
-
-      ```diff
-      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      --- a/python/aug25/benchmark_runner.py
-      +++ b/python/aug25/benchmark_runner.py
-      @@ -83,16 +83,24 @@
-           # 3. Construct GrammarConstraint and export reference precompute2 model
-           print("Constructing GrammarConstraint...")
-           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-           pre2_json_str = grammar_constraint.precompute2_json_string()
-      +    pre3_json_str = grammar_constraint.precompute3_json_string()
-       
-           # 4. Load competitor model
+      @@ -87,21 +87,17 @@
            print(f"Loading competitor model from: {args.competitor}")
            CompetitorModel = load_competitor_model(args.competitor)
            
            t_start_load = time.perf_counter()
-      -    competitor_model = CompetitorModel.from_json_string(pre2_json_str)
-      +    if 'precompute3' in args.competitor.name:
-      +        print("-> Using precompute3 JSON for competitor model.")
-      +        competitor_json_str = pre3_json_str
-      +    else:
-      +        print("-> Using precompute2 JSON for competitor model.")
-      +        competitor_json_str = pre2_json_str
-      +    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+      -    if 'precompute3' in args.competitor.name:
+      -        print("-> Using precompute3 JSON for competitor model.")
+      -        competitor_json_str = pre3_json_str
+      -    else:
+      -        print("-> Using precompute2 JSON for competitor model.")
+      -        competitor_json_str = pre2_json_str
+      -    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+      +    # All models now load from precompute3 JSON.
+      +    print("-> Using precompute3 JSON for competitor model.")
+      +    competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
            load_time = time.perf_counter() - t_start_load
            print(f"Competitor model loaded in {load_time:.4f} seconds.")
        
            # 5. Equivalence Check
            print(f"Loading reference model from: {args.reference}")
            ReferenceModel = load_competitor_model(args.reference)
+      -    # The reference model is always loaded from precompute2 JSON for this benchmark suite.
       -    reference_model = ReferenceModel.from_json_string(pre2_json_str)
-      +    # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-      +    reference_model = ReferenceModel.from_json_string(pre2_json_str)
+      +    # The reference model also loads from precompute3 JSON for equivalence checks.
+      +    print("-> Using precompute3 JSON for reference model.")
+      +    reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
            print(f"Running equivalence check against reference model: {args.reference.name}")
            
            equivalence_passed = True
 
-      ```
-
-      And here is the patch for `python/aug25/precompute3_model.py`:
-
-      ```diff
-      diff --git a/python/aug25/precompute3_model.py b/python/aug25/precompute3_model.py
-      --- a/python/aug25/precompute3_model.py
-      +++ b/python/aug25/precompute3_model.py
-      @@ -43,11 +43,16 @@
-               return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+      ``````diff
+      --- a/python/aug25/common_interface.py
+      +++ b/python/aug25/common_interface.py
+      @@ -11,6 +11,11 @@
+               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
+               """
+               raise NotImplementedError
+      +
+      +    @classmethod
+      +    def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
+      +        """Initializes a model from a precompute3-formatted JSON string."""
+      +        raise NotImplementedError
        
-           def iter_edges(self, node: int, token: int):
-      -        # For precompute3, llm BV filters at the edge label.
-      +        # For equivalence checking, we must "explode" the state_bv into individual
-      +        # state IDs to match the GraphProvider interface expected by the checker.
-      +        # This is not used by the performance-critical get_mask() method.
-               for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-                   if llm_rs.contains(token):
-      -                for dest_idx, _ in dests:
-      -                    # The common interface doesn't handle state_bv, so we yield None for state_id.
-      -                    yield (int(pop), None, int(dest_idx))
+       @dataclass(frozen=True, slots=True)
+       class RangeSet:
+
+      ``````diff
+      --- a/python/aug25/precompute2_model.py
+      +++ b/python/aug25/precompute2_model.py
+      @@ -34,6 +34,49 @@
+               arena = {int(k): v for k, v in arena_values}
+               return Model(roots_map, arena)
+       
+      +    @classmethod
+      +    def from_precompute3_json_string(cls, s: str) -> "Model":
+      +        """
+      +        Initializes a precompute2 model from a precompute3-formatted JSON string
+      +        by "exploding" the state ID bitsets from precompute3 edges.
+      +        """
+      +        import json
+      +        from collections import defaultdict
+      +        from .common_interface import RangeSet
+      +
+      +        arr = json.loads(s)
+      +        roots_map, arena_json_p3 = arr
+      +        arena_values_p3 = arena_json_p3.get("values", [])
+      +        arena_p3 = {int(k): v for k, v in arena_values_p3}
+      +
+      +        arena_p2 = {}
+      +        for uid, node_p3 in arena_p3.items():
+      +            node_p2 = {
+      +                "max_depth": node_p3.get("max_depth", 0),
+      +                "value": node_p3.get("value", {}),
+      +                "children": []
+      +            }
+      +
+      +            children_p3 = node_p3.get("children", [])
+      +            grouped_edges = defaultdict(list)
+      +
+      +            for (pop, llm_bv_json), dests in children_p3:
+      +                llm_rs = RangeSet.from_json(llm_bv_json)
       +                for dest_idx, state_bv_ranges in dests:
-      +                    if not state_bv_ranges: # Epsilon transition on GSS stack
-      +                        yield (int(pop), None, int(dest_idx))
+      +                    if not state_bv_ranges:
+      +                        grouped_edges[(pop, None)].append((dest_idx, llm_rs))
       +                    else:
       +                        for start, end in state_bv_ranges:
       +                            for sid in range(start, end + 1):
-      +                                yield (int(pop), sid, int(dest_idx))
+      +                                grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
+      +            
+      +            p2_children = []
+      +            for (pop, sid), dests_list in grouped_edges.items():
+      +                dests_by_dest_idx = defaultdict(RangeSet.empty)
+      +                for dest_idx, llm_rs in dests_list:
+      +                    dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
+      +                final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
+      +                p2_children.append(((pop, sid), final_dests))
+      +            node_p2["children"] = p2_children
+      +            arena_p2[uid] = node_p2
+      +        return cls(roots_map, arena_p2)
+      +
+           def get_root(self, state_id: int) -> int:
+               return self.roots_map[int(state_id)]
        
-           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-               # Final mask to return
+
+      ``````diff
+      --- a/python/aug25/precompute3_model.py
+      +++ b/python/aug25/precompute3_model.py
+      @@ -32,6 +32,11 @@
+               arena = {int(k): v for k, v in arena_values}
+               return Model(roots_map, arena)
+       
+      +    @classmethod
+      +    def from_precompute3_json_string(cls, s: str) -> "Model":
+      +        """Initializes a precompute3 model from its JSON representation."""
+      +        return cls.from_json_string(s)
+      +
+           def get_root(self, state_id: int) -> int:
+               return self.roots_map[int(state_id)]
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 4 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/benchmark_runner.py
@@ -6659,141 +6621,21 @@ messages:
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
 
       --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/common_interface.py
+      Applying patch to 'python/aug25/common_interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/common_interface.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/aug25/precompute2_model.py
+      Applying patch to 'python/aug25/precompute2_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/precompute2_model.py.
+
+      --- Processing Diff Block 4 ---
       Identified target file: python/aug25/precompute3_model.py
       Applying patch to 'python/aug25/precompute3_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly load benchmark data for
-      competitor models and improve precompute3 equivalence check"'
-    metadata:
-  - user: |-
-      Diff of python/src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/example_js.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/benchmark_analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/benchmark_runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/common_interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/equality.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/optimizer_general.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/precompute2_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/precompute3_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      ```
-      ===================================
-      Dump Complete.
-      Loading competitor model from: aug25/precompute3_model.py
-      -> Using precompute3 JSON for competitor model.
-      Competitor model loaded in 0.0053 seconds.
-      Loading reference model from: aug25/precompute2_model.py
-      Running equivalence check against reference model: precompute2_model.py
-      ```
-      It takes a long time for the equivalence check to complete. It'd be nice to have some notion of how it's progressing.
-    metadata:
-  - assistant: |-
-      Of course. The equivalence check iterates through every tokenizer state, which can be time-consuming. I'll add a progress indicator to the benchmark runner so you can see how many states have been verified.
-
-      Here is the patch for `python/aug25/benchmark_runner.py`:
-
-      ```diff
-      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      --- a/python/aug25/benchmark_runner.py
-      +++ b/python/aug25/benchmark_runner.py
-      @@ -121,16 +121,25 @@
-               equivalence_passed = False
-               equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-           else:
-      -        for sid in sorted(list(ref_roots)):
-      +        sorted_roots = sorted(list(ref_roots))
-      +        total_roots = len(sorted_roots)
-      +        print(f"Checking equivalence across {total_roots} tokenizer states...")
-      +        for i, sid in enumerate(sorted_roots):
-      +            # Progress indicator
-      +            if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
-      +                print(f"  ... verified {i+1}/{total_roots} states", end='\r')
-      +
-                   passed, details = are_equivalent_for_state(
-                       reference_model, reference_model.get_root(sid),
-                       competitor_model, competitor_model.get_root(sid),
-                       verbose=False
-                   )
-                   if not passed:
-      +                print() # Newline to clear the progress indicator
-                       equivalence_passed = False
-                       equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                       break
-      +        if equivalence_passed:
-      +            print() # Final newline after progress indicator
-           
-           if equivalence_passed:
-               print("✅ Equivalence check passed.")
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/benchmark_runner.py
-      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
-    metadata:
-  - user: 'Changes committed with message: "Feat: Add progress indicator for equivalence
-      check"'
+  - user: 'Changes committed with message: "Refactor: Unify model loading to use precompute3
+      JSON format"'
     metadata:
 ...

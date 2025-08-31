@@ -14,6 +14,11 @@ class GraphProvider:
         """
         raise NotImplementedError
 
+    @classmethod
+    def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
+        """Initializes a model from a precompute3-formatted JSON string."""
+        raise NotImplementedError
+
 @dataclass(frozen=True, slots=True)
 class RangeSet:
     """

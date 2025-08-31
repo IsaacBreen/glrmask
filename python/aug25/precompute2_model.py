@@ -43,6 +43,53 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         return Model(roots_map, arena)
 
+    @classmethod
+    def from_precompute3_json_string(cls, s: str) -> "Model":
+        """
+        Initializes a precompute2 model from a precompute3-formatted JSON string
+        by "exploding" the state ID bitsets from precompute3 edges.
+        """
+        import json
+        from collections import defaultdict
+        from .common_interface import RangeSet
+
+        arr = json.loads(s)
+        roots_map, arena_json_p3 = arr
+        arena_values_p3 = arena_json_p3.get("values", [])
+        arena_p3 = {int(k): v for k, v in arena_values_p3}
+
+        arena_p2 = {}
+        for uid, node_p3 in arena_p3.items():
+            node_p2 = {
+                "max_depth": node_p3.get("max_depth", 0),
+                "value": node_p3.get("value", {}),
+                "children": []
+            }
+
+            children_p3 = node_p3.get("children", [])
+            grouped_edges = defaultdict(list)
+
+            for (pop, llm_bv_json), dests in children_p3:
+                llm_rs = RangeSet.from_json(llm_bv_json)
+                for dest_idx, state_bv_ranges in dests:
+                    if not state_bv_ranges:
+                        grouped_edges[(pop, None)].append((dest_idx, llm_rs))
+                    else:
+                        for start, end in state_bv_ranges:
+                            for sid in range(start, end + 1):
+                                grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
+            
+            p2_children = []
+            for (pop, sid), dests_list in grouped_edges.items():
+                dests_by_dest_idx = defaultdict(RangeSet.empty)
+                for dest_idx, llm_rs in dests_list:
+                    dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
+                final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
+                p2_children.append(((pop, sid), final_dests))
+            node_p2["children"] = p2_children
+            arena_p2[uid] = node_p2
+        return cls(roots_map, arena_p2)
+
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
 

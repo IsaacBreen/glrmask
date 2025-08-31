@@ -36,6 +36,11 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         return Model(roots_map, arena)
 
+    @classmethod
+    def from_precompute3_json_string(cls, s: str) -> "Model":
+        """Initializes a precompute3 model from its JSON representation."""
+        return cls.from_json_string(s)
+
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
 
