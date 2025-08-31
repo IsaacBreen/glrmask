@@ -665,6 +665,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
         let mask_start = Instant::now();
         constraint_state.print_gss_stats();
+        constraint_state.print_gss();
         constraint_state.explain_stack();
         // let current_mask = constraint_state.get_mask();
         // println!("  get_mask took: {:?}", mask_start.elapsed());
