@@ -579,8 +579,8 @@ impl GLRParser {
 
         // --- Actions & Gotos ---
         if let Some(row) = self.table.get(&state_id) {
-            writeln!(f, "{}Actions (without default reduce):", indent)?;
-            format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
+            // writeln!(f, "{}Actions (without default reduce):", indent)?;
+            // format_actions(f, &row.shifts_and_reduces_without_default_reduce, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
 
             writeln!(f, "{}Actions (full):", indent)?;
             format_actions(f, &row.shifts_and_reduces_full, &self.terminal_map, &self.non_terminal_map, &self.productions, &sub_indent)?;
