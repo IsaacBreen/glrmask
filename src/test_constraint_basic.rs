@@ -1574,6 +1574,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After second single '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
     let nodes2 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
@@ -1582,6 +1583,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After third single '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
     let nodes3 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
