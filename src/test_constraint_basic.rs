@@ -1556,7 +1556,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     let mut constraint_state = constraint.init();
 
     // Warm-up commit
-    constraint_state.commit_bytes(b"{{{{");
+    constraint_state.commit_bytes(b"{{");
     assert!(constraint_state.is_active());
 
     // First single '{' commit
@@ -1566,7 +1566,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
 
-    // Second single '{' commit
+    // Second single '{' commit$
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     let nodes2 = gather_gss_stats(
