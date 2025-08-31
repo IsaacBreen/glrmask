@@ -1552,6 +1552,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
 
     constraint_state.commit_bytes(b"{{{{{{{{");
     assert!(constraint_state.is_active());
+    constraint_state.print_gss();
     let stats = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     );
@@ -1561,6 +1562,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     // Commit one more
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
+    constraint_state.print_gss();
     let final_stats = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     );
