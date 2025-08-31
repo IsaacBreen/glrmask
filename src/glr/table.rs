@@ -726,7 +726,17 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
             }
         }
 
-        let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
+        // First, check for a reduction of the initial production (ID 0). If it exists, it's always promoted.
+        let promoted_reduce_key = reduce_counts.iter().find_map(|(key, (_, pids))| {
+            if pids.contains(&ProductionID(0)) {
+                Some(*key)
+            } else {
+                None
+            }
+        }).or_else(|| {
+            // Otherwise, use the original logic: promote the most common reduction.
+            reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key)
+        });
 
         let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
