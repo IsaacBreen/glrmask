@@ -2526,7 +2526,34 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn print_gss(&self) {
-        todo!()
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+        if roots.is_empty() {
+            println!("GSS is empty.");
+            return;
+        }
+
+        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+
+        let config = GSSPrintConfig {
+            labels: Some(&labels),
+            max_edges: 500,
+            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+            verbose: true,
+        };
+
+        let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
+        println!("{}", gss_str);
+
+        if !state_ids.is_empty() {
+            println!("\n--- GSS State Explanations ---");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+        }
     }
 
     pub fn explain_stack(&self) {
