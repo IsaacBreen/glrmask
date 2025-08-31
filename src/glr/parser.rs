@@ -1687,9 +1687,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn is_ok(&self) -> bool {
-        let accepted_now = self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty());
-        let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
-        accepted_now || accepted_prev || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+        !self.active_state.stack.is_empty() && self.active_state.stack.is_alive()
     }
 
     /// Returns true if the token processed two steps ago lead to an `accept` action.
