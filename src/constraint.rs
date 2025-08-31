@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -2522,6 +2522,74 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "GSS stats: {:#?}", stats);
     }
 
+    pub fn print_gss(&self) {
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+        if roots.is_empty() {
+            println!("GSS is empty.");
+            return;
+        }
+
+        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+
+        let config = GSSPrintConfig {
+            labels: Some(&labels),
+            max_edges: 500,
+            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+            verbose: false,
+        };
+
+        let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
+        println!("{}", gss_str);
+
+        if !state_ids.is_empty() {
+            println!("\n--- GSS State Explanations ---");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+        }
+    }
+
+    pub fn explain_stack(&self) {
+        for (state_id, state) in &self.state {
+            println!("\n--- State {} ---", state_id.0);
+            // Sample and print a bunch of stacks
+            let mut seen = BTreeSet::new();
+            let num_to_sample = 10;
+            for i in 0..1000 {
+                if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
+                    let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                        .map(|edge| edge.state_id)
+                        .collect();
+                    sampled_stack.reverse();
+                    if seen.contains(&sampled_stack) {
+                        continue;
+                    }
+                    println!("  Sampled stack {}: {:?}", i + 1, sampled_stack);
+                    seen.insert(sampled_stack);
+                    if seen.len() >= num_to_sample {
+                        break;
+                    }
+                };
+            }
+            // Sample a stack
+            if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
+                let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                    .map(|edge| edge.state_id)
+                    .collect();
+                sampled_stack.reverse();
+                let explanation = self.parent.parser.explain_stack(&sampled_stack);
+                // Indent the explanation for readability
+                for line in explanation.lines() {
+                    println!("      {}", line);
+                }
+            };
+        }
+    }
+
     pub fn get_mask3(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
@@ -2834,8 +2902,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    pub fn is_active_or_accepted(&self) -> bool {
-        !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty() || s.has_accepted())
+    pub fn is_active(&self) -> bool {
+        !self.state.is_empty()
     }
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {

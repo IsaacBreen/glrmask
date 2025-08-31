@@ -85,7 +85,7 @@ fn test_trivial() {
 
     // Commit "a"
     state.commit(LLMTokenID(0));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
 
     // Mask should now allow "$"
     let mask2 = state.get_mask();
@@ -93,7 +93,7 @@ fn test_trivial() {
 
     // Commit "$"
     state.commit(LLMTokenID(1));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
 
     // Mask should now be empty as we've reached the end of a valid parse
     let mask3 = state.get_mask();
@@ -159,7 +159,7 @@ fn test_constraint_simple() {
     // Commit "ab" (LLMTokenID 0)
     println!("{}", &constraint_state);
     constraint_state.commit(LLMTokenID(0));
-    assert!(constraint_state.is_active_or_accepted());
+    assert!(constraint_state.is_active());
 
     // Mask after committing "ab"
     println!("Constraint state:\n{}", &constraint_state);
@@ -878,7 +878,7 @@ fn test_hideous_ambiguity() {
             break;
         }
         constraint_state.commit(LLMTokenID(a_id));
-        if !constraint_state.is_active_or_accepted() {
+        if !constraint_state.is_active() {
             println!("Constraint state became inactive at iteration {}.", i);
             break;
         }
@@ -1492,10 +1492,112 @@ fn test_constraint_expression_cycle() {
 
     // Commit "$"
     state.commit(LLMTokenID(1));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
+}
+
+#[test]
+fn test_ambiguous_tokenizer_no_gss_explosion() {
+    // Grammar: S -> A, A -> '{' A '}' | ''
+    // Tokenizer:
+    //   - OPEN_BRACE: '{'
+    //   - CLOSE_BRACE: '}'
+    //   - ANYTHING: '{'+
+    // This setup creates a situation where a single '{' can be tokenized as either
+    // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
+    // by the parser, but the ambiguity exists for the tokenizer and could lead to
+    // complex states if not handled correctly. We want to ensure this doesn't cause
+    // an exponential blowup in the GSS.
+
+    // 1. Tokenizer
+    let tokenizer_expr = groups![
+        eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
+        eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
+        repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. Grammar
+    let productions = vec![
+        prod("S", vec![nt("A")]),
+        prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
+        prod("A", vec![]),
+    ];
+
+    // 3. LLM Vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
+    let max_original_llm_token_id = 1;
+
+    // 4. Mappings
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
+    grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(regex_name("OPEN_BRACE"), 0);
+    token_name_map.insert(regex_name("CLOSE_BRACE"), 1);
+    token_name_map.insert(regex_name("ANYTHING"), 2);
+
+    // 5. Parser and Constraint
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        max_original_llm_token_id,
+    );
+
+    // 6. Test Logic
+    let mut constraint_state = constraint.init();
+
+    // Warm-up commit
+    constraint_state.commit_bytes(b"{{");
+    assert!(constraint_state.is_active());
+    println!("After warm-up '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
+
+    // First single '{' commit
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    println!("After first single '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
+    let nodes1 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    // Second single '{' commit$
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    println!("After second single '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
+    let nodes2 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    // Third single '{' commit
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    println!("After third single '{{': {} states", constraint_state.state.len());
+    constraint_state.print_gss();
+    let nodes3 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    let increase1 = nodes2 - nodes1;
+    let increase2 = nodes3 - nodes2;
+
+    // The increase in nodes should stabilize or decrease, not grow.
+    assert!(
+        increase2 <= increase1,
+        "GSS node growth should not accelerate. First increase: {}, Second increase: {}",
+        increase1,
+        increase2
+    );
 }
 
 #[test]
