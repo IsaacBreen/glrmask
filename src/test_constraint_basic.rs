@@ -1566,7 +1566,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     last_gss_nodes = stats.unique_nodes;
 
     // Commit one more
-    constraint_state.commit_bytes(b"{{");
+    constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     constraint_state.print_gss();
     let final_stats = gather_gss_stats(
