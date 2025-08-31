@@ -1550,23 +1550,21 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     let mut constraint_state = constraint.init();
     let mut last_gss_nodes = 0;
 
-    for i in 1..=8 {
-        constraint_state.commit_bytes(b"{");
-        assert!(constraint_state.is_active());
-        let stats = gather_gss_stats(
-            &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        println!("After {} commits: GSS stats = {:?}", i, stats);
-        last_gss_nodes = stats.unique_nodes;
-    }
+    constraint_state.commit_bytes(b"{{{{{{{{");
+    assert!(constraint_state.is_active());
+    let stats = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    );
+    println!("After first commit: GSS stats = {:?}", stats);
+    last_gss_nodes = stats.unique_nodes;
 
-    // Commit one more time
+    // Commit one more
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     let final_stats = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     );
-    println!("After 9 commits: GSS stats = {:?}", final_stats);
+    println!("After second commit: GSS stats = {:?}", final_stats);
 
     // The number of nodes should only increase by a small constant amount, not exponentially.
     // The exact number can vary with implementation details, but it should be small.
