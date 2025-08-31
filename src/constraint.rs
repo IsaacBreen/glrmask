@@ -496,6 +496,8 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
+        return (BTreeMap::new(), Trie1GodWrapper::new()); // TEMP
+
         let mut helper = Precomputer::new(
             tokenizer,
             parser,
@@ -1923,6 +1925,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
+        return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
         // self.get_mask2()
         self.get_mask3()
