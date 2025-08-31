@@ -80,16 +80,13 @@ impl JSONConvertible for PrecomputedNode3Contents {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalAllowanceCheckMode {
+    #[default]
     None,
     ImmediateSets,
     ImmediateProbe,
     StepProbe,
-}
-
-impl Default for TerminalAllowanceCheckMode {
-    fn default() -> Self { TerminalAllowanceCheckMode::None }
 }
 
 impl JSONConvertible for TerminalAllowanceCheckMode {
