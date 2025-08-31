@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -2523,6 +2523,24 @@ impl<'a> GrammarConstraintState<'a> {
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         crate::debug!(2, "GSS stats: {:#?}", stats);
+    }
+
+    pub fn explain_stack(&self) {
+        for (state_id, state) in &self.state {
+            println!("\n--- State {} ---", state_id.0);
+            // Sample a stack
+            if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
+                let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                    .map(|edge| edge.state_id)
+                    .collect();
+                sampled_stack.reverse();
+                let explanation = self.parent.parser.explain_stack(&sampled_stack);
+                // Indent the explanation for readability
+                for line in explanation.lines() {
+                    println!("      {}", line);
+                }
+            };
+        }
     }
 
     pub fn get_mask3(&self) -> LLMTokenBV {
