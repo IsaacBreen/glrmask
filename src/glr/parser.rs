@@ -1465,10 +1465,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
-        // Reset acceptance flag for the new token
-        self.accepted = false;
-        self.active_state.accepted_state = Arc::new(GSSNode::new_fresh());
-
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1504,6 +1500,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_active.merge(state);
         }
         self.active_state = next_active;
+
+        // Reset acceptance flag for the new token
+        self.accepted = false;
+        self.active_state.accepted_state = Arc::new(GSSNode::new_fresh());
+
         self.log_gss("Phase1/2-end", token_id, false, false);
         self.below_bottom_cache.clear();
     }
