@@ -282,9 +282,9 @@ fn _compute_first_set_for_item(
 }
 
 #[time_it]
-pub fn compute_closure<'a>(
+pub fn compute_closure(
     items: &BTreeSet<Item>,
-    prods_by_lhs: &BTreeMap<NonTerminal, Vec<&'a Production>>,
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<Arc<Production>>>,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
@@ -299,10 +299,10 @@ pub fn compute_closure<'a>(
         if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
             if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
                 let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
-                for &prod in prods_for_nt {
+                for prod in prods_for_nt {
                     for lookahead in lookaheads.iter().cloned() {
                         let new_item = Item {
-                            production: Arc::new(prod.clone()),
+                            production: prod.clone(),
                             dot_position: 0,
                             lookahead,
                         };
@@ -318,21 +318,21 @@ pub fn compute_closure<'a>(
     if lalr_mode {
         crate::debug!(4, "Computing LALR closure.");
         let mut lalr_closure = BTreeSet::new();
-        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+        let mut reduce_item_cores: BTreeMap<(Arc<Production>, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
         // Separate reduce and non-reduce items, and group reduce items by core
         for item in closure {
-            reduce_item_cores.entry(((*item.production).clone(), item.dot_position)).or_default().insert(item.lookahead);
+            reduce_item_cores.entry((item.production.clone(), item.dot_position)).or_default().insert(item.lookahead);
         }
 
         // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
-        for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
-            if let Some(follows) = follow_sets.get(&prod.lhs) {
+        for ((prod_arc, dot_pos), existing_lookaheads) in reduce_item_cores {
+            if let Some(follows) = follow_sets.get(&prod_arc.lhs) {
                 for lookahead in follows {
                     if lookahead == &None && !existing_lookaheads.contains(&None) {
                         continue;
                     }
-                    lalr_closure.insert(Item { production: Arc::new(prod.clone()), dot_position: dot_pos, lookahead: lookahead.clone() });
+                    lalr_closure.insert(Item { production: prod_arc.clone(), dot_position: dot_pos, lookahead: lookahead.clone() });
                 }
             }
         }

@@ -360,22 +360,24 @@ fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BT
 
 #[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
+    let productions_arc: Vec<Arc<Production>> = productions.iter().cloned().map(Arc::new).collect();
+
     let start_production_id = 0;
     let initial_item = Item {
-        production: Arc::new(productions[start_production_id].clone()),
+        production: productions_arc[start_production_id].clone(),
         dot_position: 0,
         lookahead: None,
     };
-    let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
+    let initial_item_set = BTreeSet::from([initial_item.clone()]);
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
-    for p in productions {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
+    for p in &productions_arc {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
     }
 
     let mut worklist = VecDeque::from([initial_item_set.clone()]);
@@ -387,12 +389,12 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     // --- Create the 'everything' item set ---
     if EVERYTHING {
         let mut everything_item_set = BTreeSet::new();
-        for prod in productions {
+        for prod in &productions_arc {
             if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
                 for dot_position in 0..=prod.rhs.len() {
                     for lookahead in lookaheads {
                         let item = Item {
-                            production: Arc::new(prod.clone()),
+                            production: prod.clone(),
                             dot_position,
                             lookahead: lookahead.clone(),
                         };
