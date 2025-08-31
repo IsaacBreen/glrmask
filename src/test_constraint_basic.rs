@@ -1499,6 +1499,87 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+fn test_ambiguous_tokenizer_no_gss_explosion() {
+    // Grammar: S -> '{'+
+    // Tokenizer:
+    //   - OPEN_BRACE: '{'
+    //   - ANYTHING: '{'+
+    // This setup creates a situation where a single '{' can be tokenized as either
+    // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
+    // by the parser, but the ambiguity exists for the tokenizer and could lead to
+    // complex states if not handled correctly. We want to ensure this doesn't cause
+    // an exponential blowup in the GSS.
+
+    // 1. Tokenizer
+    let tokenizer_expr = groups![
+        eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
+        repeat1_fast(eat_u8_fast(b'{')) // Group 1: ANYTHING
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. Grammar
+    let productions = vec![
+        prod("S", vec![nt("S"), t("OPEN_BRACE")]),
+        prod("S", vec![t("OPEN_BRACE")]),
+    ];
+
+    // 3. LLM Vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
+    let max_original_llm_token_id = 0;
+
+    // 4. Mappings
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(regex_name("OPEN_BRACE"), 0);
+    token_name_map.insert(regex_name("ANYTHING"), 1);
+
+    // 5. Parser and Constraint
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        max_original_llm_token_id,
+    );
+
+    // 6. Test Logic
+    let mut constraint_state = constraint.init();
+    let mut last_gss_nodes = 0;
+
+    for i in 1..=8 {
+        constraint_state.commit_bytes(b"{");
+        assert!(constraint_state.is_active());
+        let stats = gather_gss_stats(
+            &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        println!("After {} commits: GSS stats = {:?}", i, stats);
+        last_gss_nodes = stats.num_nodes;
+    }
+
+    // Commit one more time
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    let final_stats = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    );
+    println!("After 9 commits: GSS stats = {:?}", final_stats);
+
+    // The number of nodes should only increase by a small constant amount, not exponentially.
+    // The exact number can vary with implementation details, but it should be small.
+    // Let's assert it increases by at most 5.
+    assert!(
+        final_stats.num_nodes <= last_gss_nodes + 5,
+        "GSS nodes should not grow exponentially. Before: {}, After: {}",
+        last_gss_nodes,
+        final_stats.num_nodes
+    );
+}
+
+#[test]
 fn test_constraint_indirect_recursion_simplified() {
     // Grammar: S' -> S EOF; S -> a E | b; E -> S
     // This is equivalent to S -> a* b, so valid strings are "b", "ab", "aab", etc.
