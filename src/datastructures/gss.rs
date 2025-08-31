@@ -1314,6 +1314,96 @@ pub(crate) fn fuse_predecessors_recursive(
     result_arc
 }
 
+/// Canonicalizes a GSS to remove structural redundancy by merging isomorphic subgraphs.
+/// This is a more powerful simplification than `fuse_predecessors`.
+pub fn canonicalize_gss(root_arc: &mut Arc<GSSNode>) {
+    // A map from a node's pointer to its canonicalized Arc.
+    let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+    // A map from a node's structural representation to its canonical Arc.
+    let mut structural_cache: BTreeMap<
+        BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<*const GSSNode>>>,
+        Arc<GSSNode>,
+    > = BTreeMap::new();
+
+    let new_root = canonicalize_gss_recursive(root_arc, &mut memo, &mut structural_cache);
+    *root_arc = new_root;
+}
+
+fn canonicalize_gss_recursive(
+    node_arc: &Arc<GSSNode>,
+    memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+    structural_cache: &mut BTreeMap<
+        BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<*const GSSNode>>>,
+        Arc<GSSNode>,
+    >,
+) -> Arc<GSSNode> {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if let Some(canonical_arc) = memo.get(&node_ptr) {
+        return canonical_arc.clone();
+    }
+
+    // For root nodes, their identity is their Acc. We don't merge them based on structure.
+    // They are the leaves of our recursion from a structural point of view.
+    if node_arc.is_root() {
+        memo.insert(node_ptr, node_arc.clone());
+        return node_arc.clone();
+    }
+
+    // Post-order traversal: canonicalize children first.
+    let mut new_predecessors_map = NodeMap::new();
+    let mut structural_key = BTreeMap::new();
+    let mut children_changed = false;
+
+    for (edge_val, preds_by_depth) in node_arc.predecessors() {
+        let mut new_preds_by_depth = BTreeMap::new();
+        let mut key_preds_by_depth = BTreeMap::new();
+
+        for (dest_key, pred_vec) in preds_by_depth {
+            let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
+            let mut key_pred_vec = Vec::with_capacity(pred_vec.len());
+
+            for pred_arc in pred_vec {
+                let canonical_pred = canonicalize_gss_recursive(pred_arc, memo, structural_cache);
+                if !Arc::ptr_eq(&canonical_pred, pred_arc) {
+                    children_changed = true;
+                }
+                key_pred_vec.push(Arc::as_ptr(&canonical_pred));
+                new_pred_vec.push(canonical_pred);
+            }
+
+            key_pred_vec.sort_unstable(); // Canonical order for key
+            new_pred_vec.sort_by_key(|a| Arc::as_ptr(a)); // Canonical order for node content
+
+            new_preds_by_depth.insert(*dest_key, new_pred_vec);
+            key_preds_by_depth.insert(*dest_key, key_pred_vec);
+        }
+        new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
+        structural_key.insert(edge_val.clone(), key_preds_by_depth);
+    }
+
+    // Look up the canonical representative for this structure.
+    if let Some(canonical_node) = structural_cache.get(&structural_key) {
+        memo.insert(node_ptr, canonical_node.clone());
+        return canonical_node.clone();
+    }
+
+    // This is the first time we see this structure.
+    // If children were changed, we need to create a new node.
+    // Otherwise, this node itself becomes the canonical representative.
+    let canonical_node = if children_changed {
+        Arc::new(GSSNode::new_with_map(
+            Arc::new(Acc::new_fresh()),
+            new_predecessors_map,
+        ))
+    } else {
+        node_arc.clone()
+    };
+
+    structural_cache.insert(structural_key, canonical_node.clone());
+    memo.insert(node_ptr, canonical_node.clone());
+    canonical_node
+}
+
 pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
     trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
