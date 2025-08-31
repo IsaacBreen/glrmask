@@ -1210,7 +1210,7 @@ impl<'a> IncrementalParser<'a> {
             }
 
             if let Some(end_state_id) = results.end_state {
-                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)); // Use accessor
+                let possible_final_grammar_tokens: BTreeSet<_> = self.grammar.tokenizer().tokens_accessible_from_state(TokenizerStateID(end_state_id)); // Use accessor
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     let mut final_glr_state = current_glr_state.clone();
                     final_glr_state.step(possible_final_grammar_token);

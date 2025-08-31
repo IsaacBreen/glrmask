@@ -113,7 +113,7 @@ impl Regex {
         ExecuteResult { matches, end_state: new_state }
     }
 
-    pub(crate) fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> Vec<GrammarTokenID> {
+    pub(crate) fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> BTreeSet<GrammarTokenID> {
         let regex_state = self.init_to_state(state.0);
         regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }

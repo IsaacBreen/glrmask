@@ -16,6 +16,24 @@ macro_rules! choice_fast {
 
 use chrono::Local; // Import the Local timezone functionality
 
+/// The compile-time debug level. Messages with a level greater than this will be ignored.
+pub const MACRO_DEBUG_LEVEL: usize = 3;
+
+/// A list of filenames (not full paths) to allow debug messages from.
+/// If this list is empty, all files are allowed (respecting `MACRO_DEBUG_LEVEL`).
+/// Example: `&["parser.rs", "constraint.rs"]`
+pub const ALLOWED_FILES: &[&str] = &[
+    // "parser.rs", // Example: Uncomment to allow messages from parser.rs
+    // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+    // "interface.rs",
+    // Add more filenames here as needed
+];
+
+/// Checks if a given debug level is enabled based on `MACRO_DEBUG_LEVEL`.
+pub fn is_debug_level_enabled(level: usize) -> bool {
+    level <= MACRO_DEBUG_LEVEL
+}
+
 /// Internal implementation detail for the `debug!` macro.
 /// This macro contains the shared logic and configuration to avoid duplication.
 /// It should not be used directly.
@@ -23,29 +41,15 @@ use chrono::Local; // Import the Local timezone functionality
 #[macro_export]
 macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        // --- Configuration (Defined Once) ---
-        // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 2;
-        // List of filenames (not full paths) to allow debug messages from.
-        // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
-        // Example: &["parser.rs", "constraint.rs"]
-        const ALLOWED_FILES: &[&str] = &[
-            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
-            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
-            // "interface.rs",
-            // Add more filenames here as needed
-        ];
-        // --- End Configuration ---
-
         // Runtime check against the message's level and file path
-        if $level <= MACRO_DEBUG_LEVEL {
+        if $level <= $crate::r#macro::MACRO_DEBUG_LEVEL {
             let current_file_path = std::path::Path::new(file!());
             // Extract the filename, default to empty string if extraction fails
             let current_filename = current_file_path.file_name()
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename) {
+            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
                 // Optional: Keep this if you want compile-time stripping based on a feature flag
                 // #[cfg(feature = "debug")]
                 { // Use a block to scope the 'now' variable and the import
