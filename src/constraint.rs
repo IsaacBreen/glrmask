@@ -2778,6 +2778,7 @@ impl<'a> GrammarConstraintState<'a> {
         let gss_stats_before_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
+        crate::debug!(5, "Terminals map: {:?}", terminals_map);
         for state in self.state.values_mut() {
             prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
         }
