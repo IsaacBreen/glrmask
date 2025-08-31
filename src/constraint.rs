@@ -417,13 +417,13 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
-        Self::_dump_precomputed(
-            &precomputed,
-            &llm_vocab.original_to_internal_id_bimap,
-            &token_name_map,
-            &llm_vocab.llm_token_map,
-            &trie1_god,
-        );
+        // Self::_dump_precomputed(
+        //     &precomputed,
+        //     &llm_vocab.original_to_internal_id_bimap,
+        //     &token_name_map,
+        //     &llm_vocab.llm_token_map,
+        //     &trie1_god,
+        // );
 
         let (precomputed2, trie2_god) = Self::precompute2(
             &precomputed,
@@ -444,12 +444,12 @@ impl GrammarConstraint {
         crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2, &trie2_god);
         crate::constraint_extra::print_precompute_stats2(&stats2, &trie2_god);
 
-        Self::_dump_precomputed2(
-            &precomputed2,
-            &llm_vocab.original_to_internal_id_bimap,
-            &llm_vocab.llm_token_map,
-            &trie2_god,
-        );
+        // Self::_dump_precomputed2(
+        //     &precomputed2,
+        //     &llm_vocab.original_to_internal_id_bimap,
+        //     &llm_vocab.llm_token_map,
+        //     &trie2_god,
+        // );
 
         let (precomputed3, trie3_god) = Self::precompute3(
             &precomputed2,
@@ -461,12 +461,12 @@ impl GrammarConstraint {
         crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
         crate::constraint_extra::print_precompute_stats3(&stats3, &trie3_god);
 
-        Self::_dump_precomputed3(
-            &precomputed3,
-            &llm_vocab.original_to_internal_id_bimap,
-            &llm_vocab.llm_token_map,
-            &trie3_god,
-        );
+        // Self::_dump_precomputed3(
+        //     &precomputed3,
+        //     &llm_vocab.original_to_internal_id_bimap,
+        //     &llm_vocab.llm_token_map,
+        //     &trie3_god,
+        // );
 
         let mut gc = Self {
             tokenizer,
