@@ -1480,6 +1480,7 @@ pub(crate) struct GSSStats {
     pub(crate) num_unique_root_predecessor_keys: usize,
     pub(crate) total_edges: usize,
     pub(crate) unique_nodes: usize,
+    pub(crate) num_leaves: usize,
     pub(crate) structurally_unique_nodes: usize,
     pub(crate) structural_redundancy: f64,
     pub(crate) num_redundant_nodes: usize,
@@ -1522,6 +1523,10 @@ pub(crate) fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
         let node_ptr = node as *const GSSNode;
         if !visited.insert(node_ptr) {
             continue;
+        }
+
+        if node.is_root() {
+            stats.num_leaves += 1;
         }
 
         stats.unique_nodes += 1;
