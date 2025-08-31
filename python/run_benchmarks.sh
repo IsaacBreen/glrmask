@@ -24,7 +24,7 @@ set -euo pipefail
 
 # --- Configuration ---
 # Use environment variables if set, otherwise use defaults.
-: "${GRAMMAR_FILE:="../src/js_simplified3.ebnf"}"
+: "${GRAMMAR_FILE:="../src/js.ebnf"}"
 : "${CODE_FILE:="../src/example_code.js"}"
 
 # --- Argument Validation ---
