@@ -3,14 +3,13 @@ use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals
 use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
 pub use crate::types::TerminalID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
-use fxhash::FxHashSet;
 use std::sync::Arc;
 use crate::interface::display_productions;
 // Added for derive macro pattern
@@ -345,30 +344,13 @@ type Stage7Result = (
     StateID,
 );
 
-fn kernel_core_key(items: &BTreeSet<Item>) -> Vec<(usize, usize)> {
-    // Represent the kernel by sorted (production_ptr, dot_position) pairs.
-    // production_ptr uses the Arc pointer address; equal for clones of the same Arc.
-    let mut v: Vec<(usize, usize)> = Vec::with_capacity(items.len());
-    for it in items {
-        let prod_ptr = std::sync::Arc::as_ptr(&it.production) as usize;
-        v.push((prod_ptr, it.dot_position));
-    }
-    v.sort_unstable();
-    v
-}
-
-fn stage_1_row(
-    worklist: &mut VecDeque<BTreeSet<Item>>,
-    visited_cores: &mut FxHashSet<Vec<(usize, usize)>>,
-    splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>,
-) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
     let mut row = BTreeMap::new();
     for (symbol, items_in_split) in &splits {
         row.insert(symbol.clone(), items_in_split.clone());
         if symbol.is_some() {
             let goto_set = compute_goto(items_in_split);
-            let key = kernel_core_key(&goto_set);
-            if visited_cores.insert(key) {
+            if visited_kernels.insert(goto_set.clone()) {
                 worklist.push_back(goto_set);
             }
         }
@@ -378,42 +360,37 @@ fn stage_1_row(
 
 #[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
-    let productions_arc: Vec<Arc<Production>> = productions.iter().cloned().map(Arc::new).collect();
-
     let start_production_id = 0;
     let initial_item = Item {
-        production: productions_arc[start_production_id].clone(),
+        production: Arc::new(productions[start_production_id].clone()),
         dot_position: 0,
         lookahead: None,
     };
-    let initial_item_set = BTreeSet::from([initial_item.clone()]);
+    let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
 
     let first_sets = compute_first_sets_for_nonterminals(productions);
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Arc<Production>>> = BTreeMap::new();
-    for p in &productions_arc {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
     }
 
     let mut worklist = VecDeque::from([initial_item_set.clone()]);
     let mut transitions: Stage1Table = BTreeMap::new();
-    let mut visited_cores: FxHashSet<Vec<(usize, usize)>> = FxHashSet::default();
-    visited_cores.insert(kernel_core_key(&initial_item_set));
-
-    let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
+    let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
 
     // --- Create the 'everything' item set ---
     if EVERYTHING {
         let mut everything_item_set = BTreeSet::new();
-        for prod in &productions_arc {
+        for prod in productions {
             if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
                 for dot_position in 0..=prod.rhs.len() {
                     for lookahead in lookaheads {
                         let item = Item {
-                            production: prod.clone(),
+                            production: Arc::new(prod.clone()),
                             dot_position,
                             lookahead: lookahead.clone(),
                         };
@@ -423,8 +400,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
             }
         }
         // Add the everything set to the worklist if it's not already there
-        let key = kernel_core_key(&everything_item_set);
-        if visited_cores.insert(key) {
+        if visited_kernels.insert(everything_item_set.clone()) {
             worklist.push_back(everything_item_set);
         }
     }
@@ -445,9 +421,9 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
                 do_lalr
             }
         };
-        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
+        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
         let splits = split_on_dot(&closure);
-        let row = stage_1_row(&mut worklist, &mut visited_cores, splits);
+        let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
         transitions.insert(item_set, row);
     }
 
