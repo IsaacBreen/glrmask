@@ -85,7 +85,7 @@ fn test_trivial() {
 
     // Commit "a"
     state.commit(LLMTokenID(0));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
 
     // Mask should now allow "$"
     let mask2 = state.get_mask();
@@ -93,7 +93,7 @@ fn test_trivial() {
 
     // Commit "$"
     state.commit(LLMTokenID(1));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
 
     // Mask should now be empty as we've reached the end of a valid parse
     let mask3 = state.get_mask();
@@ -159,7 +159,7 @@ fn test_constraint_simple() {
     // Commit "ab" (LLMTokenID 0)
     println!("{}", &constraint_state);
     constraint_state.commit(LLMTokenID(0));
-    assert!(constraint_state.is_active_or_accepted());
+    assert!(constraint_state.is_active());
 
     // Mask after committing "ab"
     println!("Constraint state:\n{}", &constraint_state);
@@ -878,7 +878,7 @@ fn test_hideous_ambiguity() {
             break;
         }
         constraint_state.commit(LLMTokenID(a_id));
-        if !constraint_state.is_active_or_accepted() {
+        if !constraint_state.is_active() {
             println!("Constraint state became inactive at iteration {}.", i);
             break;
         }
@@ -1492,7 +1492,7 @@ fn test_constraint_expression_cycle() {
 
     // Commit "$"
     state.commit(LLMTokenID(1));
-    assert!(state.is_active_or_accepted());
+    assert!(state.is_active());
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, HybridBitset::from_iter(vec![]));

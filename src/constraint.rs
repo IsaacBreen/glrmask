@@ -2893,8 +2893,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    pub fn is_active_or_accepted(&self) -> bool {
-        !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty() || s.has_accepted())
+    pub fn is_active(&self) -> bool {
+        !self.state.is_empty()
     }
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
