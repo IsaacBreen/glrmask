@@ -839,23 +839,21 @@ impl<'a> GLRParserState<'a> { // No longer generic
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         accepted_states_todo: &mut VecDeque<ParseState>,
-    action_selector: F,
-    config: &ProcessTokenAdvancedConfig,
-    fuel: &mut Option<usize>,
-    early_exit_on_shift: &mut bool,
-)
-where
-    F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
+        action_selector: F,
+        config: &ProcessTokenAdvancedConfig,
+        fuel: &mut Option<usize>,
+    )
+    where
+        F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
         assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
         for (state, per_state_fuel) in work_map.values() {
-        assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
-    }
-    while let Some(entry) = work_map.pop_first() {
-        if *early_exit_on_shift { return; }
-        let (key, (state, per_state_fuel)) = entry;
-        if let Some(f) = fuel {
-            if *f == 0 {
+            assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
+        }
+        while let Some(entry) = work_map.pop_first() {
+            let (key, (state, per_state_fuel)) = entry;
+            if let Some(f) = fuel {
+                if *f == 0 {
                     // Out of fuel. Put the state back and return.
                     work_map.insert(key, (state, per_state_fuel));
                     return;
@@ -865,20 +863,17 @@ where
             let WorkMapKey(_depth, state_id) = key;
             let row = &self.parser.table[&state_id];
             let action_opt = action_selector(row);
-        if let Some(action) = action_opt {
-            for peek in GSSNode::peek_iter(&state.stack) {
-                if *early_exit_on_shift { return; }
-                match action {
-                    Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
-                        crate::debug!(5, "Action: Shift to state {}", to.0);
-                        *early_exit_on_shift = true;
-                        if *early_exit_on_shift { return; }
-                        let new_parse_state =
-                            self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
-                        shifted_states_todo.push_back(new_parse_state);
-                    }
-                    Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                        nonterminal_id: nt,
+            if let Some(action) = action_opt {
+                for peek in GSSNode::peek_iter(&state.stack) {
+                    match action {
+                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                            crate::debug!(5, "Action: Shift to state {}", to.0);
+                            let new_parse_state =
+                                self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                            shifted_states_todo.push_back(new_parse_state);
+                        }
+                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                            nonterminal_id: nt,
                             len,
                             ..
                         }) => {
@@ -913,10 +908,6 @@ where
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                             crate::debug!(5, "Action: Split with shift and reduces");
                             if let Some(to) = shift {
-                                *early_exit_on_shift = true;
-                                if *early_exit_on_shift {
-                                    return;
-                                }
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
                                 let new_parse_state =
                                     self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
@@ -1029,7 +1020,7 @@ where
         }
     }
 
-    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig, early_exit_on_shift: &mut bool) {
+    fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
         timeit!("GLRParserState::step::phase1", {
@@ -1046,12 +1037,11 @@ where
                 },
                 config,
                 &mut None,
-                early_exit_on_shift,
             );
         });
     }
 
-    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig, early_exit_on_shift: &mut bool) {
+    fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
@@ -1069,7 +1059,6 @@ where
                 },
                 config,
                 &mut None,
-                early_exit_on_shift,
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -1494,12 +1483,8 @@ where
         self.process_token_advanced(token_id, &ProcessTokenAdvancedConfig::default())
     }
 
-    pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
-        self._process_token_advanced(token_id, config, &mut false);
-    }
-
     #[time_it("GLRParserState::process_token_advanced")]
-    fn _process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig, early_exit_on_shift: &mut bool) {
+    pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1517,15 +1502,13 @@ where
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, self.active_state.clone(), None);
-            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config, early_exit_on_shift);
-            if *early_exit_on_shift { return; }
+            self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
         } else { // ParserPhase::ReadyForDefaultReductions
             Self::enqueue(&mut phase2_todo, self.active_state.clone(), None);
         }
 
         // --- Phase 2 ---
-        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config, early_exit_on_shift);
-        if *early_exit_on_shift { return; }
+        self._do_actions_with_default(token_id, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
@@ -1587,7 +1570,6 @@ where
             |row| Some(Action::Default(&row.default_reduce)),
             &token_config,
             &mut fuel,
-            &mut false, // Never early exit on default reductions
         );
 
         // Consolidate all survivors into the new active state.
@@ -1649,83 +1631,6 @@ where
             }
             LRMode::LALR => None,
         }
-    }
-
-    pub fn allows_terminal(&self, terminal_id: TerminalID) -> bool {
-        let mut state_clone = self.clone();
-        let mut early_exit_on_shift = false;
-        state_clone._process_token_advanced(terminal_id, &ProcessTokenAdvancedConfig::default(), &mut early_exit_on_shift);
-        early_exit_on_shift
-    }
-
-    pub fn has_immediate_action_for_terminal(&self, token_id: TerminalID) -> Option<bool> {
-        if self.active_state.stack.is_empty() {
-            return Some(false);
-        }
-        match LR_MODE {
-            LRMode::LR1 | LRMode::LALR_EX_SHIFT_STATES => {
-                for peek in GSSNode::peek_iter(&self.active_state.stack) {
-                    let row = &self.parser.table[&peek.edge_value().state_id];
-                    let action_opt = match self.phase {
-                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
-                        ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
-                    };
-                    if action_opt.is_some() {
-                        return Some(true);
-                    }
-                }
-                Some(false)
-            }
-            LRMode::LALR => None,
-        }
-    }
-
-    pub fn immediate_shift_terminals(&self) -> BTreeSet<TerminalID> {
-        let mut terminals = BTreeSet::new();
-        if self.active_state.stack.is_empty() {
-            return terminals;
-        }
-        for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let row = &self.parser.table[&peek.edge_value().state_id];
-            let actions = match self.phase {
-                ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
-                ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
-            };
-            for (tid, action) in actions {
-                match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
-                        terminals.insert(*tid);
-                    }
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => {
-                        if shift.is_some() {
-                            terminals.insert(*tid);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        terminals
-    }
-
-    pub fn immediate_reduce_terminals(&self) -> BTreeSet<TerminalID> {
-        let mut terminals = BTreeSet::new();
-        if self.active_state.stack.is_empty() {
-            return terminals;
-        }
-        for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let row = &self.parser.table[&peek.edge_value().state_id];
-            let actions = match self.phase {
-                ParserPhase::ReadyForToken => &row.shifts_and_reduces_without_default_reduce,
-                ParserPhase::ReadyForDefaultReductions => &row.shifts_and_reduces_full,
-            };
-            for (tid, action) in actions {
-                if matches!(action, Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } | Stage7ShiftsAndReducesLookaheadValue::Split { .. }) {
-                    terminals.insert(*tid);
-                }
-            }
-        }
-        terminals
     }
 
     pub fn step(&mut self, token_id: TerminalID) {

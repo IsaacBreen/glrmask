@@ -55,14 +55,6 @@ use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateValidationMode {
-    None,
-    Immediate,
-    ImmediateAction,
-    Full,
-}
-
 pub type StateIDBV = HybridBitset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2741,12 +2733,12 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID, validation_mode: StateValidationMode) { // llm_token_id is original
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
         let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
-        self.commit_bytes(llm_token_bytes, validation_mode);
+        self.commit_bytes(llm_token_bytes);
     }
 
-    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8], validation_mode: StateValidationMode) { // llm_token_id is original
+    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
         if llm_token_bytes.is_empty() {
             return;
         }
@@ -2879,38 +2871,6 @@ impl<'a> GrammarConstraintState<'a> {
         gss_transformation_memo.clear();
 
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
-
-        if validation_mode != StateValidationMode::None {
-            let all_terminals_count = self.parent.parser.terminal_map.len();
-            self.state.retain(|tokenizer_id, glr_state| {
-                let accessible_terminals = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_id);
-                if accessible_terminals.len() >= all_terminals_count { // Heuristic for "all tokens"
-                    return true;
-                }
-                if accessible_terminals.is_empty() {
-                    // No more tokens can be matched by tokenizer. Check if parser can accept end of input.
-                    return glr_state.has_accepted();
-                }
-
-                match validation_mode {
-                    StateValidationMode::None => unreachable!(),
-                    StateValidationMode::Immediate => {
-                        let shift_terminals = glr_state.immediate_shift_terminals();
-                        if !shift_terminals.is_disjoint(&accessible_terminals) {
-                            return true;
-                        }
-                        let reduce_terminals = glr_state.immediate_reduce_terminals();
-                        !reduce_terminals.is_disjoint(&accessible_terminals)
-                    }
-                    StateValidationMode::ImmediateAction => {
-                        accessible_terminals.iter().any(|t| glr_state.has_immediate_action_for_terminal(*t) == Some(true))
-                    }
-                    StateValidationMode::Full => {
-                        accessible_terminals.iter().any(|t| glr_state.allows_terminal(*t))
-                    }
-                }
-            });
-        }
 
         let mut fuse_memo = HashMap::new();
         for state in self.state.values_mut() {
