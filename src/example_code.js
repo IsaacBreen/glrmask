@@ -1,3 +1,53 @@
+{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+if (true) {
+    if (true) {
+        if (true) {
+            if (true) {
+                if (true) {
+                    if (true) {
+                        if (true) {
+                            if (true) {
+                                if (true) {
+                                    if (true) {
+                                        if (true) {
+                                            if (true) {
+                                                if (true) {
+                                                    if (true) {
+                                                        if (true) {
+                                                            if (true) {
+                                                                if (true) {
+                                                                    if (true) {
+                                                                        if (true) {
+                                                                            if (true) {
+                                                                                if (true) {
+                                                                                    if (true) {
+                                                                                        if (true) {
+                                                                                            if (true) {
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 aaaaaaaa
 // [x]: 1
 // [Symbol('description')]: 2
