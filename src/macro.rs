@@ -42,14 +42,14 @@ pub fn is_debug_level_enabled(level: usize) -> bool {
 macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         // Runtime check against the message's level and file path
-        if $level <= $crate::macro::MACRO_DEBUG_LEVEL {
+        if $level <= $crate::r#macro::MACRO_DEBUG_LEVEL {
             let current_file_path = std::path::Path::new(file!());
             // Extract the filename, default to empty string if extraction fails
             let current_filename = current_file_path.file_name()
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-            if $crate::macro::ALLOWED_FILES.is_empty() || $crate::macro::ALLOWED_FILES.contains(&current_filename) {
+            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
                 // Optional: Keep this if you want compile-time stripping based on a feature flag
                 // #[cfg(feature = "debug")]
                 { // Use a block to scope the 'now' variable and the import
