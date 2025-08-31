@@ -6,7 +6,7 @@ use std::sync::Arc;
 // Added for derive macro pattern
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Item {
     pub production: Arc<Production>,
     pub dot_position: usize,

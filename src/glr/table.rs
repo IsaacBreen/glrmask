@@ -3,7 +3,7 @@ use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals
 use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
 pub use crate::types::TerminalID;
@@ -382,6 +382,8 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     let mut transitions: Stage1Table = BTreeMap::new();
     let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
 
+    let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
+
     // --- Create the 'everything' item set ---
     if EVERYTHING {
         let mut everything_item_set = BTreeSet::new();
@@ -421,7 +423,7 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
                 do_lalr
             }
         };
-        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
+        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
         let splits = split_on_dot(&closure);
         let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
         transitions.insert(item_set, row);

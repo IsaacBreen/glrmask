@@ -1,6 +1,6 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
 use std::sync::Arc;
 use profiler_macro::time_it;
 
@@ -227,7 +227,7 @@ fn compute_first_set_for_item(
     item: &Item,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
-    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+    cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Option<Terminal>> {
     _compute_first_set_for_item(
         item,
@@ -241,7 +241,7 @@ fn _compute_first_set_for_item(
     item: &Item,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
-    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+    cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Option<Terminal>> {
     if let Some(cached) = cache.get(item) {
         return cached.clone();
@@ -289,16 +289,16 @@ pub fn compute_closure<'a>(
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
     lalr_mode: bool,
+    first_set_cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
 ) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-    let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
     while let Some(item) = worklist.pop_front() {
         if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
             if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
+                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
                 for &prod in prods_for_nt {
                     for lookahead in lookaheads.iter().cloned() {
                         let new_item = Item {

@@ -7075,7 +7075,7 @@ local_system:
     src/glr/automaton.rs: |
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::items::{Item, LRMode, LR_MODE};
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
       use std::sync::Arc;
       use profiler_macro::time_it;
 
@@ -7302,7 +7302,7 @@ local_system:
           item: &Item,
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
-          cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+          cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
       ) -> BTreeSet<Option<Terminal>> {
           _compute_first_set_for_item(
               item,
@@ -7316,7 +7316,7 @@ local_system:
           item: &Item,
           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
           nullable_nonterminals: &BTreeSet<NonTerminal>,
-          cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+          cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
       ) -> BTreeSet<Option<Terminal>> {
           if let Some(cached) = cache.get(item) {
               return cached.clone();
@@ -7364,16 +7364,16 @@ local_system:
           nullable_nonterminals: &BTreeSet<NonTerminal>,
           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
           lalr_mode: bool,
+          first_set_cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
       ) -> BTreeSet<Item> {
           // crate::debug!(3, "Computing closure");
           let mut closure = items.clone();
           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-          let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
           while let Some(item) = worklist.pop_front() {
               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
                   if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                      let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
+                      let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
                       for &prod in prods_for_nt {
                           for lookahead in lookaheads.iter().cloned() {
                               let new_item = Item {
@@ -7541,7 +7541,7 @@ local_system:
           }
       }
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub enum Symbol {
           Terminal(Terminal),
           NonTerminal(NonTerminal),
@@ -7580,7 +7580,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct Production {
           pub lhs: NonTerminal,
           pub rhs: Vec<Symbol>,
@@ -7644,7 +7644,7 @@ local_system:
       // Added for derive macro pattern
 
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct Item {
           pub production: Arc<Production>,
           pub dot_position: usize,
@@ -10187,7 +10187,7 @@ local_system:
       use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use bimap::BiBTreeMap;
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
       use std::fmt::Display;
       use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
       pub use crate::types::TerminalID;
@@ -10566,6 +10566,8 @@ local_system:
           let mut transitions: Stage1Table = BTreeMap::new();
           let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
 
+          let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
+
           // --- Create the 'everything' item set ---
           if EVERYTHING {
               let mut everything_item_set = BTreeSet::new();
@@ -10605,7 +10607,7 @@ local_system:
                       do_lalr
                   }
               };
-              let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
+              let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
               let splits = split_on_dot(&closure);
               let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
               transitions.insert(item_set, row);
@@ -12586,9 +12588,9 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -18958,5 +18960,178 @@ messages:
       filename: src/glr/tests.rs
   - user: '`stage_1` takes a long time to execute. Like 10 seconds. How could we speed
       it up? Should be very fast, well under 0.1s.'
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Dealing with performance bottlenecks in parser generation is crucial. The repeated re-computation of FIRST sets within the closure calculation is a classic performance trap.
+
+      Here are the patches to introduce a persistent cache for the FIRST set computations and switch to a `HashMap` for faster lookups, which should significantly speed up `stage_1`.
+
+      ```diff
+      diff --git a/src/glr/automaton.rs b/src/glr/automaton.rs
+      --- a/src/glr/automaton.rs
+      +++ b/src/glr/automaton.rs
+      @@ -1,5 +1,5 @@
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::items::{Item, LRMode, LR_MODE};
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+       use std::sync::Arc;
+       use profiler_macro::time_it;
+       
+      @@ -250,7 +250,7 @@
+           item: &Item,
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+           nullable_nonterminals: &BTreeSet<NonTerminal>,
+      -    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+      +    cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
+       ) -> BTreeSet<Option<Terminal>> {
+           _compute_first_set_for_item(
+               item,
+      @@ -264,7 +264,7 @@
+           item: &Item,
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+           nullable_nonterminals: &BTreeSet<NonTerminal>,
+      -    cache: &mut BTreeMap<Item, BTreeSet<Option<Terminal>>>,
+      +    cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
+       ) -> BTreeSet<Option<Terminal>> {
+           if let Some(cached) = cache.get(item) {
+               return cached.clone();
+      @@ -311,16 +311,15 @@
+           first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+           nullable_nonterminals: &BTreeSet<NonTerminal>,
+           follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
+           lalr_mode: bool,
+      +    first_set_cache: &mut HashMap<Item, BTreeSet<Option<Terminal>>>,
+       ) -> BTreeSet<Item> {
+           // crate::debug!(3, "Computing closure");
+           let mut closure = items.clone();
+           let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+      -    let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
+       
+           while let Some(item) = worklist.pop_front() {
+               if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+                   if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+      -                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
+      +                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, first_set_cache);
+                       for &prod in prods_for_nt {
+                           for lookahead in lookaheads.iter().cloned() {
+                               let new_item = Item {
+
+      ```
+      ```diff
+      diff --git a/src/glr/grammar.rs b/src/glr/grammar.rs
+      --- a/src/glr/grammar.rs
+      +++ b/src/glr/grammar.rs
+      @@ -111,7 +111,7 @@
+           }
+       }
+       
+      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub enum Symbol {
+           Terminal(Terminal),
+           NonTerminal(NonTerminal),
+      @@ -152,7 +152,7 @@
+       }
+       
+       
+      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub struct Production {
+           pub lhs: NonTerminal,
+           pub rhs: Vec<Symbol>,
+
+      ```
+      ```diff
+      diff --git a/src/glr/items.rs b/src/glr/items.rs
+      --- a/src/glr/items.rs
+      +++ b/src/glr/items.rs
+      @@ -6,7 +6,7 @@
+       // Added for derive macro pattern
+       
+       
+      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub struct Item {
+           pub production: Arc<Production>,
+           pub dot_position: usize,
+
+      ```
+      ```diff
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -1,6 +1,7 @@
+       use super::items::{Item, LRMode, LR_MODE};
+       use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+       use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use bimap::BiBTreeMap;
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap};
+       use std::fmt::Display;
+       use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
+       pub use crate::types::TerminalID;
+      @@ -300,6 +301,8 @@
+           let mut worklist = VecDeque::from([initial_item_set.clone()]);
+           let mut transitions: Stage1Table = BTreeMap::new();
+           let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+      +
+      +    let mut first_set_cache: HashMap<Item, BTreeSet<Option<Terminal>>> = HashMap::new();
+       
+           // --- Create the 'everything' item set ---
+           if EVERYTHING {
+      @@ -326,7 +329,7 @@
+                       do_lalr
+                   }
+               };
+      -        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
+      +        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode, &mut first_set_cache);
+               let splits = split_on_dot(&closure);
+               let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+               transitions.insert(item_set, row);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 4 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/automaton.rs
+      Applying patch to 'src/glr/automaton.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/automaton.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/grammar.rs
+      Applying patch to 'src/glr/grammar.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/grammar.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/items.rs
+      Applying patch to 'src/glr/items.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/items.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Optimize stage_1 by caching FIRST
+      set computations"'
     metadata:
 ...
