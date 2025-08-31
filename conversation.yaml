@@ -10386,11 +10386,6 @@ local_system:
 
               crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
-              let mut grammar_terminals_bv = TerminalBV::zeros();
-              for (_, tid) in self.parent.parser.terminal_map.iter() {
-                  grammar_terminals_bv.insert(tid.0);
-              }
-
               // for (state_id, state) in &self.state {
               //     crate::debug!(3, "State {} before commit:", state_id.0);
               //     state.log_gss("Before commit", TerminalID(0), false, false);
@@ -10416,9 +10411,7 @@ local_system:
                   }
                   let mut terminals = TerminalBV::zeros();
                   for token in exec_result.matches {
-                      if grammar_terminals_bv.contains(token.id) {
-                          terminals.insert(token.id);
-                      }
+                      terminals.insert(token.id);
                   }
                   terminals_map.insert(*tokenizer_state_id, terminals);
               }
@@ -10463,13 +10456,8 @@ local_system:
                           &llm_token_bytes[offset..],
                           tokenizer_s_id_at_offset,
                       );
-                      let mut pushed_any_grammar = false;
 
                       for match_info in &exec_result.matches {
-                          if !grammar_terminals_bv.contains(match_info.id) {
-                              continue;
-                          }
-
                           let mut cloned_glr_s = glr_s_at_offset.clone();
 
                           cloned_glr_s.step(TerminalID(match_info.id));
@@ -10477,7 +10465,6 @@ local_system:
 
                           if cloned_glr_s.is_ok() {
                               let new_offset = offset + match_info.width;
-                              pushed_any_grammar = true;
                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
@@ -10504,13 +10491,11 @@ local_system:
                           }
                       }
 
-                      if !pushed_any_grammar {
-                          if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                              // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                              // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                              let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                              new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
-                          }
+                      if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                          // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                          // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                          let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                          new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
                       }
                   }
               }
@@ -10530,7 +10515,7 @@ local_system:
 
               let mut fuse_memo = HashMap::new();
               for state in self.state.values_mut() {
-                  state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 16, &mut fuse_memo);
+                  state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 8, &mut fuse_memo);
               }
               fuse_memo.clear();
 
@@ -13346,26 +13331,57 @@ local_system:
               merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
               let final_predecessors = if merge_depth > 0 {
-                  // After merging, unify structurally identical predecessors to increase sharing.
+                  // 1) Canonicalize identical nodes (increase sharing)
                   let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
-                  let mut unified_predecessors = BTreeMap::new();
 
+                  // 2) Collapse across all dest depths for the same edge into a single list
+                  let mut collapsed_by_edge: BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>> = BTreeMap::new();
                   for (edge_val, preds_by_depth) in merged_map {
-                      let mut unified_preds_by_depth = BTreeMap::new();
-                      for (depth, pred_vec) in preds_by_depth {
-                          let mut unified_pred_vec = Vec::new();
+                      // Flatten all predecessor vectors across depths for this edge
+                      for pred_vec in preds_by_depth.into_values() {
                           for pred_arc in pred_vec {
-                              let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
-                              unified_pred_vec.push(canonical_arc);
+                              // Structural canonicalization (share identical nodes)
+                              let canonical_arc = canonical_map
+                                  .entry((*pred_arc).clone())
+                                  .or_insert_with(|| pred_arc.clone())
+                                  .clone();
+                              collapsed_by_edge.entry(edge_val.clone()).or_default().push(canonical_arc);
                           }
-                          unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
-                          unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
-                          unified_preds_by_depth.insert(depth, unified_pred_vec);
                       }
-                      unified_predecessors.insert(edge_val, unified_preds_by_depth);
                   }
+
+                  // 3) For each edge, fully merge its collapsed predecessors into ONE node
+                  //    and put it in a single (edge -> [one dest_key -> vec![one node]]) bucket.
+                  let mut unified_predecessors: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
+                  for (edge_val, mut vec_arcs) in collapsed_by_edge {
+                      // Deduplicate by pointer to avoid merging the same Arc twice
+                      vec_arcs.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                      vec_arcs.dedup_by_key(|a| Arc::as_ptr(a));
+
+                      let merged_arc = if vec_arcs.len() <= 1 {
+                          vec_arcs.into_iter().next().unwrap()
+                      } else {
+                          let mut iter = vec_arcs.into_iter();
+                          let first = iter.next().unwrap();
+                          let mut merged_node = (*first).clone();
+                          // Merge the rest under the given depth budget
+                          for other_arc in iter {
+                              merged_node._merge(&other_arc, merge_depth - 1);
+                          }
+                          Arc::new(merged_node)
+                      };
+
+                      // Put under a single dest_key (the merged node's depth)
+                      let dest_key = merged_arc.dest_key();
+                      unified_predecessors
+                          .entry(edge_val)
+                          .or_default()
+                          .insert(dest_key, vec![merged_arc]);
+                  }
+
                   unified_predecessors
               } else {
+                  // For merge_depth == 0, keep the original grouping to avoid extra work.
                   merged_map
               };
 
@@ -22885,10 +22901,14 @@ messages:
           // Warm-up commit
           constraint_state.commit_bytes(b"{{");
           assert!(constraint_state.is_active());
+          println!("After warm-up '{{': {} states", constraint_state.state.len());
+          constraint_state.print_gss();
 
           // First single '{' commit
           constraint_state.commit_bytes(b"{");
           assert!(constraint_state.is_active());
+          println!("After first single '{{': {} states", constraint_state.state.len());
+          constraint_state.print_gss();
           let nodes1 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
@@ -22896,6 +22916,8 @@ messages:
           // Second single '{' commit$
           constraint_state.commit_bytes(b"{");
           assert!(constraint_state.is_active());
+          println!("After second single '{{': {} states", constraint_state.state.len());
+          constraint_state.print_gss();
           let nodes2 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
@@ -22903,6 +22925,8 @@ messages:
           // Third single '{' commit
           constraint_state.commit_bytes(b"{");
           assert!(constraint_state.is_active());
+          println!("After third single '{{': {} states", constraint_state.state.len());
+          constraint_state.print_gss();
           let nodes3 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
@@ -23151,21 +23175,13 @@ messages:
       What a mess. How did this happen?
       What'd an efficient version of this GSS look like?
       Improve the code so we get this efficient version.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
-                  - Give concrete, step-by-step edits the user can apply.
-                  - Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: llm
-      phase: instructions-only
-  - assistant: |-
+
+      Note that we've considered solutions like this, but REJECTED them.
+
+      `````ad-attachment
+      collapse: closed
+      title: Rejected solutions
+
       Below are focused, step-by-step edits to reduce spurious GSS growth when committing bytes with ambiguous tokenizer matches (e.g., a non-grammar token like ANYTHING that overlaps with grammar tokens). We’ll do three things:
 
       1) Ignore non-grammar tokenizer groups during commit (both for pruning checks and for stepping).
@@ -23345,6 +23361,149 @@ messages:
       - Filtering matches to grammar terminals is safe: GLR cannot consume a token that is not in its terminal map anyway, so we avoid stepping on a token that has no action in the parse table.
       - Skipping the carry-over only when a grammar step “succeeded” preserves completeness: if a grammar token is present but cannot be consumed from the current GLR configuration (i.e., every step fails), we still keep the tokenizer-only continuation so alternate segmentations remain possible.
       - If, in future workloads, you want even more collapse, you can also call fuse_predecessors on the transient GLR states you add into new_overall_state before the final merge; in practice, the end-of-commit fusing is usually sufficient and avoids extra overhead in the inner loop.
+
+      `````
+
+      This is WRONG. It might make our test pass, but it's not solving the underlying issue. There are grammars for which an `ANYTHING` terminal exists, and this won't help there at all. We need to address the way the GSS turns out to get an inefficient representation.
+      And ideally we'd do so in a way that avoids some kind of computation in each call to `commit_bytes` that is proportional to the size of the GSS... We want it to be *efficient*.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: llm
+      phase: instructions-only
+  - assistant: |-
+      Below are focused, step-by-step edits that improve the GSS’s structural sharing and prevent redundant branching from accumulating when committing bytes with ambiguous tokenizer matches. The core change collapses “same-edge predecessors across different depths” during merges, which produces a compact, factored representation without changing semantics or relying on filtering out non-grammar tokenizer groups.
+
+      Make only the changes below; no other parts of the code need to be modified.
+
+      1) Collapse predecessors by edge across depths during merges
+      File: src/datastructures/gss.rs
+      Function: GSSNode::_merge
+
+      Context:
+      - Near the end of GSSNode::_merge you build a merged_map via merge_node_maps, and then you build final_predecessors via a block:
+
+      Current outline:
+      - let self_predecessors = self.predecessors().clone();
+      - let other_predecessors = other.predecessors().clone();
+      - let mut merged_map = self_predecessors;
+      - merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
+      - let final_predecessors = if merge_depth > 0 { … } else { merged_map };
+      - *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
+
+      Replace only the construction of final_predecessors (the if/else block) with a version that collapses all dest-keys for a given edge into a single merged predecessor node. This prevents the proliferation of multiple per-depth entries for the same edge, which is what causes the branching “towering” you observed.
+
+      Do this:
+
+      - Find the block starting with:
+        let final_predecessors = if merge_depth > 0 {
+          // ...
+        } else {
+          merged_map
+        };
+
+      - Replace that entire block with the following:
+
+        - You don’t need to change function signature or other lines.
+
+      Code to paste (use this verbatim as a replacement for the final_predecessors block):
+
+      ```rust
+      let final_predecessors = if merge_depth > 0 {
+          // 1) Canonicalize identical nodes (increase sharing)
+          let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+
+          // 2) Collapse across all dest depths for the same edge into a single list
+          let mut collapsed_by_edge: BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>> = BTreeMap::new();
+          for (edge_val, preds_by_depth) in merged_map {
+              // Flatten all predecessor vectors across depths for this edge
+              for pred_vec in preds_by_depth.into_values() {
+                  for pred_arc in pred_vec {
+                      // Structural canonicalization (share identical nodes)
+                      let canonical_arc = canonical_map
+                          .entry((*pred_arc).clone())
+                          .or_insert_with(|| pred_arc.clone())
+                          .clone();
+                      collapsed_by_edge.entry(edge_val.clone()).or_default().push(canonical_arc);
+                  }
+              }
+          }
+
+          // 3) For each edge, fully merge its collapsed predecessors into ONE node
+          //    and put it in a single (edge -> [one dest_key -> vec![one node]]) bucket.
+          let mut unified_predecessors: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
+          for (edge_val, mut vec_arcs) in collapsed_by_edge {
+              // Deduplicate by pointer to avoid merging the same Arc twice
+              vec_arcs.sort_by_key(|a| Arc::as_ptr(a) as usize);
+              vec_arcs.dedup_by_key(|a| Arc::as_ptr(a));
+
+              let merged_arc = if vec_arcs.len() <= 1 {
+                  vec_arcs.into_iter().next().unwrap()
+              } else {
+                  let mut iter = vec_arcs.into_iter();
+                  let first = iter.next().unwrap();
+                  let mut merged_node = (*first).clone();
+                  // Merge the rest under the given depth budget
+                  for other_arc in iter {
+                      merged_node._merge(&other_arc, merge_depth - 1);
+                  }
+                  Arc::new(merged_node)
+              };
+
+              // Put under a single dest_key (the merged node's depth)
+              let dest_key = merged_arc.dest_key();
+              unified_predecessors
+                  .entry(edge_val)
+                  .or_default()
+                  .insert(dest_key, vec![merged_arc]);
+          }
+
+          unified_predecessors
+      } else {
+          // For merge_depth == 0, keep the original grouping to avoid extra work.
+          merged_map
+      };
+      ```
+
+      Why this helps
+      - NodeMap currently stores predecessors keyed by (edge, dest depth). This preserves multiple groups even when they share identical structure. The replacement collapses all depths per edge into a single merged predecessor (under that edge), which is exactly what your end-of-commit fuse_predecessors pass tries to recover later. Doing this during merges keeps the GSS compact and prevents the “wide and deep” duplication you observed in Tokenizer State 3.
+      - This operates only when merge_depth > 0 (which is true for the merges that matter), avoiding extra cost in contexts that explicitly requested no-deep-merge.
+      - It does not alter acceptance or reduction behavior: it only remaps the internal graph structure into a maximally-shared equivalent.
+
+      2) Optional: modestly increase end-of-commit fuse depth
+      File: src/constraint.rs
+      Function: GrammarConstraintState::commit_bytes
+
+      At the very end (just before clearing fuse_memo), you fuse predecessors recursively with a small level budget:
+
+      Current:
+      - for state in self.state.values_mut() {
+          state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
+        }
+
+      If you still see mild branching after step (1), increase the level budget to a small, safe value (e.g., 8) to opportunistically collapse any remaining per-edge, cross-depth duplicates that the previous merge-based collapse did not encounter:
+
+      Suggested change:
+      - Replace the 3 with 8.
+
+      This is optional and conservative: thanks to step (1), the GSS should already be compact. Leaving it at 3 is fine if you prefer to avoid any additional work here.
+
+      3) What you should see
+      - The “Tokenizer State 3” subtree will stop accumulating parallel same-edge predecessors at multiple depths. Instead, for a given edge (e.g., edge 0), you will see a single chain going deeper across commits, not multiple sibling paths differing only by depth buckets.
+      - The unique_nodes growth per additional “{” should stabilize (increase2 <= increase1) and your test should pass without changing tokenizer/grammar semantics or filtering any token groups.
+
+      4) Notes
+      - No changes to tokenizer semantics, parser actions, or filtering are involved, so grammars that intentionally include “ANYTHING”-like terminals continue to work unchanged.
+      - The collapse is applied during merges that already happen in GLR parsing and commit_bytes; it does not add a new O(GSS) pass per commit.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -23361,100 +23520,122 @@ messages:
       mode: git
       phase: diff-after-plan
   - assistant: |-
-      I've analyzed the GSS growth in your test case. The exponential increase is caused by a combination of tokenizer ambiguity and how the `commit_bytes` function propagates GLR states. Specifically, when a string like `"{` matches both a grammar token (`OPEN_BRACE`) and a non-grammar token (`ANYTHING`), the logic was creating distinct GSS paths for both possibilities. The "do nothing" path (for `ANYTHING`) was proliferating unnecessarily.
-
-      Here are the patches to fix this by filtering out non-grammar tokens during the commit process and fusing the resulting GSS more aggressively to collapse redundant structures.
-
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -2749,6 +2749,11 @@
-       
-               crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
-       
-      +        let mut grammar_terminals_bv = TerminalBV::zeros();
-      +        for (_, tid) in self.parent.parser.terminal_map.iter() {
-      +            grammar_terminals_bv.insert(tid.0);
-      +        }
-      +
-               // for (state_id, state) in &self.state {
-               //     crate::debug!(3, "State {} before commit:", state_id.0);
-               //     state.log_gss("Before commit", TerminalID(0), false, false);
-      @@ -2769,7 +2774,9 @@
-                   }
-                   let mut terminals = TerminalBV::zeros();
-                   for token in exec_result.matches {
-      -                terminals.insert(token.id);
-      +                if grammar_terminals_bv.contains(token.id) {
-      +                    terminals.insert(token.id);
-      +                }
-                   }
-                   terminals_map.insert(*tokenizer_state_id, terminals);
-               }
-      @@ -2807,9 +2814,15 @@
-                           &llm_token_bytes[offset..],
-                           tokenizer_s_id_at_offset,
-                       );
-      +                let mut pushed_any_grammar = false;
-       
-                       for match_info in &exec_result.matches {
-      +                    if !grammar_terminals_bv.contains(match_info.id) {
-      +                        continue;
-      +                    }
-      +
-                           let mut cloned_glr_s = glr_s_at_offset.clone();
-       
-                           cloned_glr_s.step(TerminalID(match_info.id));
-      @@ -2817,6 +2830,7 @@
-       
-                           if cloned_glr_s.is_ok() {
-                               let new_offset = offset + match_info.width;
-      +                        pushed_any_grammar = true;
-                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-       
-      @@ -2842,11 +2856,13 @@
-                           }
-                       }
-       
-      -                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-      -                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-      -                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-      -                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-      -                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
-      +                if !pushed_any_grammar {
-      +                    if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-      +                        // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-      +                        // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-      +                        let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-      +                        new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
-      +                    }
-                       }
-                   }
-               }
-      @@ -2866,7 +2882,7 @@
+      @@ -2917,7 +2917,7 @@
        
                let mut fuse_memo = HashMap::new();
                for state in self.state.values_mut() {
       -            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
-      +            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 16, &mut fuse_memo);
+      +            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 8, &mut fuse_memo);
                }
                fuse_memo.clear();
        
+
+      ``````diff
+      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -628,32 +628,59 @@
+               let mut merged_map = self_predecessors;
+               merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
+       
+               let final_predecessors = if merge_depth > 0 {
+      -            // After merging, unify structurally identical predecessors to increase sharing.
+      -            let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+      -            let mut unified_predecessors = BTreeMap::new();
+      -
+      -            for (edge_val, preds_by_depth) in merged_map {
+      -                let mut unified_preds_by_depth = BTreeMap::new();
+      -                for (depth, pred_vec) in preds_by_depth {
+      -                    let mut unified_pred_vec = Vec::new();
+      -                    for pred_arc in pred_vec {
+      -                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+      -                        unified_pred_vec.push(canonical_arc);
+      -                    }
+      -                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+      -                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+      -                    unified_preds_by_depth.insert(depth, unified_pred_vec);
+      -                }
+      -                unified_predecessors.insert(edge_val, unified_preds_by_depth);
+      -            }
+      -            unified_predecessors
+      +            // 1) Canonicalize identical nodes (increase sharing)
+      +            let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+      +
+      +            // 2) Collapse across all dest depths for the same edge into a single list
+      +            let mut collapsed_by_edge: BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>> = BTreeMap::new();
+      +            for (edge_val, preds_by_depth) in merged_map {
+      +                // Flatten all predecessor vectors across depths for this edge
+      +                for pred_vec in preds_by_depth.into_values() {
+      +                    for pred_arc in pred_vec {
+      +                        // Structural canonicalization (share identical nodes)
+      +                        let canonical_arc = canonical_map
+      +                            .entry((*pred_arc).clone())
+      +                            .or_insert_with(|| pred_arc.clone())
+      +                            .clone();
+      +                        collapsed_by_edge.entry(edge_val.clone()).or_default().push(canonical_arc);
+      +                    }
+      +                }
+      +            }
+      +
+      +            // 3) For each edge, fully merge its collapsed predecessors into ONE node
+      +            //    and put it in a single (edge -> [one dest_key -> vec![one node]]) bucket.
+      +            let mut unified_predecessors: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
+      +            for (edge_val, mut vec_arcs) in collapsed_by_edge {
+      +                // Deduplicate by pointer to avoid merging the same Arc twice
+      +                vec_arcs.sort_by_key(|a| Arc::as_ptr(a) as usize);
+      +                vec_arcs.dedup_by_key(|a| Arc::as_ptr(a));
+      +
+      +                let merged_arc = if vec_arcs.len() <= 1 {
+      +                    vec_arcs.into_iter().next().unwrap()
+      +                } else {
+      +                    let mut iter = vec_arcs.into_iter();
+      +                    let first = iter.next().unwrap();
+      +                    let mut merged_node = (*first).clone();
+      +                    // Merge the rest under the given depth budget
+      +                    for other_arc in iter {
+      +                        merged_node._merge(&other_arc, merge_depth - 1);
+      +                    }
+      +                    Arc::new(merged_node)
+      +                };
+      +
+      +                // Put under a single dest_key (the merged node's depth)
+      +                let dest_key = merged_arc.dest_key();
+      +                unified_predecessors
+      +                    .entry(edge_val)
+      +                    .or_default()
+      +                    .insert(dest_key, vec![merged_arc]);
+      +            }
+      +
+      +            unified_predecessors
+               } else {
+      +            // For merge_depth == 0, keep the original grouping to avoid extra work.
+                   merged_map
+               };
+       
+               *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
+           }
 
       ```
     metadata:
   - user: |
       Apply result (plan-git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Prevent GSS explosion by filtering
-      non-grammar tokens and increasing GSS fusion depth"'
+  - user: 'Changes committed with message: "Refactor GSS merge to collapse predecessors
+      across depths and increase fuse budget"'
     metadata:
 ...
