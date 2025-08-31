@@ -2529,13 +2529,22 @@ impl<'a> GrammarConstraintState<'a> {
         for (state_id, state) in &self.state {
             println!("\n--- State {} ---", state_id.0);
             // Sample and print a bunch of stacks
-            for i in 0..5 {
+            let mut seen = BTreeSet::new();
+            let num_to_sample = 10;
+            for i in 0..1000 {
                 if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
                     let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
                         .map(|edge| edge.state_id)
                         .collect();
                     sampled_stack.reverse();
+                    if seen.contains(&sampled_stack) {
+                        continue;
+                    }
                     println!("  Sampled stack {}: {:?}", i + 1, sampled_stack);
+                    seen.insert(sampled_stack);
+                    if seen.len() >= num_to_sample {
+                        break;
+                    }
                 };
             }
             // Sample a stack
