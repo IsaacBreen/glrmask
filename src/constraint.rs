@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -80,43 +80,6 @@ impl JSONConvertible for PrecomputedNode3Contents {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalAllowanceCheckMode {
-    None,
-    ImmediateSets,
-    ImmediateProbe,
-    StepProbe,
-}
-
-impl Default for TerminalAllowanceCheckMode {
-    fn default() -> Self { TerminalAllowanceCheckMode::None }
-}
-
-impl JSONConvertible for TerminalAllowanceCheckMode {
-    fn to_json(&self) -> JSONNode {
-        let s = match self {
-            TerminalAllowanceCheckMode::None => "none",
-            TerminalAllowanceCheckMode::ImmediateSets => "immediate_sets",
-            TerminalAllowanceCheckMode::ImmediateProbe => "immediate_probe",
-            TerminalAllowanceCheckMode::StepProbe => "step_probe",
-        };
-        JSONNode::String(s.to_string())
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::String(s) => match s.as_str() {
-                "none" => Ok(TerminalAllowanceCheckMode::None),
-                "immediate_sets" => Ok(TerminalAllowanceCheckMode::ImmediateSets),
-                "immediate_probe" => Ok(TerminalAllowanceCheckMode::ImmediateProbe),
-                "step_probe" => Ok(TerminalAllowanceCheckMode::StepProbe),
-                other => Err(format!("Unknown TerminalAllowanceCheckMode '{}'", other)),
-            },
-            other => Err(format!("Expected JSON string for TerminalAllowanceCheckMode, got {:?}", other)),
-        }
-    }
-}
-
 pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
@@ -178,7 +141,6 @@ pub struct GrammarConstraint {
     pub(crate) trie1_god: Trie1GodWrapper,
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
-    pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
 }
 
 impl GrammarConstraint {
@@ -206,7 +168,6 @@ impl GrammarConstraint {
         assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
         assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
     }
 }
 
@@ -227,7 +188,6 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
-        obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
         JSONNode::Object(obj)
     }
 
@@ -263,11 +223,6 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
-                let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
-                    Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
-                    None => TerminalAllowanceCheckMode::None,
-                };
-
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
@@ -280,7 +235,6 @@ impl JSONConvertible for GrammarConstraint {
                     trie1_god,
                     trie2_god,
                     trie3_god,
-                    post_commit_allow_check_mode,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -526,7 +480,6 @@ impl GrammarConstraint {
             trie1_god,
             trie2_god,
             trie3_god,
-            post_commit_allow_check_mode: TerminalAllowanceCheckMode::None,
         };
 
         gc
@@ -543,8 +496,6 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
-        // return (BTreeMap::new(), Trie1GodWrapper::new()); // TEMP
-
         let mut helper = Precomputer::new(
             tokenizer,
             parser,
@@ -1869,6 +1820,19 @@ pub struct ParseStateKey {
     stack_state_id: StateID,
 }
 
+impl ParseState { // No longer generic
+    pub fn merge(&mut self, mut other: ParseState) {
+        // if self.stack.max_depth() > other.stack.max_depth() {
+        //     std::mem::swap(self, &mut other);
+        // }
+        // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
+        // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+    }
+}
+
 pub trait InsertWith<K, V> {
     fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
 }
@@ -1959,7 +1923,6 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
         // self.get_mask2()
         self.get_mask3()
@@ -2559,74 +2522,6 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "GSS stats: {:#?}", stats);
     }
 
-    pub fn print_gss(&self) {
-        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
-        if roots.is_empty() {
-            println!("GSS is empty.");
-            return;
-        }
-
-        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
-
-        let config = GSSPrintConfig {
-            labels: Some(&labels),
-            max_edges: 500,
-            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-            verbose: false,
-        };
-
-        let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
-        println!("{}", gss_str);
-
-        if !state_ids.is_empty() {
-            println!("\n--- GSS State Explanations ---");
-            for state_id in state_ids {
-                let mut explanation = String::new();
-                println!("\n--- State {} ---", state_id.0);
-                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-                println!("{}", explanation);
-            }
-        }
-    }
-
-    pub fn explain_stack(&self) {
-        for (state_id, state) in &self.state {
-            println!("\n--- State {} ---", state_id.0);
-            // Sample and print a bunch of stacks
-            let mut seen = BTreeSet::new();
-            let num_to_sample = 10;
-            for i in 0..1000 {
-                if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
-                    let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
-                        .map(|edge| edge.state_id)
-                        .collect();
-                    sampled_stack.reverse();
-                    if seen.contains(&sampled_stack) {
-                        continue;
-                    }
-                    println!("  Sampled stack {}: {:?}", i + 1, sampled_stack);
-                    seen.insert(sampled_stack);
-                    if seen.len() >= num_to_sample {
-                        break;
-                    }
-                };
-            }
-            // Sample a stack
-            if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
-                let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
-                    .map(|edge| edge.state_id)
-                    .collect();
-                sampled_stack.reverse();
-                let explanation = self.parent.parser.explain_stack(&sampled_stack);
-                // Indent the explanation for readability
-                for line in explanation.lines() {
-                    println!("      {}", line);
-                }
-            };
-        }
-    }
-
     pub fn get_mask3(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
@@ -2825,7 +2720,7 @@ impl<'a> GrammarConstraintState<'a> {
         let gss_stats_before_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(5, "Terminals map: {:?}", terminals_map);
+        crate::debug!(3, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
         for state in self.state.values_mut() {
             prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
         }
@@ -2833,11 +2728,9 @@ impl<'a> GrammarConstraintState<'a> {
         let gss_stats_after_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(3, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
+        crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
         if gss_stats_after_pruning != gss_stats_before_pruning {
-            crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
             crate::debug!(3, "GSS stats changed after pruning disallowed terminals.");
-            self.print_gss();
         } else {
             crate::debug!(3, "GSS stats did not change after pruning disallowed terminals.");
         }
@@ -2876,13 +2769,10 @@ impl<'a> GrammarConstraintState<'a> {
 
                         let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
                         if let Some(end_state_id) = exec_result.end_state {
-                            let terminals_accessible_from_end_state = self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
-                            if terminals_accessible_from_end_state.contains(&TerminalID(match_info.id)) {
-                                let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
-                                // Disallow this token from being matched again immediately.
-                                disallowed_terminals_for_end_state.insert(match_info.id);
-                                disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                            }
+                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                            // Disallow this token from being matched again immediately.
+                            disallowed_terminals_for_end_state.insert(match_info.id);
+                            disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
                         }
                         // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
@@ -2919,61 +2809,11 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        let mut fuse_memo = HashMap::new();
-        for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 1, &mut fuse_memo);
-        }
-        fuse_memo.clear();
-
-        // Post-commit allowance check: ensure each surviving state allows at least one
-        // token the tokenizer can produce from its current tokenizer state.
-        // Mode is controlled by self.parent.post_commit_allow_check_mode.
-        match self.parent.post_commit_allow_check_mode {
-            TerminalAllowanceCheckMode::None => {
-                // no-op
-            }
-            TerminalAllowanceCheckMode::ImmediateSets => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    // Fast auto-pass if tokenizer can produce all grammar terminals.
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-
-                    let mut union = glr_state.immediate_shift_terminals();
-                    union.extend(glr_state.immediate_reduce_terminals());
-                    !union.is_disjoint(&accessible)
-                });
-            }
-            TerminalAllowanceCheckMode::ImmediateProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
-            TerminalAllowanceCheckMode::StepProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        if glr_state.allows_terminal(*tid) {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
-        }
+        // let mut fuse_memo = HashMap::new();
+        // for state in self.state.values_mut() {
+            // state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
+        // }
+        // fuse_memo.clear();
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
@@ -2994,8 +2834,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    pub fn is_active(&self) -> bool {
-        !self.state.is_empty()
+    pub fn is_active_or_accepted(&self) -> bool {
+        !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty() || s.has_accepted())
     }
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {

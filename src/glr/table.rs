@@ -360,13 +360,17 @@ fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BT
 
 #[time_it]
 fn stage_1(productions: &[Production]) -> Stage1Result {
-    assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
     let start_production_id = 0;
     let initial_item = Item {
         production: Arc::new(productions[start_production_id].clone()),
         dot_position: 0,
+        lookahead: None,
     };
     let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
+
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     // Pre-computation for compute_closure: group productions by their LHS non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
@@ -382,12 +386,17 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     if EVERYTHING {
         let mut everything_item_set = BTreeSet::new();
         for prod in productions {
-            for dot_position in 0..=prod.rhs.len() {
-                let item = Item {
-                    production: Arc::new(prod.clone()),
-                    dot_position,
-                };
-                everything_item_set.insert(item);
+            if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                for dot_position in 0..=prod.rhs.len() {
+                    for lookahead in lookaheads {
+                        let item = Item {
+                            production: Arc::new(prod.clone()),
+                            dot_position,
+                            lookahead: lookahead.clone(),
+                        };
+                        everything_item_set.insert(item);
+                    }
+                }
             }
         }
         // Add the everything set to the worklist if it's not already there
@@ -397,8 +406,22 @@ fn stage_1(productions: &[Production]) -> Stage1Result {
     }
 
     while let Some(item_set) = worklist.pop_front() {
-        assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
-        let closure = compute_closure(&item_set, &prods_by_lhs);
+        let lalr_mode = match LR_MODE {
+            LRMode::LALR => true,
+            LRMode::LR1 => false,
+            LRMode::LALR_EX_SHIFT_STATES => {
+                // Ensure we can't get to this state from a shift.
+                let mut do_lalr = true;
+                for item in &item_set {
+                    if matches!(item.prev(), Some((Symbol::Terminal(_), _))) {
+                        do_lalr = false;
+                        break;
+                    }
+                }
+                do_lalr
+            }
+        };
+        let closure = compute_closure(&item_set, &prods_by_lhs, &first_sets, &nullable_nonterminals, &follow_sets, lalr_mode);
         let splits = split_on_dot(&closure);
         let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
         transitions.insert(item_set, row);
@@ -444,23 +467,16 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 }
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-    // Compute FOLLOW sets (including EOF as None)
-    let first_sets = compute_first_sets_for_nonterminals(productions);
-    let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-
     let mut stage_3_table = BTreeMap::new();
 
     for (item_set, row) in stage_2_table {
         let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
 
         for item in &row.reduces {
-            let lhs = &item.production.lhs;
-            if let Some(follows) = follow_sets.get(lhs) {
-                for look in follows {
-                    reduces.entry(look.clone()).or_default().insert(item.clone());
-                }
-            }
+            reduces
+                .entry(item.lookahead.clone())
+                .or_default()
+                .insert(item.clone());
         }
 
         stage_3_table.insert(
@@ -472,6 +488,7 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
             },
         );
     }
+
     stage_3_table
 }
 
@@ -667,6 +684,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     let initial_item = Item {
         production: Arc::new(productions[start_production_id].clone()),
         dot_position: 0,
+        lookahead: None,
     };
     let initial_item_set = BTreeSet::from([initial_item]);
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
@@ -676,16 +694,25 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
     stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
 
     // --- Find and configure the 'everything' state ---
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
     let everything_state_id;
     if EVERYTHING {
         let mut everything_item_set = BTreeSet::new();
         for prod in productions {
-            for dot_position in 0..=prod.rhs.len() {
-                let item = Item {
-                    production: Arc::new(prod.clone()),
-                    dot_position,
-                };
-                everything_item_set.insert(item);
+            if let Some(lookaheads) = follow_sets.get(&prod.lhs) {
+                for dot_position in 0..=prod.rhs.len() {
+                    for lookahead in lookaheads {
+                        let item = Item {
+                            production: Arc::new(prod.clone()),
+                            dot_position,
+                            lookahead: lookahead.clone(),
+                        };
+                        everything_item_set.insert(item);
+                    }
+                }
             }
         }
         everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
@@ -726,17 +753,7 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
             }
         }
 
-        // First, check for a reduction of the initial production (ID 0). If it exists, it's always promoted.
-        let promoted_reduce_key = reduce_counts.iter().find_map(|(key, (_, pids))| {
-            if pids.contains(&ProductionID(0)) {
-                Some(*key)
-            } else {
-                None
-            }
-        }).or_else(|| {
-            // Otherwise, use the original logic: promote the most common reduction.
-            reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key)
-        });
+        let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
 
         let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
             let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
@@ -1006,7 +1023,6 @@ fn merge_compatible_states(
 
 #[time_it]
 pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, crate::glr::parser::ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-    assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
     let original_productions = productions.to_vec();
     let start_production_id = 0;
 

@@ -777,57 +777,26 @@ impl GSSNode {
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
         let final_predecessors = if merge_depth > 0 {
-            // 1) Canonicalize identical nodes (increase sharing)
+            // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+            let mut unified_predecessors = BTreeMap::new();
 
-            // 2) Collapse across all dest depths for the same edge into a single list
-            let mut collapsed_by_edge: BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>> = BTreeMap::new();
             for (edge_val, preds_by_depth) in merged_map {
-                // Flatten all predecessor vectors across depths for this edge
-                for pred_vec in preds_by_depth.into_values() {
+                let mut unified_preds_by_depth = BTreeMap::new();
+                for (depth, pred_vec) in preds_by_depth {
+                    let mut unified_pred_vec = Vec::new();
                     for pred_arc in pred_vec {
-                        // Structural canonicalization (share identical nodes)
-                        let canonical_arc = canonical_map
-                            .entry((*pred_arc).clone())
-                            .or_insert_with(|| pred_arc.clone())
-                            .clone();
-                        collapsed_by_edge.entry(edge_val.clone()).or_default().push(canonical_arc);
+                        let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                        unified_pred_vec.push(canonical_arc);
                     }
+                    unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                    unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                    unified_preds_by_depth.insert(depth, unified_pred_vec);
                 }
+                unified_predecessors.insert(edge_val, unified_preds_by_depth);
             }
-
-            // 3) For each edge, fully merge its collapsed predecessors into ONE node
-            //    and put it in a single (edge -> [one dest_key -> vec![one node]]) bucket.
-            let mut unified_predecessors: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
-            for (edge_val, mut vec_arcs) in collapsed_by_edge {
-                // Deduplicate by pointer to avoid merging the same Arc twice
-                vec_arcs.sort_by_key(|a| Arc::as_ptr(a) as usize);
-                vec_arcs.dedup_by_key(|a| Arc::as_ptr(a));
-
-                let merged_arc = if vec_arcs.len() <= 1 {
-                    vec_arcs.into_iter().next().unwrap()
-                } else {
-                    let mut iter = vec_arcs.into_iter();
-                    let first = iter.next().unwrap();
-                    let mut merged_node = (*first).clone();
-                    // Merge the rest under the given depth budget
-                    for other_arc in iter {
-                        merged_node._merge(&other_arc, merge_depth - 1);
-                    }
-                    Arc::new(merged_node)
-                };
-
-                // Put under a single dest_key (the merged node's depth)
-                let dest_key = merged_arc.dest_key();
-                unified_predecessors
-                    .entry(edge_val)
-                    .or_default()
-                    .insert(dest_key, vec![merged_arc]);
-            }
-
             unified_predecessors
         } else {
-            // For merge_depth == 0, keep the original grouping to avoid extra work.
             merged_map
         };
 
@@ -1291,7 +1260,6 @@ pub(crate) fn fuse_predecessors_recursive(
     levels: usize,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
 ) -> Arc<GSSNode> {
-    return node_arc.clone();
     if levels == 0 {
         return node_arc.clone();
     }
@@ -1512,7 +1480,6 @@ pub(crate) struct GSSStats {
     pub(crate) num_unique_root_predecessor_keys: usize,
     pub(crate) total_edges: usize,
     pub(crate) unique_nodes: usize,
-    pub(crate) num_leaves: usize,
     pub(crate) structurally_unique_nodes: usize,
     pub(crate) structural_redundancy: f64,
     pub(crate) num_redundant_nodes: usize,
@@ -1555,10 +1522,6 @@ pub(crate) fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
         let node_ptr = node as *const GSSNode;
         if !visited.insert(node_ptr) {
             continue;
-        }
-
-        if node.is_root() {
-            stats.num_leaves += 1;
         }
 
         stats.unique_nodes += 1;
