@@ -262,7 +262,7 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
                 let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
                     Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
-                    None => TerminalAllowanceCheckMode::Default(),
+                    None => TerminalAllowanceCheckMode::default(),
                 };
 
                 Ok(GrammarConstraint {
@@ -523,7 +523,7 @@ impl GrammarConstraint {
             trie1_god,
             trie2_god,
             trie3_god,
-            post_commit_allow_check_mode: TerminalAllowanceCheckMode::Default(),
+            post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
         };
 
         gc
