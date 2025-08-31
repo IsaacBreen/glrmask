@@ -1557,7 +1557,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
             &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         println!("After {} commits: GSS stats = {:?}", i, stats);
-        last_gss_nodes = stats.num_nodes;
+        last_gss_nodes = stats.unique_nodes;
     }
 
     // Commit one more time
@@ -1572,10 +1572,10 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     // The exact number can vary with implementation details, but it should be small.
     // Let's assert it increases by at most 5.
     assert!(
-        final_stats.num_nodes <= last_gss_nodes + 5,
+        final_stats.unique_nodes <= last_gss_nodes + 5,
         "GSS nodes should not grow exponentially. Before: {}, After: {}",
         last_gss_nodes,
-        final_stats.num_nodes
+        final_stats.unique_nodes
     );
 }
 
