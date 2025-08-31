@@ -527,18 +527,10 @@ impl GLRParser {
             if items.is_empty() {
                 writeln!(f, "{}  (None)", indent)?;
             } else {
-                let mut grouped_items: BTreeMap<(&Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
                 for item in items {
-                    grouped_items
-                        .entry((&item.production, item.dot_position))
-                        .or_default()
-                        .insert(item.lookahead.clone());
-                }
-
-                for ((production, dot_pos), lookaheads) in grouped_items {
-                    write!(f, "{}- [{} ->", sub_indent, production.lhs.0)?;
-                    for (i, symbol) in production.rhs.iter().enumerate() {
-                        if i == dot_pos {
+                    write!(f, "{}- [{} ->", sub_indent, item.production.lhs.0)?;
+                    for (i, symbol) in item.production.rhs.iter().enumerate() {
+                        if i == item.dot_position {
                             write!(f, " •")?;
                         }
                         match symbol {
@@ -546,29 +538,8 @@ impl GLRParser {
                             Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
                         }
                     }
-                    if dot_pos == production.rhs.len() {
+                    if item.dot_position == item.production.rhs.len() {
                         write!(f, " •")?;
-                    }
-                    write!(f, ", ")?;
-                    // Display the lookahead
-                    if lookaheads.len() == 1 {
-                        if let Some(lookahead) = lookaheads.iter().next().unwrap() {
-                            write!(f, "{}", lookahead)?;
-                        } else {
-                            write!(f, "ε")?; // Epsilon for no lookahead
-                        }
-                    } else {
-                        write!(f, "{{")?;
-                        let mut lookahead_strs: Vec<String> = lookaheads.iter().map(|l| if let Some(t) = l { t.to_string() } else { "ε".to_string() }).collect();
-                        lookahead_strs.sort();
-                        const MAX_LOOKAHEADS_TO_SHOW: usize = 5;
-                        if lookahead_strs.len() > MAX_LOOKAHEADS_TO_SHOW {
-                            let truncated: Vec<_> = lookahead_strs.iter().take(MAX_LOOKAHEADS_TO_SHOW).cloned().collect();
-                            write!(f, "{}... ({} total)", truncated.join(", "), lookahead_strs.len())?;
-                        } else {
-                            write!(f, "{}", lookahead_strs.join(", "))?;
-                        }
-                        write!(f, "}}")?;
                     }
                     writeln!(f, "]")?;
                 }
