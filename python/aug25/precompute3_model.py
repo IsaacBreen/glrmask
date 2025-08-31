@@ -61,6 +61,45 @@ class Model(GraphProvider):
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
+    def print_stats(self):
+        """Prints statistics about the loaded graph."""
+        import numpy as np
+
+        num_nodes = len(self.arena)
+        num_edge_groups = 0
+        num_dests = 0
+        pop_values = []
+        llm_rs_num_ranges = []
+        state_bv_num_ranges = []
+        num_end_nodes = 0
+        
+        for uid, node in self.arena.items():
+            if self.is_end(uid):
+                num_end_nodes += 1
+            
+            children = node.get("children") or []
+            num_edge_groups += len(children)
+
+            for (pop, llm_rs), dests in children:
+                num_dests += len(dests)
+                pop_values.extend([pop] * len(dests))
+                llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
+                for _, state_bv in dests:
+                    state_bv_num_ranges.append(len(state_bv))
+
+        print("\n--- Precompute3 Model Statistics ---")
+        print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
+        if pop_values:
+            p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
+            print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+        if llm_rs_num_ranges:
+            p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+            print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+        if state_bv_num_ranges:
+            p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+            print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+        print("------------------------------------\n")
+
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         # Final mask to return
         final_mask = ffi.Bitset.zeros()
@@ -121,7 +160,9 @@ class Model(GraphProvider):
                     for dest_idx, state_bv in dests:
                         # Filter popped parents by state bitset
                         matched = []
-                        if state_bv:
+                        if not state_bv:  # Epsilon transition on GSS stack
+                            matched = [p for _, p in peeks]
+                        else:  # State-ID-gated transition
                             for (sid_val, parent_node) in peeks:
                                 for (a, b) in state_bv:
                                     if a <= sid_val <= b:

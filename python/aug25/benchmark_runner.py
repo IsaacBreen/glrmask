@@ -106,6 +106,10 @@ def run_benchmark(args):
     load_time = time.perf_counter() - t_start_load
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
+    if hasattr(competitor_model, 'print_stats'):
+        print("Printing competitor model statistics...")
+        competitor_model.print_stats()
+
     # 5. Equivalence Check
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
