@@ -282,36 +282,29 @@ fn _compute_first_set_for_item(
 }
 
 #[time_it]
-pub fn compute_closure(
+pub fn compute_closure<'a>(
     items: &BTreeSet<Item>,
-    prods_by_lhs: &BTreeMap<NonTerminal, Vec<Arc<Production>>>,
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<&'a Production>>,
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
     follow_sets: &BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>>,
     lalr_mode: bool,
 ) -> BTreeSet<Item> {
-    if lalr_mode {
-        // LALR-optimized closure:
-        // - Ignore lookaheads for expansions (non-reduce items carry lookahead=None).
-        // - Only reduce items carry lookaheads, taken from FOLLOW(LHS).
-        let mut closure: BTreeSet<Item> = items.iter().map(|it| {
-            let mut it2 = it.clone();
-            if !it2.dot_at_end() {
-                it2.lookahead = None;
-            }
-            it2
-        }).collect();
+    // crate::debug!(3, "Computing closure");
+    let mut closure = items.clone();
+    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+    let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
 
-        let mut worklist: VecDeque<Item> = closure.iter().cloned().collect();
-
-        while let Some(item) = worklist.pop_front() {
-            if let Some((Symbol::NonTerminal(nt), _)) = item.next() {
-                if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                    for prod_arc in prods_for_nt {
+    while let Some(item) = worklist.pop_front() {
+        if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
+            if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
+                let lookaheads = compute_first_set_for_item(&next_item, &first_sets, &nullable_nonterminals, &mut first_set_cache);
+                for &prod in prods_for_nt {
+                    for lookahead in lookaheads.iter().cloned() {
                         let new_item = Item {
-                            production: prod_arc.clone(),
+                            production: Arc::new(prod.clone()),
                             dot_position: 0,
-                            lookahead: None,
+                            lookahead,
                         };
                         if closure.insert(new_item.clone()) {
                             worklist.push_back(new_item);
@@ -320,56 +313,31 @@ pub fn compute_closure(
                 }
             }
         }
+    }
 
-        // Now attach lookaheads only to reduce items using FOLLOW sets.
+    if lalr_mode {
+        crate::debug!(4, "Computing LALR closure.");
         let mut lalr_closure = BTreeSet::new();
+        let mut reduce_item_cores: BTreeMap<(Production, usize), BTreeSet<Option<Terminal>>> = BTreeMap::new();
+
+        // Separate reduce and non-reduce items, and group reduce items by core
         for item in closure {
-            if item.dot_at_end() {
-                if let Some(follows) = follow_sets.get(&item.production.lhs) {
-                    for lookahead in follows {
-                        lalr_closure.insert(Item {
-                            production: item.production.clone(),
-                            dot_position: item.dot_position,
-                            lookahead: lookahead.clone(),
-                        });
+            reduce_item_cores.entry(((*item.production).clone(), item.dot_position)).or_default().insert(item.lookahead);
+        }
+
+        // Process reduce items by replacing their specific lookaheads with the full FOLLOW set.
+        for ((prod, dot_pos), existing_lookaheads) in reduce_item_cores {
+            if let Some(follows) = follow_sets.get(&prod.lhs) {
+                for lookahead in follows {
+                    if lookahead == &None && !existing_lookaheads.contains(&None) {
+                        continue;
                     }
-                } else {
-                    // No FOLLOW data; keep the reduce with whatever it had (likely None).
-                    lalr_closure.insert(item);
+                    lalr_closure.insert(Item { production: Arc::new(prod.clone()), dot_position: dot_pos, lookahead: lookahead.clone() });
                 }
-            } else {
-                // Non-reduce items keep lookahead=None (important for kernel normalization).
-                lalr_closure.insert(item);
             }
         }
         lalr_closure
     } else {
-        // Keep the LR(1) implementation, but reuse Arc<Production> instead of cloning Productions.
-        let mut closure = items.clone();
-        let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-        let mut first_set_cache: BTreeMap<Item, BTreeSet<Option<Terminal>>> = BTreeMap::new();
-
-        while let Some(item) = worklist.pop_front() {
-            if let Some((Symbol::NonTerminal(nt), next_item)) = item.next() {
-                if let Some(prods_for_nt) = prods_by_lhs.get(&nt) {
-                    let lookaheads = compute_first_set_for_item(
-                        &next_item, first_sets, nullable_nonterminals, &mut first_set_cache
-                    );
-                    for prod_arc in prods_for_nt {
-                        for lookahead in lookaheads.iter().cloned() {
-                            let new_item = Item {
-                                production: prod_arc.clone(),
-                                dot_position: 0,
-                                lookahead,
-                            };
-                            if closure.insert(new_item.clone()) {
-                                worklist.push_back(new_item);
-                            }
-                        }
-                    }
-                }
-            }
-        }
         closure
     }
 }
