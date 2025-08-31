@@ -4465,9 +4465,10 @@ local_system:
 
       #[test]
       fn test_ambiguous_tokenizer_no_gss_explosion() {
-          // Grammar: S -> '{'+
+          // Grammar: S -> A, A -> '{' A '}' | ''
           // Tokenizer:
           //   - OPEN_BRACE: '{'
+          //   - CLOSE_BRACE: '}'
           //   - ANYTHING: '{'+
           // This setup creates a situation where a single '{' can be tokenized as either
           // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
@@ -4478,28 +4479,33 @@ local_system:
           // 1. Tokenizer
           let tokenizer_expr = groups![
               eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
-              repeat1_fast(eat_u8_fast(b'{')) // Group 1: ANYTHING
+              eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
+              repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
           ];
           let tokenizer = tokenizer_expr.build();
 
           // 2. Grammar
           let productions = vec![
-              prod("S", vec![nt("S"), t("OPEN_BRACE")]),
-              prod("S", vec![t("OPEN_BRACE")]),
+              prod("S", vec![nt("A")]),
+              prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
+              prod("A", vec![]),
           ];
 
           // 3. LLM Vocabulary
           let mut llm_token_map = LLMTokenMap::new();
           llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
-          let max_original_llm_token_id = 0;
+          llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
+          let max_original_llm_token_id = 1;
 
           // 4. Mappings
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
           grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
+          grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
 
           let mut token_name_map = BiBTreeMap::new();
           token_name_map.insert(regex_name("OPEN_BRACE"), 0);
-          token_name_map.insert(regex_name("ANYTHING"), 1);
+          token_name_map.insert(regex_name("CLOSE_BRACE"), 1);
+          token_name_map.insert(regex_name("ANYTHING"), 2);
 
           // 5. Parser and Constraint
           let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
@@ -4515,7 +4521,7 @@ local_system:
           let mut constraint_state = constraint.init();
           let mut last_gss_nodes = 0;
 
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          constraint_state.commit_bytes(b"{{{");
           assert!(constraint_state.is_active());
           constraint_state.print_gss();
           let stats = gather_gss_stats(
@@ -4525,7 +4531,7 @@ local_system:
           last_gss_nodes = stats.unique_nodes;
 
           // Commit one more
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          constraint_state.commit_bytes(b"{{{");
           assert!(constraint_state.is_active());
           constraint_state.print_gss();
           let final_stats = gather_gss_stats(
@@ -4537,7 +4543,7 @@ local_system:
           // The exact number can vary with implementation details, but it should be small.
           // Let's assert it increases by at most 5.
           assert!(
-              final_stats.unique_nodes <= last_gss_nodes + 5,
+              final_stats.unique_nodes <= last_gss_nodes * 2,
               "GSS nodes should not grow exponentially. Before: {}, After: {}",
               last_gss_nodes,
               final_stats.unique_nodes
@@ -9432,34 +9438,41 @@ local_system:
 
           // 6. Test Logic
           let mut constraint_state = constraint.init();
-          let mut last_gss_nodes = 0;
 
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          // Warm-up commit
+          constraint_state.commit_bytes(b"{{{{");
           assert!(constraint_state.is_active());
-          constraint_state.print_gss();
-          let stats = gather_gss_stats(
-              &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-          );
-          println!("After first commit: GSS stats = {:?}", stats);
-          last_gss_nodes = stats.unique_nodes;
 
-          // Commit one more
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          // First single '{' commit
+          constraint_state.commit_bytes(b"{");
           assert!(constraint_state.is_active());
-          constraint_state.print_gss();
-          let final_stats = gather_gss_stats(
+          let nodes1 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-          );
-          println!("After second commit: GSS stats = {:?}", final_stats);
+          ).unique_nodes;
 
-          // The number of nodes should only increase by a small constant amount, not exponentially.
-          // The exact number can vary with implementation details, but it should be small.
-          // Let's assert it increases by at most 5.
+          // Second single '{' commit
+          constraint_state.commit_bytes(b"{");
+          assert!(constraint_state.is_active());
+          let nodes2 = gather_gss_stats(
+              &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+          ).unique_nodes;
+
+          // Third single '{' commit
+          constraint_state.commit_bytes(b"{");
+          assert!(constraint_state.is_active());
+          let nodes3 = gather_gss_stats(
+              &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+          ).unique_nodes;
+
+          let increase1 = nodes2 - nodes1;
+          let increase2 = nodes3 - nodes2;
+
+          // The increase in nodes should stabilize or decrease, not grow.
           assert!(
-              final_stats.unique_nodes <= last_gss_nodes + 5,
-              "GSS nodes should not grow exponentially. Before: {}, After: {}",
-              last_gss_nodes,
-              final_stats.unique_nodes
+              increase2 <= increase1,
+              "GSS node growth should not accelerate. First increase: {}, Second increase: {}",
+              increase1,
+              increase2
           );
       }
 
@@ -14342,9 +14355,10 @@ messages:
 
       #[test]
       fn test_ambiguous_tokenizer_no_gss_explosion() {
-          // Grammar: S -> '{'+
+          // Grammar: S -> A, A -> '{' A '}' | ''
           // Tokenizer:
           //   - OPEN_BRACE: '{'
+          //   - CLOSE_BRACE: '}'
           //   - ANYTHING: '{'+
           // This setup creates a situation where a single '{' can be tokenized as either
           // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
@@ -14355,28 +14369,33 @@ messages:
           // 1. Tokenizer
           let tokenizer_expr = groups![
               eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
-              repeat1_fast(eat_u8_fast(b'{')) // Group 1: ANYTHING
+              eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
+              repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
           ];
           let tokenizer = tokenizer_expr.build();
 
           // 2. Grammar
           let productions = vec![
-              prod("S", vec![nt("S"), t("OPEN_BRACE")]),
-              prod("S", vec![t("OPEN_BRACE")]),
+              prod("S", vec![nt("A")]),
+              prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
+              prod("A", vec![]),
           ];
 
           // 3. LLM Vocabulary
           let mut llm_token_map = LLMTokenMap::new();
           llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
-          let max_original_llm_token_id = 0;
+          llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
+          let max_original_llm_token_id = 1;
 
           // 4. Mappings
           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
           grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
+          grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
 
           let mut token_name_map = BiBTreeMap::new();
           token_name_map.insert(regex_name("OPEN_BRACE"), 0);
-          token_name_map.insert(regex_name("ANYTHING"), 1);
+          token_name_map.insert(regex_name("CLOSE_BRACE"), 1);
+          token_name_map.insert(regex_name("ANYTHING"), 2);
 
           // 5. Parser and Constraint
           let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
@@ -14392,7 +14411,7 @@ messages:
           let mut constraint_state = constraint.init();
           let mut last_gss_nodes = 0;
 
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          constraint_state.commit_bytes(b"{{{");
           assert!(constraint_state.is_active());
           constraint_state.print_gss();
           let stats = gather_gss_stats(
@@ -14402,7 +14421,7 @@ messages:
           last_gss_nodes = stats.unique_nodes;
 
           // Commit one more
-          constraint_state.commit_bytes(b"{{{{{{{{");
+          constraint_state.commit_bytes(b"{{{");
           assert!(constraint_state.is_active());
           constraint_state.print_gss();
           let final_stats = gather_gss_stats(
@@ -14414,7 +14433,7 @@ messages:
           // The exact number can vary with implementation details, but it should be small.
           // Let's assert it increases by at most 5.
           assert!(
-              final_stats.unique_nodes <= last_gss_nodes + 5,
+              final_stats.unique_nodes <= last_gss_nodes * 2,
               "GSS nodes should not grow exponentially. Before: {}, After: {}",
               last_gss_nodes,
               final_stats.unique_nodes
@@ -14799,8 +14818,12 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_basic.rs
-  - user: Modify `test_ambiguous_tokenizer_no_gss_explosion` so that instead of `S
-      -> '{'+` it's `S -> A`, and we have `A -> '{' A '}'` and `A -> `.
+  - user: Modify `test_ambiguous_tokenizer_no_gss_explosion` so that instead of committing
+      `{{{` and then `{{{` and comparing the number of nodes before and after, we
+      commit `{{{{` first to 'warm it up', then commit `{`, then commit `{` again,
+      then commit `{` for a third time, and compare the increase in number of nodes
+      between the second and third commit and then between the third and fourth commit,
+      and assert that the second increase is no bigger than the first.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -14817,67 +14840,76 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I will modify the `test_ambiguous_tokenizer_no_gss_explosion` test as you requested. Here are the changes in diff format.
+      I will modify the test `test_ambiguous_tokenizer_no_gss_explosion` as you requested. Here are the changes:
 
       ```diff
       --- a/src/test_constraint_basic.rs
       +++ b/src/test_constraint_basic.rs
-      @@ -1071,10 +1071,12 @@
-       #[test]
-       fn test_ambiguous_tokenizer_no_gss_explosion() {
-      -    // Grammar: S -> '{'+
-      +    // Grammar: S -> A, A -> '{' A '}' | ''
-           // Tokenizer:
-           //   - OPEN_BRACE: '{'
-      +    //   - CLOSE_BRACE: '}'
-           //   - ANYTHING: '{'+
-           // This setup creates a situation where a single '{' can be tokenized as either
-           // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
-           // by the parser, but the ambiguity exists for the tokenizer and could lead to
-      @@ -1083,32 +1085,38 @@
+      @@ -1182,34 +1182,34 @@
        
-           // 1. Tokenizer
-           let tokenizer_expr = groups![
-               eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
-      -        repeat1_fast(eat_u8_fast(b'{')) // Group 1: ANYTHING
-      +        eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
-      +        repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
-           ];
-           let tokenizer = tokenizer_expr.build();
+           // 6. Test Logic
+           let mut constraint_state = constraint.init();
+      -    let mut last_gss_nodes = 0;
+      -
+      -    constraint_state.commit_bytes(b"{{{");
+      +
+      +    // Warm-up commit
+      +    constraint_state.commit_bytes(b"{{{{");
+           assert!(constraint_state.is_active());
+      -    constraint_state.print_gss();
+      -    let stats = gather_gss_stats(
+      +
+      +    // First single '{' commit
+      +    constraint_state.commit_bytes(b"{");
+      +    assert!(constraint_state.is_active());
+      +    let nodes1 = gather_gss_stats(
+               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+      -    );
+      -    println!("After first commit: GSS stats = {:?}", stats);
+      -    last_gss_nodes = stats.unique_nodes;
+      -
+      -    // Commit one more
+      -    constraint_state.commit_bytes(b"{{{");
+      +    ).unique_nodes;
+      +
+      +    // Second single '{' commit
+      +    constraint_state.commit_bytes(b"{");
+           assert!(constraint_state.is_active());
+      -    constraint_state.print_gss();
+      -    let final_stats = gather_gss_stats(
+      +    let nodes2 = gather_gss_stats(
+               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+      -    );
+      -    println!("After second commit: GSS stats = {:?}", final_stats);
+      -
+      -    // The number of nodes should only increase by a small constant amount, not exponentially.
+      -    // The exact number can vary with implementation details, but it should be small.
+      -    // Let's assert it increases by at most 5.
+      +    ).unique_nodes;
+      +
+      +    // Third single '{' commit
+      +    constraint_state.commit_bytes(b"{");
+      +    assert!(constraint_state.is_active());
+      +    let nodes3 = gather_gss_stats(
+      +        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+      +    ).unique_nodes;
+      +
+      +    let increase1 = nodes2 - nodes1;
+      +    let increase2 = nodes3 - nodes2;
+      +
+      +    // The increase in nodes should stabilize or decrease, not grow.
+           assert!(
+      -        final_stats.unique_nodes <= last_gss_nodes * 2,
+      -        "GSS nodes should not grow exponentially. Before: {}, After: {}",
+      -        last_gss_nodes,
+      -        final_stats.unique_nodes
+      +        increase2 <= increase1,
+      +        "GSS node growth should not accelerate. First increase: {}, Second increase: {}",
+      +        increase1,
+      +        increase2
+           );
+       }
        
-           // 2. Grammar
-           let productions = vec![
-      -        prod("S", vec![nt("S"), t("OPEN_BRACE")]),
-      -        prod("S", vec![t("OPEN_BRACE")]),
-      +        prod("S", vec![nt("A")]),
-      +        prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
-      +        prod("A", vec![]),
-           ];
-       
-           // 3. LLM Vocabulary
-           let mut llm_token_map = LLMTokenMap::new();
-           llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
-      -    let max_original_llm_token_id = 0;
-      +    llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
-      +    let max_original_llm_token_id = 1;
-       
-           // 4. Mappings
-           let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-           grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
-      +    grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
-       
-           let mut token_name_map = BiBTreeMap::new();
-           token_name_map.insert(regex_name("OPEN_BRACE"), 0);
-      -    token_name_map.insert(regex_name("ANYTHING"), 1);
-      +    token_name_map.insert(regex_name("CLOSE_BRACE"), 1);
-      +    token_name_map.insert(regex_name("ANYTHING"), 2);
-       
-           // 5. Parser and Constraint
-           let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
-           let constraint = GrammarConstraint::new(
-               tokenizer,
-               parser,
-               llm_token_map,
 
       ```
     metadata:
@@ -14890,7 +14922,7 @@ messages:
       Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_basic.rs.
     metadata:
-  - user: "Changes committed with message: \"test: Refactor ambiguous tokenizer test
-      for grammar S -> A, A -> '{' A '}' | ''\""
+  - user: 'Changes committed with message: "test(constraint): Assert stable GSS node
+      growth in ambiguous tokenizer test"'
     metadata:
 ...

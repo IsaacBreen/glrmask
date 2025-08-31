@@ -1554,34 +1554,41 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
 
     // 6. Test Logic
     let mut constraint_state = constraint.init();
-    let mut last_gss_nodes = 0;
 
-    constraint_state.commit_bytes(b"{{");
+    // Warm-up commit
+    constraint_state.commit_bytes(b"{{{{");
     assert!(constraint_state.is_active());
-    constraint_state.print_gss();
-    let stats = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    );
-    println!("After first commit: GSS stats = {:?}", stats);
-    last_gss_nodes = stats.unique_nodes;
 
-    // Commit one more
-    constraint_state.commit_bytes(b"{{");
+    // First single '{' commit
+    constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
-    constraint_state.print_gss();
-    let final_stats = gather_gss_stats(
+    let nodes1 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    );
-    println!("After second commit: GSS stats = {:?}", final_stats);
+    ).unique_nodes;
 
-    // The number of nodes should only increase by a small constant amount, not exponentially.
-    // The exact number can vary with implementation details, but it should be small.
-    // Let's assert it increases by at most 5.
+    // Second single '{' commit
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    let nodes2 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    // Third single '{' commit
+    constraint_state.commit_bytes(b"{");
+    assert!(constraint_state.is_active());
+    let nodes3 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    let increase1 = nodes2 - nodes1;
+    let increase2 = nodes3 - nodes2;
+
+    // The increase in nodes should stabilize or decrease, not grow.
     assert!(
-        final_stats.unique_nodes <= last_gss_nodes * 2,
-        "GSS nodes should not grow exponentially. Before: {}, After: {}",
-        last_gss_nodes,
-        final_stats.unique_nodes
+        increase2 <= increase1,
+        "GSS node growth should not accelerate. First increase: {}, Second increase: {}",
+        increase1,
+        increase2
     );
 }
 
