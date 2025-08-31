@@ -2539,7 +2539,7 @@ impl<'a> GrammarConstraintState<'a> {
             max_edges: 500,
             original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
             llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-            verbose: true,
+            verbose: false,
         };
 
         let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
