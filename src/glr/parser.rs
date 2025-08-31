@@ -134,7 +134,8 @@ impl JSONConvertible for ParseStateEdgeContent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState {
     pub stack: Arc<GSSNode>,
-    pub accepted_state: Arc<GSSNode>,
+    pub accepted_state: Option<Arc<GSSNode>>,
+    pub prev_accepted_state: Arc<GSSNode>,
     pub trie2_god: Option<Trie2GodWrapper>,
 }
 
@@ -142,7 +143,8 @@ impl ParseState {
     pub fn new() -> Self {
         ParseState {
             stack: Arc::new(GSSNode::new_fresh()),
-            accepted_state: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -150,7 +152,8 @@ impl ParseState {
     pub(crate) fn with_stack(stack: Arc<GSSNode>) -> Self {
         ParseState {
             stack,
-            accepted_state: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -167,7 +170,14 @@ impl ParseState {
 
     pub fn merge(&mut self, mut other: ParseState) {
         Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
-        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+        if let Some(other_accepted) = other.accepted_state {
+            if let Some(self_accepted) = self.accepted_state.as_mut() {
+                Arc::make_mut(self_accepted).merge_with_depth(usize::MAX, &other_accepted);
+            } else {
+                self.accepted_state = Some(other_accepted);
+            }
+        }
+        Arc::make_mut(&mut self.prev_accepted_state).merge_with_depth(usize::MAX, &other.prev_accepted_state);
         assert_eq!(self.trie2_god.is_none(), other.trie2_god.is_none());
         if self.trie2_god.is_some() {
             assert_eq!(self.trie2_god.as_ref().unwrap(), other.trie2_god.as_ref().unwrap());
@@ -387,7 +397,6 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_state: stack,
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
         }
@@ -397,7 +406,6 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_state: ParseState::new(),
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
         }
@@ -408,7 +416,6 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
         };
@@ -419,7 +426,6 @@ impl GLRParser {
         let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
-            accepted: false,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
         };
@@ -444,7 +450,6 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            accepted: false,
         }
     }
 
@@ -458,7 +463,8 @@ impl GLRParser {
         let stack_top = GSSNode::new_fresh().push_many(all_edges);
         ParseState {
             stack: Arc::new(stack_top),
-            accepted_state: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -470,7 +476,6 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
-            accepted: false,
         }
     }
 
@@ -483,7 +488,8 @@ impl GLRParser {
         let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
         ParseState {
             stack,
-            accepted_state: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -498,7 +504,8 @@ impl GLRParser {
         };
         ParseState {
             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
-            accepted_state: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -730,7 +737,6 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
-    accepted: bool,                // <-- NEW
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode2Index, LLMTokenBV)>,
 }
@@ -795,6 +801,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let isolated_state = ParseState {
                 stack: peek.isolated_parent(),
                 accepted_state: state.accepted_state.clone(),
+                prev_accepted_state: state.prev_accepted_state.clone(),
                 trie2_god: state.trie2_god.clone(),
             };
             let depth = isolated_state.stack.max_depth();
@@ -819,6 +826,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         ParseState {
             stack: Arc::new(new_gss_node_instance),
             accepted_state: self.active_state.accepted_state.clone(),
+            prev_accepted_state: self.active_state.prev_accepted_state.clone(),
             trie2_god: None,
         }
     }
@@ -878,6 +886,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_parse_state = ParseState {
                                     stack: s_new_arc,
                                     accepted_state: state.accepted_state.clone(),
+                                    prev_accepted_state: state.prev_accepted_state.clone(),
                                     trie2_god: state.trie2_god.clone(),
                                 };
                                 if let Some(ref mut r_map) = reduce_map {
@@ -887,10 +896,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             }
                             if !accepted_s_new_arc.is_empty() {
-                                self.accepted = true;
                                 let accepted_parse_state = ParseState {
                                     stack: Arc::new(GSSNode::new_fresh()),
-                                    accepted_state: accepted_s_new_arc,
+                                    accepted_state: Some(accepted_s_new_arc),
+                                    prev_accepted_state: state.prev_accepted_state.clone(),
                                     trie2_god: state.trie2_god.clone(),
                                 };
                                 accepted_states_todo.push_back(accepted_parse_state);
@@ -914,6 +923,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             let new_parse_state = ParseState {
                                                 stack: s_new_arc,
                                                 accepted_state: state.accepted_state.clone(),
+                                                prev_accepted_state: state.prev_accepted_state.clone(),
                                                 trie2_god: state.trie2_god.clone(),
                                             };
                                             if let Some(ref mut r_map) = reduce_map {
@@ -923,10 +933,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             }
                                         }
                                         if !accepted_s_new_arc.is_empty() {
-                                            self.accepted = true;
                                             let accepted_parse_state = ParseState {
                                                 stack: Arc::new(GSSNode::new_fresh()),
-                                                accepted_state: accepted_s_new_arc,
+                                                accepted_state: Some(accepted_s_new_arc),
+                                                prev_accepted_state: state.prev_accepted_state.clone(),
                                                 trie2_god: state.trie2_god.clone(),
                                             };
                                             accepted_states_todo.push_back(accepted_parse_state);
@@ -975,6 +985,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                     let new_parse_state = ParseState {
                                                         stack: s_new_arc,
                                                         accepted_state: state.accepted_state.clone(),
+                                                        prev_accepted_state: state.prev_accepted_state.clone(),
                                                         trie2_god: state.trie2_god.clone(),
                                                     };
                                                     if let Some(ref mut r_map) = reduce_map {
@@ -984,10 +995,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                     }
                                                 }
                                                 if !accepted_s_new_arc.is_empty() {
-                                                    self.accepted = true;
                                                     let accepted_parse_state = ParseState {
                                                         stack: Arc::new(GSSNode::new_fresh()),
-                                                        accepted_state: accepted_s_new_arc,
+                                                        accepted_state: Some(accepted_s_new_arc),
+                                                        prev_accepted_state: state.prev_accepted_state.clone(),
                                                         trie2_god: state.trie2_god.clone(),
                                                     };
                                                     accepted_states_todo.push_back(accepted_parse_state);
@@ -1501,7 +1512,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
-        let mut next_active = ParseState::new().with_maybe_god(self.active_state.trie2_god.clone());
+        let mut next_active = ParseState {
+            stack: Arc::new(GSSNode::new_fresh()),
+            accepted_state: None,
+            prev_accepted_state: self.active_state.prev_accepted_state.clone(),
+            trie2_god: self.active_state.trie2_god.clone(),
+        };
         for state in shifted_states_todo {
             next_active.merge(state);
         }
@@ -1510,9 +1526,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         self.active_state = next_active;
 
-        // Reset acceptance flag for the new token
-        self.accepted = false;
-        self.active_state.accepted_state = Arc::new(GSSNode::new_fresh());
+        // Move current accepted state to previous, and reset current.
+        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        self.active_state.accepted_state = None;
 
         self.log_gss("Phase1/2-end", token_id, false, false);
         self.below_bottom_cache.clear();
@@ -1668,19 +1684,29 @@ impl<'a> GLRParserState<'a> { // No longer generic
             _ => {},
         }
         self.active_state.merge(other.active_state);
-        self.accepted |= other.accepted;
     }
 
     pub fn is_ok(&self) -> bool {
-        self.accepted || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
+        let accepted_now = self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty());
+        let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
+        accepted_now || accepted_prev || (!self.active_state.stack.is_empty() && self.active_state.stack.is_alive())
     }
 
-    /// Returns true if the previous step lead to an `accept` action.
-    pub fn has_accepted(&self) -> bool {
-        self.accepted
+    /// Returns true if the token processed two steps ago lead to an `accept` action.
+    pub fn has_accepted_prev(&self) -> bool {
+        !self.active_state.prev_accepted_state.is_empty()
     }
 
-    // #[time_it("GLRParserState::log_gss")]
+    /// Returns true if the most recently processed token could lead to an `accept` action,
+    /// possibly after subsequent default reductions. This may mutate the state by running
+    /// default reductions if they haven't been run yet for the current token.
+    pub fn has_accepted(&mut self) -> bool {
+        if self.phase == ParserPhase::ReadyForDefaultReductions {
+            self.process_default_reductions();
+        }
+        self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty())
+    }
+
     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
             return;
@@ -1690,8 +1716,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         const PANIC_THRESHOLD: usize = 1_000_000;
 
         let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
-        if !self.active_state.accepted_state.is_empty() {
-            roots_to_log.push(("Accepted", self.active_state.accepted_state.clone()));
+        if let Some(accepted_state) = &self.active_state.accepted_state {
+            if !accepted_state.is_empty() {
+                roots_to_log.push(("Accepted", accepted_state.clone()));
+            }
+        }
+        if !self.active_state.prev_accepted_state.is_empty() {
+            roots_to_log.push(("PrevAccepted", self.active_state.prev_accepted_state.clone()));
         }
 
         let stats_breakdown = roots_to_log.iter().map(|(name, root)| {
@@ -1699,8 +1730,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             format!("{}_nodes: {:?}", name.to_lowercase(), stats)
         }).collect::<Vec<_>>().join(" ");
 
-        crate::debug!(3, "{} ({:?}) - accepted: {} - token '{}' ({}) - {}",
-                      phase, self.phase, self.accepted, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
+        let accepted_now = self.active_state.accepted_state.is_some();
+        let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
+        crate::debug!(3, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
+                      phase, self.phase, accepted_now, accepted_prev, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
 
         let mut gss_strings = vec![];
         let mut all_state_ids = BTreeSet::new();
@@ -1768,8 +1801,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
     /// Generates a Graphviz DOT representation of the GSS state graph.
     pub fn gss_to_dot(&self) -> String {
         let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
-        if !self.active_state.accepted_state.is_empty() {
-            roots.push(("Accepted", &self.active_state.accepted_state));
+        if let Some(accepted_state) = &self.active_state.accepted_state {
+            if !accepted_state.is_empty() {
+                roots.push(("Accepted", accepted_state));
+            }
+        }
+        if !self.active_state.prev_accepted_state.is_empty() {
+            roots.push(("PrevAccepted", &self.active_state.prev_accepted_state));
         }
         self.parser.gss_forest_to_dot(&roots, None, None)
     }
