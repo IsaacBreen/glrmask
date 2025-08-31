@@ -1889,6 +1889,11 @@ pub(crate) fn format_acc(
 ) -> String {
     let _ = (original_internal_bimap, llm_token_map);
 
+    let mut parts: Vec<String> = Vec::new();
+    if node.is_root() {
+        parts.push("GSS_ROOT".to_string());
+    }
+
     let acc = node.acc();
 
     let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
@@ -1982,7 +1987,6 @@ pub(crate) fn format_acc(
         }
     };
 
-    let mut parts: Vec<String> = Vec::new();
     if let Some(s) = union_llm_opt { parts.push(s); }
     if let Some(s) = union_terminals_opt { parts.push(s); }
     if let Some(s) = trie2_nodes_str { parts.push(s); }
