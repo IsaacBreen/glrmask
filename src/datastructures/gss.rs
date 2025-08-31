@@ -1291,6 +1291,7 @@ pub(crate) fn fuse_predecessors_recursive(
     levels: usize,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
 ) -> Arc<GSSNode> {
+    return node_arc.clone();
     if levels == 0 {
         return node_arc.clone();
     }
