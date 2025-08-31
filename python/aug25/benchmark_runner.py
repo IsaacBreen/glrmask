@@ -8,6 +8,7 @@ import importlib.util
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
+from tqdm import tqdm
 
 import _sep1
 from aug25.equality import are_equivalent_for_state
@@ -169,7 +170,7 @@ def run_benchmark(args):
 
     # 7. Run benchmark loop
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-    for i, token_id in enumerate(token_ids):
+    for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
         # Get the reference mask to check correctness (if enabled)
         if args.verify_masks:
             reference_mask_np = constraint_state.get_mask()
@@ -202,10 +203,6 @@ def run_benchmark(args):
 
         # Advance the state
         constraint_state.commit(token_id)
-        
-        # Progress indicator
-        if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
-            print(f"  ... completed step {i+1}/{len(token_ids)}")
 
     print("--- Benchmark finished ---")
 

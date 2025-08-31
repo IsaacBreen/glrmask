@@ -1222,6 +1222,10 @@ local_system:
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
+          if hasattr(competitor_model, 'print_stats'):
+              print("Printing competitor model statistics...")
+              competitor_model.print_stats()
+
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
@@ -2079,6 +2083,45 @@ local_system:
                                   for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
 
+          def print_stats(self):
+              """Prints statistics about the loaded graph."""
+              import numpy as np
+
+              num_nodes = len(self.arena)
+              num_edge_groups = 0
+              num_dests = 0
+              pop_values = []
+              llm_rs_num_ranges = []
+              state_bv_num_ranges = []
+              num_end_nodes = 0
+              
+              for uid, node in self.arena.items():
+                  if self.is_end(uid):
+                      num_end_nodes += 1
+                  
+                  children = node.get("children") or []
+                  num_edge_groups += len(children)
+
+                  for (pop, llm_rs), dests in children:
+                      num_dests += len(dests)
+                      pop_values.extend([pop] * len(dests))
+                      llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
+                      for _, state_bv in dests:
+                          state_bv_num_ranges.append(len(state_bv))
+
+              print("\n--- Precompute3 Model Statistics ---")
+              print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
+              if pop_values:
+                  p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              if llm_rs_num_ranges:
+                  p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              if state_bv_num_ranges:
+                  p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              print("------------------------------------\n")
+
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
               final_mask = ffi.Bitset.zeros()
@@ -2139,7 +2182,9 @@ local_system:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if state_bv:
+                              if not state_bv:  # Epsilon transition on GSS stack
+                                  matched = [p for _, p in peeks]
+                              else:  # State-ID-gated transition
                                   for (sid_val, parent_node) in peeks:
                                       for (a, b) in state_bv:
                                           if a <= sid_val <= b:
@@ -3282,6 +3327,7 @@ local_system:
       from pathlib import Path
       from datetime import datetime, timezone
       import numpy as np
+      from tqdm import tqdm
 
       import _sep1
       from aug25.equality import are_equivalent_for_state
@@ -3443,7 +3489,7 @@ local_system:
 
           # 7. Run benchmark loop
           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-          for i, token_id in enumerate(token_ids):
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
               # Get the reference mask to check correctness (if enabled)
               if args.verify_masks:
                   reference_mask_np = constraint_state.get_mask()
@@ -3476,10 +3522,6 @@ local_system:
 
               # Advance the state
               constraint_state.commit(token_id)
-              
-              # Progress indicator
-              if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
-                  print(f"  ... completed step {i+1}/{len(token_ids)}")
 
           print("--- Benchmark finished ---")
 
@@ -5641,6 +5683,10 @@ messages:
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
+          if hasattr(competitor_model, 'print_stats'):
+              print("Printing competitor model statistics...")
+              competitor_model.print_stats()
+
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
@@ -6523,6 +6569,45 @@ messages:
                                   for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
 
+          def print_stats(self):
+              """Prints statistics about the loaded graph."""
+              import numpy as np
+
+              num_nodes = len(self.arena)
+              num_edge_groups = 0
+              num_dests = 0
+              pop_values = []
+              llm_rs_num_ranges = []
+              state_bv_num_ranges = []
+              num_end_nodes = 0
+              
+              for uid, node in self.arena.items():
+                  if self.is_end(uid):
+                      num_end_nodes += 1
+                  
+                  children = node.get("children") or []
+                  num_edge_groups += len(children)
+
+                  for (pop, llm_rs), dests in children:
+                      num_dests += len(dests)
+                      pop_values.extend([pop] * len(dests))
+                      llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
+                      for _, state_bv in dests:
+                          state_bv_num_ranges.append(len(state_bv))
+
+              print("\n--- Precompute3 Model Statistics ---")
+              print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
+              if pop_values:
+                  p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              if llm_rs_num_ranges:
+                  p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              if state_bv_num_ranges:
+                  p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
+                  print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
+              print("------------------------------------\n")
+
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
               final_mask = ffi.Bitset.zeros()
@@ -6583,7 +6668,9 @@ messages:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if state_bv:
+                              if not state_bv:  # Epsilon transition on GSS stack
+                                  matched = [p for _, p in peeks]
+                              else:  # State-ID-gated transition
                                   for (sid_val, parent_node) in peeks:
                                       for (a, b) in state_bv:
                                           if a <= sid_val <= b:
@@ -6618,10 +6705,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: We want to optimise performance on the benchmark as much as possible. For
-      this, it might be useful to get some statistics about the input tree. After
-      all, how can we optimise when we don't know what we're optimising? Compute any
-      info that we might need. Think about how we might optimise performance.
+  - user: Use a progress bar for the benchmark steps instead of printing every 100
+      steps.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6638,121 +6723,52 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      To help with performance optimization, I'll add functionality to gather and display statistics about the precomputed graph structure. This will provide insights into node and edge counts, `pop` value distributions, and the complexity of the token and state bitsets, which are critical for identifying performance bottlenecks.
-
-      I'll also correct a logic error in the `precompute3_model` where epsilon transitions on the GSS stack were being incorrectly dropped, ensuring the mask calculation is correct.
-
-      Here are the changes:
-
       ```diff
       diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      index 99b532f..533664d 100644
+      index 2139611..633c662 100644
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -87,6 +87,10 @@
-           competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
-           load_time = time.perf_counter() - t_start_load
-           print(f"Competitor model loaded in {load_time:.4f} seconds.")
-      +
-      +    if hasattr(competitor_model, 'print_stats'):
-      +        print("Printing competitor model statistics...")
-      +        competitor_model.print_stats()
+      @@ -7,6 +7,7 @@
+       from pathlib import Path
+       from datetime import datetime, timezone
+       import numpy as np
+      +from tqdm import tqdm
        
-           # 5. Equivalence Check
-           print(f"Loading reference model from: {args.reference}")
-
-      ``````diff
-      diff --git a/python/aug25/precompute3_model.py b/python/aug25/precompute3_model.py
-      index 920f5c2..3028445 100644
-      --- a/python/aug25/precompute3_model.py
-      +++ b/python/aug25/precompute3_model.py
-      @@ -43,6 +43,48 @@
-                       for dest_idx, state_bv_ranges in dests:
-                           if not state_bv_ranges: # Epsilon transition on GSS stack
-                               yield (int(pop), None, int(dest_idx))
-                           else:
-                               for start, end in state_bv_ranges:
-                                   for sid in range(start, end + 1):
-                                       yield (int(pop), sid, int(dest_idx))
+       import _sep1
+       from aug25.equality import are_equivalent_for_state
+      @@ -165,7 +166,7 @@
        
-      +    def print_stats(self):
-      +        """Prints statistics about the loaded graph."""
-      +        import numpy as np
-      +
-      +        num_nodes = len(self.arena)
-      +        num_edge_groups = 0
-      +        num_dests = 0
-      +        pop_values = []
-      +        llm_rs_num_ranges = []
-      +        state_bv_num_ranges = []
-      +        num_end_nodes = 0
-      +        
-      +        for uid, node in self.arena.items():
-      +            if self.is_end(uid):
-      +                num_end_nodes += 1
-      +            
-      +            children = node.get("children") or []
-      +            num_edge_groups += len(children)
-      +
-      +            for (pop, llm_rs), dests in children:
-      +                num_dests += len(dests)
-      +                pop_values.extend([pop] * len(dests))
-      +                llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
-      +                for _, state_bv in dests:
-      +                    state_bv_num_ranges.append(len(state_bv))
-      +
-      +        print("\n--- Precompute3 Model Statistics ---")
-      +        print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
-      +        if pop_values:
-      +            p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
-      +            print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-      +        if llm_rs_num_ranges:
-      +            p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-      +            print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-      +        if state_bv_num_ranges:
-      +            p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-      +            print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-      +        print("------------------------------------\n")
-      +
-           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-               # Final mask to return
-               final_mask = ffi.Bitset.zeros()
-      @@ -103,14 +145,15 @@
+           # 7. Run benchmark loop
+           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+      -    for i, token_id in enumerate(token_ids):
+      +    for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+               # Get the reference mask to check correctness (if enabled)
+               if args.verify_masks:
+                   reference_mask_np = constraint_state.get_mask()
+      @@ -198,11 +199,6 @@
        
-                           for dest_idx, state_bv in dests:
-                               # Filter popped parents by state bitset
-                               matched = []
-      -                        if state_bv:
-      +                        if not state_bv:  # Epsilon transition on GSS stack
-      +                            matched = [p for _, p in peeks]
-      +                        else:  # State-ID-gated transition
-                                   for (sid_val, parent_node) in peeks:
-                                       for (a, b) in state_bv:
-                                           if a <= sid_val <= b:
-                                               matched.append(parent_node)
-                                               break
-                               if not matched:
-                                   continue
+               # Advance the state
+               constraint_state.commit(token_id)
+      -        
+      -        # Progress indicator
+      -        if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
+      -            print(f"  ... completed step {i+1}/{len(token_ids)}")
        
-                               # Merge matched parents
+           print("--- Benchmark finished ---")
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/benchmark_runner.py
       Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/precompute3_model.py
-      Applying patch to 'python/aug25/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add model statistics reporting and
-      display"'
+  - user: 'Changes committed with message: "feat: Add tqdm progress bar to benchmark
+      runner"'
     metadata:
 ...
