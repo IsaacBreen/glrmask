@@ -2799,8 +2799,8 @@ impl<'a> GrammarConstraintState<'a> {
         let gss_stats_after_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
         if gss_stats_after_pruning != gss_stats_before_pruning {
+            crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
             crate::debug!(3, "GSS stats changed after pruning disallowed terminals.");
             self.print_gss();
         } else {
