@@ -82,10 +82,10 @@ impl JSONConvertible for PrecomputedNode3Contents {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalAllowanceCheckMode {
-    #[default]
     None,
     ImmediateSets,
     ImmediateProbe,
+    #[default]
     StepProbe,
 }
 
