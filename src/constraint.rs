@@ -2528,6 +2528,16 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn explain_stack(&self) {
         for (state_id, state) in &self.state {
             println!("\n--- State {} ---", state_id.0);
+            // Sample and print a bunch of stacks
+            for i in 0..5 {
+                if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
+                    let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                        .map(|edge| edge.state_id)
+                        .collect();
+                    sampled_stack.reverse();
+                    println!("  Sampled stack {}: {:?}", i + 1, sampled_stack);
+                };
+            }
             // Sample a stack
             if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
                 let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
