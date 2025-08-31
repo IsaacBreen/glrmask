@@ -2921,7 +2921,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut fuse_memo = HashMap::new();
         for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 8, &mut fuse_memo);
+            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 1, &mut fuse_memo);
         }
         fuse_memo.clear();
 
