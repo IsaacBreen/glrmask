@@ -2525,6 +2525,10 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "GSS stats: {:#?}", stats);
     }
 
+    pub fn print_gss(&self) {
+        todo!()
+    }
+
     pub fn explain_stack(&self) {
         for (state_id, state) in &self.state {
             println!("\n--- State {} ---", state_id.0);
