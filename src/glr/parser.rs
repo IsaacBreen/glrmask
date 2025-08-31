@@ -164,6 +164,15 @@ impl ParseState {
         self.trie2_god = maybe_god;
         self
     }
+
+    pub fn merge(&mut self, mut other: ParseState) {
+        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
+        assert_eq!(self.trie2_god.is_none(), other.trie2_god.is_none());
+        if self.trie2_god.is_some() {
+            assert_eq!(self.trie2_god.as_ref().unwrap(), other.trie2_god.as_ref().unwrap());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

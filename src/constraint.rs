@@ -1822,19 +1822,6 @@ pub struct ParseStateKey {
     stack_state_id: StateID,
 }
 
-impl ParseState { // No longer generic
-    pub fn merge(&mut self, mut other: ParseState) {
-        // if self.stack.max_depth() > other.stack.max_depth() {
-        //     std::mem::swap(self, &mut other);
-        // }
-        // Arc::make_mut(&mut self.stack).merge_with_depth(1, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(2, &other.stack);
-        // Arc::make_mut(&mut self.stack).merge_with_depth(3, &other.stack);
-        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
-        Arc::make_mut(&mut self.accepted_state).merge_with_depth(usize::MAX, &other.accepted_state);
-    }
-}
-
 pub trait InsertWith<K, V> {
     fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
 }
