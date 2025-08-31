@@ -2745,11 +2745,6 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
-        let mut grammar_terminals_bv = TerminalBV::zeros();
-        for (_, tid) in self.parent.parser.terminal_map.iter() {
-            grammar_terminals_bv.insert(tid.0);
-        }
-
         // for (state_id, state) in &self.state {
         //     crate::debug!(3, "State {} before commit:", state_id.0);
         //     state.log_gss("Before commit", TerminalID(0), false, false);
@@ -2775,9 +2770,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             let mut terminals = TerminalBV::zeros();
             for token in exec_result.matches {
-                if grammar_terminals_bv.contains(token.id) {
-                    terminals.insert(token.id);
-                }
+                terminals.insert(token.id);
             }
             terminals_map.insert(*tokenizer_state_id, terminals);
         }
@@ -2822,13 +2815,8 @@ impl<'a> GrammarConstraintState<'a> {
                     &llm_token_bytes[offset..],
                     tokenizer_s_id_at_offset,
                 );
-                let mut pushed_any_grammar = false;
 
                 for match_info in &exec_result.matches {
-                    if !grammar_terminals_bv.contains(match_info.id) {
-                        continue;
-                    }
-
                     let mut cloned_glr_s = glr_s_at_offset.clone();
 
                     cloned_glr_s.step(TerminalID(match_info.id));
@@ -2836,7 +2824,6 @@ impl<'a> GrammarConstraintState<'a> {
 
                     if cloned_glr_s.is_ok() {
                         let new_offset = offset + match_info.width;
-                        pushed_any_grammar = true;
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
@@ -2863,13 +2850,11 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                if !pushed_any_grammar {
-                    if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                        // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                        // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                        let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                        new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
-                    }
+                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
                 }
             }
         }
@@ -2889,7 +2874,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut fuse_memo = HashMap::new();
         for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 16, &mut fuse_memo);
+            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
         }
         fuse_memo.clear();
 
