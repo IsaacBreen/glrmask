@@ -663,6 +663,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         assert!(constraint_state.is_active_or_accepted(), "State became inactive before token {}", i + 1);
 
         let mask_start = Instant::now();
+        constraint_state.print_gss_stats();
         // let current_mask = constraint_state.get_mask();
         // println!("  get_mask took: {:?}", mask_start.elapsed());
         // println!("  Current mask: {:?}", current_mask);
