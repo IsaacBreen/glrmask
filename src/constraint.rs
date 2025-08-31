@@ -2678,7 +2678,7 @@ impl<'a> GrammarConstraintState<'a> {
             return;
         }
 
-        crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
+        crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         // for (state_id, state) in &self.state {
         //     crate::debug!(3, "State {} before commit:", state_id.0);
@@ -2819,7 +2819,7 @@ impl<'a> GrammarConstraintState<'a> {
         //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
         // }
 
-        crate::debug!(2, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         for (tokenizer_id, glr_state) in &self.state {
             if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
                 // glr_state.log_gss("After commit", TerminalID(0), false, false);
