@@ -1124,6 +1124,7 @@ local_system:
       from pathlib import Path
       from datetime import datetime, timezone
       import numpy as np
+      from tqdm import tqdm
 
       import _sep1
       from aug25.equality import are_equivalent_for_state
@@ -1216,22 +1217,21 @@ local_system:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          # All models now load from precompute3 JSON.
-          print("-> Using precompute3 JSON for competitor model.")
-          competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
+          if 'precompute3' in args.competitor.name:
+              print("-> Using precompute3 JSON for competitor model.")
+              competitor_json_str = pre3_json_str
+          else:
+              print("-> Using precompute2 JSON for competitor model.")
+              competitor_json_str = pre2_json_str
+          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
-
-          if hasattr(competitor_model, 'print_stats'):
-              print("Printing competitor model statistics...")
-              competitor_model.print_stats()
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model also loads from precompute3 JSON for equivalence checks.
-          print("-> Using precompute3 JSON for reference model.")
-          reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
+          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(pre2_json_str)
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
@@ -1285,7 +1285,7 @@ local_system:
 
           # 7. Run benchmark loop
           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-          for i, token_id in enumerate(token_ids):
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
               # Get the reference mask to check correctness (if enabled)
               if args.verify_masks:
                   reference_mask_np = constraint_state.get_mask()
@@ -1318,10 +1318,6 @@ local_system:
 
               # Advance the state
               constraint_state.commit(token_id)
-              
-              # Progress indicator
-              if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
-                  print(f"  ... completed step {i+1}/{len(token_ids)}")
 
           print("--- Benchmark finished ---")
 
@@ -1416,11 +1412,6 @@ local_system:
               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
               """
-              raise NotImplementedError
-
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
-              """Initializes a model from a precompute3-formatted JSON string."""
               raise NotImplementedError
 
       @dataclass(frozen=True, slots=True)
@@ -1871,53 +1862,6 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """
-              Initializes a precompute2 model from a precompute3-formatted JSON string
-              by "exploding" the state ID bitsets from precompute3 edges.
-              """
-              import json
-              from collections import defaultdict
-              from .common_interface import RangeSet
-
-              arr = json.loads(s)
-              roots_map, arena_json_p3 = arr
-              arena_values_p3 = arena_json_p3.get("values", [])
-              arena_p3 = {int(k): v for k, v in arena_values_p3}
-
-              arena_p2 = {}
-              for uid, node_p3 in arena_p3.items():
-                  node_p2 = {
-                      "max_depth": node_p3.get("max_depth", 0),
-                      "value": node_p3.get("value", {}),
-                      "children": []
-                  }
-
-                  children_p3 = node_p3.get("children", [])
-                  grouped_edges = defaultdict(list)
-
-                  for (pop, llm_bv_json), dests in children_p3:
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      for dest_idx, state_bv_ranges in dests:
-                          if not state_bv_ranges:
-                              grouped_edges[(pop, None)].append((dest_idx, llm_rs))
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(start, end + 1):
-                                      grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
-                  
-                  p2_children = []
-                  for (pop, sid), dests_list in grouped_edges.items():
-                      dests_by_dest_idx = defaultdict(RangeSet.empty)
-                      for dest_idx, llm_rs in dests_list:
-                          dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
-                      final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
-                      p2_children.append(((pop, sid), final_dests))
-                  node_p2["children"] = p2_children
-                  arena_p2[uid] = node_p2
-              return cls(roots_map, arena_p2)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -2058,11 +2002,6 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """Initializes a precompute3 model from its JSON representation."""
-              return cls.from_json_string(s)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -2082,45 +2021,6 @@ local_system:
                               for start, end in state_bv_ranges:
                                   for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
-
-          def print_stats(self):
-              """Prints statistics about the loaded graph."""
-              import numpy as np
-
-              num_nodes = len(self.arena)
-              num_edge_groups = 0
-              num_dests = 0
-              pop_values = []
-              llm_rs_num_ranges = []
-              state_bv_num_ranges = []
-              num_end_nodes = 0
-              
-              for uid, node in self.arena.items():
-                  if self.is_end(uid):
-                      num_end_nodes += 1
-                  
-                  children = node.get("children") or []
-                  num_edge_groups += len(children)
-
-                  for (pop, llm_rs), dests in children:
-                      num_dests += len(dests)
-                      pop_values.extend([pop] * len(dests))
-                      llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
-                      for _, state_bv in dests:
-                          state_bv_num_ranges.append(len(state_bv))
-
-              print("\n--- Precompute3 Model Statistics ---")
-              print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
-              if pop_values:
-                  p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if llm_rs_num_ranges:
-                  p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if state_bv_num_ranges:
-                  p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              print("------------------------------------\n")
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
@@ -2182,9 +2082,7 @@ local_system:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if not state_bv:  # Epsilon transition on GSS stack
-                                  matched = [p for _, p in peeks]
-                              else:  # State-ID-gated transition
+                              if state_bv:
                                   for (sid_val, parent_node) in peeks:
                                       for (a, b) in state_bv:
                                           if a <= sid_val <= b:
@@ -3327,10 +3225,12 @@ local_system:
       from pathlib import Path
       from datetime import datetime, timezone
       import numpy as np
+      from collections import Counter
       from tqdm import tqdm
 
       import _sep1
       from aug25.equality import are_equivalent_for_state
+      from aug25.common_interface import RangeSet
 
       # --- Helper Functions (from former example_js.py) ---
 
@@ -3385,6 +3285,90 @@ local_system:
           
           return getattr(module, 'Model')
 
+      def print_model_statistics(model, model_name: str):
+          """Analyzes and prints statistics about the loaded graph model."""
+          print(f"\n--- Statistics for {model_name} ---")
+
+          if not hasattr(model, 'arena') or not model.arena:
+              print("  - Model has no arena or is empty. Cannot compute stats.")
+              return
+
+          num_nodes = len(model.arena)
+          num_roots = len(model.roots_map)
+          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
+
+          print(f"  - Roots: {num_roots}")
+          print(f"  - Nodes: {num_nodes}")
+          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
+
+          # Detect model type by inspecting the first child edge of the first node with children
+          is_precompute3 = False
+          for node_data in model.arena.values():
+              children = node_data.get("children")
+              if children:
+                  edge_key, _ = children[0]
+                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+                  if isinstance(edge_key[1], RangeSet):
+                       is_precompute3 = True
+                  break
+          
+          model_type = "Precompute3" if is_precompute3 else "Precompute2"
+          print(f"  - Detected Model Type: {model_type}")
+
+          pops = []
+          fan_outs = []
+          llm_rs_sizes = []
+          state_rs_sizes = [] # precompute3 only
+
+          if is_precompute3:
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, llm_rs), dests in children:
+                      pops.append(pop)
+                      if llm_rs.intervals:
+                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                      total_dest_edges += len(dests)
+                      for _, state_bv in dests:
+                          if state_bv:
+                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
+
+          else: # Precompute2
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, _), dests in children:
+                      pops.append(pop)
+                      total_dest_edges += len(dests)
+                      for _, llm_rs in dests:
+                          if llm_rs.intervals:
+                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
+
+          def print_dist(name, data):
+              if not data:
+                  print(f"  - {name} Distribution: N/A (no data)")
+                  return
+              arr = np.array(data)
+              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
+
+          print_dist("Pop counts", pops)
+          print_dist("Node fan-out", fan_outs)
+          print_dist("LLM RangeSet sizes", llm_rs_sizes)
+          if is_precompute3:
+              print_dist("State RangeSet sizes", state_rs_sizes)
+          print("-" * 20)
+
       def run_benchmark(args):
           """Main benchmark logic."""
           print("--- Setting up benchmark environment ---")
@@ -3420,22 +3404,28 @@ local_system:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          # All models now load from precompute3 JSON.
-          print("-> Using precompute3 JSON for competitor model.")
-          competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
+          if 'precompute3' in args.competitor.name:
+              print("-> Using precompute3 JSON for competitor model.")
+              competitor_json_str = pre3_json_str
+          else:
+              print("-> Using precompute2 JSON for competitor model.")
+              competitor_json_str = pre2_json_str
+          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
-          if hasattr(competitor_model, 'print_stats'):
-              print("Printing competitor model statistics...")
-              competitor_model.print_stats()
+          if args.print_stats:
+              print_model_statistics(competitor_model, args.competitor.name)
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model also loads from precompute3 JSON for equivalence checks.
-          print("-> Using precompute3 JSON for reference model.")
-          reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
+          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(pre2_json_str)
+
+          if args.print_stats:
+              print_model_statistics(reference_model, args.reference.name)
+
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
@@ -3589,6 +3579,8 @@ local_system:
           
           parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
                               help="Disable correctness verification of masks at each step (improves benchmark purity).")
+          parser.add_argument('--print-stats', action='store_true',
+                              help="Print detailed statistics about the loaded models before running the benchmark.")
           parser.set_defaults(verify_masks=True)
 
           args = parser.parse_args()
@@ -3616,11 +3608,6 @@ local_system:
               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
               """
-              raise NotImplementedError
-
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
-              """Initializes a model from a precompute3-formatted JSON string."""
               raise NotImplementedError
 
       @dataclass(frozen=True, slots=True)
@@ -4071,53 +4058,6 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """
-              Initializes a precompute2 model from a precompute3-formatted JSON string
-              by "exploding" the state ID bitsets from precompute3 edges.
-              """
-              import json
-              from collections import defaultdict
-              from .common_interface import RangeSet
-
-              arr = json.loads(s)
-              roots_map, arena_json_p3 = arr
-              arena_values_p3 = arena_json_p3.get("values", [])
-              arena_p3 = {int(k): v for k, v in arena_values_p3}
-
-              arena_p2 = {}
-              for uid, node_p3 in arena_p3.items():
-                  node_p2 = {
-                      "max_depth": node_p3.get("max_depth", 0),
-                      "value": node_p3.get("value", {}),
-                      "children": []
-                  }
-
-                  children_p3 = node_p3.get("children", [])
-                  grouped_edges = defaultdict(list)
-
-                  for (pop, llm_bv_json), dests in children_p3:
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      for dest_idx, state_bv_ranges in dests:
-                          if not state_bv_ranges:
-                              grouped_edges[(pop, None)].append((dest_idx, llm_rs))
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(start, end + 1):
-                                      grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
-                  
-                  p2_children = []
-                  for (pop, sid), dests_list in grouped_edges.items():
-                      dests_by_dest_idx = defaultdict(RangeSet.empty)
-                      for dest_idx, llm_rs in dests_list:
-                          dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
-                      final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
-                      p2_children.append(((pop, sid), final_dests))
-                  node_p2["children"] = p2_children
-                  arena_p2[uid] = node_p2
-              return cls(roots_map, arena_p2)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -4258,11 +4198,6 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """Initializes a precompute3 model from its JSON representation."""
-              return cls.from_json_string(s)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -4282,45 +4217,6 @@ local_system:
                               for start, end in state_bv_ranges:
                                   for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
-
-          def print_stats(self):
-              """Prints statistics about the loaded graph."""
-              import numpy as np
-
-              num_nodes = len(self.arena)
-              num_edge_groups = 0
-              num_dests = 0
-              pop_values = []
-              llm_rs_num_ranges = []
-              state_bv_num_ranges = []
-              num_end_nodes = 0
-              
-              for uid, node in self.arena.items():
-                  if self.is_end(uid):
-                      num_end_nodes += 1
-                  
-                  children = node.get("children") or []
-                  num_edge_groups += len(children)
-
-                  for (pop, llm_rs), dests in children:
-                      num_dests += len(dests)
-                      pop_values.extend([pop] * len(dests))
-                      llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
-                      for _, state_bv in dests:
-                          state_bv_num_ranges.append(len(state_bv))
-
-              print("\n--- Precompute3 Model Statistics ---")
-              print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
-              if pop_values:
-                  p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if llm_rs_num_ranges:
-                  p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if state_bv_num_ranges:
-                  p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              print("------------------------------------\n")
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
@@ -4382,9 +4278,7 @@ local_system:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if not state_bv:  # Epsilon transition on GSS stack
-                                  matched = [p for _, p in peeks]
-                              else:  # State-ID-gated transition
+                              if state_bv:
                                   for (sid_val, parent_node) in peeks:
                                       for (a, b) in state_bv:
                                           if a <= sid_val <= b:
@@ -5585,6 +5479,7 @@ messages:
       from pathlib import Path
       from datetime import datetime, timezone
       import numpy as np
+      from tqdm import tqdm
 
       import _sep1
       from aug25.equality import are_equivalent_for_state
@@ -5677,22 +5572,21 @@ messages:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          # All models now load from precompute3 JSON.
-          print("-> Using precompute3 JSON for competitor model.")
-          competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
+          if 'precompute3' in args.competitor.name:
+              print("-> Using precompute3 JSON for competitor model.")
+              competitor_json_str = pre3_json_str
+          else:
+              print("-> Using precompute2 JSON for competitor model.")
+              competitor_json_str = pre2_json_str
+          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
-
-          if hasattr(competitor_model, 'print_stats'):
-              print("Printing competitor model statistics...")
-              competitor_model.print_stats()
 
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model also loads from precompute3 JSON for equivalence checks.
-          print("-> Using precompute3 JSON for reference model.")
-          reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
+          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(pre2_json_str)
           print(f"Running equivalence check against reference model: {args.reference.name}")
           
           equivalence_passed = True
@@ -5746,7 +5640,7 @@ messages:
 
           # 7. Run benchmark loop
           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-          for i, token_id in enumerate(token_ids):
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
               # Get the reference mask to check correctness (if enabled)
               if args.verify_masks:
                   reference_mask_np = constraint_state.get_mask()
@@ -5779,10 +5673,6 @@ messages:
 
               # Advance the state
               constraint_state.commit(token_id)
-              
-              # Progress indicator
-              if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
-                  print(f"  ... completed step {i+1}/{len(token_ids)}")
 
           print("--- Benchmark finished ---")
 
@@ -5882,11 +5772,6 @@ messages:
               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
               """
-              raise NotImplementedError
-
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "GraphProvider":
-              """Initializes a model from a precompute3-formatted JSON string."""
               raise NotImplementedError
 
       @dataclass(frozen=True, slots=True)
@@ -6352,53 +6237,6 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """
-              Initializes a precompute2 model from a precompute3-formatted JSON string
-              by "exploding" the state ID bitsets from precompute3 edges.
-              """
-              import json
-              from collections import defaultdict
-              from .common_interface import RangeSet
-
-              arr = json.loads(s)
-              roots_map, arena_json_p3 = arr
-              arena_values_p3 = arena_json_p3.get("values", [])
-              arena_p3 = {int(k): v for k, v in arena_values_p3}
-
-              arena_p2 = {}
-              for uid, node_p3 in arena_p3.items():
-                  node_p2 = {
-                      "max_depth": node_p3.get("max_depth", 0),
-                      "value": node_p3.get("value", {}),
-                      "children": []
-                  }
-
-                  children_p3 = node_p3.get("children", [])
-                  grouped_edges = defaultdict(list)
-
-                  for (pop, llm_bv_json), dests in children_p3:
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      for dest_idx, state_bv_ranges in dests:
-                          if not state_bv_ranges:
-                              grouped_edges[(pop, None)].append((dest_idx, llm_rs))
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(start, end + 1):
-                                      grouped_edges[(pop, sid)].append((dest_idx, llm_rs))
-                  
-                  p2_children = []
-                  for (pop, sid), dests_list in grouped_edges.items():
-                      dests_by_dest_idx = defaultdict(RangeSet.empty)
-                      for dest_idx, llm_rs in dests_list:
-                          dests_by_dest_idx[dest_idx] = dests_by_dest_idx[dest_idx].union(llm_rs)
-                      final_dests = [(d, rs.to_json()) for d, rs in dests_by_dest_idx.items()]
-                      p2_children.append(((pop, sid), final_dests))
-                  node_p2["children"] = p2_children
-                  arena_p2[uid] = node_p2
-              return cls(roots_map, arena_p2)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -6544,11 +6382,6 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
 
-          @classmethod
-          def from_precompute3_json_string(cls, s: str) -> "Model":
-              """Initializes a precompute3 model from its JSON representation."""
-              return cls.from_json_string(s)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -6568,45 +6401,6 @@ messages:
                               for start, end in state_bv_ranges:
                                   for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
-
-          def print_stats(self):
-              """Prints statistics about the loaded graph."""
-              import numpy as np
-
-              num_nodes = len(self.arena)
-              num_edge_groups = 0
-              num_dests = 0
-              pop_values = []
-              llm_rs_num_ranges = []
-              state_bv_num_ranges = []
-              num_end_nodes = 0
-              
-              for uid, node in self.arena.items():
-                  if self.is_end(uid):
-                      num_end_nodes += 1
-                  
-                  children = node.get("children") or []
-                  num_edge_groups += len(children)
-
-                  for (pop, llm_rs), dests in children:
-                      num_dests += len(dests)
-                      pop_values.extend([pop] * len(dests))
-                      llm_rs_num_ranges.extend([len(llm_rs.intervals)] * len(dests))
-                      for _, state_bv in dests:
-                          state_bv_num_ranges.append(len(state_bv))
-
-              print("\n--- Precompute3 Model Statistics ---")
-              print(f"  Nodes: {num_nodes}, Edge Groups: {num_edge_groups}, Total Dests: {num_dests}, End Nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2% if num_nodes > 0 else 0})")
-              if pop_values:
-                  p = np.percentile(pop_values, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  Pop values: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if llm_rs_num_ranges:
-                  p = np.percentile(llm_rs_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  LLM #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              if state_bv_num_ranges:
-                  p = np.percentile(state_bv_num_ranges, [0, 25, 50, 75, 90, 99, 100])
-                  print(f"  StateID #ranges: min={p[0]}, p25={p[1]}, p50={p[2]}, p75={p[3]}, p90={p[4]}, p99={p[5]}, max={p[6]}")
-              print("------------------------------------\n")
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
               # Final mask to return
@@ -6668,9 +6462,7 @@ messages:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if not state_bv:  # Epsilon transition on GSS stack
-                                  matched = [p for _, p in peeks]
-                              else:  # State-ID-gated transition
+                              if state_bv:
                                   for (sid_val, parent_node) in peeks:
                                       for (a, b) in state_bv:
                                           if a <= sid_val <= b:
@@ -6705,8 +6497,10 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: Use a progress bar for the benchmark steps instead of printing every 100
-      steps.
+  - user: We want to optimise performance on the benchmark as much as possible. For
+      this, it might be useful to get some statistics aboutx the input tree. After
+      all, how can we optimise when we don't know what we're optimising? Compute any
+      info that we might need. Think about how we might optimise performance.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6723,39 +6517,148 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
+      I've analyzed the request to gather statistics for performance optimization. To achieve this, I'll add a feature to the benchmark runner that, when enabled, inspects the loaded data structures (`precompute2` and `precompute3` models) and prints a detailed summary of their properties. This information, such as graph size, fan-out, and the distribution of various values, will be crucial for identifying potential bottlenecks and guiding optimization efforts.
+
+      Here are the changes to enable this statistical analysis:
+
       ```diff
       diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      index 2139611..633c662 100644
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -7,6 +7,7 @@
+      @@ -7,10 +7,12 @@
        from pathlib import Path
        from datetime import datetime, timezone
        import numpy as np
-      +from tqdm import tqdm
+      +from collections import Counter
+       from tqdm import tqdm
        
        import _sep1
        from aug25.equality import are_equivalent_for_state
-      @@ -165,7 +166,7 @@
+      +from aug25.common_interface import RangeSet
        
-           # 7. Run benchmark loop
-           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-      -    for i, token_id in enumerate(token_ids):
-      +    for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
-               # Get the reference mask to check correctness (if enabled)
-               if args.verify_masks:
-                   reference_mask_np = constraint_state.get_mask()
-      @@ -198,11 +199,6 @@
+       # --- Helper Functions (from former example_js.py) ---
        
-               # Advance the state
-               constraint_state.commit(token_id)
-      -        
-      -        # Progress indicator
-      -        if (i + 1) % 50 == 0 or (i + 1) == len(token_ids):
-      -            print(f"  ... completed step {i+1}/{len(token_ids)}")
+      @@ -66,6 +68,83 @@
+           
+           return getattr(module, 'Model')
        
-           print("--- Benchmark finished ---")
+      +def print_model_statistics(model, model_name: str):
+      +    """Analyzes and prints statistics about the loaded graph model."""
+      +    print(f"\n--- Statistics for {model_name} ---")
+      +
+      +    if not hasattr(model, 'arena') or not model.arena:
+      +        print("  - Model has no arena or is empty. Cannot compute stats.")
+      +        return
+      +
+      +    num_nodes = len(model.arena)
+      +    num_roots = len(model.roots_map)
+      +    num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
+      +
+      +    print(f"  - Roots: {num_roots}")
+      +    print(f"  - Nodes: {num_nodes}")
+      +    print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
+      +
+      +    # Detect model type by inspecting the first child edge of the first node with children
+      +    is_precompute3 = False
+      +    for node_data in model.arena.values():
+      +        children = node_data.get("children")
+      +        if children:
+      +            edge_key, _ = children[0]
+      +            # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+      +            if isinstance(edge_key[1], RangeSet):
+      +                 is_precompute3 = True
+      +            break
+      +    
+      +    model_type = "Precompute3" if is_precompute3 else "Precompute2"
+      +    print(f"  - Detected Model Type: {model_type}")
+      +
+      +    pops = []
+      +    fan_outs = []
+      +    llm_rs_sizes = []
+      +    state_rs_sizes = [] # precompute3 only
+      +
+      +    if is_precompute3:
+      +        total_edge_groups = 0
+      +        total_dest_edges = 0
+      +        for node_data in model.arena.values():
+      +            children = node_data.get("children", [])
+      +            fan_outs.append(len(children))
+      +            total_edge_groups += len(children)
+      +            for (pop, llm_rs), dests in children:
+      +                pops.append(pop)
+      +                if llm_rs.intervals:
+      +                    llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+      +                total_dest_edges += len(dests)
+      +                for _, state_bv in dests:
+      +                    if state_bv:
+      +                        state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+      +        print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+      +        print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
+      +
+      +    else: # Precompute2
+      +        total_edge_groups = 0
+      +        total_dest_edges = 0
+      +        for node_data in model.arena.values():
+      +            children = node_data.get("children", [])
+      +            fan_outs.append(len(children))
+      +            total_edge_groups += len(children)
+      +            for (pop, _), dests in children:
+      +                pops.append(pop)
+      +                total_dest_edges += len(dests)
+      +                for _, llm_rs in dests:
+      +                    if llm_rs.intervals:
+      +                        llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+      +        print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+      +        print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
+      +
+      +    def print_dist(name, data):
+      +        if not data:
+      +            print(f"  - {name} Distribution: N/A (no data)")
+      +            return
+      +        arr = np.array(data)
+      +        p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+      +        print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
+      +
+      +    print_dist("Pop counts", pops)
+      +    print_dist("Node fan-out", fan_outs)
+      +    print_dist("LLM RangeSet sizes", llm_rs_sizes)
+      +    if is_precompute3:
+      +        print_dist("State RangeSet sizes", state_rs_sizes)
+      +    print("-" * 20)
+      +
+       def run_benchmark(args):
+           """Main benchmark logic."""
+           print("--- Setting up benchmark environment ---")
+      @@ -107,12 +184,19 @@
+               competitor_json_str = pre2_json_str
+           competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+           load_time = time.perf_counter() - t_start_load
+           print(f"Competitor model loaded in {load_time:.4f} seconds.")
        
+      +    if args.print_stats:
+      +        print_model_statistics(competitor_model, args.competitor.name)
+      +
+           # 5. Equivalence Check
+           print(f"Loading reference model from: {args.reference}")
+           ReferenceModel = load_competitor_model(args.reference)
+           # The reference model is always loaded from precompute2 JSON for this benchmark suite.
+           reference_model = ReferenceModel.from_json_string(pre2_json_str)
+      +
+      +    if args.print_stats:
+      +        print_model_statistics(reference_model, args.reference.name)
+      +
+           print(f"Running equivalence check against reference model: {args.reference.name}")
+           
+           equivalence_passed = True
+      @@ -263,6 +347,8 @@
+           
+           parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                               help="Disable correctness verification of masks at each step (improves benchmark purity).")
+      +    parser.add_argument('--print-stats', action='store_true',
+      +                        help="Print detailed statistics about the loaded models before running the benchmark.")
+           parser.set_defaults(verify_masks=True)
+       
+           args = parser.parse_args()
 
       ```
     metadata:
@@ -6768,7 +6671,7 @@ messages:
       Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add tqdm progress bar to benchmark
-      runner"'
+  - user: 'Changes committed with message: "feat: Add --print-stats flag to benchmark_runner
+      for model analysis"'
     metadata:
 ...

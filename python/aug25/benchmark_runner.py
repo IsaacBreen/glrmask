@@ -8,10 +8,12 @@ import importlib.util
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
+from collections import Counter
 from tqdm import tqdm
 
 import _sep1
 from aug25.equality import are_equivalent_for_state
+from aug25.common_interface import RangeSet
 
 # --- Helper Functions (from former example_js.py) ---
 
@@ -66,6 +68,90 @@ def load_competitor_model(competitor_path: Path):
     
     return getattr(module, 'Model')
 
+def print_model_statistics(model, model_name: str):
+    """Analyzes and prints statistics about the loaded graph model."""
+    print(f"\n--- Statistics for {model_name} ---")
+
+    if not hasattr(model, 'arena') or not model.arena:
+        print("  - Model has no arena or is empty. Cannot compute stats.")
+        return
+
+    num_nodes = len(model.arena)
+    num_roots = len(model.roots_map)
+    num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
+
+    print(f"  - Roots: {num_roots}")
+    print(f"  - Nodes: {num_nodes}")
+    print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
+
+    # Detect model type by inspecting the first child edge of the first node with children
+    is_precompute3 = False
+    for node_data in model.arena.values():
+        children = node_data.get("children")
+        if children:
+            edge_key, _ = children[0]
+            # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+            if isinstance(edge_key[1], RangeSet):
+                 is_precompute3 = True
+            break
+    
+    model_type = "Precompute3" if is_precompute3 else "Precompute2"
+    print(f"  - Detected Model Type: {model_type}")
+
+    pops = []
+    fan_outs = []
+    llm_rs_sizes = []
+    state_rs_sizes = [] # precompute3 only
+
+    if is_precompute3:
+        total_edge_groups = 0
+        total_dest_edges = 0
+        for node_data in model.arena.values():
+            children = node_data.get("children", [])
+            fan_outs.append(len(children))
+            total_edge_groups += len(children)
+            for (pop, llm_rs), dests in children:
+                pops.append(pop)
+                if llm_rs.intervals:
+                    llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                total_dest_edges += len(dests)
+                for _, state_bv in dests:
+                    if state_bv:
+                        state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+        print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+        print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
+
+    else: # Precompute2
+        total_edge_groups = 0
+        total_dest_edges = 0
+        for node_data in model.arena.values():
+            children = node_data.get("children", [])
+            fan_outs.append(len(children))
+            total_edge_groups += len(children)
+            for (pop, _), dests in children:
+                pops.append(pop)
+                total_dest_edges += len(dests)
+                for _, llm_rs in dests:
+                    if llm_rs.intervals:
+                        llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+        print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+        print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
+
+    def print_dist(name, data):
+        if not data:
+            print(f"  - {name} Distribution: N/A (no data)")
+            return
+        arr = np.array(data)
+        p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+        print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
+
+    print_dist("Pop counts", pops)
+    print_dist("Node fan-out", fan_outs)
+    print_dist("LLM RangeSet sizes", llm_rs_sizes)
+    if is_precompute3:
+        print_dist("State RangeSet sizes", state_rs_sizes)
+    print("-" * 20)
+
 def run_benchmark(args):
     """Main benchmark logic."""
     print("--- Setting up benchmark environment ---")
@@ -111,11 +197,18 @@ def run_benchmark(args):
     load_time = time.perf_counter() - t_start_load
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
+    if args.print_stats:
+        print_model_statistics(competitor_model, args.competitor.name)
+
     # 5. Equivalence Check
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
     # The reference model is always loaded from precompute2 JSON for this benchmark suite.
     reference_model = ReferenceModel.from_json_string(pre2_json_str)
+
+    if args.print_stats:
+        print_model_statistics(reference_model, args.reference.name)
+
     print(f"Running equivalence check against reference model: {args.reference.name}")
     
     equivalence_passed = True
@@ -269,6 +362,8 @@ def main():
     
     parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
                         help="Disable correctness verification of masks at each step (improves benchmark purity).")
+    parser.add_argument('--print-stats', action='store_true',
+                        help="Print detailed statistics about the loaded models before running the benchmark.")
     parser.set_defaults(verify_masks=True)
 
     args = parser.parse_args()
