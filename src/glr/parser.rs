@@ -842,10 +842,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         action_selector: F,
         config: &ProcessTokenAdvancedConfig,
         fuel: &mut Option<usize>,
-    )
+        early_exit_on_shift: bool,
+    ) -> bool
     where
         F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
     {
+        let mut found_shift = false;
         assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
         for (state, per_state_fuel) in work_map.values() {
             assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
@@ -856,7 +858,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 if *f == 0 {
                     // Out of fuel. Put the state back and return.
                     work_map.insert(key, (state, per_state_fuel));
-                    return;
+                    return found_shift;
                 }
                 *f -= 1;
             }
@@ -871,6 +873,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             let new_parse_state =
                                 self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                             shifted_states_todo.push_back(new_parse_state);
+                            found_shift = true;
+                            if early_exit_on_shift {
+                                return true;
+                            }
                         }
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id: nt,
@@ -912,6 +918,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_parse_state =
                                     self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                                 shifted_states_todo.push_back(new_parse_state);
+                                found_shift = true;
+                                if early_exit_on_shift {
+                                    return true;
+                                }
                             }
                             if per_state_fuel != Some(0) {
                                 let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
@@ -1018,6 +1028,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 crate::debug!(5, "No action found in state {}", state_id.0);
             }
         }
+        return found_shift;
     }
 
     fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
@@ -1037,6 +1048,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 },
                 config,
                 &mut None,
+                false,
             );
         });
     }
@@ -1059,6 +1071,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 },
                 config,
                 &mut None,
+                false,
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -1570,6 +1583,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             |row| Some(Action::Default(&row.default_reduce)),
             &token_config,
             &mut fuel,
+            false,
         );
 
         // Consolidate all survivors into the new active state.
@@ -1631,6 +1645,132 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
             LRMode::LALR => None,
         }
+    }
+
+    /// Returns true iff simulating a single-step with `token_id` would perform any SHIFT.
+    /// This clones the parser state and early-exits on the first SHIFT.
+    pub fn allows_terminal(&self, token_id: TerminalID) -> bool {
+        // Treat the ignore token as always "allowed" (it doesn't shift but is always consumable).
+        if Some(token_id) == self.parser.ignore_terminal_id {
+            return true;
+        }
+
+        let mut s = self.clone();
+        s.below_bottom_cache.clear();
+
+        let mut phase2_todo: WorkMap = WorkMap::new();
+        let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
+        let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
+        let cfg = ProcessTokenAdvancedConfig::default();
+
+        if s.phase == ParserPhase::ReadyForToken {
+            let mut phase1_todo: WorkMap = WorkMap::new();
+            Self::enqueue(&mut phase1_todo, s.active_state.clone(), None);
+            if s.process_action_queue(
+                &mut phase1_todo,
+                Some(&mut phase2_todo),
+                &mut shifted_states_todo,
+                &mut accepted_states_todo,
+                |row| row
+                    .shifts_and_reduces_without_default_reduce
+                    .get(&token_id)
+                    .map(Action::Normal),
+                &cfg,
+                &mut None,
+                true, // early_exit_on_shift
+            ) {
+                return true;
+            }
+        } else {
+            Self::enqueue(&mut phase2_todo, s.active_state.clone(), None);
+        }
+
+        s.process_action_queue(
+            &mut phase2_todo,
+            None,
+            &mut shifted_states_todo,
+            &mut accepted_states_todo,
+            |row| row
+                .shifts_and_reduces_full
+                .get(&token_id)
+                .map(Action::Normal),
+            &cfg,
+            &mut None,
+            true, // early_exit_on_shift
+        )
+    }
+
+    /// Returns Some(true) if at least one top-of-stack state has an action for `token_id`,
+    /// Some(false) otherwise. (Uses the row action map immediately, does not simulate.)
+    pub fn has_immediate_action_for_terminal(&self, token_id: TerminalID) -> Option<bool> {
+        let mut any = false;
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
+            let row = &self.parser.table[&peek.edge_value().state_id];
+            let has = if self.phase == ParserPhase::ReadyForToken {
+                row.shifts_and_reduces_without_default_reduce.contains_key(&token_id)
+            } else {
+                row.shifts_and_reduces_full.contains_key(&token_id)
+            };
+            if has {
+                any = true;
+                break;
+            }
+        }
+        Some(any)
+    }
+
+    /// Returns the set of terminals that cause a SHIFT from at least one top-of-stack state.
+    pub fn immediate_shift_terminals(&self) -> BTreeSet<TerminalID> {
+        let mut out = BTreeSet::new();
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
+            let row = &self.parser.table[&peek.edge_value().state_id];
+            let actions = if self.phase == ParserPhase::ReadyForToken {
+                &row.shifts_and_reduces_without_default_reduce
+            } else {
+                &row.shifts_and_reduces_full
+            };
+            for (tid, action) in actions {
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
+                        out.insert(*tid);
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => {
+                        if shift.is_some() {
+                            out.insert(*tid);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// Returns the set of terminals that cause a REDUCE from at least one top-of-stack state.
+    pub fn immediate_reduce_terminals(&self) -> BTreeSet<TerminalID> {
+        let mut out = BTreeSet::new();
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
+            let row = &self.parser.table[&peek.edge_value().state_id];
+            let actions = if self.phase == ParserPhase::ReadyForToken {
+                &row.shifts_and_reduces_without_default_reduce
+            } else {
+                &row.shifts_and_reduces_full
+            };
+            for (tid, action) in actions {
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => {
+                        out.insert(*tid);
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                        if !reduces.is_empty() {
+                            out.insert(*tid);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     pub fn step(&mut self, token_id: TerminalID) {

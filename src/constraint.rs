@@ -80,6 +80,43 @@ impl JSONConvertible for PrecomputedNode3Contents {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalAllowanceCheckMode {
+    None,
+    ImmediateSets,
+    ImmediateProbe,
+    StepProbe,
+}
+
+impl Default for TerminalAllowanceCheckMode {
+    fn default() -> Self { TerminalAllowanceCheckMode::None }
+}
+
+impl JSONConvertible for TerminalAllowanceCheckMode {
+    fn to_json(&self) -> JSONNode {
+        let s = match self {
+            TerminalAllowanceCheckMode::None => "none",
+            TerminalAllowanceCheckMode::ImmediateSets => "immediate_sets",
+            TerminalAllowanceCheckMode::ImmediateProbe => "immediate_probe",
+            TerminalAllowanceCheckMode::StepProbe => "step_probe",
+        };
+        JSONNode::String(s.to_string())
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::String(s) => match s.as_str() {
+                "none" => Ok(TerminalAllowanceCheckMode::None),
+                "immediate_sets" => Ok(TerminalAllowanceCheckMode::ImmediateSets),
+                "immediate_probe" => Ok(TerminalAllowanceCheckMode::ImmediateProbe),
+                "step_probe" => Ok(TerminalAllowanceCheckMode::StepProbe),
+                other => Err(format!("Unknown TerminalAllowanceCheckMode '{}'", other)),
+            },
+            other => Err(format!("Expected JSON string for TerminalAllowanceCheckMode, got {:?}", other)),
+        }
+    }
+}
+
 pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
@@ -141,6 +178,7 @@ pub struct GrammarConstraint {
     pub(crate) trie1_god: Trie1GodWrapper,
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
+    pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
 }
 
 impl GrammarConstraint {
@@ -168,6 +206,7 @@ impl GrammarConstraint {
         assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
         assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
+        assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
     }
 }
 
@@ -188,6 +227,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
+        obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
         JSONNode::Object(obj)
     }
 
@@ -223,6 +263,11 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
+                let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
+                    Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
+                    None => TerminalAllowanceCheckMode::None,
+                };
+
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
@@ -235,6 +280,7 @@ impl JSONConvertible for GrammarConstraint {
                     trie1_god,
                     trie2_god,
                     trie3_god,
+                    post_commit_allow_check_mode,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -480,6 +526,7 @@ impl GrammarConstraint {
             trie1_god,
             trie2_god,
             trie3_god,
+            post_commit_allow_check_mode: TerminalAllowanceCheckMode::None,
         };
 
         gc
@@ -2877,6 +2924,56 @@ impl<'a> GrammarConstraintState<'a> {
             state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 8, &mut fuse_memo);
         }
         fuse_memo.clear();
+
+        // Post-commit allowance check: ensure each surviving state allows at least one
+        // token the tokenizer can produce from its current tokenizer state.
+        // Mode is controlled by self.parent.post_commit_allow_check_mode.
+        match self.parent.post_commit_allow_check_mode {
+            TerminalAllowanceCheckMode::None => {
+                // no-op
+            }
+            TerminalAllowanceCheckMode::ImmediateSets => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    // Fast auto-pass if tokenizer can produce all grammar terminals.
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+
+                    let mut union = glr_state.immediate_shift_terminals();
+                    union.extend(glr_state.immediate_reduce_terminals());
+                    !union.is_disjoint(&accessible)
+                });
+            }
+            TerminalAllowanceCheckMode::ImmediateProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+            TerminalAllowanceCheckMode::StepProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.allows_terminal(*tid) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+        }
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
