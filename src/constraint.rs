@@ -2809,12 +2809,22 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        // Simplify GSS to remove structural redundancy.
-        for state in self.state.values_mut() {
-            if !state.active_state.stack.is_empty() {
-                crate::datastructures::gss::canonicalize_gss(&mut state.active_state.stack);
-            }
-        }
+        // let mut fuse_memo = HashMap::new();
+        // for state in self.state.values_mut() {
+            // state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
+        // }
+        // fuse_memo.clear();
+
+        // let mut roots_to_simplify_arcs = Vec::new();
+        // for glr_parser_state in self.state.values_mut() {
+        //     if !glr_parser_state.active_state.stack.is_empty() {
+        //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
+        //     }
+        // }
+        //
+        // if !roots_to_simplify_arcs.is_empty() {
+        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        // }
 
         crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         for (tokenizer_id, glr_state) in &self.state {
