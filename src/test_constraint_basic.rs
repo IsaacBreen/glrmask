@@ -1500,9 +1500,10 @@ fn test_constraint_expression_cycle() {
 
 #[test]
 fn test_ambiguous_tokenizer_no_gss_explosion() {
-    // Grammar: S -> '{'+
+    // Grammar: S -> A, A -> '{' A '}' | ''
     // Tokenizer:
     //   - OPEN_BRACE: '{'
+    //   - CLOSE_BRACE: '}'
     //   - ANYTHING: '{'+
     // This setup creates a situation where a single '{' can be tokenized as either
     // OPEN_BRACE or ANYTHING. Since ANYTHING is not in the grammar, it should be ignored
@@ -1513,28 +1514,33 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     // 1. Tokenizer
     let tokenizer_expr = groups![
         eat_u8_fast(b'{'),      // Group 0: OPEN_BRACE
-        repeat1_fast(eat_u8_fast(b'{')) // Group 1: ANYTHING
+        eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
+        repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
     ];
     let tokenizer = tokenizer_expr.build();
 
     // 2. Grammar
     let productions = vec![
-        prod("S", vec![nt("S"), t("OPEN_BRACE")]),
-        prod("S", vec![t("OPEN_BRACE")]),
+        prod("S", vec![nt("A")]),
+        prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
+        prod("A", vec![]),
     ];
 
     // 3. LLM Vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"{".to_vec(), LLMTokenID(0));
-    let max_original_llm_token_id = 0;
+    llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
+    let max_original_llm_token_id = 1;
 
     // 4. Mappings
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
+    grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
 
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert(regex_name("OPEN_BRACE"), 0);
-    token_name_map.insert(regex_name("ANYTHING"), 1);
+    token_name_map.insert(regex_name("CLOSE_BRACE"), 1);
+    token_name_map.insert(regex_name("ANYTHING"), 2);
 
     // 5. Parser and Constraint
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
@@ -1560,7 +1566,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     last_gss_nodes = stats.unique_nodes;
 
     // Commit one more
-    constraint_state.commit_bytes(b"{");
+    constraint_state.commit_bytes(b"{{{{{{{{");
     assert!(constraint_state.is_active());
     constraint_state.print_gss();
     let final_stats = gather_gss_stats(
