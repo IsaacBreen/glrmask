@@ -101,22 +101,21 @@ def run_benchmark(args):
     CompetitorModel = load_competitor_model(args.competitor)
     
     t_start_load = time.perf_counter()
-    # All models now load from precompute3 JSON.
-    print("-> Using precompute3 JSON for competitor model.")
-    competitor_model = CompetitorModel.from_precompute3_json_string(pre3_json_str)
+    if 'precompute3' in args.competitor.name:
+        print("-> Using precompute3 JSON for competitor model.")
+        competitor_json_str = pre3_json_str
+    else:
+        print("-> Using precompute2 JSON for competitor model.")
+        competitor_json_str = pre2_json_str
+    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
     load_time = time.perf_counter() - t_start_load
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
-
-    if hasattr(competitor_model, 'print_stats'):
-        print("Printing competitor model statistics...")
-        competitor_model.print_stats()
 
     # 5. Equivalence Check
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
-    # The reference model also loads from precompute3 JSON for equivalence checks.
-    print("-> Using precompute3 JSON for reference model.")
-    reference_model = ReferenceModel.from_precompute3_json_string(pre3_json_str)
+    # The reference model is always loaded from precompute2 JSON for this benchmark suite.
+    reference_model = ReferenceModel.from_json_string(pre2_json_str)
     print(f"Running equivalence check against reference model: {args.reference.name}")
     
     equivalence_passed = True
