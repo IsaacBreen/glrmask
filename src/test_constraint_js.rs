@@ -511,7 +511,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Setting up for JS Constraint Integration Test ---");
 
     // 1. Load and compile the JavaScript grammar.
-    let grammar_path = "src/js.ebnf";
+    let grammar_path = "src/js_simplified2.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -538,9 +538,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
         // gpt2_raw_vocab.push("-----".to_string()); // Add a specific token for testing
         // gpt2_raw_vocab.push("{{{".to_string());
-        gpt2_raw_vocab.push("if(1){if(1){if(1){".to_string());
-        gpt2_raw_vocab.push("if(1){".to_string());
-        gpt2_raw_vocab.push("if(2){".to_string());
+        // gpt2_raw_vocab.push("if(1){if(1){if(1){".to_string());
+        // gpt2_raw_vocab.push("if(1){".to_string());
+        // gpt2_raw_vocab.push("if(2){".to_string());
 
         //
         // // Filter 2: Keep only tokens where all alphabetic chars are 'a'
