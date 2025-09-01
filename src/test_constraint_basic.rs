@@ -1534,7 +1534,9 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     let repeating_chunk = b"if(1){";
 
     // First chunk
-    constraint_state.commit_bytes(repeating_chunk);
+    for byte in repeating_chunk {
+        constraint_state.commit_bytes(&[*byte]);
+    }
     assert!(constraint_state.is_active());
     println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
@@ -1543,7 +1545,9 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     ).unique_nodes;
 
     // Second chunk
-    constraint_state.commit_bytes(repeating_chunk);
+    for byte in repeating_chunk {
+        constraint_state.commit_bytes(&[*byte]);
+    }
     assert!(constraint_state.is_active());
     println!("\nAfter second chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
@@ -1552,7 +1556,9 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     ).unique_nodes;
 
     // Third chunk
-    constraint_state.commit_bytes(repeating_chunk);
+    for byte in repeating_chunk {
+        constraint_state.commit_bytes(&[*byte]);
+    }
     assert!(constraint_state.is_active());
     println!("\nAfter third chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
