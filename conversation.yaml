@@ -4327,20 +4327,25 @@ local_system:
                   .flatten()
                   .collect();
 
-              if !unique_preds.is_empty() {
-                  // Get the Acc of the first predecessor. If it's None, the condition can't be met.
-                  if let Some(first_acc) = unique_preds[0].own_acc_opt() {
-                      // Check if all other predecessors have the exact same Acc.
-                      let all_preds_have_same_acc = unique_preds.iter().skip(1).all(|p| {
-                          p.own_acc_opt().as_deref() == Some(first_acc.as_ref())
-                      });
+              // This check only makes sense if the current node has no Acc.
+              if self.own_acc_opt().is_none() && !unique_preds.is_empty() {
+                  // Check if ALL predecessors are internal nodes. If even one is a Root, this constraint doesn't apply,
+                  // because we can't move the Acc off a Root.
+                  if unique_preds.iter().all(|p| matches!(p.as_ref(), GSSNode::Internal(_))) {
+                      // Now, check if they all have the same Acc.
+                      // Get the Acc of the first predecessor. If it's None, the condition can't be met.
+                      if let Some(first_acc) = unique_preds[0].own_acc_opt() {
+                          let all_preds_have_same_acc = unique_preds.iter().skip(1).all(|p| {
+                              p.own_acc_opt().as_deref() == Some(first_acc.as_ref())
+                          });
 
-                      if all_preds_have_same_acc {
-                          let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
-                          return Err(format!(
-                              "Constraint 2 violated: Node {:p} has predecessors that all share the same Acc {:?}. The Acc should be on this node instead.\nFull GSS Structure:\n{}",
-                              self, first_acc, gss_str
-                          ));
+                          if all_preds_have_same_acc {
+                              let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
+                              return Err(format!(
+                                  "Constraint 2 violated: Node {:p} has predecessors that all share the same Acc {:?}. The Acc should be on this node instead.\nFull GSS Structure:\n{}",
+                                  self, first_acc, gss_str
+                              ));
+                          }
                       }
                   }
               }
@@ -5624,7 +5629,9 @@ local_system:
               let leaf_v1 = Arc::new(GSSNode::new((*acc1).clone()));
               let mid_v1 = Arc::new(leaf_v1.push(mock_edge(1)));
               let root_v1 = Arc::new(mid_v1.push(mock_edge(2)));
-              assert!(GSSNode::verify_constraints(&root_v1, &terminal_map).is_ok());
+              if let Err(e) = GSSNode::verify_constraints(&root_v1, &terminal_map) {
+                  panic!("Valid structure 1 failed verification: {}", e);
+              }
 
               // Valid 2: Acc on an internal node, its predecessor (a leaf) has no Acc.
               let leaf_v2 = Arc::new(GSSNode::new(empty_acc()));
@@ -5632,7 +5639,9 @@ local_system:
               mid_preds.entry(mock_edge(1)).or_default().insert(leaf_v2.dest_key(), vec![leaf_v2]);
               let mid_v2 = Arc::new(build_internal(mid_preds, Some(acc1.clone())));
               let root_v2 = Arc::new(mid_v2.push(mock_edge(2))); // root_v2 has no Acc, its pred mid_v2 does.
-              assert!(GSSNode::verify_constraints(&root_v2, &terminal_map).is_ok());
+              if let Err(e) = GSSNode::verify_constraints(&root_v2, &terminal_map) {
+                  panic!("Valid structure 2 failed verification: {}", e);
+              }
 
               // Valid 3: Fork with one branch having an Acc, one not.
               let leaf_with_acc = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
@@ -5641,7 +5650,9 @@ local_system:
               root_preds_v3.entry(mock_edge(1)).or_default().insert(leaf_with_acc.dest_key(), vec![leaf_with_acc]);
               root_preds_v3.entry(mock_edge(2)).or_default().insert(leaf_no_acc.dest_key(), vec![leaf_no_acc]);
               let root_v3 = Arc::new(build_internal(root_preds_v3, None));
-              assert!(GSSNode::verify_constraints(&root_v3, &terminal_map).is_ok());
+              if let Err(e) = GSSNode::verify_constraints(&root_v3, &terminal_map) {
+                  panic!("Valid structure 3 failed verification: {}", e);
+              }
 
               // Valid 4: Fork with two different Accs.
               let leaf_acc1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
@@ -5650,7 +5661,9 @@ local_system:
               root_preds_v4.entry(mock_edge(1)).or_default().insert(leaf_acc1.dest_key(), vec![leaf_acc1]);
               root_preds_v4.entry(mock_edge(2)).or_default().insert(leaf_acc2.dest_key(), vec![leaf_acc2]);
               let root_v4 = Arc::new(build_internal(root_preds_v4, None));
-              assert!(GSSNode::verify_constraints(&root_v4, &terminal_map).is_ok());
+              if let Err(e) = GSSNode::verify_constraints(&root_v4, &terminal_map) {
+                  panic!("Valid structure 4 failed verification: {}", e);
+              }
 
               // --- Invalid Structures ---
 
@@ -11678,5 +11691,182 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add Acc placement constraint verification
       and tests"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2+
+
+      thread 'datastructures::gss::tests::test_acc_constraints' (31321017) panicked at src/datastructures/gss.rs:2882:9:
+      assertion failed: GSSNode::verify_constraints(&root_v1, &terminal_map).is_ok()
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::panic
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:145:5
+         3: sep1::datastructures::gss::tests::test_acc_constraints
+                   at ./src/datastructures/gss.rs:2882:9
+         4: sep1::datastructures::gss::tests::test_acc_constraints::{{closure}}
+                   at ./src/datastructures/gss.rs:2867:30
+         5: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         6: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - assistant: |-
+      I've identified the issue in the constraint verification logic and will correct it. The original check incorrectly flagged valid structures where an `Acc` is held by a `GSSNode::Root` leaf. The rule about pushing an `Acc` up the stack should not apply when the predecessor holding the `Acc` is a `GSSNode::Root`, as these nodes are defined as the endpoints that must carry an `Acc`.
+
+      I will also improve the test assertions to provide more detailed failure messages, including a full printout of the GSS structure, which will make debugging easier in the future.
+
+      Here are the changes:
+
+      ```diff
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -1557,23 +1557,27 @@
+                   .flatten()
+                   .collect();
+       
+      -        if !unique_preds.is_empty() {
+      -            // Get the Acc of the first predecessor. If it's None, the condition can't be met.
+      -            if let Some(first_acc) = unique_preds[0].own_acc_opt() {
+      -                // Check if all other predecessors have the exact same Acc.
+      -                let all_preds_have_same_acc = unique_preds.iter().skip(1).all(|p| {
+      -                    p.own_acc_opt().as_deref() == Some(first_acc.as_ref())
+      -                });
+      -
+      -                if all_preds_have_same_acc {
+      -                    let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
+      -                    return Err(format!(
+      -                        "Constraint 2 violated: Node {:p} has predecessors that all share the same Acc {:?}. The Acc should be on this node instead.\nFull GSS Structure:\n{}",
+      -                        self, first_acc, gss_str
+      -                    ));
+      +        // This check only makes sense if the current node has no Acc.
+      +        if self.own_acc_opt().is_none() && !unique_preds.is_empty() {
+      +            // Check if ALL predecessors are internal nodes. If even one is a Root, this constraint doesn't apply,
+      +            // because we can't move the Acc off a Root.
+      +            if unique_preds.iter().all(|p| matches!(p.as_ref(), GSSNode::Internal(_))) {
+      +                // Now, check if they all have the same Acc.
+      +                // Get the Acc of the first predecessor. If it's None, the condition can't be met.
+      +                if let Some(first_acc) = unique_preds[0].own_acc_opt() {
+      +                    let all_preds_have_same_acc = unique_preds.iter().skip(1).all(|p| {
+      +                        p.own_acc_opt().as_deref() == Some(first_acc.as_ref())
+      +                    });
+      +
+      +                    if all_preds_have_same_acc {
+      +                        let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
+      +                        return Err(format!(
+      +                            "Constraint 2 violated: Node {:p} has predecessors that all share the same Acc {:?}. The Acc should be on this node instead.\nFull GSS Structure:\n{}",
+      +                            self, first_acc, gss_str
+      +                        ));
+      +                    }
+                       }
+                   }
+               }
+       
+               // Recurse
+      @@ -2291,42 +2295,54 @@
+               // Valid 1: Standard tower, Acc at the leaf (which is a GSSNode::Root)
+               let leaf_v1 = Arc::new(GSSNode::new((*acc1).clone()));
+               let mid_v1 = Arc::new(leaf_v1.push(mock_edge(1)));
+               let root_v1 = Arc::new(mid_v1.push(mock_edge(2)));
+      -        assert!(GSSNode::verify_constraints(&root_v1, &terminal_map).is_ok());
+      +        if let Err(e) = GSSNode::verify_constraints(&root_v1, &terminal_map) {
+      +            panic!("Valid structure 1 failed verification: {}", e);
+      +        }
+       
+               // Valid 2: Acc on an internal node, its predecessor (a leaf) has no Acc.
+               let leaf_v2 = Arc::new(GSSNode::new(empty_acc()));
+               let mut mid_preds = NodeMap::new();
+               mid_preds.entry(mock_edge(1)).or_default().insert(leaf_v2.dest_key(), vec![leaf_v2]);
+               let mid_v2 = Arc::new(build_internal(mid_preds, Some(acc1.clone())));
+               let root_v2 = Arc::new(mid_v2.push(mock_edge(2))); // root_v2 has no Acc, its pred mid_v2 does.
+      -        assert!(GSSNode::verify_constraints(&root_v2, &terminal_map).is_ok());
+      +        if let Err(e) = GSSNode::verify_constraints(&root_v2, &terminal_map) {
+      +            panic!("Valid structure 2 failed verification: {}", e);
+      +        }
+       
+               // Valid 3: Fork with one branch having an Acc, one not.
+               let leaf_with_acc = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let leaf_no_acc = Arc::new(GSSNode::new(empty_acc()));
+               let mut root_preds_v3 = NodeMap::new();
+               root_preds_v3.entry(mock_edge(1)).or_default().insert(leaf_with_acc.dest_key(), vec![leaf_with_acc]);
+               root_preds_v3.entry(mock_edge(2)).or_default().insert(leaf_no_acc.dest_key(), vec![leaf_no_acc]);
+               let root_v3 = Arc::new(build_internal(root_preds_v3, None));
+      -        assert!(GSSNode::verify_constraints(&root_v3, &terminal_map).is_ok());
+      +        if let Err(e) = GSSNode::verify_constraints(&root_v3, &terminal_map) {
+      +            panic!("Valid structure 3 failed verification: {}", e);
+      +        }
+       
+               // Valid 4: Fork with two different Accs.
+               let leaf_acc1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let leaf_acc2 = Arc::new(build_internal(NodeMap::new(), Some(acc2.clone())));
+               let mut root_preds_v4 = NodeMap::new();
+               root_preds_v4.entry(mock_edge(1)).or_default().insert(leaf_acc1.dest_key(), vec![leaf_acc1]);
+               root_preds_v4.entry(mock_edge(2)).or_default().insert(leaf_acc2.dest_key(), vec![leaf_acc2]);
+               let root_v4 = Arc::new(build_internal(root_preds_v4, None));
+      -        assert!(GSSNode::verify_constraints(&root_v4, &terminal_map).is_ok());
+      +        if let Err(e) = GSSNode::verify_constraints(&root_v4, &terminal_map) {
+      +            panic!("Valid structure 4 failed verification: {}", e);
+      +        }
+       
+               // --- Invalid Structures ---
+       
+               // Invalid 1: Constraint 1 violation (parent and child both have Acc)
+               let leaf_i1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let mut mid_preds_i1 = NodeMap::new();
+               mid_preds_i1.entry(mock_edge(1)).or_default().insert(leaf_i1.dest_key(), vec![leaf_i1]);
+               let mid_i1 = Arc::new(build_internal(mid_preds_i1, Some(acc2.clone())));
+               let root_i1 = Arc::new(mid_i1.push(mock_edge(2)));
+               let err = GSSNode::verify_constraints(&root_i1, &terminal_map).unwrap_err();
+               assert!(
+                   err.contains("Constraint 1 violated"),
+                   "Incorrect error for constraint 1: {}", err
+               );
+       
+               // Invalid 2a: Constraint 2 violation (single predecessor has Acc, should be pushed up)
+               let leaf_i2a = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let root_i2a = Arc::new(build_internal(NodeMap::from([(mock_edge(1), BTreeMap::from([(leaf_i2a.dest_key(), vec![leaf_i2a])]))]), None));
+               let err = GSSNode::verify_constraints(&root_i2a, &terminal_map).unwrap_err();
+               assert!(
+                   err.contains("Constraint 2 violated"),
+                   "Incorrect error for constraint 2a: {}", err
+               );
+       
+               // Invalid 2b: Constraint 2 violation (all predecessors have same Acc, should be pushed up)
+               let leaf1_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let leaf2_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+               let mut root_preds_i2b = NodeMap::new();
+               root_preds_i2b.entry(mock_edge(1)).or_default().insert(leaf1_i2b.dest_key(), vec![leaf1_i2b]);
+               root_preds_i2b.entry(mock_edge(2)).or_default().insert(leaf2_i2b.dest_key(), vec![leaf2_i2b]);
+               let root_i2b = Arc::new(build_internal(root_preds_i2b, None));
+               let err = GSSNode::verify_constraints(&root_i2b, &terminal_map).unwrap_err();
+               assert!(
+                   err.contains("Constraint 2 violated"),
+                   "Incorrect error for constraint 2b: {}", err
+               );
+           }
+       }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Enhance GSS constraint verification
+      with detailed error reporting"'
     metadata:
 ...

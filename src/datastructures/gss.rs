@@ -2879,7 +2879,9 @@ mod tests {
         let leaf_v1 = Arc::new(GSSNode::new((*acc1).clone()));
         let mid_v1 = Arc::new(leaf_v1.push(mock_edge(1)));
         let root_v1 = Arc::new(mid_v1.push(mock_edge(2)));
-        assert!(GSSNode::verify_constraints(&root_v1, &terminal_map).is_ok());
+        if let Err(e) = GSSNode::verify_constraints(&root_v1, &terminal_map) {
+            panic!("Valid structure 1 failed verification: {}", e);
+        }
 
         // Valid 2: Acc on an internal node, its predecessor (a leaf) has no Acc.
         let leaf_v2 = Arc::new(GSSNode::new(empty_acc()));
@@ -2887,7 +2889,9 @@ mod tests {
         mid_preds.entry(mock_edge(1)).or_default().insert(leaf_v2.dest_key(), vec![leaf_v2]);
         let mid_v2 = Arc::new(build_internal(mid_preds, Some(acc1.clone())));
         let root_v2 = Arc::new(mid_v2.push(mock_edge(2))); // root_v2 has no Acc, its pred mid_v2 does.
-        assert!(GSSNode::verify_constraints(&root_v2, &terminal_map).is_ok());
+        if let Err(e) = GSSNode::verify_constraints(&root_v2, &terminal_map) {
+            panic!("Valid structure 2 failed verification: {}", e);
+        }
 
         // Valid 3: Fork with one branch having an Acc, one not.
         let leaf_with_acc = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
@@ -2896,7 +2900,9 @@ mod tests {
         root_preds_v3.entry(mock_edge(1)).or_default().insert(leaf_with_acc.dest_key(), vec![leaf_with_acc]);
         root_preds_v3.entry(mock_edge(2)).or_default().insert(leaf_no_acc.dest_key(), vec![leaf_no_acc]);
         let root_v3 = Arc::new(build_internal(root_preds_v3, None));
-        assert!(GSSNode::verify_constraints(&root_v3, &terminal_map).is_ok());
+        if let Err(e) = GSSNode::verify_constraints(&root_v3, &terminal_map) {
+            panic!("Valid structure 3 failed verification: {}", e);
+        }
 
         // Valid 4: Fork with two different Accs.
         let leaf_acc1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
@@ -2905,7 +2911,9 @@ mod tests {
         root_preds_v4.entry(mock_edge(1)).or_default().insert(leaf_acc1.dest_key(), vec![leaf_acc1]);
         root_preds_v4.entry(mock_edge(2)).or_default().insert(leaf_acc2.dest_key(), vec![leaf_acc2]);
         let root_v4 = Arc::new(build_internal(root_preds_v4, None));
-        assert!(GSSNode::verify_constraints(&root_v4, &terminal_map).is_ok());
+        if let Err(e) = GSSNode::verify_constraints(&root_v4, &terminal_map) {
+            panic!("Valid structure 4 failed verification: {}", e);
+        }
 
         // --- Invalid Structures ---
 
