@@ -1314,16 +1314,16 @@ pub(crate) fn fuse_predecessors_recursive(
     result_arc
 }
 
-pub fn simplify(roots: &[&mut Arc<GSSNode>]) {
+pub fn simplify(mut roots: Vec<Arc<GSSNode>>) -> Vec<Arc<GSSNode>> {
     // Short-circuit on empty input
     if roots.is_empty() {
-        return;
+        return roots;
     }
 
     // Pass 1: Aggressively fuse predecessors sharing the same edge across the whole depth.
     // This reduces fan-out at each node and creates maximal sharing opportunities.
-    for root in roots {
-        let mut cloned = (**root).clone();
+    for root in roots.iter_mut() {
+        let mut cloned = (*root).as_ref().clone();
         cloned.fuse_predecessors(usize::MAX);
         *root = Arc::new(cloned);
     }
@@ -1401,7 +1401,7 @@ pub fn simplify(roots: &[&mut Arc<GSSNode>]) {
     let mut intern: HashMap<GSSNode, Arc<GSSNode>> = HashMap::new();
 
     // Rewrite all roots to their canonical representatives.
-    for root in roots {
+    for root in roots.iter_mut() {
         let canon = canonicalize(root, &mut rewire_memo, &mut intern);
         *root = canon;
     }
