@@ -1314,6 +1314,10 @@ pub(crate) fn fuse_predecessors_recursive(
     result_arc
 }
 
+pub fn simplify(roots: &[&mut Arc<GSSNode>]) {
+    todo!()
+}
+
 pub(crate) fn deep_clone_gss_with_trie2_map(
     root: &Arc<GSSNode>,
     trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,

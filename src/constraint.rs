@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path, simplify};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -2975,6 +2975,8 @@ impl<'a> GrammarConstraintState<'a> {
                 });
             }
         }
+
+        simplify(&mut self.state.values_mut().map(|s| &mut s.active_state.stack).collect::<Vec<_>>());
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
