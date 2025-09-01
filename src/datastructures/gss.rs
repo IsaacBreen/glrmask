@@ -1314,7 +1314,7 @@ pub(crate) fn fuse_predecessors_recursive(
     result_arc
 }
 
-pub fn simplify(roots: &[&mut Arc<GSSNode>]) {
+pub fn simplify(roots: &mut Arc<GSSNode>, x: &mut HashMap<*const GSSNode, Arc<GSSNode>>) {
     todo!()
 }
 
