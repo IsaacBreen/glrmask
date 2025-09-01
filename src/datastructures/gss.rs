@@ -2490,20 +2490,21 @@ mod tests {
         // constraint propagation (narrowing).
 
         // --- GSS 1 Setup ---
-        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        let trie2_node3 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_god = Trie2GodWrapper::new();
+        let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node3 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         let mut acc_l1 = empty_acc();
-        acc_l1.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node1.clone()));
+        acc_l1.trie2_nodes.insert(trie2_node1.clone());
         let l1 = Arc::new(GSSNode::new(acc_l1));
 
         let mut acc_l2 = empty_acc();
-        acc_l2.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node2.clone()));
+        acc_l2.trie2_nodes.insert(trie2_node2.clone());
         let l2 = Arc::new(GSSNode::new(acc_l2));
 
         let mut acc_l3 = empty_acc();
-        acc_l3.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node3.clone()));
+        acc_l3.trie2_nodes.insert(trie2_node3.clone());
         let l3 = Arc::new(GSSNode::new(acc_l3));
 
         let mut gss1_preds = NodeMap::new();
@@ -2515,7 +2516,7 @@ mod tests {
 
         // --- GSS 2 Setup ---
         let mut acc_l4 = empty_acc();
-        acc_l4.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node1.clone())); // Shared trie2_node
+        acc_l4.trie2_nodes.insert(trie2_node1.clone()); // Shared trie2_node
         let l4 = Arc::new(GSSNode::new(acc_l4));
         let i1 = Arc::new(l4.push(mock_edge(0)));
         let gss2 = i1.push(mock_edge(1));
@@ -2536,9 +2537,9 @@ mod tests {
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
         }
 
-        assert!(final_leaf_trie2_nodes.contains(&PrecomputeNode2Index::new(trie2_node1.clone())), "trie2_node1 missing");
-        assert!(final_leaf_trie2_nodes.contains(&PrecomputeNode2Index::new(trie2_node2.clone())), "trie2_node2 missing");
-        assert!(final_leaf_trie2_nodes.contains(&PrecomputeNode2Index::new(trie2_node3.clone())), "trie2_node3 missing");
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node1), "trie2_node1 missing");
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node2), "trie2_node2 missing");
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node3), "trie2_node3 missing");
         assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
     }
 
@@ -2548,14 +2549,15 @@ mod tests {
         // but different sub-structures would incorrectly collapse the distinct sub-structures.
 
         // --- Shared Nodes ---
-        let trie2_node1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_god = Trie2GodWrapper::new();
+        let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc1 = empty_acc();
-        acc1.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node1.clone()));
+        acc1.trie2_nodes.insert(trie2_node1.clone());
         let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
-        let trie2_node2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc2 = empty_acc();
-        acc2.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node2.clone()));
+        acc2.trie2_nodes.insert(trie2_node2.clone());
         let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
 
         // --- GSS A ---
@@ -2602,9 +2604,10 @@ mod tests {
         // Merged should have two predecessors from root via edge 1, at different depths.
 
         // --- GSS A setup ---
-        let trie2_node_a = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_god = Trie2GodWrapper::new();
+        let trie2_node_a = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_a = empty_acc();
-        acc_a.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node_a.clone()));
+        acc_a.trie2_nodes.insert(trie2_node_a.clone());
         let leaf_a = Arc::new(GSSNode::new(acc_a));
 
         let gss_a = GSSNode::new_with_single_predecessor(
@@ -2614,9 +2617,9 @@ mod tests {
         );
 
         // --- GSS B setup ---
-        let trie2_node_b = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_node_b = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_b = empty_acc();
-        acc_b.trie2_nodes.insert(PrecomputeNode2Index::new(trie2_node_b.clone()));
+        acc_b.trie2_nodes.insert(trie2_node_b.clone());
         let leaf_b = Arc::new(GSSNode::new(acc_b));
 
         let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
@@ -2649,11 +2652,12 @@ mod tests {
         // Root -> (edge 2) -> ... -> Leaf [Trie={unique}]
         //
         // After merging two such towers, the single leaf should contain the union of the two distinct
-        // trie2 nodes.
+        // of the trie2_nodes instead of the union of all of them.
 
         // --- Build two distinct trie2 nodes ---
-        let t1 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-        let t2 = Arc::new(RwLock::new(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let trie2_god = Trie2GodWrapper::new();
+        let t1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+        let t2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         // Helper to build one tower given a leaf with a unique trie2 node.
         let build_tower_from_leaf = |leaf: Arc<GSSNode>| -> GSSNode {
@@ -2664,13 +2668,13 @@ mod tests {
 
         // --- Leaf 1 with trie2_node t1 ---
         let mut acc1 = empty_acc();
-        acc1.trie2_nodes.insert(PrecomputeNode2Index::new(t1.clone()));
+        acc1.trie2_nodes.insert(t1.clone());
         let leaf1 = Arc::new(GSSNode::new(acc1));
         let tower1 = build_tower_from_leaf(leaf1);
 
         // --- Leaf 2 with trie2_node t2 ---
         let mut acc2 = empty_acc();
-        acc2.trie2_nodes.insert(PrecomputeNode2Index::new(t2.clone()));
+        acc2.trie2_nodes.insert(t2.clone());
         let leaf2 = Arc::new(GSSNode::new(acc2));
         let tower2 = build_tower_from_leaf(leaf2);
 
@@ -2695,8 +2699,8 @@ mod tests {
         let leaf = &leaves[0];
         let trie2_nodes = &leaf.acc().trie2_nodes;
         assert_eq!(trie2_nodes.len(), 2, "Unified leaf should contain the union of all trie2 nodes from merged towers");
-        assert!(trie2_nodes.contains(&PrecomputeNode2Index::new(t1.clone())), "Unified leaf missing trie2 node 1");
-        assert!(trie2_nodes.contains(&PrecomputeNode2Index::new(t2.clone())), "Unified leaf missing trie2 node 2");
+        assert!(trie2_nodes.contains(&t1), "Unified leaf missing trie2 node 1");
+        assert!(trie2_nodes.contains(&t2), "Unified leaf missing trie2 node 2");
     }
 
     #[test]
