@@ -2602,12 +2602,14 @@ impl<'a> GrammarConstraintState<'a> {
                     if seen.contains(&sampled_stack) {
                         continue;
                     }
-                    println!("  Sampled stack {}: {:?}", i + 1, sampled_stack);
                     seen.insert(sampled_stack);
                     if seen.len() >= num_to_sample {
                         break;
                     }
                 };
+            }
+            for sampled_stack in seen {
+                println!("  Sampled stack: {:?}", sampled_stack);
             }
             // Sample a stack
             if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
