@@ -1505,23 +1505,13 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
     // which can lead to exponential growth in GSS nodes if states are not merged properly.
     println!("--- Setting up for JS GSS Explosion Test ---");
-    let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-#![ignore(IGNORE)]
-
-program ::= statement* EOF;
+    let js_grammar_ebnf = r#"program ::= statement* EOF;
 EOF ::= '<|EOF|>';
 
-// --- Lexical Grammar ---
-IGNORE ::= ( WS | COMMENT )+ ;
-WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-
-// --- Statements (Minimal grammar to cause GSS explosion) ---
 statement ::= if_statement | expression | block ;
 block ::= '{' statement* '}' ;
 if_statement ::= 'if' expression statement ;
 
-// --- Expressions & Literals (Minimal) ---
 expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
 IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
 "#;
@@ -1536,7 +1526,6 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
         max_id = i;
     }
 
-    // 3. Construct the GrammarConstraint.
     let constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar.clone(),
         llm_token_map.clone(),
@@ -1546,7 +1535,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     println!("GrammarConstraint constructed successfully.");
 
     let mut constraint_state = constraint.init();
-    let repeating_chunk = b"if a{";
+    let repeating_chunk = b"ifa{";
 
     // First chunk
     for byte in repeating_chunk {
