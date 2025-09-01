@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - Cargo.toml
     - src/test_constraint_basic.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     Cargo.toml: |
@@ -1560,89 +1560,28 @@ local_system:
           // with the input "if(1){if(1){...". The grammar has a recursive structure for
           // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
           // which can lead to exponential growth in GSS nodes if states are not merged properly.
-
-          // 1. Load and compile the simplified JavaScript grammar.
           println!("--- Setting up for JS GSS Explosion Test ---");
-          let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
-
-      program ::= statement_list? EOF;
+          let js_grammar_ebnf = r#"program ::= statement* EOF;
       EOF ::= '<|EOF|>';
 
-      // --- Lexical Grammar (Unchanged) ---
-      IGNORE ::= ( WS | COMMENT )+ ;
-      WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+      statement ::= if_statement | expression | block ;
+      block ::= '{' statement* '}' ;
+      if_statement ::= 'if' expression statement ;
 
-      // --- Statements (Simplified) ---
-      statement_list ::= statement+ ;
-
-      statement ::=
-          block
-        | declaration_statement
-        | if_statement
-        | while_statement
-        | function_declaration
-        | return_statement
-        | expression_statement
-        ;
-
-      expression_statement ::= expression ';'? ;
-      block ::= '{' statement_list? '}' ;
-
-      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      while_statement ::= 'while' '(' expression ')' statement ;
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      return_statement ::= 'return' expression? ';'? ;
-
-      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-
-      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      arguments ::= ( expression ( ',' expression )* )? ;
-
-      primary_expression ::=
-          'this'
-        | IDENTIFIER
-        | literal
-        | '(' expression ')'
-        ;
-
-      // --- Literals and Primitives (Simplified) ---
-      literal ::=
-          'null'
-        | 'true' | 'false'
-        | NUMERIC_LITERAL
-        | STRING_LITERAL
-        ;
-
-      NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+      expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
       "#;
           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
-          // 2. Define a minimal LLM vocabulary with single-character tokens.
           let mut llm_token_map = LLMTokenMap::new();
           let mut max_id = 0;
-          for (i, s) in ["i", "f", "(", "1", ")", "{"].iter().enumerate() {
+          for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
               max_id = i;
           }
 
-          // 3. Construct the GrammarConstraint.
           let constraint = GrammarConstraint::from_compiled_grammar(
               compiled_grammar.clone(),
               llm_token_map.clone(),
@@ -1651,13 +1590,14 @@ local_system:
           );
           println!("GrammarConstraint constructed successfully.");
 
-          // 4. Test Logic: commit "if(1){" repeatedly and check GSS growth.
           let mut constraint_state = constraint.init();
-          let repeating_chunk = b"if(1){";
+          let repeating_chunk = b"ifa{";
 
           // First chunk
-          for byte in repeating_chunk {
-              constraint_state.commit_bytes(&[*byte]);
+          for _ in 0..2 {
+              for byte in repeating_chunk {
+                  constraint_state.commit_bytes(&[*byte]);
+              }
           }
           assert!(constraint_state.is_active());
           println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
@@ -1665,6 +1605,7 @@ local_system:
           let nodes1 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Second chunk
           for byte in repeating_chunk {
@@ -1676,6 +1617,7 @@ local_system:
           let nodes2 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Third chunk
           for byte in repeating_chunk {
@@ -1687,6 +1629,7 @@ local_system:
           let nodes3 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           let increase1 = nodes2 - nodes1;
           let increase2 = nodes3 - nodes2;
@@ -3739,6 +3682,51 @@ local_system:
           // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
           // which can lead to exponential growth in GSS nodes if states are not merged properly.
           println!("--- Setting up for JS GSS Explosion Test ---");
+          /*
+          Essence of this test
+
+          We deliberately construct the smallest grammar that forces a GLR parser to keep two equally plausible parses alive for the same input prefix and then continue parsing the exact same remainder of the input in both parses. With repetition, these branches multiply, causing accelerating growth in the Graph-Structured Stack (GSS).
+
+          Minimal ingredients (all are necessary here):
+          1) Lexical overlap: the literal keyword 'if' and IDENTIFIER both match "if".
+             This makes the prefix "if a" ambiguous:
+             - Path A (if-statement): 'if' expression statement
+             - Path B (expression-as-statement): expression ::= IDENTIFIER IDENTIFIER
+               In Path B, we let the expression consume "if a" as two identifiers.
+
+          2) Shared continuation: a block "{" statement* "}" that both paths accept.
+             After both parses consume "if a", they see the same next token '{' and
+             both recurse into the block. Repeating the ambiguous unit (ifa{) causes
+             the number of simultaneous parses to grow combinatorially, which shows up
+             as accelerating GSS node growth.
+
+          What removes the explosion (any one of these):
+          - Reserve the keyword: make IDENTIFIER not match "if" (removes lexical overlap).
+          - Remove the 'block' alternative (or do not allow 'block' as a statement)
+            so the two branches do not share the same continuation.
+          - Remove 'statement ::= expression' or make 'expression' not consume both
+            identifiers (e.g., expression ::= IDENTIFIER). Then the two branches do
+            not align on the same next token '{'.
+          - Force parentheses around either the if or the call-like expression:
+            if '(' expr ')' stmt or IDENTIFIER '(' expr ')' so the ambiguous prefix
+            disappears in this minimalist setup.
+
+          Why the LLM token set is ['i','f','a','{']:
+          We use single-byte LLM tokens to keep the constraint layer simple while still
+          forming grammar terminals ('if', IDENTIFIER, '{'). The sequence "ifa{" is the
+          smallest repeatable chunk that produces the child-vs-sibling ambiguity which
+          triggers the blowup.
+
+          How the assertion detects the explosion:
+          We commit the same chunk three times and measure unique GSS node counts.
+          If growth is linear, increases between samples should not accelerate.
+          We fail the test when the second increase is larger than the first,
+          indicating combinatorial (explosive) growth.
+          */
+          // Minimal grammar for explosion:
+          // - 'if' literal overlaps with IDENTIFIER
+          // - expression can be IDENTIFIER IDENTIFIER (so "if a" is a valid expression)
+          // - block '{' statement* '}' is a shared continuation for both parses
           let js_grammar_ebnf = r#"program ::= statement* EOF;
       EOF ::= '<|EOF|>';
 
@@ -3753,6 +3741,8 @@ local_system:
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
+          // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+          // This keeps the constraint path simple while still forming the needed terminals.
           let mut llm_token_map = LLMTokenMap::new();
           let mut max_id = 0;
           for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
@@ -3769,11 +3759,18 @@ local_system:
           println!("GrammarConstraint constructed successfully.");
 
           let mut constraint_state = constraint.init();
+          // "ifa{" is the minimal ambiguous unit:
+          // - Can be parsed as an if-statement ('if' + expr "a" + child block "{")
+          // - Or as an expression statement ("if a") followed by a sibling block "{"
+          // Repeating it forces both branches to re-encounter the same continuation,
+          // producing accelerating GSS growth.
           let repeating_chunk = b"ifa{";
 
           // First chunk
-          for byte in repeating_chunk {
-              constraint_state.commit_bytes(&[*byte]);
+          for _ in 0..2 {
+              for byte in repeating_chunk {
+                  constraint_state.commit_bytes(&[*byte]);
+              }
           }
           assert!(constraint_state.is_active());
           println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
@@ -3781,6 +3778,7 @@ local_system:
           let nodes1 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Second chunk
           for byte in repeating_chunk {
@@ -3792,6 +3790,7 @@ local_system:
           let nodes2 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Third chunk
           for byte in repeating_chunk {
@@ -3803,6 +3802,7 @@ local_system:
           let nodes3 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           let increase1 = nodes2 - nodes1;
           let increase2 = nodes3 - nodes2;
@@ -3810,6 +3810,8 @@ local_system:
           println!("\nNode counts: {}, {}, {}", nodes1, nodes2, nodes3);
           println!("Increases: {}, {}", increase1, increase2);
 
+          // Check for accelerating growth: nodes3 - nodes2 > nodes2 - nodes1
+          // If true, parsing states are multiplying (combinatorial blowup), as intended.
           // The increase in nodes should not accelerate. If it does, it indicates
           // an exponential blowup.
           assert!(
@@ -4308,9 +4310,9 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
-    - gf
+    - cp
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
@@ -5894,89 +5896,28 @@ messages:
           // with the input "if(1){if(1){...". The grammar has a recursive structure for
           // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
           // which can lead to exponential growth in GSS nodes if states are not merged properly.
-
-          // 1. Load and compile the simplified JavaScript grammar.
           println!("--- Setting up for JS GSS Explosion Test ---");
-          let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
-
-      program ::= statement_list? EOF;
+          let js_grammar_ebnf = r#"program ::= statement* EOF;
       EOF ::= '<|EOF|>';
 
-      // --- Lexical Grammar (Unchanged) ---
-      IGNORE ::= ( WS | COMMENT )+ ;
-      WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+      statement ::= if_statement | expression | block ;
+      block ::= '{' statement* '}' ;
+      if_statement ::= 'if' expression statement ;
 
-      // --- Statements (Simplified) ---
-      statement_list ::= statement+ ;
-
-      statement ::=
-          block
-        | declaration_statement
-        | if_statement
-        | while_statement
-        | function_declaration
-        | return_statement
-        | expression_statement
-        ;
-
-      expression_statement ::= expression ';'? ;
-      block ::= '{' statement_list? '}' ;
-
-      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      while_statement ::= 'while' '(' expression ')' statement ;
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      return_statement ::= 'return' expression? ';'? ;
-
-      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-
-      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      arguments ::= ( expression ( ',' expression )* )? ;
-
-      primary_expression ::=
-          'this'
-        | IDENTIFIER
-        | literal
-        | '(' expression ')'
-        ;
-
-      // --- Literals and Primitives (Simplified) ---
-      literal ::=
-          'null'
-        | 'true' | 'false'
-        | NUMERIC_LITERAL
-        | STRING_LITERAL
-        ;
-
-      NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+      expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
       "#;
           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
-          // 2. Define a minimal LLM vocabulary with single-character tokens.
           let mut llm_token_map = LLMTokenMap::new();
           let mut max_id = 0;
-          for (i, s) in ["i", "f", "(", "1", ")", "{"].iter().enumerate() {
+          for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
               max_id = i;
           }
 
-          // 3. Construct the GrammarConstraint.
           let constraint = GrammarConstraint::from_compiled_grammar(
               compiled_grammar.clone(),
               llm_token_map.clone(),
@@ -5985,13 +5926,14 @@ messages:
           );
           println!("GrammarConstraint constructed successfully.");
 
-          // 4. Test Logic: commit "if(1){" repeatedly and check GSS growth.
           let mut constraint_state = constraint.init();
-          let repeating_chunk = b"if(1){";
+          let repeating_chunk = b"ifa{";
 
           // First chunk
-          for byte in repeating_chunk {
-              constraint_state.commit_bytes(&[*byte]);
+          for _ in 0..2 {
+              for byte in repeating_chunk {
+                  constraint_state.commit_bytes(&[*byte]);
+              }
           }
           assert!(constraint_state.is_active());
           println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
@@ -5999,6 +5941,7 @@ messages:
           let nodes1 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Second chunk
           for byte in repeating_chunk {
@@ -6010,6 +5953,7 @@ messages:
           let nodes2 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           // Third chunk
           for byte in repeating_chunk {
@@ -6021,6 +5965,7 @@ messages:
           let nodes3 = gather_gss_stats(
               &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
           ).unique_nodes;
+          constraint_state.print_gss();
 
           let increase1 = nodes2 - nodes1;
           let increase2 = nodes3 - nodes2;
@@ -6520,8 +6465,86 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_basic.rs
-  - user: Simplify the grammar in `test_js_if_statement_gss_explosion`, removing parts
-      that aren't directly relevant to the test input.
+  - user: |2-
+              Here’s how to document the intent and mechanics of test_js_if_statement_gss_explosion so future readers immediately understand what causes the blowup, what’s necessary to reproduce it, and what minimal tweaks eliminate it.
+
+              File: src/test_constraint_basic.rs
+
+              1) Add a high-level explanatory block comment right after the line:
+              println!("--- Setting up for JS GSS Explosion Test ---");
+
+              Insert this comment block:
+
+              /*
+              Essence of this test
+
+              We deliberately construct the smallest grammar that forces a GLR parser to keep two equally plausible parses alive for the same input prefix and then continue parsing the exact same remainder of the input in both parses. With repetition, these branches multiply, causing accelerating growth in the Graph-Structured Stack (GSS).
+
+              Minimal ingredients (all are necessary here):
+              1) Lexical overlap: the literal keyword 'if' and IDENTIFIER both match "if".
+                 This makes the prefix "if a" ambiguous:
+                 - Path A (if-statement): 'if' expression statement
+                 - Path B (expression-as-statement): expression ::= IDENTIFIER IDENTIFIER
+                   In Path B, we let the expression consume "if a" as two identifiers.
+
+              2) Shared continuation: a block "{" statement* "}" that both paths accept.
+                 After both parses consume "if a", they see the same next token '{' and
+                 both recurse into the block. Repeating the ambiguous unit (ifa{) causes
+                 the number of simultaneous parses to grow combinatorially, which shows up
+                 as accelerating GSS node growth.
+
+              What removes the explosion (any one of these):
+              - Reserve the keyword: make IDENTIFIER not match "if" (removes lexical overlap).
+              - Remove the 'block' alternative (or do not allow 'block' as a statement)
+                so the two branches do not share the same continuation.
+              - Remove 'statement ::= expression' or make 'expression' not consume both
+                identifiers (e.g., expression ::= IDENTIFIER). Then the two branches do
+                not align on the same next token '{'.
+              - Force parentheses around either the if or the call-like expression:
+                if '(' expr ')' stmt or IDENTIFIER '(' expr ')' so the ambiguous prefix
+                disappears in this minimalist setup.
+
+              Why the LLM token set is ['i','f','a','{']:
+              We use single-byte LLM tokens to keep the constraint layer simple while still
+              forming grammar terminals ('if', IDENTIFIER, '{'). The sequence "ifa{" is the
+              smallest repeatable chunk that produces the child-vs-sibling ambiguity which
+              triggers the blowup.
+
+              How the assertion detects the explosion:
+              We commit the same chunk three times and measure unique GSS node counts.
+              If growth is linear, increases between samples should not accelerate.
+              We fail the test when the second increase is larger than the first,
+              indicating combinatorial (explosive) growth.
+              */
+
+              2) Just above the js_grammar_ebnf string assignment, add a short comment summarizing the grammar’s role:
+
+              // Minimal grammar for explosion:
+              // - 'if' literal overlaps with IDENTIFIER
+              // - expression can be IDENTIFIER IDENTIFIER (so "if a" is a valid expression)
+              // - block '{' statement* '}' is a shared continuation for both parses
+
+              3) Above the LLM vocabulary construction loop, add this comment:
+
+              // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+              // This keeps the constraint path simple while still forming the needed terminals.
+
+              4) Right above the repeating_chunk assignment, add this comment:
+
+              // "ifa{" is the minimal ambiguous unit:
+              // - Can be parsed as an if-statement ('if' + expr "a" + child block "{")
+              // - Or as an expression statement ("if a") followed by a sibling block "{"
+              // Repeating it forces both branches to re-encounter the same continuation,
+              // producing accelerating GSS growth.
+
+              5) (Optional) Right above the final assertion, add this comment to explain the check:
+
+              // Check for accelerating growth: nodes3 - nodes2 > nodes2 - nodes1
+              // If true, parsing states are multiplying (combinatorial blowup), as intended.
+
+              After making these insertions, the test logic and behavior remain unchanged, but the rationale and the minimal conditions for the explosion are now clearly documented where they matter.
+    metadata:
+  - user: Apply the above changes for the if-statement explosion test.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6538,430 +6561,92 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've simplified the EBNF grammar within the `test_js_if_statement_gss_explosion` test. The updated grammar now only includes the rules necessary to parse the test's input (`if(1){...`), which are `if_statement`, `block`, and a minimal `expression` that just handles numeric literals. This removes many unrelated rules, focusing the test specifically on the recursive `if-statement` structure that was causing the GSS explosion.
-
       ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
       --- a/src/test_constraint_basic.rs
       +++ b/src/test_constraint_basic.rs
-      @@ -1408,55 +1408,22 @@
-       COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-       
-       // --- Statements (Simplified) ---
-       statement_list ::= statement+ ;
-       
-       statement ::=
-           block
-      -  | declaration_statement
-         | if_statement
-      -  | while_statement
-      -  | function_declaration
-      -  | return_statement
-      -  | expression_statement
-         ;
-       
-      -expression_statement ::= expression ';'? ;
-       block ::= '{' statement_list? '}' ;
-       
-      -declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      -while_statement ::= 'while' '(' expression ')' statement ;
-      -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      -return_statement ::= 'return' expression? ';'? ;
-       
-      -// --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      -expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-      +// --- Expressions (Heavily Simplified for test) ---
-      +expression ::= NUMERIC_LITERAL;
-       
-      -equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-      -
-      -additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-      -
-      -multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-      -
-      -unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-      -
-      -call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      -arguments ::= ( expression ( ',' expression )* )? ;
-      -
-      -primary_expression ::=
-      -    'this'
-      -  | IDENTIFIER
-      -  | literal
-      -  | '(' expression ')'
-      -  ;
-      -
-      -// --- Literals and Primitives (Simplified) ---
-      -literal ::=
-      -    'null'
-      -  | 'true' | 'false'
-      -  | NUMERIC_LITERAL
-      -  | STRING_LITERAL
-      -  ;
-      -
-      +// --- Literals and Primitives (Simplified for test) ---
-       NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      -STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-      -IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-       "#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: 'Changes committed with message: "Simplify JS grammar in GSS explosion test"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |2
-
-      Node counts: 7, 12, 17
-      Increases: 5, 5
-
-      Process finished with exit code 0
-    metadata:
-  - user: It looks like this PASSES. It should FAIL. We've simplified it too much.
-      Or changed *something* important. What?
-    metadata:
-  - assistant: |-
-      You've correctly identified that the simplification went too far and removed the very issue the test was designed to catch. The test now passes because a critical ambiguity in the grammar was eliminated.
-
-      Here’s what happened:
-
-      ### The Source of the GSS Explosion: Ambiguity
-
-      The original JavaScript grammar was ambiguous in how it could parse a statement beginning with `if(...)`. When the parser encountered the text `if(1)`, it had to consider two valid interpretations simultaneously:
-
-      1.  **An `if_statement`**: This is the obvious interpretation, where `if` is a keyword introducing a conditional statement. The parser would match `'if' '(' expression ')'` and then look for a `statement` to follow.
-
-      2.  **An `expression_statement`**: In the original grammar, `if` is a valid `IDENTIFIER`. A sequence like `IDENTIFIER '(' expression ')'` is a valid `call_expression` (a function call). A `call_expression` is a type of `expression`, and an `expression` can form an `expression_statement`.
-
-      So, the parser had to fork its state to track both possibilities: "this is an `if` statement" and "this is a function call to a function named `if`".
-
-      When you nest these structures, as the test input `if(1){if(1){...` does, this ambiguity compounds. Each nested `if` doubles the number of possible parse trees. This creates an exponential growth in the parser's internal state (the GSS nodes), which is precisely the "explosion" the test was designed to detect and fail on.
-
-      ### How the Simplification Fixed the Problem
-
-      Your simplification eliminated this ambiguity in two ways:
-
-      1.  **The `expression` rule was changed**: The new rule `expression ::= NUMERIC_LITERAL;` means that `if(1)` can no longer be parsed as an expression. It is not a numeric literal. This alone kills the ambiguity.
-
-      2.  **The `statement` rule was changed**: You removed `expression_statement` as a possible kind of `statement`. This means that even if `if(1)` *could* be parsed as an expression, it wouldn't be considered a valid standalone statement.
-
-      With the ambiguity gone, the parser sees `if` and knows it can *only* be the start of an `if_statement`. The parsing becomes linear, the GSS graph doesn't grow exponentially, and the test passes.
-    metadata:
-  - user: |-
-      Apply result (git-llm mode):
-      No git diff blocks (```diff) found in the last assistant message.
-    metadata:
-  - user: 'Changes committed with message: "Simplify JS grammar in GSS explosion test"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |2
-
-      Node counts: 7, 12, 17
-      Increases: 5, 5
-
-      Process finished with exit code 0
-    metadata:
-  - user: STILL. Try again.
-    metadata:
-  - assistant: |-
-      You are right, my apologies. The previous simplification removed the very ambiguity that was causing the GSS explosion, which is why the test started passing. The key was that `if(...)` could be interpreted as both an `if_statement` and an `expression_statement` (a function call).
-
-      To restore the failure condition and make the test meaningful again, we need to reintroduce that ambiguity in a minimal way. The following patch does that by:
-
-      1.  Adding `expression_statement` back as a valid type of `statement`.
-      2.  Redefining `expression` to allow a `call_expression` (like `if(1)`) in addition to a `NUMERIC_LITERAL`.
-      3.  Adding the `IDENTIFIER` rule needed for the `call_expression`.
-
-      This makes the input `if(1){...` ambiguous again, which should correctly trigger the GSS explosion the test is designed to catch.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1419,19 +1419,26 @@
-       
-       statement ::=
-           block
-         | if_statement
-      +  | expression_statement // Re-added for ambiguity
-         ;
-       
-      +expression_statement ::= expression ; // Simplified
-       block ::= '{' statement_list? '}' ;
-       
-       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-       // --- Expressions (Heavily Simplified for test) ---
-      -expression ::= NUMERIC_LITERAL;
-      +expression ::=
-      +    call_expression
-      +  | NUMERIC_LITERAL
-      +  ;
-      +
-      +call_expression ::= IDENTIFIER '(' expression ')' ;
-       
-       // --- Literals and Primitives (Simplified for test) ---
-       NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      +IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ; // Re-added for ambiguity
-       "#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: 'Changes committed with message: "Reintroduce ambiguity in JS grammar test
-      to trigger GSS explosion"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |+
-      Node counts: 9, 23, 51
-      Increases: 14, 28
-
-
-      thread 'test_constraint_basic::test_js_if_statement_gss_explosion' (31047341) panicked at src/test_constraint_basic.rs:1613:5:
-      GSS node growth is accelerating, indicating an explosion. First increase: 14, Second increase: 28
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: sep1::test_constraint_basic::test_js_if_statement_gss_explosion
-                   at ./src/test_constraint_basic.rs:1613:5
-         3: sep1::test_constraint_basic::test_js_if_statement_gss_explosion::{{closure}}
-                   at ./src/test_constraint_basic.rs:1502:44
-         4: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         5: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: Great. That works. Now what made the difference? Knowing this, can we simplify
-      the grammar even more?
-    metadata:
-  - assistant: |-
-      Excellent, the test now fails as expected. Let's break down exactly what's happening and discuss further simplification.
-
-      ### What Made the Difference?
-
-      The key to the GSS explosion is **grammatical ambiguity**. The test now fails because we reintroduced a situation where the parser sees the input string and has two valid, conflicting ways to interpret it according to the grammar rules.
-
-      Here are the two conflicting paths for the input `if(1)`:
-
-      1.  **Path A: The `if_statement`**
-          *   The tokenizer sees the string `"if"` and recognizes it as the literal keyword `'if'`.
-          *   The parser starts matching the `if_statement` rule: `'if' '(' expression ')' statement`.
-          *   This is the obvious, intended path.
-
-      2.  **Path B: The `expression_statement` (as a function call)**
-          *   The tokenizer *also* sees that the string `"if"` matches the `IDENTIFIER` rule (`[a-zA-Z_][a-zA-Z0-9_]*`).
-          *   The parser explores an alternative: what if this is an `expression_statement`?
-          *   An `expression_statement` can be an `expression`.
-          *   An `expression` can be a `call_expression`.
-          *   A `call_expression` is defined as `IDENTIFIER '(' expression ')'`.
-          *   This path perfectly matches the input `if(1)`, interpreting it as a call to a function named `if`.
-
-      When the parser encounters the first `if(1){...`, it must keep both possibilities alive. When it then encounters the *nested* `if(1){...`, it again has to branch for each of the existing possibilities. This branching-within-a-branch is what causes the number of states (GSS nodes) to grow exponentially, leading to the panic you see.
-
-      Your first simplification eliminated Path B entirely, which removed the ambiguity and made the test pass. The last change reintroduced it, correctly restoring the failure.
-
-      ### Can We Simplify the Grammar Even More?
-
-      Yes, but only slightly. The current grammar is very close to the minimal set of rules needed to reproduce this specific ambiguity with the given test input. Most parts are now essential:
-
-      *   We need `block` and `statement_list` to handle the `{...}` and allow the recursion.
-      *   We need `NUMERIC_LITERAL` to parse the `1` in `if(1)`.
-      *   We need `call_expression` and `expression_statement` to create the ambiguous "Path B".
-
-      The one part that is *not* exercised by the test input is the optional `else` clause in the `if_statement`. We can remove it for a slightly cleaner, more minimal grammar that will still fail in the exact same way.
-
-      Here is the change to remove it:
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1428,7 +1428,7 @@
-       expression_statement ::= expression ; // Simplified
-       block ::= '{' statement_list? '}' ;
-       
-      -if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      +if_statement ::= 'if' '(' expression ')' statement ;
-       
-       // --- Expressions (Heavily Simplified for test) ---
-       expression ::=
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: 'Changes committed with message: "Simplify JS grammar test by removing optional
-      else clause"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: That change is ok. But be more aggressive. We want the grammar to be as
-      simple as possible without changing the outcome of the test.
-    metadata:
-  - assistant: |-
-      Of course. You're looking for the absolute minimal grammar that still reproduces the GSS explosion. The previous simplification was a good step, but we can be more aggressive by removing the concept of `block` statements entirely and simplifying the expression.
-
-      This change reduces the grammar to its essence: a `statement` can be an `if_statement` or an `expression_statement`, and an `if_statement` recursively contains another `statement`. This preserves the ambiguity and recursion with the fewest possible rules.
-
-      To accommodate this, the test input is changed from `if(1){...` to the simpler `if(a)...`, and the LLM vocabulary is updated accordingly.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1504,50 +1504,33 @@
+      @@ -1412,14 +1412,49 @@
            // with the input "if(1){if(1){...". The grammar has a recursive structure for
            // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
            // which can lead to exponential growth in GSS nodes if states are not merged properly.
-      -
-           // 1. Load and compile the simplified JavaScript grammar.
            println!("--- Setting up for JS GSS Explosion Test ---");
-           let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-       #![ignore(IGNORE)]
-       
-      -program ::= statement_list? EOF;
-      +program ::= statement* EOF;
+      +    /*
+      +    Essence of this test
+      +
+      +    We deliberately construct the smallest grammar that forces a GLR parser to keep two equally plausible parses alive for the same input prefix and then continue parsing the exact same remainder of the input in both parses. With repetition, these branches multiply, causing accelerating growth in the Graph-Structured Stack (GSS).
+      +
+      +    Minimal ingredients (all are necessary here):
+      +    1) Lexical overlap: the literal keyword 'if' and IDENTIFIER both match "if".
+      +       This makes the prefix "if a" ambiguous:
+      +       - Path A (if-statement): 'if' expression statement
+      +       - Path B (expression-as-statement): expression ::= IDENTIFIER IDENTIFIER
+      +         In Path B, we let the expression consume "if a" as two identifiers.
+      +
+      +    2) Shared continuation: a block "{" statement* "}" that both paths accept.
+      +       After both parses consume "if a", they see the same next token '{' and
+      +       both recurse into the block. Repeating the ambiguous unit (ifa{) causes
+      +       the number of simultaneous parses to grow combinatorially, which shows up
+      +       as accelerating GSS node growth.
+      +
+      +    What removes the explosion (any one of these):
+      +    - Reserve the keyword: make IDENTIFIER not match "if" (removes lexical overlap).
+      +    - Remove the 'block' alternative (or do not allow 'block' as a statement)
+      +      so the two branches do not share the same continuation.
+      +    - Remove 'statement ::= expression' or make 'expression' not consume both
+      +      identifiers (e.g., expression ::= IDENTIFIER). Then the two branches do
+      +      not align on the same next token '{'.
+      +    - Force parentheses around either the if or the call-like expression:
+      +      if '(' expr ')' stmt or IDENTIFIER '(' expr ')' so the ambiguous prefix
+      +      disappears in this minimalist setup.
+      +
+      +    Why the LLM token set is ['i','f','a','{']:
+      +    We use single-byte LLM tokens to keep the constraint layer simple while still
+      +    forming grammar terminals ('if', IDENTIFIER, '{'). The sequence "ifa{" is the
+      +    smallest repeatable chunk that produces the child-vs-sibling ambiguity which
+      +    triggers the blowup.
+      +
+      +    How the assertion detects the explosion:
+      +    We commit the same chunk three times and measure unique GSS node counts.
+      +    If growth is linear, increases between samples should not accelerate.
+      +    We fail the test when the second increase is larger than the first,
+      +    indicating combinatorial (explosive) growth.
+      +    */
+      +    // Minimal grammar for explosion:
+      +    // - 'if' literal overlaps with IDENTIFIER
+      +    // - expression can be IDENTIFIER IDENTIFIER (so "if a" is a valid expression)
+      +    // - block '{' statement* '}' is a shared continuation for both parses
+           let js_grammar_ebnf = r#"program ::= statement* EOF;
        EOF ::= '<|EOF|>';
        
-       // --- Lexical Grammar (Unchanged) ---
-       IGNORE ::= ( WS | COMMENT )+ ;
-       WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-       COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-       
-      -// --- Statements (Simplified) ---
-      -statement_list ::= statement+ ;
-      -
-      -statement ::=
-      -    block
-      -  | if_statement
-      -  | expression_statement // Re-added for ambiguity
-      -  ;
-      -
-      -expression_statement ::= expression ; // Simplified
-      -block ::= '{' statement_list? '}' ;
-      -
-      +// --- Statements (Minimal) ---
-      +statement ::= if_statement | expression_statement ;
-      +expression_statement ::= expression ;
-       if_statement ::= 'if' '(' expression ')' statement ;
-       
-      -// --- Expressions (Heavily Simplified for test) ---
-      -expression ::=
-      -    call_expression
-      -  | NUMERIC_LITERAL
-      -  ;
-      -
-      +// --- Expressions (Minimal) ---
-      +expression ::= call_expression | IDENTIFIER ;
-       call_expression ::= IDENTIFIER '(' expression ')' ;
-       
-      -// --- Literals and Primitives (Simplified for test) ---
-      -NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      -IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ; // Re-added for ambiguity
-      +// --- Literals (Minimal) ---
-      +IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-       "#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
+      @@ -1433,6 +1468,8 @@
            let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
            println!("Grammar compiled successfully.");
        
-           // 2. Define a minimal LLM vocabulary with single-character tokens.
+      +    // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+      +    // This keeps the constraint path simple while still forming the needed terminals.
            let mut llm_token_map = LLMTokenMap::new();
            let mut max_id = 0;
-      -    for (i, s) in ["i", "f", "(", "1", ")", "{"].iter().enumerate() {
-      +    for (i, s) in ["i", "f", "(", "a", ")"].iter().enumerate() {
-               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
-               max_id = i;
-           }
-      @@ -1561,9 +1544,9 @@
-           );
+           for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
+      @@ -1448,6 +1485,11 @@
            println!("GrammarConstraint constructed successfully.");
        
-      -    // 4. Test Logic: commit "if(1){" repeatedly and check GSS growth.
-      +    // 4. Test Logic: commit "if(a)" repeatedly and check GSS growth.
            let mut constraint_state = constraint.init();
-      -    let repeating_chunk = b"if(1){";
-      +    let repeating_chunk = b"if(a)";
+      +    // "ifa{" is the minimal ambiguous unit:
+      +    // - Can be parsed as an if-statement ('if' + expr "a" + child block "{")
+      +    // - Or as an expression statement ("if a") followed by a sibling block "{"
+      +    // Repeating it forces both branches to re-encounter the same continuation,
+      +    // producing accelerating GSS growth.
+           let repeating_chunk = b"ifa{";
        
            // First chunk
-           for byte in repeating_chunk {
+      @@ -1488,6 +1530,8 @@
+           println!("\nNode counts: {}, {}, {}", nodes1, nodes2, nodes3);
+           println!("Increases: {}, {}", increase1, increase2);
+       
+      +    // Check for accelerating growth: nodes3 - nodes2 > nodes2 - nodes1
+      +    // If true, parsing states are multiplying (combinatorial blowup), as intended.
+           // The increase in nodes should not accelerate. If it does, it indicates
+           // an exponential blowup.
+           assert!(
 
       ```
     metadata:
@@ -6974,401 +6659,7 @@ messages:
       Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_basic.rs.
     metadata:
-  - user: 'Changes committed with message: "Aggressively simplify JS grammar test
-      for GSS explosion"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      Node counts: 11, 23, 35
-      Increases: 12, 12
-
-      Process finished with exit code 0
-    metadata:
-  - assistant: |-
-      You've hit on a fascinating and subtle aspect of how GLR parsers handle ambiguity. The last simplification didn't just make the grammar smaller; it fundamentally changed the *nature* of the ambiguity in a way that allowed the parser's state-merging logic to work correctly again.
-
-      Here’s the breakdown:
-
-      ### Why the Test Started Passing
-
-      The GSS explosion doesn't happen with just any ambiguity. It happens when the parser is forced to maintain multiple, distinct parsing contexts (different stack histories) that are simultaneously parsing the *exact same subsequent input*.
-
-      *   **In the FAILING version (`if(1){...`)**: The `{` was the key. The parser had two viable paths leading up to it:
-          1.  `if(1)` was a complete `expression_statement`, and `{...}` was the *next, sibling* statement.
-          2.  `if(1)` was an incomplete `if_statement`, and `{...}` was its *child* statement.
-          Because the parser had to explore both "sibling" and "child" interpretations for the *same block*, it couldn't merge the states, and the recursion inside the block caused the explosion.
-
-      *   **In the PASSING version (`if(a)if(a)...`)**: You removed the `{}` block structure. The parser still had two paths after the first `if(a)`:
-          1.  `if(a)` was a complete `expression_statement`, and the next `if(a)` was its sibling.
-          2.  `if(a)` was an incomplete `if_statement`, and the next `if(a)` was its child.
-          While this is still ambiguous, the structures are different enough that the parser could effectively distinguish and merge the states. The direct recursion was "clean" enough for the parser to handle linearly.
-
-      The takeaway is that the `{...}` block was the crucial ingredient. It acted as a container that could be interpreted as both a child and a sibling, which is the specific pattern that triggers the exponential growth in this case.
-
-      ### Restoring the Failure with a Minimal Grammar
-
-      To make the test fail again, we need to reintroduce that "ambiguous container" pattern. The following patch creates the most minimal grammar I can devise that still has this property. It brings back the `{...}` block structure, which is essential.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1504,33 +1504,30 @@
-           // with the input "if(1){if(1){...". The grammar has a recursive structure for
-           // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
-           // which can lead to exponential growth in GSS nodes if states are not merged properly.
-      -    // 1. Load and compile the simplified JavaScript grammar.
-           println!("--- Setting up for JS GSS Explosion Test ---");
-           let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-       #![ignore(IGNORE)]
-       
-       program ::= statement* EOF;
-       EOF ::= '<|EOF|>';
-       
-      -// --- Lexical Grammar (Unchanged) ---
-      +// --- Lexical Grammar ---
-       IGNORE ::= ( WS | COMMENT )+ ;
-       WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-       COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-       
-      -// --- Statements (Minimal) ---
-      -statement ::= if_statement | expression_statement ;
-      +// --- Statements (Minimal grammar to cause GSS explosion) ---
-      +statement ::= if_statement | expression_statement | block ;
-       expression_statement ::= expression ;
-      +block ::= '{' statement* '}' ;
-       if_statement ::= 'if' '(' expression ')' statement ;
-       
-      -// --- Expressions (Minimal) ---
-      +// --- Expressions ---
-       expression ::= call_expression | IDENTIFIER ;
-       call_expression ::= IDENTIFIER '(' expression ')' ;
-       
-      -// --- Literals (Minimal) ---
-      +// --- Literals ---
-       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-       "#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-           println!("Grammar compiled successfully.");
-       
-      -    // 2. Define a minimal LLM vocabulary with single-character tokens.
-           let mut llm_token_map = LLMTokenMap::new();
-           let mut max_id = 0;
-      -    for (i, s) in ["i", "f", "(", "a", ")"].iter().enumerate() {
-      +    for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
-               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
-               max_id = i;
-           }
-      @@ -1544,9 +1541,8 @@
-           );
-           println!("GrammarConstraint constructed successfully.");
-       
-      -    // 4. Test Logic: commit "if(a)" repeatedly and check GSS growth.
-           let mut constraint_state = constraint.init();
-      -    let repeating_chunk = b"if(a)";
-      +    let repeating_chunk = b"if(a){";
-       
-           // First chunk
-           for byte in repeating_chunk {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: 'Changes committed with message: "Reintroduce block statement and simplify
-      JS grammar for GSS explosion test"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |2
-
-      Node counts: 9, 23, 51
-      Increases: 14, 28
-
-
-      thread 'test_constraint_basic::test_js_if_statement_gss_explosion' (31085393) panicked at src/test_constraint_basic.rs:1596:5:
-      GSS node growth is accelerating, indicating an explosion. First increase: 14, Second increase: 28
-      stack backtrace:
-         0: __rustc::rust_begin_unwind
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
-         1: core::panicking::panic_fmt
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
-         2: sep1::test_constraint_basic::test_js_if_statement_gss_explosion
-                   at ./src/test_constraint_basic.rs:1596:5
-         3: sep1::test_constraint_basic::test_js_if_statement_gss_explosion::{{closure}}
-                   at ./src/test_constraint_basic.rs:1502:44
-         4: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
-         5: core::ops::function::FnOnce::call_once
-                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-      error: test failed, to rerun pass `-p sep1 --lib`
-      error: 1 target failed:
-          `-p sep1 --lib`
-
-      Process finished with exit code 101
-    metadata:
-  - user: Ok good. That change is also OK. Can we simplify it even more?
-    metadata:
-  - assistant: |-
-      You are absolutely right to push for more simplification. We've reached the core of the issue, but the grammar can still be made more abstract and minimal while preserving the exact failure condition.
-
-      The parentheses in `if (a)` and `if(a)` are syntactic sugar. The underlying ambiguity comes from the sequence `'if' IDENTIFIER`, which can be interpreted as the start of an `if_statement` or as a complete `call_expression`. We can remove the parentheses entirely to simplify the grammar.
-
-      The `IGNORE` rule in the EBNF will correctly handle the space in the input `if a{`, so we don't need to change the tokenizer logic. This change reduces the number of tokens the grammar needs to handle and simplifies the `if_statement` and `call_expression` rules, resulting in the most minimal representation of this specific GSS explosion problem.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1520,11 +1520,11 @@
-       statement ::= if_statement | expression_statement | block ;
-       expression_statement ::= expression ;
-       block ::= '{' statement* '}' ;
-      -if_statement ::= 'if' '(' expression ')' statement ;
-      +if_statement ::= 'if' expression statement ;
-       
-       // --- Expressions ---
-       expression ::= call_expression | IDENTIFIER ;
-      -call_expression ::= IDENTIFIER '(' expression ')' ;
-      +call_expression ::= IDENTIFIER expression ;
-       
-       // --- Literals ---
-       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-      @@ -1535,7 +1535,7 @@
-       
-           let mut llm_token_map = LLMTokenMap::new();
-           let mut max_id = 0;
-      -    for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
-      +    for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
-               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
-               max_id = i;
-           }
-      @@ -1549,7 +1549,7 @@
-           println!("GrammarConstraint constructed successfully.");
-       
-           let mut constraint_state = constraint.init();
-      -    let repeating_chunk = b"if(a){";
-      +    let repeating_chunk = b"if a{";
-       
-           // First chunk
-           for byte in repeating_chunk {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: 'Changes committed with message: "Simplify JS grammar test by removing parentheses
-      and updating input/vocab"'
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Great. Simplify it even more. Give me the maximally simplified example that
-      still reproduces the same outcome.
-    metadata:
-  - assistant: |-
-      You're right to keep pushing. We can distill this down to its absolute essence. The previous versions used intermediate rules like `call_expression` and `expression_statement` which aren't strictly necessary.
-
-      This version is the maximally simplified grammar that still produces the failure. It works by:
-      1.  Merging `expression_statement` directly into `statement`, so a `statement` can now be an `expression`.
-      2.  Merging `call_expression` directly into `expression`, so an `expression` can be one or two `IDENTIFIER`s.
-
-      The core ambiguity remains: when the parser sees `if a`, it can be interpreted as either the start of an `if_statement` or as a complete `expression` (of the `IDENTIFIER IDENTIFIER` form) that is a `statement`. This is the minimal structure required to create the "child vs. sibling" ambiguity for the `{...}` block that follows, which in turn causes the GSS explosion.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1517,15 +1517,11 @@
-       COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-       
-       // --- Statements (Minimal grammar to cause GSS explosion) ---
-      -statement ::= if_statement | expression_statement | block ;
-      -expression_statement ::= expression ;
-      +statement ::= if_statement | expression | block ;
-       block ::= '{' statement* '}' ;
-       if_statement ::= 'if' expression statement ;
-       
-      -// --- Expressions ---
-      -expression ::= call_expression | IDENTIFIER ;
-      -call_expression ::= IDENTIFIER expression ;
-      -
-      -// --- Literals ---
-      +// --- Expressions & Literals (Minimal) ---
-      +expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
-       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-       "#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: |-
-      Diff of Cargo.toml since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Can we do even better? The simpler the grammar, the easier it is to understand
-      what's going on.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1504,29 +1504,19 @@
-           // with the input "if(1){if(1){...". The grammar has a recursive structure for
-           // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
-           // which can lead to exponential growth in GSS nodes if states are not merged properly.
-      -    // 1. Load and compile the simplified JavaScript grammar.
-           println!("--- Setting up for JS GSS Explosion Test ---");
-      -    let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-      -#![ignore(IGNORE)]
-      -
-      -program ::= statement* EOF;
-      -EOF ::= '<|EOF|>';
-      -
-      -// --- Lexical Grammar ---
-      -IGNORE ::= ( WS | COMMENT )+ ;
-      -WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      -COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-      -
-      -// --- Statements (Minimal grammar to cause GSS explosion) ---
-      -statement ::= if_statement | expression | block ;
-      -block ::= '{' statement* '}' ;
-      -if_statement ::= 'if' expression statement ;
-      -
-      -// --- Expressions & Literals (Minimal) ---
-      -expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
-      -IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-      -"#;
-      +    let js_grammar_ebnf = r#"program ::= statement* EOF;
-      +EOF ::= '<|EOF|>';
-      +
-      +statement ::= if_statement | expression | block ;
-      +block ::= '{' statement* '}' ;
-      +if_statement ::= 'if' expression statement ;
-      +
-      +expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
-      +IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-      +"#;
-           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-           println!("Grammar compiled successfully.");
-      @@ -1549,7 +1539,7 @@
-           println!("GrammarConstraint constructed successfully.");
-       
-           // 4. Test Logic: commit "if(1){" repeatedly and check GSS growth.
-           let mut constraint_state = constraint.init();
-      -    let repeating_chunk = b"if a{";
-      +    let repeating_chunk = b"ifa{";
-       
-           // First chunk
-           for byte in repeating_chunk {
-      ```
-    metadata:
-  - user: |-
-      Git apply attempt failed (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Error applying patch to src/test_constraint_basic.rs: Hunk #2 (header: `@@ -1549,7 +1539,7 @@`) failed: context not found.
-
-
-      ---
-
-      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Git apply failed. Fallback to LLM apply:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Error applying patch to src/test_constraint_basic.rs: Hunk #2 (header: `@@ -1549,7 +1539,7 @@`) failed: context not found.
-
-
-      LLM apply output:
-      Using model 'gf' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/test_constraint_basic.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/test_constraint_basic.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/test_constraint_basic.rs
+  - user: 'Changes committed with message: "docs: Add detailed explanations to JS
+      GSS explosion test"'
     metadata:
 ...

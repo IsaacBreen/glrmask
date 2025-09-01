@@ -1505,6 +1505,51 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
     // which can lead to exponential growth in GSS nodes if states are not merged properly.
     println!("--- Setting up for JS GSS Explosion Test ---");
+    /*
+    Essence of this test
+
+    We deliberately construct the smallest grammar that forces a GLR parser to keep two equally plausible parses alive for the same input prefix and then continue parsing the exact same remainder of the input in both parses. With repetition, these branches multiply, causing accelerating growth in the Graph-Structured Stack (GSS).
+
+    Minimal ingredients (all are necessary here):
+    1) Lexical overlap: the literal keyword 'if' and IDENTIFIER both match "if".
+       This makes the prefix "if a" ambiguous:
+       - Path A (if-statement): 'if' expression statement
+       - Path B (expression-as-statement): expression ::= IDENTIFIER IDENTIFIER
+         In Path B, we let the expression consume "if a" as two identifiers.
+
+    2) Shared continuation: a block "{" statement* "}" that both paths accept.
+       After both parses consume "if a", they see the same next token '{' and
+       both recurse into the block. Repeating the ambiguous unit (ifa{) causes
+       the number of simultaneous parses to grow combinatorially, which shows up
+       as accelerating GSS node growth.
+
+    What removes the explosion (any one of these):
+    - Reserve the keyword: make IDENTIFIER not match "if" (removes lexical overlap).
+    - Remove the 'block' alternative (or do not allow 'block' as a statement)
+      so the two branches do not share the same continuation.
+    - Remove 'statement ::= expression' or make 'expression' not consume both
+      identifiers (e.g., expression ::= IDENTIFIER). Then the two branches do
+      not align on the same next token '{'.
+    - Force parentheses around either the if or the call-like expression:
+      if '(' expr ')' stmt or IDENTIFIER '(' expr ')' so the ambiguous prefix
+      disappears in this minimalist setup.
+
+    Why the LLM token set is ['i','f','a','{']:
+    We use single-byte LLM tokens to keep the constraint layer simple while still
+    forming grammar terminals ('if', IDENTIFIER, '{'). The sequence "ifa{" is the
+    smallest repeatable chunk that produces the child-vs-sibling ambiguity which
+    triggers the blowup.
+
+    How the assertion detects the explosion:
+    We commit the same chunk three times and measure unique GSS node counts.
+    If growth is linear, increases between samples should not accelerate.
+    We fail the test when the second increase is larger than the first,
+    indicating combinatorial (explosive) growth.
+    */
+    // Minimal grammar for explosion:
+    // - 'if' literal overlaps with IDENTIFIER
+    // - expression can be IDENTIFIER IDENTIFIER (so "if a" is a valid expression)
+    // - block '{' statement* '}' is a shared continuation for both parses
     let js_grammar_ebnf = r#"program ::= statement* EOF;
 EOF ::= '<|EOF|>';
 
@@ -1519,6 +1564,8 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
 
+    // Minimal LLM vocab: single-byte tokens that compose "ifa{"
+    // This keeps the constraint path simple while still forming the needed terminals.
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_id = 0;
     for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
@@ -1535,6 +1582,11 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     println!("GrammarConstraint constructed successfully.");
 
     let mut constraint_state = constraint.init();
+    // "ifa{" is the minimal ambiguous unit:
+    // - Can be parsed as an if-statement ('if' + expr "a" + child block "{")
+    // - Or as an expression statement ("if a") followed by a sibling block "{"
+    // Repeating it forces both branches to re-encounter the same continuation,
+    // producing accelerating GSS growth.
     let repeating_chunk = b"ifa{";
 
     // First chunk
@@ -1581,6 +1633,8 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     println!("\nNode counts: {}, {}, {}", nodes1, nodes2, nodes3);
     println!("Increases: {}, {}", increase1, increase2);
 
+    // Check for accelerating growth: nodes3 - nodes2 > nodes2 - nodes1
+    // If true, parsing states are multiplying (combinatorial blowup), as intended.
     // The increase in nodes should not accelerate. If it does, it indicates
     // an exponential blowup.
     assert!(
