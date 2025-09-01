@@ -1538,8 +1538,10 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let repeating_chunk = b"ifa{";
 
     // First chunk
-    for byte in repeating_chunk {
-        constraint_state.commit_bytes(&[*byte]);
+    for _ in 0..2 {
+        for byte in repeating_chunk {
+            constraint_state.commit_bytes(&[*byte]);
+        }
     }
     assert!(constraint_state.is_active());
     println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
@@ -1547,6 +1549,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let nodes1 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
+    constraint_state.print_gss();
 
     // Second chunk
     for byte in repeating_chunk {
@@ -1558,6 +1561,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let nodes2 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
+    constraint_state.print_gss();
 
     // Third chunk
     for byte in repeating_chunk {
@@ -1569,6 +1573,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let nodes3 = gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes;
+    constraint_state.print_gss();
 
     let increase1 = nodes2 - nodes1;
     let increase2 = nodes3 - nodes2;
