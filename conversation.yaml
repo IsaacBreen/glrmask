@@ -3754,11 +3754,11 @@ local_system:
       statement ::= if_statement | expression_statement | block ;
       expression_statement ::= expression ;
       block ::= '{' statement* '}' ;
-      if_statement ::= 'if' '(' expression ')' statement ;
+      if_statement ::= 'if' expression statement ;
 
       // --- Expressions ---
       expression ::= call_expression | IDENTIFIER ;
-      call_expression ::= IDENTIFIER '(' expression ')' ;
+      call_expression ::= IDENTIFIER expression ;
 
       // --- Literals ---
       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
@@ -3769,7 +3769,7 @@ local_system:
 
           let mut llm_token_map = LLMTokenMap::new();
           let mut max_id = 0;
-          for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
+          for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
               max_id = i;
           }
@@ -3784,7 +3784,7 @@ local_system:
           println!("GrammarConstraint constructed successfully.");
 
           let mut constraint_state = constraint.init();
-          let repeating_chunk = b"if(a){";
+          let repeating_chunk = b"if a{";
 
           // First chunk
           for byte in repeating_chunk {
@@ -4325,7 +4325,7 @@ system:
   model:
     - gp
   code_completion_model:
-    - cp
+    - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
@@ -7111,5 +7111,106 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Reintroduce block statement and simplify
       JS grammar for GSS explosion test"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |2
+
+      Node counts: 9, 23, 51
+      Increases: 14, 28
+
+
+      thread 'test_constraint_basic::test_js_if_statement_gss_explosion' (31085393) panicked at src/test_constraint_basic.rs:1596:5:
+      GSS node growth is accelerating, indicating an explosion. First increase: 14, Second increase: 28
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::test_constraint_basic::test_js_if_statement_gss_explosion
+                   at ./src/test_constraint_basic.rs:1596:5
+         3: sep1::test_constraint_basic::test_js_if_statement_gss_explosion::{{closure}}
+                   at ./src/test_constraint_basic.rs:1502:44
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+
+      Process finished with exit code 101
+    metadata:
+  - user: Ok good. That change is also OK. Can we simplify it even more?
+    metadata:
+  - assistant: |-
+      You are absolutely right to push for more simplification. We've reached the core of the issue, but the grammar can still be made more abstract and minimal while preserving the exact failure condition.
+
+      The parentheses in `if (a)` and `if(a)` are syntactic sugar. The underlying ambiguity comes from the sequence `'if' IDENTIFIER`, which can be interpreted as the start of an `if_statement` or as a complete `call_expression`. We can remove the parentheses entirely to simplify the grammar.
+
+      The `IGNORE` rule in the EBNF will correctly handle the space in the input `if a{`, so we don't need to change the tokenizer logic. This change reduces the number of tokens the grammar needs to handle and simplifies the `if_statement` and `call_expression` rules, resulting in the most minimal representation of this specific GSS explosion problem.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1520,11 +1520,11 @@
+       statement ::= if_statement | expression_statement | block ;
+       expression_statement ::= expression ;
+       block ::= '{' statement* '}' ;
+      -if_statement ::= 'if' '(' expression ')' statement ;
+      +if_statement ::= 'if' expression statement ;
+       
+       // --- Expressions ---
+       expression ::= call_expression | IDENTIFIER ;
+      -call_expression ::= IDENTIFIER '(' expression ')' ;
+      +call_expression ::= IDENTIFIER expression ;
+       
+       // --- Literals ---
+       IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+      @@ -1535,7 +1535,7 @@
+       
+           let mut llm_token_map = LLMTokenMap::new();
+           let mut max_id = 0;
+      -    for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
+      +    for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
+               llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
+               max_id = i;
+           }
+      @@ -1549,7 +1549,7 @@
+           println!("GrammarConstraint constructed successfully.");
+       
+           let mut constraint_state = constraint.init();
+      -    let repeating_chunk = b"if(a){";
+      +    let repeating_chunk = b"if a{";
+       
+           // First chunk
+           for byte in repeating_chunk {
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "Simplify JS grammar test by removing parentheses
+      and updating input/vocab"'
     metadata:
 ...

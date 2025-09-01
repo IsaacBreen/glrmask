@@ -1520,11 +1520,11 @@ COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
 statement ::= if_statement | expression_statement | block ;
 expression_statement ::= expression ;
 block ::= '{' statement* '}' ;
-if_statement ::= 'if' '(' expression ')' statement ;
+if_statement ::= 'if' expression statement ;
 
 // --- Expressions ---
 expression ::= call_expression | IDENTIFIER ;
-call_expression ::= IDENTIFIER '(' expression ')' ;
+call_expression ::= IDENTIFIER expression ;
 
 // --- Literals ---
 IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
@@ -1535,7 +1535,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_id = 0;
-    for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
+    for (i, s) in ["i", "f", "a", "{"].iter().enumerate() {
         llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
         max_id = i;
     }
@@ -1550,7 +1550,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     println!("GrammarConstraint constructed successfully.");
 
     let mut constraint_state = constraint.init();
-    let repeating_chunk = b"if(a){";
+    let repeating_chunk = b"if a{";
 
     // First chunk
     for byte in repeating_chunk {
