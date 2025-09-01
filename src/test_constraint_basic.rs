@@ -1504,7 +1504,6 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     // with the input "if(1){if(1){...". The grammar has a recursive structure for
     // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
     // which can lead to exponential growth in GSS nodes if states are not merged properly.
-    // 1. Load and compile the simplified JavaScript grammar.
     println!("--- Setting up for JS GSS Explosion Test ---");
     let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
 #![ignore(IGNORE)]
@@ -1512,31 +1511,31 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
 program ::= statement* EOF;
 EOF ::= '<|EOF|>';
 
-// --- Lexical Grammar (Unchanged) ---
+// --- Lexical Grammar ---
 IGNORE ::= ( WS | COMMENT )+ ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
 
-// --- Statements (Minimal) ---
-statement ::= if_statement | expression_statement ;
+// --- Statements (Minimal grammar to cause GSS explosion) ---
+statement ::= if_statement | expression_statement | block ;
 expression_statement ::= expression ;
+block ::= '{' statement* '}' ;
 if_statement ::= 'if' '(' expression ')' statement ;
 
-// --- Expressions (Minimal) ---
+// --- Expressions ---
 expression ::= call_expression | IDENTIFIER ;
 call_expression ::= IDENTIFIER '(' expression ')' ;
 
-// --- Literals (Minimal) ---
+// --- Literals ---
 IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
 "#;
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
 
-    // 2. Define a minimal LLM vocabulary with single-character tokens.
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_id = 0;
-    for (i, s) in ["i", "f", "(", "a", ")"].iter().enumerate() {
+    for (i, s) in ["i", "f", "(", "a", ")", "{"].iter().enumerate() {
         llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
         max_id = i;
     }
@@ -1550,9 +1549,8 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     );
     println!("GrammarConstraint constructed successfully.");
 
-    // 4. Test Logic: commit "if(a)" repeatedly and check GSS growth.
     let mut constraint_state = constraint.init();
-    let repeating_chunk = b"if(a)";
+    let repeating_chunk = b"if(a){";
 
     // First chunk
     for byte in repeating_chunk {
