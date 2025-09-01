@@ -2980,7 +2980,9 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, glr_state) in &self.state {
             roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
         }
+        println!("Simplifying GSS after commit...");
         simplify(&mut roots);
+        println!("Done simplifying GSS after commit.");
         for (tokenizer_state_id, glr_state) in &mut self.state {
             glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
         }
