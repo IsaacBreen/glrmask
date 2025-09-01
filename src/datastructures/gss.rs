@@ -11,7 +11,6 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -154,59 +153,17 @@ pub enum GSSNode {
     Internal(GSSInternal),
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct GSSRoot {
     acc: Arc<Acc>,
     hash_key_cache: u64,
-    canonical: AtomicBool,
 }
 
-impl Debug for GSSRoot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GSSRoot")
-            .field("acc", &self.acc)
-            .field("hash_key_cache", &self.hash_key_cache)
-            .field("canonical", &self.canonical.load(AtomicOrdering::Relaxed))
-            .finish()
-    }
-}
-
-impl Clone for GSSRoot {
-    fn clone(&self) -> Self {
-        Self {
-            acc: self.acc.clone(),
-            hash_key_cache: self.hash_key_cache,
-            canonical: AtomicBool::new(self.canonical.load(AtomicOrdering::Relaxed)),
-        }
-    }
-}
-
+#[derive(Debug, Clone)]
 pub(crate) struct GSSInternal {
     predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
-    canonical: AtomicBool,
-}
-
-impl Debug for GSSInternal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GSSInternal")
-            .field("predecessors", &self.predecessors)
-            .field("hash_key_cache", &self.hash_key_cache)
-            .field("max_depth", &self.max_depth)
-            .field("canonical", &self.canonical.load(AtomicOrdering::Relaxed))
-            .finish()
-    }
-}
-
-impl Clone for GSSInternal {
-    fn clone(&self) -> Self {
-        Self {
-            predecessors: self.predecessors.clone(),
-            hash_key_cache: self.hash_key_cache,
-            max_depth: self.max_depth,
-            canonical: AtomicBool::new(self.canonical.load(AtomicOrdering::Relaxed)),
-        }
-    }
 }
 
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
@@ -569,21 +526,7 @@ impl GSSNode {
     pub(crate) fn new(acc: Acc) -> Self {
         let arc_acc = Arc::new(acc);
         let hash_key_cache = compute_hash_key_root(&arc_acc);
-        GSSNode::Root(GSSRoot { acc: arc_acc, hash_key_cache, canonical: AtomicBool::new(false) })
-    }
-
-    fn is_canonical(&self) -> bool {
-        match self {
-            GSSNode::Root(r) => r.canonical.load(AtomicOrdering::Relaxed),
-            GSSNode::Internal(i) => i.canonical.load(AtomicOrdering::Relaxed),
-        }
-    }
-
-    fn set_canonical(&self, value: bool) {
-        match self {
-            GSSNode::Root(r) => r.canonical.store(value, AtomicOrdering::Relaxed),
-            GSSNode::Internal(i) => i.canonical.store(value, AtomicOrdering::Relaxed),
-        }
+        GSSNode::Root(GSSRoot { acc: arc_acc, hash_key_cache })
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
@@ -610,7 +553,7 @@ impl GSSNode {
         }
         let hash_key_cache = compute_hash_key_internal(&predecessors);
         let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth, canonical: AtomicBool::new(false) })
+        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
@@ -803,7 +746,6 @@ impl GSSNode {
             *self = GSSNode::Root(GSSRoot {
                 acc: acc_arc.clone(),
                 hash_key_cache: compute_hash_key_root(&acc_arc),
-                canonical: AtomicBool::new(false),
             });
             return;
         }
@@ -1388,7 +1330,6 @@ impl GSSInternPool {
             return existing.clone();
         }
         // Store an Arc of the created node as the canonical representative.
-        node.set_canonical(true);
         let arc = Arc::new(node);
         // Key is a value-clone of the node; that's fine because we want structural keying.
         self.by_node.insert((*arc).clone(), arc.clone());
@@ -1402,9 +1343,6 @@ fn canonicalize_node(
     pool: &mut GSSInternPool,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
 ) -> Arc<GSSNode> {
-    if node_arc.is_canonical() {
-        return node_arc.clone();
-    }
     let ptr = Arc::as_ptr(node_arc);
     if let Some(cached) = memo.get(&ptr) {
         return cached.clone();
