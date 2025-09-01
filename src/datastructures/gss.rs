@@ -86,9 +86,6 @@ impl JSONConvertible for PrecomputedNodeContents {
 /// Represents the full set of allowed tokens and terminals for a GSS node.
 /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
 /// is computed on demand by aggregating the Accs of all reachable roots.
-/// NOTE (extended): Internal nodes may optionally carry Acc as well. If an internal node
-/// carries Acc, callers should treat it as a "line" cut: do not assume descendants also
-/// carry Acc. This file preserves external APIs; transforms still target root Accs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
@@ -149,8 +146,7 @@ impl Acc {
 // --- GSS Node & Core Implementation ---
 
 /// A node in the Graph-Structured Stack (GSS).
-/// Extended design: root nodes carry Acc; internal nodes may optionally carry Acc.
-/// If an internal node carries Acc, treat it as a "line" cut point for Acc traversal.
+/// Simplified design: only root nodes carry Acc; internal nodes carry only predecessors.
 #[derive(Debug, Clone)]
 pub enum GSSNode {
     Root(GSSRoot),
@@ -168,9 +164,6 @@ pub(crate) struct GSSInternal {
     predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
-    /// Optional local Acc carried at this internal node.
-    /// If present, callers should not assume descendants also carry Acc on the same path.
-    acc: Option<Arc<Acc>>,
 }
 
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
@@ -250,20 +243,12 @@ impl GSSPopper {
 
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
-                // Apply parent's own acc (if any) to the path before exploring predecessors.
-                let parent_acc_applied = if let Some(parent_acc) = parent.own_acc_effective_opt() {
-                    Arc::new(Acc::narrow(&path_acc, parent_acc.as_ref()))
-                } else {
-                    path_acc.clone()
-                };
-
                 for (edge_val, preds_by_depth) in parent.predecessors().iter() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
                             match child.as_ref() {
                                 GSSNode::Root(r) => {
-                                    // Apply root acc (always present on root in current design)
-                                    let combined = Arc::new(Acc::narrow(&parent_acc_applied, &r.acc));
+                                    let combined = Arc::new(Acc::narrow(&path_acc, &r.acc));
                                     // Reached the bottom on this pop.
                                     let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
                                     if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
@@ -275,9 +260,9 @@ impl GSSPopper {
                                 }
                                 GSSNode::Internal(_) => {
                                     if let Some(existing_acc) = new_paths.get_mut(child) {
-                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &parent_acc_applied));
+                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &path_acc));
                                     } else {
-                                        new_paths.insert(child.clone(), parent_acc_applied.clone());
+                                        new_paths.insert(child.clone(), path_acc.clone());
                                     }
                                 }
                             }
@@ -327,14 +312,9 @@ impl<'a> GSSPopperItem<'a> {
 impl<'a> GSSPopperItemPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
-    /// Returns the combined `Acc` of the path, the parent (if it has local acc), and the predecessor node.
+    /// Returns the combined `Acc` of the path and the predecessor node.
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
-        let applied_parent = if let Some(parent_acc) = self.parent_arc.own_acc_effective_opt() {
-            Acc::narrow(self.path_acc, parent_acc.as_ref())
-        } else {
-            self.path_acc.as_ref().clone()
-        };
-        Acc::narrow(&applied_parent, &self.predecessor_node.acc())
+        Acc::narrow(self.path_acc, &self.predecessor_node.acc())
     }
 
     /// Returns a new `GSSNode` representing the predecessor; in the simplified design, just clones.
@@ -344,8 +324,8 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     #[allow(dead_code)] pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let _resolved_acc = self.resolved_acc(); // ignored by new_with_single_predecessor in simplified design
-        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, Acc::new_fresh())
+        let resolved_acc = self.resolved_acc(); // ignored by new_with_single_predecessor in simplified design
+        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
@@ -387,22 +367,8 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
         .unwrap_or(0)
 }
 
-fn compute_hash_key_internal(predecessors: &NodeMap, acc: &Option<Arc<Acc>>) -> u64 {
+fn compute_hash_key_internal(predecessors: &NodeMap) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    // Include local acc (if any)
-    match acc {
-        None => {
-            0u8.hash(&mut hasher);
-        }
-        Some(a) => {
-            1u8.hash(&mut hasher);
-            a.llm_tokens_union.hash(&mut hasher);
-            a.terminals_union.hash(&mut hasher);
-            for trie2_node in &a.trie2_nodes {
-                trie2_node.hash(&mut hasher);
-            }
-        }
-    }
     for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
         for (dest_key, pred_vec) in preds_by_depth {
@@ -423,111 +389,6 @@ fn compute_hash_key_root(acc: &Acc) -> u64 {
         trie2_node.hash(&mut hasher);
     }
     hasher.finish()
-}
-
-// Acc presence: treat only non-neutral Acc as "present".
-fn acc_is_effective(acc: &Acc) -> bool {
-    !acc.is_merge_neutral()
-}
-
-// Own Acc if non-neutral, else None.
-impl GSSNode {
-    fn own_acc_effective_opt(&self) -> Option<Arc<Acc>> {
-        match self {
-            GSSNode::Root(r) => {
-                if acc_is_effective(&r.acc) { Some(r.acc.clone()) } else { None }
-            }
-            GSSNode::Internal(i) => {
-                i.acc.as_ref().and_then(|a| if acc_is_effective(a) { Some(a.clone()) } else { None })
-            }
-        }
-    }
-}
-
-// Strip ALL local Accs (roots: set to fresh; internals: set acc=None) in a subtree,
-// and collect the union of all trie2_nodes we removed while stripping.
-// We must walk the entire subtree because constraint requires no predecessor has Acc.
-fn strip_all_local_accs_and_collect_trie2(
-    node_arc: &Arc<GSSNode>,
-    memo: &mut HashMap<*const GSSNode, (Arc<GSSNode>, BTreeSet<PrecomputeNode2Index>)>,
-) -> (Arc<GSSNode>, BTreeSet<PrecomputeNode2Index>) {
-    let ptr = Arc::as_ptr(node_arc);
-    if let Some(cached) = memo.get(&ptr) {
-        return cached.clone();
-    }
-
-    let (new_node, mut union_trie2): (Arc<GSSNode>, BTreeSet<PrecomputeNode2Index>) = match node_arc.as_ref() {
-        GSSNode::Root(r) => {
-            let mut collected = BTreeSet::new();
-            collected.extend(r.acc.trie2_nodes.iter().cloned());
-            // Replace with a neutral root.
-            (Arc::new(GSSNode::new(Acc::new_fresh())), collected)
-        }
-        GSSNode::Internal(i) => {
-            let mut collected = BTreeSet::new();
-            if let Some(local) = &i.acc {
-                collected.extend(local.trie2_nodes.iter().cloned());
-            }
-            // Recurse
-            let mut new_map: NodeMap = BTreeMap::new();
-            for (edge, by_depth) in &i.predecessors {
-                let mut new_by_depth = BTreeMap::new();
-                for (dk, vec) in by_depth {
-                    let mut nv: Vec<Arc<GSSNode>> = Vec::with_capacity(vec.len());
-                    for p in vec {
-                        let (p_new, p_trie2) = strip_all_local_accs_and_collect_trie2(p, memo);
-                        collected.extend(p_trie2);
-                        nv.push(p_new);
-                    }
-                    new_by_depth.insert(*dk, nv);
-                }
-                new_map.insert(edge.clone(), new_by_depth);
-            }
-            // Make a copy of internal with acc removed.
-            (Arc::new(GSSNode::new_internal_raw(None, new_map)), collected)
-        }
-    };
-
-    memo.insert(ptr, (new_node.clone(), union_trie2.clone()));
-    (new_node, union_trie2)
-}
-
-// If all direct predecessors (across all edges) have the same non-neutral Acc,
-// and none have "no Acc," return that Acc (by value). Otherwise None.
-// Note: does not mutate the predecessors; caller decides whether to strip.
-fn maybe_suck_up_predecessor_accs(predecessors: &NodeMap) -> Option<Acc> {
-    let mut common: Option<Acc> = None;
-    let mut saw_none = false;
-    let mut saw_any = false;
-
-    for preds_by_depth in predecessors.values() {
-        for pred_vec in preds_by_depth.values() {
-            for pred in pred_vec {
-                match pred.own_acc_effective_opt() {
-                    Some(a) => {
-                        let av = (*a).clone();
-                        if let Some(ref c) = common {
-                            if *c != av {
-                                return None; // not identical
-                            }
-                        } else {
-                            common = Some(av);
-                        }
-                        saw_any = true;
-                    }
-                    None => {
-                        saw_none = true;
-                    }
-                }
-            }
-        }
-    }
-
-    if saw_any && !saw_none {
-        common
-    } else {
-        None
-    }
 }
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
@@ -668,122 +529,92 @@ impl GSSNode {
         GSSNode::Root(GSSRoot { acc: arc_acc, hash_key_cache })
     }
 
-    /// Private raw constructor that builds an internal node from a pre-computed map and an optional local Acc.
-    /// This does NOT push the local acc into descendants.
-    fn new_internal_raw(acc_opt: Option<Arc<Acc>>, predecessors: NodeMap) -> Self {
-        let hash_key_cache = compute_hash_key_internal(&predecessors, &acc_opt);
-        let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth, acc: acc_opt })
-    }
-
     /// Private constructor for internal methods that build a node from a pre-computed map.
-    /// For compatibility with existing call sites:
-    /// - If `acc` is neutral, it is ignored (no local acc on this internal).
-    /// - If `acc` is non-neutral, we propagate it down to all reachable roots (as in the original design).
+    /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
     fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
-        // An internal node must have predecessors. If effectively empty, create a root instead.
+        // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
+        // The provided `acc` becomes the local accumulator for this new root.
         if predecessors.values().all(|by_depth| by_depth.values().all(Vec::is_empty)) {
             return GSSNode::new((*acc).clone());
         }
 
-        // Decide whether to store a local Acc and/or "suck up" from predecessors.
-        let mut local_acc_opt: Option<Acc> = if acc_is_effective(&acc) {
-            Some((*acc).clone())
-        } else {
-            None
-        };
-
-        // If we don't have a local Acc, but all predecessors share an identical non-neutral Acc, suck it up.
-        if local_acc_opt.is_none() {
-            if let Some(common) = maybe_suck_up_predecessor_accs(&predecessors) {
-                local_acc_opt = Some(common);
-            }
-        }
-
-        // If we decided to carry a local Acc, strip all Accs in the entire predecessor subgraph,
-        // and union all stripped trie2_nodes into the local Acc to preserve semantics.
-        let mut final_predecessors = predecessors;
-        let mut local_acc_arc: Option<Arc<Acc>> = None;
-        if let Some(mut local_acc) = local_acc_opt {
-            let mut union_trie2: BTreeSet<PrecomputeNode2Index> = BTreeSet::new();
-            let mut memo: HashMap<*const GSSNode, (Arc<GSSNode>, BTreeSet<PrecomputeNode2Index>)> = HashMap::new();
-
-            for preds_by_depth in final_predecessors.values_mut() {
+        // Push local acc into all reachable roots
+        // Note: predecessors is guaranteed not to be empty here due to the check above.
+        if !acc.is_merge_neutral() {
+            let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+            for preds_by_depth in predecessors.values_mut() {
                 for pred_vec in preds_by_depth.values_mut() {
-                    for pred in pred_vec.iter_mut() {
-                        let (stripped, collected) = strip_all_local_accs_and_collect_trie2(pred, &mut memo);
-                        union_trie2.extend(collected);
-                        *pred = stripped;
+                    for pred_arc in pred_vec.iter_mut() {
+                        let transformed = apply_local_acc_to_all_roots(pred_arc, &acc, &mut memo);
+                        *pred_arc = transformed;
                     }
                 }
             }
-
-            // Merge collected trie2_nodes into the local Acc so we don't lose them when moving the cut up.
-            local_acc.trie2_nodes = &local_acc.trie2_nodes | &union_trie2;
-            local_acc_arc = Some(Arc::new(local_acc));
         }
-
-        // Build the internal node with the chosen local Acc (if any).
-        let acc_opt = local_acc_arc;
-        let hash_key_cache = compute_hash_key_internal(&final_predecessors, &acc_opt);
-        let max_depth = compute_max_depth(&final_predecessors);
-        GSSNode::Internal(GSSInternal {
-            predecessors: final_predecessors,
-            hash_key_cache,
-            max_depth,
-            acc: acc_opt,
-        })
+        let hash_key_cache = compute_hash_key_internal(&predecessors);
+        let max_depth = compute_max_depth(&predecessors);
+        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
-    /// For compatibility, we propagate non-neutral `acc` down to reachable roots rather than storing it locally.
+    /// In simplified design, `acc` is ignored (kept for API compatibility).
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
+        let pred_tx = if acc.is_merge_neutral() {
+            predecessor_arc
+        } else {
+            let mut memo = HashMap::new();
+            apply_local_acc_to_all_roots(&predecessor_arc, &acc, &mut memo)
+        };
         let mut predecessors_map = NodeMap::new();
         predecessors_map
             .entry(edge_value)
             .or_default()
-            .insert(predecessor_arc.dest_key(), vec![predecessor_arc]);
-        Self::new_with_map(Arc::new(acc), predecessors_map)
+            .insert(pred_tx.dest_key(), vec![pred_tx]);
+        Self::new_with_map(Arc::new(Acc::new_fresh()), predecessors_map)
     }
 
     /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
-    /// For compatibility, we propagate non-neutral `acc` down to reachable roots rather than storing it locally.
+    /// In simplified design, `acc` is ignored (kept for API compatibility).
     fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
+        let pred_tx = if acc.is_merge_neutral() {
+            predecessor_arc
+        } else {
+            let mut memo = HashMap::new();
+            apply_local_acc_to_all_roots(&predecessor_arc, &acc, &mut memo)
+        };
         let mut predecessors_map = NodeMap::new();
         for edge_value in edge_values {
             predecessors_map
                 .entry(edge_value)
                 .or_default()
-                .entry(predecessor_arc.dest_key())
+                .entry(pred_tx.dest_key())
                 .or_default()
-                .push(predecessor_arc.clone());
+                .push(pred_tx.clone());
         }
-        Self::new_with_map(Arc::new(acc), predecessors_map)
+        Self::new_with_map(Arc::new(Acc::new_fresh()), predecessors_map)
     }
 
     pub fn new_fresh() -> Self {
         Self::new(Acc::new_fresh())
     }
 
-    /// Returns this node's own local Acc if present (for roots, always Some).
-    fn own_acc_opt(&self) -> Option<Arc<Acc>> {
-        match self {
-            GSSNode::Root(r) => Some(r.acc.clone()),
-            GSSNode::Internal(i) => i.acc.clone(),
-        }
-    }
-
     /// Returns the aggregate Acc for this node.
-    /// - If the node (root or internal) has a local Acc, it is included as a "line" cut and descendants are not traversed for Accs on that path.
-    /// - Otherwise: walks to all reachable descendants and merges their Accs (stopping at any node that has a local Acc).
-    pub(crate) fn acc(&self) -> Arc<Acc> {
+    /// - If root: returns the node's Acc.
+    /// - If internal: walks to all reachable roots and merges their Accs.
+    fn acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
-                // Collect all local Accs reachable from this node, stopping at any node that carries Acc.
+                // Collect all root Accs reachable from this node.
                 let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
                 let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-                queue.push_back(Arc::new(self.clone()));
+                for preds_by_depth in i.predecessors.values() {
+                    for pred_vec in preds_by_depth.values() {
+                        for pred in pred_vec {
+                            queue.push_back(pred.clone());
+                        }
+                    }
+                }
 
                 let mut accs: Vec<Arc<Acc>> = Vec::new();
                 while let Some(node) = queue.pop_front() {
@@ -794,11 +625,6 @@ impl GSSNode {
                     match node.as_ref() {
                         GSSNode::Root(r) => accs.push(r.acc.clone()),
                         GSSNode::Internal(ii) => {
-                            if let Some(local) = ii.acc.clone() {
-                                accs.push(local);
-                                // Do not traverse further along this branch.
-                                continue;
-                            }
                             for preds_by_depth in ii.predecessors.values() {
                                 for pred_vec in preds_by_depth.values() {
                                     for pred in pred_vec {
@@ -950,15 +776,6 @@ impl GSSNode {
         let mut merged_map = self_predecessors;
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
-        // After merging maps, attempt to merge local Accs if present on inputs.
-        // We defer constraint enforcement and "strip" to new_with_map's normalization.
-        let merged_local_acc: Arc<Acc> = match (self.own_acc_effective_opt(), other.own_acc_effective_opt()) {
-            (Some(a), Some(b)) => Arc::new(Acc::merge(&a, &b)),
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => Arc::new(Acc::new_fresh()),
-        };
-
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
@@ -983,9 +800,7 @@ impl GSSNode {
             merged_map
         };
 
-        // Build a new internal with the possibly merged local acc.
-        // new_with_map will normalize placement (strip predecessors if needed, or suck-up).
-        *self = GSSNode::new_with_map(merged_local_acc, final_predecessors);
+        *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
@@ -1081,7 +896,7 @@ impl PartialEq for GSSNode {
                 a.hash_key_cache == b.hash_key_cache && a.acc == b.acc
             }
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
-                a.hash_key_cache == b.hash_key_cache && a.predecessors == b.predecessors && a.acc == b.acc
+                a.hash_key_cache == b.hash_key_cache && a.predecessors == b.predecessors
             }
             _ => false,
         }
@@ -1113,7 +928,6 @@ impl Ord for GSSNode {
             }
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
                 a.hash_key_cache.cmp(&b.hash_key_cache)
-                    .then_with(|| a.acc.cmp(&b.acc))
                     .then_with(|| a.predecessors.cmp(&b.predecessors))
             }
             _ => Ordering::Equal,
@@ -1133,7 +947,7 @@ pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<
 /// Note:
 /// - There is no early-continue/stop: recursion always traverses into children of internal nodes
 ///   unless `internal_closure` prunes that node.
-/// - Internal nodes never hold Acc for transforms; only roots do (transforms do not modify internal Acc).
+/// - Internal nodes never hold Acc; only roots do.
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     internal_closure: &mut impl FnMut(&GSSInternal) -> bool,
@@ -1205,7 +1019,7 @@ fn prune_and_transform_recursive(
                 // No change in children, so no change in this node.
                 Some(node_arc.clone())
             } else {
-                // Children changed, create new internal node (no local acc by default).
+                // Children changed, create new internal node.
                 let transformed_node = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_predecessors_map);
                 Some(Arc::new(transformed_node))
             }
@@ -1573,8 +1387,8 @@ fn canonicalize_node(
                 }
             }
 
-            // Preserve any local internal acc in the canonicalized node.
-            pool.intern(GSSNode::new_internal_raw(internal.acc.clone(), new_map))
+            // Important: pass a neutral Acc when rebuilding internal nodes, so we keep structure only.
+            pool.intern(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map))
         }
     };
 
@@ -1660,7 +1474,7 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                     }
                     new_preds.insert(edge_val.clone(), new_by_depth);
                 }
-                Arc::new(GSSNode::new_internal_raw(internal.acc.clone(), new_preds))
+                Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_preds))
             }
         };
 
@@ -1670,120 +1484,6 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
 
     let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
     clone_one(root, trie2_map, &mut memo)
-}
-
-impl GSSNode {
-    /// Verifies that the GSS rooted at this node respects the Acc placement constraints.
-    /// This is a debug/test utility.
-    #[cfg(test)]
-    pub(crate) fn verify_constraints(
-        root_arc: &Arc<GSSNode>,
-        terminal_map: &BiBTreeMap<Terminal, TerminalID>
-    ) -> Result<(), String> {
-        let mut visited: HashSet<*const GSSNode> = HashSet::new();
-        Self::verify_constraints_recursive_impl(root_arc, root_arc, terminal_map, &mut visited)
-    }
-
-    #[cfg(test)]
-    fn verify_constraints_recursive_impl(
-        node_arc: &Arc<GSSNode>,
-        root_for_printing: &Arc<GSSNode>,
-        terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-        visited: &mut HashSet<*const GSSNode>,
-    ) -> Result<(), String> {
-        let ptr = Arc::as_ptr(node_arc);
-        if !visited.insert(ptr) {
-            return Ok(());
-        }
-
-        // Constraint A: If this node has a local non-neutral Acc, no predecessor anywhere in its subgraph may have a local non-neutral Acc.
-        if node_arc.own_acc_effective_opt().is_some() {
-            // BFS through predecessors to detect any local Acc below.
-            let mut q: VecDeque<(Arc<GSSNode>, usize)> = VecDeque::new();
-            for preds_by_depth in node_arc.predecessors().values() {
-                for pred_vec in preds_by_depth.values() {
-                    for p in pred_vec {
-                        q.push_back((p.clone(), 1));
-                    }
-                }
-            }
-            while let Some((p, depth)) = q.pop_front() {
-                if p.own_acc_effective_opt().is_some() {
-                    let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
-                    return Err(format!(
-                        "Constraint A violated: Node {:p} has a local Acc, but predecessor node {:p} at depth {} also has a local Acc.\nFull GSS:\n{}",
-                        node_arc.as_ref(), p.as_ref(), depth, gss_str
-                    ));
-                }
-                for preds_by_depth in p.predecessors().values() {
-                    for pred_vec in preds_by_depth.values() {
-                        for pp in pred_vec {
-                            q.push_back((pp.clone(), depth + 1));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Constraint B: Push-up property on direct predecessors.
-        // Gather effective Accs of direct predecessors.
-        let mut any_preds = false;
-        let mut saw_none = false;
-        let mut common_acc: Option<Acc> = None;
-        for preds_by_depth in node_arc.predecessors().values() {
-            for pred_vec in preds_by_depth.values() {
-                for p in pred_vec {
-                    any_preds = true;
-                    match p.own_acc_effective_opt() {
-                        Some(a) => {
-                            let av = (*a).clone();
-                            if let Some(ref c) = common_acc {
-                                if *c != av {
-                                    // Different Accs among preds -> OK
-                                    saw_none = false; // irrelevant now
-                                    common_acc = None; // signal "not uniform"
-                                    // Short-circuit by marking non-uniform via sentinel
-                                    // but keep checking children recursively below.
-                                }
-                            } else if saw_none {
-                                // Mixed Some and None -> OK
-                                common_acc = None;
-                            } else {
-                                common_acc = Some(av);
-                            }
-                        }
-                        None => {
-                            saw_none = true;
-                            common_acc = None; // not uniform (mix with None)
-                        }
-                    }
-                }
-            }
-        }
-
-        // If there were predecessors and they were uniformly the same non-neutral Acc with no None,
-        // this Acc must be pushed up onto the current node.
-        if any_preds {
-            if let Some(uniform) = common_acc {
-                let (gss_str, _) = print_gss_forest(&[root_for_printing.clone()], terminal_map, &GSSPrintConfig::default());
-                return Err(format!(
-                    "Constraint B violated: Node {:p} has direct predecessors that all share the same Acc {:?}, and none without an Acc.\nThe Acc should be stored on this node instead.\nFull GSS:\n{}",
-                    node_arc.as_ref(), uniform, gss_str
-                ));
-            }
-        }
-
-        // Recurse
-        for preds_by_depth in node_arc.predecessors().values() {
-            for pred_vec in preds_by_depth.values() {
-                for p in pred_vec {
-                    Self::verify_constraints_recursive_impl(p, root_for_printing, terminal_map, visited)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 // --- Analysis and Debugging ---
@@ -1843,25 +1543,19 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
         for ((node_ptr, last_edge_opt), path_acc) in nodes_at_depth {
             let current_node = unsafe { &*node_ptr };
 
-            // Apply local acc at this node (root or internal), if any, and it's not neutral.
-            let applied_here = if let Some(local) = current_node.own_acc_effective_opt() {
-                Arc::new(Acc::narrow(&path_acc, &local))
-            } else {
-                path_acc.clone()
-            };
-
             if current_node.is_root() {
                 if let Some(edge) = last_edge_opt {
-                    // We are at a root; record the path_acc accumulated so far (already narrowed at this node).
+                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc()));
                     results
                         .entry(edge)
                         .or_default()
-                        .insert(applied_here);
+                        .insert(final_acc);
                 }
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
                     for pred_arc in preds_by_depth.values().flatten() {
-                        let per_child_acc = applied_here.clone();
+                        // Internal nodes do not contribute to the path acc. It is passed down unmodified.
+                        let per_child_acc = path_acc.clone();
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
                         queue
@@ -2718,25 +2412,19 @@ mod tests {
         // Test from root
         let roots_map = get_roots(std::iter::once(&root));
         let mut expected = BTreeMap::new();
-        // Leaves' Acc are stripped when the line is above them; only the parent's Accs apply.
-        let path_acc1 = Arc::new(Acc::narrow(&acc_root, &acc_b));
+        let path_acc1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
         expected.insert(mock_edge(1), BTreeSet::from([path_acc1.clone()]));
-        let path_acc2 = Arc::new(Acc::narrow(&acc_root, &acc_c));
+        let path_acc2 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_c), &acc2));
         expected.insert(mock_edge(2), BTreeSet::from([path_acc2.clone()]));
         assert_eq!(roots_map, expected);
 
-        // Test from multiple sources: starting from `b` as a root will apply only `acc_b` to edge 1.
+        // Test from multiple sources. The path from `b` as a root will "win" for leaf1's path_acc
+        // because its initial `fresh` acc has a wider union of possibilities.
         let roots_multi = get_roots(vec![&root, b.as_ref()]);
-        let from_root_edge1 = Arc::new(Acc::narrow(&acc_root, &acc_b));
-        let from_b_edge1 = Arc::new(acc_b.as_ref().clone()); // `b`'s local Acc only
-        assert_eq!(
-            *roots_multi.get(&mock_edge(1)).expect("edge 1 missing"),
-            BTreeSet::from([from_root_edge1, from_b_edge1])
-        );
-        assert_eq!(
-            *roots_multi.get(&mock_edge(2)).expect("edge 2 missing"),
-            BTreeSet::from([path_acc2.clone()])
-        );
+        let from_root_edge1 = Arc::new(Acc::narrow(&Acc::narrow(&acc_root, &acc_b), &acc1));
+        let from_b_edge1 = Arc::new(Acc::narrow(&acc_b, &acc1));
+        assert_eq!(*roots_multi.get(&mock_edge(1)).expect("edge 1 missing"), BTreeSet::from([from_root_edge1, from_b_edge1]));
+        assert_eq!(*roots_multi.get(&mock_edge(2)).expect("edge 2 missing"), BTreeSet::from([path_acc2.clone()]));
 
         // Test from leaves -> no last edge, so contributes nothing
         let roots_leaves = get_roots(vec![leaf1.as_ref(), leaf2.as_ref()]);
@@ -2837,13 +2525,22 @@ mod tests {
         gss1.merge_with_depth(1, &gss2);
 
         // --- Assertions ---
-        // The union of trie2_nodes should be preserved in the Acc on the line (top-level node).
-        let merged_arc = Arc::new(gss1);
-        let acc_union = merged_arc.acc();
-        assert!(acc_union.trie2_nodes.contains(&trie2_node1), "trie2_node1 missing");
-        assert!(acc_union.trie2_nodes.contains(&trie2_node2), "trie2_node2 missing");
-        assert!(acc_union.trie2_nodes.contains(&trie2_node3), "trie2_node3 missing");
-        assert_eq!(acc_union.trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the union Acc");
+        // Traverse the merged GSS and collect all trie2_nodes from all leaf nodes.
+        let mut q = VecDeque::new();
+        q.push_back(Arc::new(gss1));
+        let mut visited = HashSet::new();
+        let mut final_leaf_trie2_nodes = BTreeSet::new();
+
+        while let Some(node) = q.pop_front() {
+            if !visited.insert(Arc::as_ptr(&node)) { continue; }
+            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
+            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
+        }
+
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node1), "trie2_node1 missing");
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node2), "trie2_node2 missing");
+        assert!(final_leaf_trie2_nodes.contains(&trie2_node3), "trie2_node3 missing");
+        assert_eq!(final_leaf_trie2_nodes.len(), 3, "Should have 3 unique trie2 nodes in the leaves");
     }
 
     #[test]
@@ -3035,99 +2732,5 @@ mod tests {
             allowed_tokens,
             "Allowed tokens should be restricted to only token 0 after filtering"
         );
-    }
-
-    #[test]
-    fn test_acc_suck_up_single_push() {
-        let acc_leaf = mock_acc(7);
-        let leaf = Arc::new(GSSNode::new(acc_leaf.clone()));
-
-        // Push a neutral Acc edge on top; should "suck up" leaf's Acc into the new internal node.
-        let pushed = leaf.push(mock_edge(42));
-        assert!(matches!(pushed, GSSNode::Internal(_)));
-        // The pushed node carries the leaf's constraints now.
-        assert_eq!(*pushed.acc(), acc_leaf);
-        // The predecessor should no longer have an effective local Acc along that branch.
-        // (It may still be a Root with a neutral Acc.)
-        if let GSSNode::Internal(i) = &pushed {
-            for preds_by_depth in i.predecessors.values() {
-                for pred_vec in preds_by_depth.values() {
-                    for p in pred_vec {
-                        assert!(p.own_acc_effective_opt().is_none(), "Predecessor still has a non-neutral local Acc after suck-up");
-                    }
-                }
-            }
-        } else {
-            panic!("Expected an internal node");
-        }
-        // The overall constraints verifier must pass.
-        let terminal_map = BiBTreeMap::new();
-        GSSNode::verify_constraints(&Arc::new(pushed), &terminal_map).expect("constraints should hold");
-    }
-
-    #[test]
-    fn test_acc_suck_up_multi_equal() {
-        // Two leaves with identical Accs; new parent should suck up that Acc.
-        let accx = mock_acc(3);
-        let l1 = Arc::new(GSSNode::new(accx.clone()));
-        let l2 = Arc::new(GSSNode::new(accx.clone()));
-
-        let mut preds = NodeSet::new();
-        preds.insert((l1.clone(), mock_edge(10)));
-        preds.insert((l2.clone(), mock_edge(20)));
-        let preds_map = process_predecessors(&preds);
-
-        let parent = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), preds_map);
-        assert!(parent.own_acc_effective_opt().is_some(), "Parent should carry the sucked-up Acc");
-        assert_eq!(*parent.acc(), accx);
-
-        // Verify none of its predecessors have non-neutral local Acc left.
-        for preds_by_depth in parent.predecessors().values() {
-            for pred_vec in preds_by_depth.values() {
-                for p in pred_vec {
-                    assert!(p.own_acc_effective_opt().is_none());
-                }
-            }
-        }
-
-        let terminal_map = BiBTreeMap::new();
-        GSSNode::verify_constraints(&Arc::new(parent), &terminal_map).expect("constraints should hold");
-    }
-
-    #[test]
-    fn test_acc_no_suck_up_multi_mixed() {
-        // Mixed preds: one with Acc, one with no Acc => no suck-up required.
-        let with_acc = Arc::new(GSSNode::new(mock_acc(2)));
-        let without_acc = Arc::new(GSSNode::new(Acc::new_fresh()));
-        let mut preds = NodeSet::new();
-        preds.insert((with_acc.clone(), mock_edge(100)));
-        preds.insert((without_acc.clone(), mock_edge(200)));
-        let preds_map = process_predecessors(&preds);
-
-        let parent = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), preds_map);
-        assert!(parent.own_acc_effective_opt().is_none(), "Parent should not suck-up when some preds have no Acc");
-
-        let terminal_map = BiBTreeMap::new();
-        GSSNode::verify_constraints(&Arc::new(parent), &terminal_map).expect("constraints should hold");
-    }
-
-    #[test]
-    fn test_verify_constraints_failure_message() {
-        // Force a violation: internal has local Acc, and a descendant also has local Acc.
-        let leaf = Arc::new(GSSNode::new(mock_acc(5)));
-        let mid = Arc::new(leaf.push(mock_edge(1)));
-        let mut root_preds = NodeMap::new();
-        root_preds.entry(mock_edge(2)).or_default().insert(mid.dest_key(), vec![mid.clone()]);
-        // Give parent a local Acc explicitly (non-neutral), which should strip, but here we bypass by raw constructor to simulate violation.
-        let violating = Arc::new(GSSNode::new_internal_raw(Some(Arc::new(mock_acc(9))), {
-            let mut m = NodeMap::new();
-            m.entry(mock_edge(2)).or_default().insert(mid.dest_key(), vec![mid.clone()]);
-            m
-        }));
-
-        let terminal_map = BiBTreeMap::new();
-        let err = GSSNode::verify_constraints(&violating, &terminal_map).unwrap_err();
-        assert!(err.contains("Constraint A violated"), "Error should explain Constraint A. Got: {}", err);
-        assert!(err.contains("Full GSS"), "Error should include printed GSS. Got: {}", err);
     }
 }
