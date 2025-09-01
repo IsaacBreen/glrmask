@@ -2595,8 +2595,8 @@ impl<'a> GrammarConstraintState<'a> {
             let num_to_sample = 10;
             for i in 0..1000 {
                 if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
-                    let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
-                        .map(|edge| edge.state_id)
+                    let mut sampled_stack: Vec<usize> = sampled_path_edges.iter()
+                        .map(|edge| edge.state_id.0)
                         .collect();
                     sampled_stack.reverse();
                     if seen.contains(&sampled_stack) {
