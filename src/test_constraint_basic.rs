@@ -1517,16 +1517,12 @@ WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
 
 // --- Statements (Minimal grammar to cause GSS explosion) ---
-statement ::= if_statement | expression_statement | block ;
-expression_statement ::= expression ;
+statement ::= if_statement | expression | block ;
 block ::= '{' statement* '}' ;
 if_statement ::= 'if' expression statement ;
 
-// --- Expressions ---
-expression ::= call_expression | IDENTIFIER ;
-call_expression ::= IDENTIFIER expression ;
-
-// --- Literals ---
+// --- Expressions & Literals (Minimal) ---
+expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
 IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
 "#;
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
