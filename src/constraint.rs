@@ -2575,16 +2575,6 @@ impl<'a> GrammarConstraintState<'a> {
 
         let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
         println!("{}", gss_str);
-
-        // if !state_ids.is_empty() {
-        //     println!("\n--- GSS State Explanations ---");
-        //     for state_id in state_ids {
-        //         let mut explanation = String::new();
-        //         println!("\n--- State {} ---", state_id.0);
-        //         self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
-        //         println!("{}", explanation);
-        //     }
-        // }
     }
 
     pub fn explain_stack(&self) {
