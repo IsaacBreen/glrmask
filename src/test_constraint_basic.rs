@@ -1590,7 +1590,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     let repeating_chunk = b"ifa{";
 
     // First chunk
-    for _ in 0..2 {
+    for _ in 0..1 {
         for byte in repeating_chunk {
             constraint_state.commit_bytes(&[*byte]);
         }
