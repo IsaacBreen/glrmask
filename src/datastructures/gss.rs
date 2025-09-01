@@ -1412,7 +1412,7 @@ pub fn simplify(states: &mut BTreeMap<TokenizerStateID, GLRParserState>) {
     // We want cross-state sharing, so we collect all roots, canonicalize with a single pool, then write back.
     // 1) Collect all roots from all states.
     let mut all_roots: Vec<Arc<GSSNode>> =
-        states.values().map(|s| s.gss_root().clone()).collect();
+        states.values().map(|s| s.active_state.stack.clone()).collect();
 
     if all_roots.is_empty() { return; }
 
@@ -1423,7 +1423,7 @@ pub fn simplify(states: &mut BTreeMap<TokenizerStateID, GLRParserState>) {
     let mut canonical_roots_iter = all_roots.into_iter();
     for state in states.values_mut() {
         // This assumes a 1-to-1 mapping and preserved order, which BTreeMap provides.
-        *state.gss_root_mut() = canonical_roots_iter.next().unwrap();
+        state.active_state.stack = canonical_roots_iter.next().unwrap();
     }
 }
 
