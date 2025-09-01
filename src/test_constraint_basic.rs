@@ -1523,56 +1523,18 @@ statement_list ::= statement+ ;
 
 statement ::=
     block
-  | declaration_statement
   | if_statement
-  | while_statement
-  | function_declaration
-  | return_statement
-  | expression_statement
   ;
 
-expression_statement ::= expression ';'? ;
 block ::= '{' statement_list? '}' ;
 
-declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-while_statement ::= 'while' '(' expression ')' statement ;
-function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-return_statement ::= 'return' expression? ';'? ;
 
-// --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+// --- Expressions (Heavily Simplified for test) ---
+expression ::= NUMERIC_LITERAL;
 
-equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-arguments ::= ( expression ( ',' expression )* )? ;
-
-primary_expression ::=
-    'this'
-  | IDENTIFIER
-  | literal
-  | '(' expression ')'
-  ;
-
-// --- Literals and Primitives (Simplified) ---
-literal ::=
-    'null'
-  | 'true' | 'false'
-  | NUMERIC_LITERAL
-  | STRING_LITERAL
-  ;
-
+// --- Literals and Primitives (Simplified for test) ---
 NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
 "#;
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));

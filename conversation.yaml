@@ -1563,8 +1563,74 @@ local_system:
 
           // 1. Load and compile the simplified JavaScript grammar.
           println!("--- Setting up for JS GSS Explosion Test ---");
-          let grammar_path = "src/js_simplified2.ebnf";
-          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
+      #![ignore(IGNORE)]
+
+      program ::= statement_list? EOF;
+      EOF ::= '<|EOF|>';
+
+      // --- Lexical Grammar (Unchanged) ---
+      IGNORE ::= ( WS | COMMENT )+ ;
+      WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+      COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+
+      // --- Statements (Simplified) ---
+      statement_list ::= statement+ ;
+
+      statement ::=
+          block
+        | declaration_statement
+        | if_statement
+        | while_statement
+        | function_declaration
+        | return_statement
+        | expression_statement
+        ;
+
+      expression_statement ::= expression ';'? ;
+      block ::= '{' statement_list? '}' ;
+
+      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
+      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+      while_statement ::= 'while' '(' expression ')' statement ;
+      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+      return_statement ::= 'return' expression? ';'? ;
+
+      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
+      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+
+      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
+
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+
+      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
+
+      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
+
+      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
+      arguments ::= ( expression ( ',' expression )* )? ;
+
+      primary_expression ::=
+          'this'
+        | IDENTIFIER
+        | literal
+        | '(' expression ')'
+        ;
+
+      // --- Literals and Primitives (Simplified) ---
+      literal ::=
+          'null'
+        | 'true' | 'false'
+        | NUMERIC_LITERAL
+        | STRING_LITERAL
+        ;
+
+      NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+      IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+      "#;
+          let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
@@ -3691,58 +3757,20 @@ local_system:
 
       statement ::=
           block
-        | declaration_statement
         | if_statement
-        | while_statement
-        | function_declaration
-        | return_statement
-        | expression_statement
         ;
 
-      expression_statement ::= expression ';'? ;
       block ::= '{' statement_list? '}' ;
 
-      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      while_statement ::= 'while' '(' expression ')' statement ;
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      return_statement ::= 'return' expression? ';'? ;
 
-      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+      // --- Expressions (Heavily Simplified for test) ---
+      expression ::= NUMERIC_LITERAL;
 
-      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      arguments ::= ( expression ( ',' expression )* )? ;
-
-      primary_expression ::=
-          'this'
-        | IDENTIFIER
-        | literal
-        | '(' expression ')'
-        ;
-
-      // --- Literals and Primitives (Simplified) ---
-      literal ::=
-          'null'
-        | 'true' | 'false'
-        | NUMERIC_LITERAL
-        | STRING_LITERAL
-        ;
-
+      // --- Literals and Primitives (Simplified for test) ---
       NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-      IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
       "#;
-          let grammar_definition = GrammarDefinition::from_ebnf_str(js_grammar_ebnf)?;
+          let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
@@ -4382,78 +4410,6 @@ messages:
       ```
     metadata:
       filename: Cargo.toml
-  - user: |-
-      ```text 'src/js_simplified2.ebnf'
-      // Instruct the parser to ignore Whitespace and Comments between tokens.
-      #![ignore(IGNORE)]
-
-      program ::= statement_list? EOF;
-      EOF ::= '<|EOF|>';
-
-      // --- Lexical Grammar (Unchanged) ---
-      IGNORE ::= ( WS | COMMENT )+ ;
-      WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-
-      // --- Statements (Simplified) ---
-      statement_list ::= statement+ ;
-
-      statement ::=
-          block
-        | declaration_statement
-        | if_statement
-        | while_statement
-        | function_declaration
-        | return_statement
-        | expression_statement
-        ;
-
-      expression_statement ::= expression ';'? ;
-      block ::= '{' statement_list? '}' ;
-
-      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      while_statement ::= 'while' '(' expression ')' statement ;
-      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      return_statement ::= 'return' expression? ';'? ;
-
-      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-
-      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      arguments ::= ( expression ( ',' expression )* )? ;
-
-      primary_expression ::=
-          'this'
-        | IDENTIFIER
-        | literal
-        | '(' expression ')'
-        ;
-
-      // --- Literals and Primitives (Simplified) ---
-      literal ::=
-          'null'
-        | 'true' | 'false'
-        | NUMERIC_LITERAL
-        | STRING_LITERAL
-        ;
-
-      // Simplified regex-style definitions for terminals
-      NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-      IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-      ```
-    metadata:
-      filename: src/js_simplified2.ebnf
   - user: |-
       ```rust 'src/test_constraint_basic.rs'
       use crate::glr::parser::ParseState;
@@ -5965,8 +5921,74 @@ messages:
 
           // 1. Load and compile the simplified JavaScript grammar.
           println!("--- Setting up for JS GSS Explosion Test ---");
-          let grammar_path = "src/js_simplified2.ebnf";
-          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
+      #![ignore(IGNORE)]
+
+      program ::= statement_list? EOF;
+      EOF ::= '<|EOF|>';
+
+      // --- Lexical Grammar (Unchanged) ---
+      IGNORE ::= ( WS | COMMENT )+ ;
+      WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+      COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+
+      // --- Statements (Simplified) ---
+      statement_list ::= statement+ ;
+
+      statement ::=
+          block
+        | declaration_statement
+        | if_statement
+        | while_statement
+        | function_declaration
+        | return_statement
+        | expression_statement
+        ;
+
+      expression_statement ::= expression ';'? ;
+      block ::= '{' statement_list? '}' ;
+
+      declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
+      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+      while_statement ::= 'while' '(' expression ')' statement ;
+      function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+      parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+      return_statement ::= 'return' expression? ';'? ;
+
+      // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
+      expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+
+      equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
+
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+
+      multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
+
+      unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
+
+      call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
+      arguments ::= ( expression ( ',' expression )* )? ;
+
+      primary_expression ::=
+          'this'
+        | IDENTIFIER
+        | literal
+        | '(' expression ')'
+        ;
+
+      // --- Literals and Primitives (Simplified) ---
+      literal ::=
+          'null'
+        | 'true' | 'false'
+        | NUMERIC_LITERAL
+        | STRING_LITERAL
+        ;
+
+      NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+      STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+      IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+      "#;
+          let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
 
@@ -6522,7 +6544,8 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_basic.rs
-  - user: Inline the grammar `src/js_simplified2.ebnf` into `test_js_if_statement_gss_explosion`.
+  - user: Simplify the grammar in `test_js_if_statement_gss_explosion`, removing parts
+      that aren't directly relevant to the test input.
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -6539,50 +6562,43 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
+      I've simplified the EBNF grammar within the `test_js_if_statement_gss_explosion` test. The updated grammar now only includes the rules necessary to parse the test's input (`if(1){...`), which are `if_statement`, `block`, and a minimal `expression` that just handles numeric literals. This removes many unrelated rules, focusing the test specifically on the recursive `if-statement` structure that was causing the GSS explosion.
+
       ```diff
-      diff --git a/src/js_simplified2.ebnf b/src/js_simplified2.ebnf
-      deleted file mode 100644
-      index 72c72b1..0000000
-      --- a/src/js_simplified2.ebnf
-      +++ /dev/null
-      @@ -1,71 +0,0 @@
-      -// Instruct the parser to ignore Whitespace and Comments between tokens.
-      -#![ignore(IGNORE)]
-      -
-      -program ::= statement_list? EOF;
-      -EOF ::= '<|EOF|>';
-      -
-      -// --- Lexical Grammar (Unchanged) ---
-      -IGNORE ::= ( WS | COMMENT )+ ;
-      -WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      -COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-      -
-      -// --- Statements (Simplified) ---
-      -statement_list ::= statement+ ;
-      -
-      -statement ::=
-      -    block
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1408,55 +1408,22 @@
+       COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+       
+       // --- Statements (Simplified) ---
+       statement_list ::= statement+ ;
+       
+       statement ::=
+           block
       -  | declaration_statement
-      -  | if_statement
+         | if_statement
       -  | while_statement
       -  | function_declaration
       -  | return_statement
       -  | expression_statement
-      -  ;
-      -
+         ;
+       
       -expression_statement ::= expression ';'? ;
-      -block ::= '{' statement_list? '}' ;
-      -
+       block ::= '{' statement_list? '}' ;
+       
       -declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-      -if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+       if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
       -while_statement ::= 'while' '(' expression ')' statement ;
       -function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
       -parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
       -return_statement ::= 'return' expression? ';'? ;
-      -
+       
       -// --- Expressions (Heavily Simplified & Collapsed Precedence) ---
       -expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-      -
+      +// --- Expressions (Heavily Simplified for test) ---
+      +expression ::= NUMERIC_LITERAL;
+       
       -equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
       -
       -additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
@@ -6609,110 +6625,25 @@ messages:
       -  | STRING_LITERAL
       -  ;
       -
-      -// Simplified regex-style definitions for terminals
-      -NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+      +// --- Literals and Primitives (Simplified for test) ---
+       NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
       -STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
       -IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-
-      ``````diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      index 0c1c8a1..3520141 100644
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1429,8 +1429,71 @@
-       
-           // 1. Load and compile the simplified JavaScript grammar.
-           println!("--- Setting up for JS GSS Explosion Test ---");
-      -    let grammar_path = "src/js_simplified2.ebnf";
-      -    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
-      +    let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
-      +#![ignore(IGNORE)]
-      +
-      +program ::= statement_list? EOF;
-      +EOF ::= '<|EOF|>';
-      +
-      +// --- Lexical Grammar (Unchanged) ---
-      +IGNORE ::= ( WS | COMMENT )+ ;
-      +WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-      +COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
-      +
-      +// --- Statements (Simplified) ---
-      +statement_list ::= statement+ ;
-      +
-      +statement ::=
-      +    block
-      +  | declaration_statement
-      +  | if_statement
-      +  | while_statement
-      +  | function_declaration
-      +  | return_statement
-      +  | expression_statement
-      +  ;
-      +
-      +expression_statement ::= expression ';'? ;
-      +block ::= '{' statement_list? '}' ;
-      +
-      +declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
-      +if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-      +while_statement ::= 'while' '(' expression ')' statement ;
-      +function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
-      +parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
-      +return_statement ::= 'return' expression? ';'? ;
-      +
-      +// --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-      +expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-      +
-      +equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-      +
-      +additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-      +
-      +multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-      +
-      +unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-      +
-      +call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-      +arguments ::= ( expression ( ',' expression )* )? ;
-      +
-      +primary_expression ::=
-      +    'this'
-      +  | IDENTIFIER
-      +  | literal
-      +  | '(' expression ')'
-      +  ;
-      +
-      +// --- Literals and Primitives (Simplified) ---
-      +literal ::=
-      +    'null'
-      +  | 'true' | 'false'
-      +  | NUMERIC_LITERAL
-      +  | STRING_LITERAL
-      +  ;
-      +
-      +NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
-      +STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
-      +IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-      +"#;
-      +    let grammar_definition = GrammarDefinition::from_ebnf_str(js_grammar_ebnf)?;
+       "#;
+           let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
            let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-           println!("Grammar compiled successfully.");
-       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/js_simplified2.ebnf
-      Detected 'deleted file mode'.
-      Successfully deleted file: src/js_simplified2.ebnf
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/test_constraint_basic.rs
       Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
       Successfully applied patch and wrote to src/test_constraint_basic.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Inline JS grammar into test_js_if_statement_gss_explosion"'
+  - user: 'Changes committed with message: "Simplify JS grammar in GSS explosion test"'
     metadata:
 ...
