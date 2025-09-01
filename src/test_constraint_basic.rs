@@ -1507,8 +1507,74 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
 
     // 1. Load and compile the simplified JavaScript grammar.
     println!("--- Setting up for JS GSS Explosion Test ---");
-    let grammar_path = "src/js_simplified2.ebnf";
-    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let js_grammar_ebnf = r#"// Instruct the parser to ignore Whitespace and Comments between tokens.
+#![ignore(IGNORE)]
+
+program ::= statement_list? EOF;
+EOF ::= '<|EOF|>';
+
+// --- Lexical Grammar (Unchanged) ---
+IGNORE ::= ( WS | COMMENT )+ ;
+WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
+
+// --- Statements (Simplified) ---
+statement_list ::= statement+ ;
+
+statement ::=
+    block
+  | declaration_statement
+  | if_statement
+  | while_statement
+  | function_declaration
+  | return_statement
+  | expression_statement
+  ;
+
+expression_statement ::= expression ';'? ;
+block ::= '{' statement_list? '}' ;
+
+declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';'? ;
+if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+while_statement ::= 'while' '(' expression ')' statement ;
+function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+return_statement ::= 'return' expression? ';'? ;
+
+// --- Expressions (Heavily Simplified & Collapsed Precedence) ---
+expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
+
+equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
+
+additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+
+multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
+
+unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
+
+call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
+arguments ::= ( expression ( ',' expression )* )? ;
+
+primary_expression ::=
+    'this'
+  | IDENTIFIER
+  | literal
+  | '(' expression ')'
+  ;
+
+// --- Literals and Primitives (Simplified) ---
+literal ::=
+    'null'
+  | 'true' | 'false'
+  | NUMERIC_LITERAL
+  | STRING_LITERAL
+  ;
+
+NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+STRING_LITERAL ::= '"' ( [^"\\] | '\\' . )* '"' | '\'' ( [^'\\] | '\\' . )* '\'' ;
+IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+"#;
+    let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
 
