@@ -1499,6 +1499,86 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
+    // This test reproduces the GSS explosion seen in `test_js_constraint_integration`
+    // with the input "if(1){if(1){...". The grammar has a recursive structure for
+    // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
+    // which can lead to exponential growth in GSS nodes if states are not merged properly.
+
+    // 1. Load and compile the simplified JavaScript grammar.
+    println!("--- Setting up for JS GSS Explosion Test ---");
+    let grammar_path = "src/js_simplified2.ebnf";
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    println!("Grammar compiled successfully.");
+
+    // 2. Define a minimal LLM vocabulary with single-character tokens.
+    let mut llm_token_map = LLMTokenMap::new();
+    let mut max_id = 0;
+    for (i, s) in ["i", "f", "(", "1", ")", "{"].iter().enumerate() {
+        llm_token_map.insert(s.as_bytes().to_vec(), LLMTokenID(i));
+        max_id = i;
+    }
+
+    // 3. Construct the GrammarConstraint.
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar.clone(),
+        llm_token_map.clone(),
+        LLMTokenID(max_id + 1), // dummy EOF
+        max_id,
+    );
+    println!("GrammarConstraint constructed successfully.");
+
+    // 4. Test Logic: commit "if(1){" repeatedly and check GSS growth.
+    let mut constraint_state = constraint.init();
+    let repeating_chunk = b"if(1){";
+
+    // First chunk
+    constraint_state.commit_bytes(repeating_chunk);
+    assert!(constraint_state.is_active());
+    println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
+    constraint_state.print_gss_stats();
+    let nodes1 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    // Second chunk
+    constraint_state.commit_bytes(repeating_chunk);
+    assert!(constraint_state.is_active());
+    println!("\nAfter second chunk '{}'", String::from_utf8_lossy(repeating_chunk));
+    constraint_state.print_gss_stats();
+    let nodes2 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    // Third chunk
+    constraint_state.commit_bytes(repeating_chunk);
+    assert!(constraint_state.is_active());
+    println!("\nAfter third chunk '{}'", String::from_utf8_lossy(repeating_chunk));
+    constraint_state.print_gss_stats();
+    let nodes3 = gather_gss_stats(
+        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+    ).unique_nodes;
+
+    let increase1 = nodes2 - nodes1;
+    let increase2 = nodes3 - nodes2;
+
+    println!("\nNode counts: {}, {}, {}", nodes1, nodes2, nodes3);
+    println!("Increases: {}, {}", increase1, increase2);
+
+    // The increase in nodes should not accelerate. If it does, it indicates
+    // an exponential blowup.
+    assert!(
+        increase2 <= increase1,
+        "GSS node growth is accelerating, indicating an explosion. First increase: {}, Second increase: {}",
+        increase1,
+        increase2
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_ambiguous_tokenizer_no_gss_explosion() {
     // Grammar: S -> A, A -> '{' A '}' | ''
     // Tokenizer:
