@@ -2976,7 +2976,14 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        simplify(&mut self.state);
+        let mut roots: BTreeMap<TokenizerStateID, Arc<GSSNode>> = BTreeMap::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
+        }
+        simplify(&mut roots);
+        for (tokenizer_state_id, glr_state) in &mut self.state {
+            glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
+        }
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
