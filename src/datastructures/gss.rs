@@ -86,6 +86,9 @@ impl JSONConvertible for PrecomputedNodeContents {
 /// Represents the full set of allowed tokens and terminals for a GSS node.
 /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
 /// is computed on demand by aggregating the Accs of all reachable roots.
+/// NOTE (extended): Internal nodes may optionally carry Acc as well. If an internal node
+/// carries Acc, callers should treat it as a "line" cut: do not assume descendants also
+/// carry Acc. This file preserves external APIs; transforms still target root Accs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
@@ -146,7 +149,8 @@ impl Acc {
 // --- GSS Node & Core Implementation ---
 
 /// A node in the Graph-Structured Stack (GSS).
-/// Simplified design: only root nodes carry Acc; internal nodes carry only predecessors.
+/// Extended design: root nodes carry Acc; internal nodes may optionally carry Acc.
+/// If an internal node carries Acc, treat it as a "line" cut point for Acc traversal.
 #[derive(Debug, Clone)]
 pub enum GSSNode {
     Root(GSSRoot),
@@ -164,6 +168,9 @@ pub(crate) struct GSSInternal {
     predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
+    /// Optional local Acc carried at this internal node.
+    /// If present, callers should not assume descendants also carry Acc on the same path.
+    acc: Option<Arc<Acc>>,
 }
 
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
@@ -243,12 +250,20 @@ impl GSSPopper {
 
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
+                // Apply parent's own acc (if any) to the path before exploring predecessors.
+                let parent_acc_applied = if let Some(parent_acc) = parent.own_acc_opt() {
+                    Arc::new(Acc::narrow(&path_acc, &parent_acc))
+                } else {
+                    path_acc.clone()
+                };
+
                 for (edge_val, preds_by_depth) in parent.predecessors().iter() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
                             match child.as_ref() {
                                 GSSNode::Root(r) => {
-                                    let combined = Arc::new(Acc::narrow(&path_acc, &r.acc));
+                                    // Apply root acc (always present on root in current design)
+                                    let combined = Arc::new(Acc::narrow(&parent_acc_applied, &r.acc));
                                     // Reached the bottom on this pop.
                                     let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
                                     if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
@@ -260,9 +275,9 @@ impl GSSPopper {
                                 }
                                 GSSNode::Internal(_) => {
                                     if let Some(existing_acc) = new_paths.get_mut(child) {
-                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &path_acc));
+                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &parent_acc_applied));
                                     } else {
-                                        new_paths.insert(child.clone(), path_acc.clone());
+                                        new_paths.insert(child.clone(), parent_acc_applied.clone());
                                     }
                                 }
                             }
@@ -312,9 +327,14 @@ impl<'a> GSSPopperItem<'a> {
 impl<'a> GSSPopperItemPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
-    /// Returns the combined `Acc` of the path and the predecessor node.
+    /// Returns the combined `Acc` of the path, the parent (if it has local acc), and the predecessor node.
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
-        Acc::narrow(self.path_acc, &self.predecessor_node.acc())
+        let applied_parent = if let Some(parent_acc) = self.parent_arc.own_acc_opt() {
+            Acc::narrow(self.path_acc, &parent_acc)
+        } else {
+            self.path_acc.as_ref().clone()
+        };
+        Acc::narrow(&applied_parent, &self.predecessor_node.acc())
     }
 
     /// Returns a new `GSSNode` representing the predecessor; in the simplified design, just clones.
@@ -324,8 +344,8 @@ impl<'a> GSSPopperItemPeek<'a> {
 
     /// Pushes a new state onto the resolved predecessor.
     #[allow(dead_code)] pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        let resolved_acc = self.resolved_acc(); // ignored by new_with_single_predecessor in simplified design
-        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, resolved_acc)
+        let _resolved_acc = self.resolved_acc(); // ignored by new_with_single_predecessor in simplified design
+        GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, Acc::new_fresh())
     }
 
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
@@ -367,8 +387,22 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
         .unwrap_or(0)
 }
 
-fn compute_hash_key_internal(predecessors: &NodeMap) -> u64 {
+fn compute_hash_key_internal(predecessors: &NodeMap, acc: &Option<Arc<Acc>>) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+    // Include local acc (if any)
+    match acc {
+        None => {
+            0u8.hash(&mut hasher);
+        }
+        Some(a) => {
+            1u8.hash(&mut hasher);
+            a.llm_tokens_union.hash(&mut hasher);
+            a.terminals_union.hash(&mut hasher);
+            for trie2_node in &a.trie2_nodes {
+                trie2_node.hash(&mut hasher);
+            }
+        }
+    }
     for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
         for (dest_key, pred_vec) in preds_by_depth {
@@ -529,8 +563,18 @@ impl GSSNode {
         GSSNode::Root(GSSRoot { acc: arc_acc, hash_key_cache })
     }
 
+    /// Private raw constructor that builds an internal node from a pre-computed map and an optional local Acc.
+    /// This does NOT push the local acc into descendants.
+    fn new_internal_raw(acc_opt: Option<Arc<Acc>>, predecessors: NodeMap) -> Self {
+        let hash_key_cache = compute_hash_key_internal(&predecessors, &acc_opt);
+        let max_depth = compute_max_depth(&predecessors);
+        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth, acc: acc_opt })
+    }
+
     /// Private constructor for internal methods that build a node from a pre-computed map.
-    /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
+    /// For compatibility with existing call sites:
+    /// - If `acc` is neutral, it is ignored (no local acc on this internal).
+    /// - If `acc` is non-neutral, we propagate it down to all reachable roots (as in the original design).
     fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
         // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
         // The provided `acc` becomes the local accumulator for this new root.
@@ -538,7 +582,7 @@ impl GSSNode {
             return GSSNode::new((*acc).clone());
         }
 
-        // Push local acc into all reachable roots
+        // Push local acc into all reachable roots (original behavior preserved for compatibility)
         // Note: predecessors is guaranteed not to be empty here due to the check above.
         if !acc.is_merge_neutral() {
             let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
@@ -551,13 +595,14 @@ impl GSSNode {
                 }
             }
         }
-        let hash_key_cache = compute_hash_key_internal(&predecessors);
+        let acc_opt: Option<Arc<Acc>> = None; // Do not store local acc at internals by default.
+        let hash_key_cache = compute_hash_key_internal(&predecessors, &acc_opt);
         let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth })
+        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth, acc: acc_opt })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
-    /// In simplified design, `acc` is ignored (kept for API compatibility).
+    /// For compatibility, we propagate non-neutral `acc` down to reachable roots rather than storing it locally.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
         let pred_tx = if acc.is_merge_neutral() {
             predecessor_arc
@@ -574,7 +619,7 @@ impl GSSNode {
     }
 
     /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
-    /// In simplified design, `acc` is ignored (kept for API compatibility).
+    /// For compatibility, we propagate non-neutral `acc` down to reachable roots rather than storing it locally.
     fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
         let pred_tx = if acc.is_merge_neutral() {
             predecessor_arc
@@ -598,23 +643,25 @@ impl GSSNode {
         Self::new(Acc::new_fresh())
     }
 
+    /// Returns this node's own local Acc if present (for roots, always Some).
+    fn own_acc_opt(&self) -> Option<Arc<Acc>> {
+        match self {
+            GSSNode::Root(r) => Some(r.acc.clone()),
+            GSSNode::Internal(i) => i.acc.clone(),
+        }
+    }
+
     /// Returns the aggregate Acc for this node.
-    /// - If root: returns the node's Acc.
-    /// - If internal: walks to all reachable roots and merges their Accs.
+    /// - If the node (root or internal) has a local Acc, it is included as a "line" cut and descendants are not traversed for Accs on that path.
+    /// - Otherwise: walks to all reachable descendants and merges their Accs (stopping at any node that has a local Acc).
     pub(crate) fn acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
-                // Collect all root Accs reachable from this node.
+                // Collect all local Accs reachable from this node, stopping at any node that carries Acc.
                 let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
                 let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-                for preds_by_depth in i.predecessors.values() {
-                    for pred_vec in preds_by_depth.values() {
-                        for pred in pred_vec {
-                            queue.push_back(pred.clone());
-                        }
-                    }
-                }
+                queue.push_back(Arc::new(self.clone()));
 
                 let mut accs: Vec<Arc<Acc>> = Vec::new();
                 while let Some(node) = queue.pop_front() {
@@ -625,6 +672,11 @@ impl GSSNode {
                     match node.as_ref() {
                         GSSNode::Root(r) => accs.push(r.acc.clone()),
                         GSSNode::Internal(ii) => {
+                            if let Some(local) = ii.acc.clone() {
+                                accs.push(local);
+                                // Do not traverse further along this branch.
+                                continue;
+                            }
                             for preds_by_depth in ii.predecessors.values() {
                                 for pred_vec in preds_by_depth.values() {
                                     for pred in pred_vec {
@@ -800,6 +852,7 @@ impl GSSNode {
             merged_map
         };
 
+        // Build a new internal without a local acc (preserve original behavior).
         *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
     }
 
@@ -896,7 +949,7 @@ impl PartialEq for GSSNode {
                 a.hash_key_cache == b.hash_key_cache && a.acc == b.acc
             }
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
-                a.hash_key_cache == b.hash_key_cache && a.predecessors == b.predecessors
+                a.hash_key_cache == b.hash_key_cache && a.predecessors == b.predecessors && a.acc == b.acc
             }
             _ => false,
         }
@@ -928,6 +981,7 @@ impl Ord for GSSNode {
             }
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
                 a.hash_key_cache.cmp(&b.hash_key_cache)
+                    .then_with(|| a.acc.cmp(&b.acc))
                     .then_with(|| a.predecessors.cmp(&b.predecessors))
             }
             _ => Ordering::Equal,
@@ -947,7 +1001,7 @@ pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<
 /// Note:
 /// - There is no early-continue/stop: recursion always traverses into children of internal nodes
 ///   unless `internal_closure` prunes that node.
-/// - Internal nodes never hold Acc; only roots do.
+/// - Internal nodes never hold Acc for transforms; only roots do (transforms do not modify internal Acc).
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     internal_closure: &mut impl FnMut(&GSSInternal) -> bool,
@@ -1019,7 +1073,7 @@ fn prune_and_transform_recursive(
                 // No change in children, so no change in this node.
                 Some(node_arc.clone())
             } else {
-                // Children changed, create new internal node.
+                // Children changed, create new internal node (no local acc by default).
                 let transformed_node = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_predecessors_map);
                 Some(Arc::new(transformed_node))
             }
@@ -1387,8 +1441,8 @@ fn canonicalize_node(
                 }
             }
 
-            // Important: pass a neutral Acc when rebuilding internal nodes, so we keep structure only.
-            pool.intern(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map))
+            // Preserve any local internal acc in the canonicalized node.
+            pool.intern(GSSNode::new_internal_raw(internal.acc.clone(), new_map))
         }
     };
 
@@ -1474,7 +1528,7 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                     }
                     new_preds.insert(edge_val.clone(), new_by_depth);
                 }
-                Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_preds))
+                Arc::new(GSSNode::new_internal_raw(internal.acc.clone(), new_preds))
             }
         };
 
@@ -1543,19 +1597,25 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
         for ((node_ptr, last_edge_opt), path_acc) in nodes_at_depth {
             let current_node = unsafe { &*node_ptr };
 
+            // Apply local acc at this node (root or internal), if any.
+            let applied_here = if let Some(local) = current_node.own_acc_opt() {
+                Arc::new(Acc::narrow(&path_acc, &local))
+            } else {
+                path_acc.clone()
+            };
+
             if current_node.is_root() {
                 if let Some(edge) = last_edge_opt {
-                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc()));
+                    // We are at a root; record the path_acc accumulated so far (already narrowed at this node).
                     results
                         .entry(edge)
                         .or_default()
-                        .insert(final_acc);
+                        .insert(applied_here);
                 }
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
                     for pred_arc in preds_by_depth.values().flatten() {
-                        // Internal nodes do not contribute to the path acc. It is passed down unmodified.
-                        let per_child_acc = path_acc.clone();
+                        let per_child_acc = applied_here.clone();
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
                         queue
