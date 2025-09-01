@@ -15,7 +15,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
-use crate::glr::parser::ParseStateEdgeContent;
+use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
@@ -1314,7 +1314,7 @@ pub(crate) fn fuse_predecessors_recursive(
     result_arc
 }
 
-pub fn simplify(roots: &mut Arc<GSSNode>, x: &mut HashMap<*const GSSNode, Arc<GSSNode>>) {
+pub fn simplify(states: &mut BTreeMap<TokenizerStateID, GLRParserState>) {
     todo!()
 }
 

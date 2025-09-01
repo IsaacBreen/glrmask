@@ -2976,10 +2976,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        let mut memo = HashMap::new();
-        for state in self.state.values_mut() {
-            simplify(&mut state.active_state.stack, &mut memo);
-        }
+        simplify(&mut self.state);
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
