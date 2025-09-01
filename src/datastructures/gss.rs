@@ -2863,37 +2863,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_acc_constraints() {
+    // --- Acc Constraint Verification Tests ---
+
+    fn setup_constraint_test() -> (BiBTreeMap<Terminal, TerminalID>, Arc<Acc>, Arc<Acc>, impl Fn(NodeMap, Option<Arc<Acc>>) -> GSSNode) {
         let terminal_map = BiBTreeMap::new();
-        // --- Helper to create an internal node with a specific Acc ---
+        let acc1 = Arc::new(mock_acc(1));
+        let acc2 = Arc::new(mock_acc(2));
         let build_internal = |preds: NodeMap, acc: Option<Arc<Acc>>| -> GSSNode {
             GSSNode::new_internal_raw(acc, preds)
         };
-        let acc1 = Arc::new(mock_acc(1));
-        let acc2 = Arc::new(mock_acc(2));
+        (terminal_map, acc1, acc2, build_internal)
+    }
 
-        // --- Valid Structures ---
-
-        // Valid 1: Standard tower, Acc at the leaf (which is a GSSNode::Root)
+    #[test]
+    fn test_constraint_valid_standard_tower() {
+        let (terminal_map, acc1, _, _) = setup_constraint_test();
+        // Structure: Root -> Mid -> Leaf(Root with Acc)
         let leaf_v1 = Arc::new(GSSNode::new((*acc1).clone()));
         let mid_v1 = Arc::new(leaf_v1.push(mock_edge(1)));
         let root_v1 = Arc::new(mid_v1.push(mock_edge(2)));
         if let Err(e) = GSSNode::verify_constraints(&root_v1, &terminal_map) {
-            panic!("Valid structure 1 failed verification: {}", e);
+            panic!("Valid structure (standard tower) failed verification: {}", e);
         }
+    }
 
-        // Valid 2: Acc on an internal node, its predecessor (a leaf) has no Acc.
+    #[test]
+    fn test_constraint_valid_internal_node_with_acc() {
+        let (terminal_map, acc1, _, build_internal) = setup_constraint_test();
+        // Structure: Root -> Mid(with Acc) -> Leaf(Root without Acc)
         let leaf_v2 = Arc::new(GSSNode::new(empty_acc()));
         let mut mid_preds = NodeMap::new();
         mid_preds.entry(mock_edge(1)).or_default().insert(leaf_v2.dest_key(), vec![leaf_v2]);
         let mid_v2 = Arc::new(build_internal(mid_preds, Some(acc1.clone())));
-        let root_v2 = Arc::new(mid_v2.push(mock_edge(2))); // root_v2 has no Acc, its pred mid_v2 does.
+        let root_v2 = Arc::new(mid_v2.push(mock_edge(2)));
         if let Err(e) = GSSNode::verify_constraints(&root_v2, &terminal_map) {
-            panic!("Valid structure 2 failed verification: {}", e);
+            panic!("Valid structure (internal node with Acc) failed verification: {}", e);
         }
+    }
 
-        // Valid 3: Fork with one branch having an Acc, one not.
+    #[test]
+    fn test_constraint_valid_fork_with_mixed_acc() {
+        let (terminal_map, acc1, _, build_internal) = setup_constraint_test();
+        // Structure: Root -> [Leaf(with Acc), Leaf(Root without Acc)]
         let leaf_with_acc = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let leaf_no_acc = Arc::new(GSSNode::new(empty_acc()));
         let mut root_preds_v3 = NodeMap::new();
@@ -2901,10 +2912,14 @@ mod tests {
         root_preds_v3.entry(mock_edge(2)).or_default().insert(leaf_no_acc.dest_key(), vec![leaf_no_acc]);
         let root_v3 = Arc::new(build_internal(root_preds_v3, None));
         if let Err(e) = GSSNode::verify_constraints(&root_v3, &terminal_map) {
-            panic!("Valid structure 3 failed verification: {}", e);
+            panic!("Valid structure (fork with mixed Acc) failed verification: {}", e);
         }
+    }
 
-        // Valid 4: Fork with two different Accs.
+    #[test]
+    fn test_constraint_valid_fork_with_different_accs() {
+        let (terminal_map, acc1, acc2, build_internal) = setup_constraint_test();
+        // Structure: Root -> [Leaf(with Acc1), Leaf(with Acc2)]
         let leaf_acc1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let leaf_acc2 = Arc::new(build_internal(NodeMap::new(), Some(acc2.clone())));
         let mut root_preds_v4 = NodeMap::new();
@@ -2912,12 +2927,14 @@ mod tests {
         root_preds_v4.entry(mock_edge(2)).or_default().insert(leaf_acc2.dest_key(), vec![leaf_acc2]);
         let root_v4 = Arc::new(build_internal(root_preds_v4, None));
         if let Err(e) = GSSNode::verify_constraints(&root_v4, &terminal_map) {
-            panic!("Valid structure 4 failed verification: {}", e);
+            panic!("Valid structure (fork with different Accs) failed verification: {}", e);
         }
+    }
 
-        // --- Invalid Structures ---
-
-        // Invalid 1: Constraint 1 violation (parent and child both have Acc)
+    #[test]
+    fn test_constraint_invalid_parent_and_child_have_acc() {
+        let (terminal_map, acc1, acc2, build_internal) = setup_constraint_test();
+        // Structure: Root -> Mid(with Acc2) -> Leaf(with Acc1)
         let leaf_i1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let mut mid_preds_i1 = NodeMap::new();
         mid_preds_i1.entry(mock_edge(1)).or_default().insert(leaf_i1.dest_key(), vec![leaf_i1]);
@@ -2928,8 +2945,12 @@ mod tests {
             err.contains("Constraint 1 violated"),
             "Incorrect error for constraint 1: {}", err
         );
+    }
 
-        // Invalid 2a: Constraint 2 violation (single predecessor has Acc, should be pushed up)
+    #[test]
+    fn test_constraint_invalid_acc_not_pushed_up_single_pred() {
+        let (terminal_map, acc1, _, build_internal) = setup_constraint_test();
+        // Structure: Root -> Leaf(with Acc)
         let leaf_i2a = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let root_i2a = Arc::new(build_internal(NodeMap::from([(mock_edge(1), BTreeMap::from([(leaf_i2a.dest_key(), vec![leaf_i2a])]))]), None));
         let err = GSSNode::verify_constraints(&root_i2a, &terminal_map).unwrap_err();
@@ -2937,8 +2958,17 @@ mod tests {
             err.contains("Constraint 2 violated"),
             "Incorrect error for constraint 2a: {}", err
         );
+    }
 
-        // Invalid 2b: Constraint 2 violation (all predecessors have same Acc, should be pushed up)
+    #[test]
+    fn test_constraint_invalid_acc_not_pushed_up_multiple_preds() {
+        let terminal_map = BiBTreeMap::new();
+        // --- Helper to create an internal node with a specific Acc ---
+        let build_internal = |preds: NodeMap, acc: Option<Arc<Acc>>| -> GSSNode {
+            GSSNode::new_internal_raw(acc, preds)
+        };
+        let acc1 = Arc::new(mock_acc(1));
+        // Structure: Root -> [Leaf1(with Acc1), Leaf2(with Acc1)]
         let leaf1_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let leaf2_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
         let mut root_preds_i2b = NodeMap::new();
