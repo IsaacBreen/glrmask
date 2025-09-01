@@ -1540,6 +1540,68 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
     clone_one(root, trie2_map, &mut memo)
 }
 
+impl GSSNode {
+    /// Verifies that the GSS rooted at this node respects the Acc placement constraints.
+    /// This is a debug/test utility.
+    #[cfg(test)]
+    pub(crate) fn verify_constraints(&self) -> Result<(), String> {
+        let mut memo = HashSet::new();
+        self.verify_constraints_recursive(&mut memo)
+    }
+
+    #[cfg(test)]
+    fn verify_constraints_recursive(&self, memo: &mut HashSet<*const GSSNode>) -> Result<(), String> {
+        let ptr = self as *const GSSNode;
+        if !memo.insert(ptr) {
+            return Ok(());
+        }
+
+        // Constraint 1: If this node has an Acc, its predecessors must not.
+        if self.own_acc_opt().is_some() {
+            for pred in self.predecessors().values().flat_map(|m| m.values()).flatten() {
+                if pred.own_acc_opt().is_some() {
+                    return Err(format!(
+                        "Constraint 1 violated: Node {:p} has Acc, but its predecessor {:p} also has Acc.",
+                        self, pred.as_ref()
+                    ));
+                }
+            }
+        }
+
+        // Constraint 2: An Acc should be "pushed up" if all predecessors have the same Acc.
+        // This is violated if a node has predecessors, and they all have an identical Acc.
+        let unique_preds: Vec<_> = self.predecessors()
+            .values()
+            .flat_map(|m| m.values())
+            .flatten()
+            .collect();
+
+        if !unique_preds.is_empty() {
+            // Get the Acc of the first predecessor. If it's None, the condition can't be met.
+            if let Some(first_acc) = unique_preds[0].own_acc_opt() {
+                // Check if all other predecessors have the exact same Acc.
+                let all_preds_have_same_acc = unique_preds.iter().skip(1).all(|p| {
+                    p.own_acc_opt().as_deref() == Some(first_acc.as_ref())
+                });
+
+                if all_preds_have_same_acc {
+                    return Err(format!(
+                        "Constraint 2 violated: Node {:p} has predecessors that all share the same Acc {:?}. The Acc should be on this node instead.",
+                        self, first_acc
+                    ));
+                }
+            }
+        }
+
+        // Recurse
+        for pred in unique_preds {
+            pred.verify_constraints_recursive(memo)?;
+        }
+
+        Ok(())
+    }
+}
+
 // --- Analysis and Debugging ---
 #[derive(Debug, Clone, Eq, Hash)]
 #[allow(dead_code)] pub(crate) struct RootItem<'a> {
@@ -2792,5 +2854,73 @@ mod tests {
             allowed_tokens,
             "Allowed tokens should be restricted to only token 0 after filtering"
         );
+    }
+
+    #[test]
+    fn test_acc_constraints() {
+        // --- Helper to create an internal node with a specific Acc ---
+        let build_internal = |preds: NodeMap, acc: Option<Arc<Acc>>| -> GSSNode {
+            GSSNode::new_internal_raw(acc, preds)
+        };
+        let acc1 = Arc::new(mock_acc(1));
+        let acc2 = Arc::new(mock_acc(2));
+
+        // --- Valid Structures ---
+
+        // Valid 1: Standard tower, Acc at the leaf (which is a GSSNode::Root)
+        let leaf_v1 = Arc::new(GSSNode::new((*acc1).clone()));
+        let mid_v1 = Arc::new(leaf_v1.push(mock_edge(1)));
+        let root_v1 = mid_v1.push(mock_edge(2));
+        assert!(root_v1.verify_constraints().is_ok());
+
+        // Valid 2: Acc on an internal node, its predecessor (a leaf) has no Acc.
+        let leaf_v2 = Arc::new(GSSNode::new(empty_acc()));
+        let mut mid_preds = NodeMap::new();
+        mid_preds.entry(mock_edge(1)).or_default().insert(leaf_v2.dest_key(), vec![leaf_v2]);
+        let mid_v2 = Arc::new(build_internal(mid_preds, Some(acc1.clone())));
+        let root_v2 = mid_v2.push(mock_edge(2)); // root_v2 has no Acc, its pred mid_v2 does.
+        assert!(root_v2.verify_constraints().is_ok());
+
+        // Valid 3: Fork with one branch having an Acc, one not.
+        let leaf_with_acc = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let leaf_no_acc = Arc::new(GSSNode::new(empty_acc()));
+        let mut root_preds_v3 = NodeMap::new();
+        root_preds_v3.entry(mock_edge(1)).or_default().insert(leaf_with_acc.dest_key(), vec![leaf_with_acc]);
+        root_preds_v3.entry(mock_edge(2)).or_default().insert(leaf_no_acc.dest_key(), vec![leaf_no_acc]);
+        let root_v3 = build_internal(root_preds_v3, None);
+        assert!(root_v3.verify_constraints().is_ok());
+
+        // Valid 4: Fork with two different Accs.
+        let leaf_acc1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let leaf_acc2 = Arc::new(build_internal(NodeMap::new(), Some(acc2.clone())));
+        let mut root_preds_v4 = NodeMap::new();
+        root_preds_v4.entry(mock_edge(1)).or_default().insert(leaf_acc1.dest_key(), vec![leaf_acc1]);
+        root_preds_v4.entry(mock_edge(2)).or_default().insert(leaf_acc2.dest_key(), vec![leaf_acc2]);
+        let root_v4 = build_internal(root_preds_v4, None);
+        assert!(root_v4.verify_constraints().is_ok());
+
+        // --- Invalid Structures ---
+
+        // Invalid 1: Constraint 1 violation (parent and child both have Acc)
+        let leaf_i1 = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let mut mid_preds_i1 = NodeMap::new();
+        mid_preds_i1.entry(mock_edge(1)).or_default().insert(leaf_i1.dest_key(), vec![leaf_i1]);
+        let mid_i1 = Arc::new(build_internal(mid_preds_i1, Some(acc2.clone())));
+        let root_i1 = mid_i1.push(mock_edge(2));
+        assert!(root_i1.verify_constraints().is_err(), "Should fail Constraint 1");
+
+        // Invalid 2a: Constraint 2 violation (single predecessor has Acc, should be pushed up)
+        let leaf_i2a = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let root_i2a = build_internal(NodeMap::from([(mock_edge(1), BTreeMap::from([(leaf_i2a.dest_key(), vec![leaf_i2a])]))]), None);
+        assert!(root_i2a.verify_constraints().is_err(), "Should fail Constraint 2a");
+
+        // Invalid 2b: Constraint 2 violation (all predecessors have same Acc, should be pushed up)
+        let leaf1_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let leaf2_i2b = Arc::new(build_internal(NodeMap::new(), Some(acc1.clone())));
+        let mut root_preds_i2b = NodeMap::new();
+        root_preds_i2b.entry(mock_edge(1)).or_default().insert(leaf1_i2b.dest_key(), vec![leaf1_i2b]);
+        root_preds_i2b.entry(mock_edge(2)).or_default().insert(leaf2_i2b.dest_key(), vec![leaf2_i2b]);
+        let root_i2b = build_internal(root_preds_i2b, None);
+        assert!(root_i2b.verify_constraints().is_err(), "Should fail Constraint 2b");
     }
 }
