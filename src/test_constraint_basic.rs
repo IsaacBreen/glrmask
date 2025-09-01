@@ -1580,6 +1580,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
         max_id,
     );
     println!("GrammarConstraint constructed successfully.");
+    println!("{}", constraint.parser);
 
     let mut constraint_state = constraint.init();
     // "ifa{" is the minimal ambiguous unit:
