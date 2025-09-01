@@ -2835,7 +2835,7 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
             crate::debug!(3, "GSS stats changed after pruning disallowed terminals.");
             // if GSS_LOGGING_ENABLED {
-                self.print_gss();
+            //     self.print_gss();
             // }
         } else {
             crate::debug!(3, "GSS stats did not change after pruning disallowed terminals.");
