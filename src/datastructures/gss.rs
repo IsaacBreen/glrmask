@@ -803,6 +803,7 @@ impl GSSNode {
             *self = GSSNode::Root(GSSRoot {
                 acc: acc_arc.clone(),
                 hash_key_cache: compute_hash_key_root(&acc_arc),
+                canonical: AtomicBool::new(false),
             });
             return;
         }
