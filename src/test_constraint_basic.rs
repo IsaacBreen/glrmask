@@ -1524,17 +1524,25 @@ statement_list ::= statement+ ;
 statement ::=
     block
   | if_statement
+  | expression_statement // Re-added for ambiguity
   ;
 
+expression_statement ::= expression ; // Simplified
 block ::= '{' statement_list? '}' ;
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
 // --- Expressions (Heavily Simplified for test) ---
-expression ::= NUMERIC_LITERAL;
+expression ::=
+    call_expression
+  | NUMERIC_LITERAL
+  ;
+
+call_expression ::= IDENTIFIER '(' expression ')' ;
 
 // --- Literals and Primitives (Simplified for test) ---
 NUMERIC_LITERAL ::= [0-9]+ ( '.' [0-9]+ )? ;
+IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ; // Re-added for ambiguity
 "#;
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
