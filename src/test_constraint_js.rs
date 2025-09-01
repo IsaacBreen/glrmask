@@ -540,6 +540,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.push("{{{".to_string());
         gpt2_raw_vocab.push("if(1){if(1){if(1){".to_string());
         gpt2_raw_vocab.push("if(1){".to_string());
+        gpt2_raw_vocab.push("if(2){".to_string());
 
         //
         // // Filter 2: Keep only tokens where all alphabetic chars are 'a'
