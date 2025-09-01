@@ -1,3 +1,4 @@
+#![allow(warnings)]
 pub mod finite_automata;
 pub mod glr;
 pub mod constraint;
