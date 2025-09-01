@@ -1530,7 +1530,7 @@ statement ::=
 expression_statement ::= expression ; // Simplified
 block ::= '{' statement_list? '}' ;
 
-if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+if_statement ::= 'if' '(' expression ')' statement ;
 
 // --- Expressions (Heavily Simplified for test) ---
 expression ::=

@@ -3764,7 +3764,7 @@ local_system:
       expression_statement ::= expression ; // Simplified
       block ::= '{' statement_list? '}' ;
 
-      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+      if_statement ::= 'if' '(' expression ')' statement ;
 
       // --- Expressions (Heavily Simplified for test) ---
       expression ::=
@@ -6787,5 +6787,109 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Reintroduce ambiguity in JS grammar test
       to trigger GSS explosion"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      Node counts: 9, 23, 51
+      Increases: 14, 28
+
+
+      thread 'test_constraint_basic::test_js_if_statement_gss_explosion' (31047341) panicked at src/test_constraint_basic.rs:1613:5:
+      GSS node growth is accelerating, indicating an explosion. First increase: 14, Second increase: 28
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: sep1::test_constraint_basic::test_js_if_statement_gss_explosion
+                   at ./src/test_constraint_basic.rs:1613:5
+         3: sep1::test_constraint_basic::test_js_if_statement_gss_explosion::{{closure}}
+                   at ./src/test_constraint_basic.rs:1502:44
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
+  - user: Great. That works. Now what made the difference? Knowing this, can we simplify
+      the grammar even more?
+    metadata:
+  - assistant: |-
+      Excellent, the test now fails as expected. Let's break down exactly what's happening and discuss further simplification.
+
+      ### What Made the Difference?
+
+      The key to the GSS explosion is **grammatical ambiguity**. The test now fails because we reintroduced a situation where the parser sees the input string and has two valid, conflicting ways to interpret it according to the grammar rules.
+
+      Here are the two conflicting paths for the input `if(1)`:
+
+      1.  **Path A: The `if_statement`**
+          *   The tokenizer sees the string `"if"` and recognizes it as the literal keyword `'if'`.
+          *   The parser starts matching the `if_statement` rule: `'if' '(' expression ')' statement`.
+          *   This is the obvious, intended path.
+
+      2.  **Path B: The `expression_statement` (as a function call)**
+          *   The tokenizer *also* sees that the string `"if"` matches the `IDENTIFIER` rule (`[a-zA-Z_][a-zA-Z0-9_]*`).
+          *   The parser explores an alternative: what if this is an `expression_statement`?
+          *   An `expression_statement` can be an `expression`.
+          *   An `expression` can be a `call_expression`.
+          *   A `call_expression` is defined as `IDENTIFIER '(' expression ')'`.
+          *   This path perfectly matches the input `if(1)`, interpreting it as a call to a function named `if`.
+
+      When the parser encounters the first `if(1){...`, it must keep both possibilities alive. When it then encounters the *nested* `if(1){...`, it again has to branch for each of the existing possibilities. This branching-within-a-branch is what causes the number of states (GSS nodes) to grow exponentially, leading to the panic you see.
+
+      Your first simplification eliminated Path B entirely, which removed the ambiguity and made the test pass. The last change reintroduced it, correctly restoring the failure.
+
+      ### Can We Simplify the Grammar Even More?
+
+      Yes, but only slightly. The current grammar is very close to the minimal set of rules needed to reproduce this specific ambiguity with the given test input. Most parts are now essential:
+
+      *   We need `block` and `statement_list` to handle the `{...}` and allow the recursion.
+      *   We need `NUMERIC_LITERAL` to parse the `1` in `if(1)`.
+      *   We need `call_expression` and `expression_statement` to create the ambiguous "Path B".
+
+      The one part that is *not* exercised by the test input is the optional `else` clause in the `if_statement`. We can remove it for a slightly cleaner, more minimal grammar that will still fail in the exact same way.
+
+      Here is the change to remove it:
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1428,7 +1428,7 @@
+       expression_statement ::= expression ; // Simplified
+       block ::= '{' statement_list? '}' ;
+       
+      -if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
+      +if_statement ::= 'if' '(' expression ')' statement ;
+       
+       // --- Expressions (Heavily Simplified for test) ---
+       expression ::=
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "Simplify JS grammar test by removing optional
+      else clause"'
     metadata:
 ...
