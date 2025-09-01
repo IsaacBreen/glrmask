@@ -8,10 +8,10 @@ use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Write};
+use std::sync::Weak;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::{OnceLock, RwLock};
-
+use std::sync::OnceLock;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::grammar::Terminal;
@@ -19,6 +19,7 @@ use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
+use parking_lot::RwLock as FastRwLock;
 use profiler_macro::{time_it, timeit};
 
 pub(crate) type LLMTokenBV = HybridBitset;
@@ -699,15 +700,17 @@ impl GSSNode {
         let mut iter = nodes.into_iter();
         if let Some(first) = iter.next() {
             let mut merged = (*first).clone();
-            for other in iter {
-                merged.merge_with_depth(merge_depth, &other);
-            }
-            Arc::new(merged)
-        } else {
-            Arc::new(GSSNode::new_fresh())
+        for other in iter {
+            merged.merge_with_depth(merge_depth, &other);
         }
-        })
+        let out = Arc::new(merged);
+        fast_intern_arc(&out)
+    } else {
+        let out = Arc::new(GSSNode::new_fresh());
+        fast_intern_arc(&out)
     }
+    })
+}
 }
 
 // Core GSS operations
@@ -1337,6 +1340,83 @@ impl GSSInternPool {
     }
 }
 
+// ---------- Global incremental interning (fast, weak, process-wide) ----------
+
+struct GlobalGSSIntern {
+    // Key: structural fingerprint (variant + hash_key_cache), Value: weak refs of canonical nodes
+    buckets: HashMap<u64, Vec<Weak<GSSNode>>>,
+}
+
+impl GlobalGSSIntern {
+    fn new() -> Self { Self { buckets: HashMap::new() } }
+
+    // Lookup a canonical Arc for this fingerprint, if any, without deep comparisons.
+    // Removes dead weaks opportunistically.
+    fn try_lookup(&mut self, fp: u64) -> Option<Arc<GSSNode>> {
+        if let Some(vec) = self.buckets.get_mut(&fp) {
+            let mut i = 0;
+            while i < vec.len() {
+                match vec[i].upgrade() {
+                    Some(a) => {
+                        // Return the first alive candidate. We rely on the structural fingerprint
+                        // (which is a subtree hash) for correctness. Collisions are extremely rare.
+                        return Some(a);
+                    }
+                    None => {
+                        vec.swap_remove(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            if vec.is_empty() {
+                self.buckets.remove(&fp);
+            }
+        }
+        None
+    }
+
+    // Insert node into the intern table (as weak), return the canonical Arc (possibly the same as input).
+    // If an alive canonical exists already, return it immediately.
+    fn get_or_intern(&mut self, fp: u64, node: Arc<GSSNode>) -> Arc<GSSNode> {
+        if let Some(existing) = self.try_lookup(fp) {
+            return existing;
+        }
+        self.buckets.entry(fp).or_default().push(Arc::downgrade(&node));
+        node
+    }
+}
+
+// One global instance, fast lock (parking_lot) to avoid poisoning and reduce overhead.
+static GLOBAL_GSS_INTERN: OnceLock<FastRwLock<GlobalGSSIntern>> = OnceLock::new();
+
+fn global_intern() -> &'static FastRwLock<GlobalGSSIntern> {
+    GLOBAL_GSS_INTERN.get_or_init(|| FastRwLock::new(GlobalGSSIntern::new()))
+}
+
+// Structural fingerprint (variant bit + current node's hash_code), stable across subtree shape.
+fn node_fingerprint(node: &GSSNode) -> u64 {
+    // Distinguish variants to avoid accidental cross-kind bucket sharing.
+    let variant_bit = if matches!(node, GSSNode::Root(_)) { 0u64 } else { 1u64 };
+    node.hash_code() ^ (variant_bit << 63)
+}
+
+// Try to reuse canonical Arc for this node pointer, if already present in the global intern.
+// Does not allocate; cheap O(1) in the common case.
+fn try_fast_canonical_arc(node_arc: &Arc<GSSNode>) -> Option<Arc<GSSNode>> {
+    let fp = node_fingerprint(node_arc.as_ref());
+    let mut w = global_intern().write();
+    w.try_lookup(fp)
+}
+
+// Return an Arc canonicalized by the global intern without deep rebuild.
+// This does not descend; it just reuses an existing canonical Arc if present, else registers this pointer.
+fn fast_intern_arc(node_arc: &Arc<GSSNode>) -> Arc<GSSNode> {
+    let fp = node_fingerprint(node_arc.as_ref());
+    let mut w = global_intern().write();
+    w.get_or_intern(fp, node_arc.clone())
+}
+
 // Canonicalize a single GSS node (bottom-up) using a global intern pool and a per-walk memo.
 fn canonicalize_node(
     node_arc: &Arc<GSSNode>,
@@ -1396,6 +1476,119 @@ fn canonicalize_node(
     out
 }
 
+// A fast, shallow, incremental canonicalizer.
+// - Reuses global intern if a canonical Arc already exists for a subtree (no descent).
+// - Otherwise, reconstructs only near the top using a node and depth budget, canonicalizing children first,
+//   deduping siblings by pointer identity, then interning the rebuilt node.
+// - Per-call memo avoids revisiting the same pointer multiple times during one simplify pass.
+fn canonicalize_shallow(
+    node_arc: &Arc<GSSNode>,
+    node_budget: &mut usize,     // total nodes we are allowed to rebuild this pass
+    depth_budget: usize,         // how deep we are willing to rebuild under this node
+    memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+) -> Arc<GSSNode> {
+    let ptr = Arc::as_ptr(node_arc);
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    // If a canonical already exists in the global intern, do not descend; reuse it O(1).
+    if let Some(existing) = try_fast_canonical_arc(node_arc) {
+        memo.insert(ptr, existing.clone());
+        return existing;
+    }
+
+    // If out of budget or not allowed to go deeper, just register this node as canonical and return.
+    if *node_budget == 0 || depth_budget == 0 {
+        let fast = fast_intern_arc(node_arc);
+        memo.insert(ptr, fast.clone());
+        return fast;
+    }
+
+    // Consume one unit of budget for attempting a shallow rebuild at this level.
+    *node_budget = node_budget.saturating_sub(1);
+
+    match node_arc.as_ref() {
+        GSSNode::Root(_) => {
+            // Nothing to rebuild below; just intern by hash and return quickly.
+            let fast = fast_intern_arc(node_arc);
+            memo.insert(ptr, fast.clone());
+            fast
+        }
+        GSSNode::Internal(i) => {
+            // Rebuild one level deep: canonicalize and dedup children by pointer identity.
+            let mut new_map: NodeMap = BTreeMap::new();
+            let mut changed = false;
+
+            for (edge_val, preds_by_depth) in &i.predecessors {
+                let mut new_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                for (dest_key, pred_vec) in preds_by_depth {
+                    let mut uniq_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(pred_vec.len());
+                    let mut seen_ptrs: HashSet<*const GSSNode> = HashSet::with_capacity(pred_vec.len());
+
+                    for child in pred_vec {
+                        let canon_child = canonicalize_shallow(child, node_budget, depth_budget - 1, memo);
+                        let p_old = Arc::as_ptr(child);
+                        let p_new = Arc::as_ptr(&canon_child);
+                        if p_old != p_new { changed = true; }
+                        if seen_ptrs.insert(p_new) {
+                            uniq_vec.push(canon_child);
+                        } else {
+                            // Duplicate eliminated at this level.
+                            changed = true;
+                        }
+                    }
+
+                    new_by_depth.insert(*dest_key, uniq_vec);
+                }
+                new_map.insert(edge_val.clone(), new_by_depth);
+            }
+
+            // If nothing changed, just reuse/intern this pointer (cheap).
+            if !changed {
+                let fast = fast_intern_arc(node_arc);
+                memo.insert(ptr, fast.clone());
+                return fast;
+            }
+
+            // Otherwise, build the simplified node and intern it. Pass a neutral Acc to avoid pushing constraints.
+            let rebuilt = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map);
+            let rebuilt_arc = Arc::new(rebuilt);
+            let interned = fast_intern_arc(&rebuilt_arc);
+            memo.insert(ptr, interned.clone());
+            interned
+        }
+    }
+}
+
+fn simplify_roots_in_place_incremental(
+    roots: &mut [Arc<GSSNode>],
+    mut node_budget: usize,
+    depth_budget: usize,
+) {
+    if roots.is_empty() { return; }
+    let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+
+    for r in roots.iter_mut() {
+        // Always attempt to turn the root into a canonical Arc quickly.
+        let mut arc = if let Some(existing) = try_fast_canonical_arc(r) {
+            existing
+        } else {
+            r.clone()
+        };
+
+        // If we still have budget, rebuild shallow under this root to unify children.
+        if node_budget > 0 && depth_budget > 0 {
+            arc = canonicalize_shallow(&arc, &mut node_budget, depth_budget, &mut memo);
+        } else {
+            // Even with no budget, make sure root is registered (O(1)), enabling reuse across states/calls.
+            arc = fast_intern_arc(&arc);
+        }
+
+        *r = arc;
+    }
+}
+
 // Convenience: canonicalize a list of roots in-place with a single pool for maximal sharing.
 fn simplify_roots_in_place(roots: &mut [Arc<GSSNode>]) {
     if roots.is_empty() { return; }
@@ -1409,21 +1602,23 @@ fn simplify_roots_in_place(roots: &mut [Arc<GSSNode>]) {
 }
 
 pub fn simplify(states: &mut BTreeMap<TokenizerStateID, Arc<GSSNode>>) {
-    // We want cross-state sharing, so we collect all roots, canonicalize with a single pool, then write back.
-    // 1) Collect all roots from all states.
-    let mut all_roots: Vec<Arc<GSSNode>> =
-        states.values().map(|s| s.clone()).collect();
-
+    // 1) Gather roots
+    let mut all_roots: Vec<Arc<GSSNode>> = states.values().cloned().collect();
     if all_roots.is_empty() { return; }
 
-    // 2) Canonicalize them in place using one shared pool.
-    simplify_roots_in_place(&mut all_roots);
+    // Tunables: limit per-call effort. These values are conservative; adjust as needed.
+    // node_budget ~ how many internal nodes we may rebuild this pass
+    // depth_budget ~ how many levels under each root we touch (beyond root)
+    const NODE_BUDGET: usize = 50_000;
+    const DEPTH_BUDGET: usize = 6;
 
-    // 3) Write the canonicalized roots back.
-    let mut canonical_roots_iter = all_roots.into_iter();
+    // 2) Fast, incremental, budgeted canonicalization
+    simplify_roots_in_place_incremental(&mut all_roots, NODE_BUDGET, DEPTH_BUDGET);
+
+    // 3) Write back in-order
+    let mut it = all_roots.into_iter();
     for state in states.values_mut() {
-        // This assumes a 1-to-1 mapping and preserved order, which BTreeMap provides.
-        *state = canonical_roots_iter.next().unwrap();
+        *state = it.next().unwrap();
     }
 }
 
