@@ -529,7 +529,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2;
+        let x = 1;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -684,6 +684,10 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("  commit took: {:?}", commit_start.elapsed());
 
         current_text_byte_offset = token_end_byte;
+
+        profiler::print_summary();
+        profiler::print_summary_flat();
+        profiler::reset()
     }
 
     println!("\nFinished processing token sequence.");
