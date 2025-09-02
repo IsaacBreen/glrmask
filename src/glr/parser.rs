@@ -168,6 +168,7 @@ impl ParseState {
         self
     }
 
+    #[time_it]
     pub fn merge(&mut self, mut other: ParseState) {
         Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
         if let Some(other_accepted) = other.accepted_state {
