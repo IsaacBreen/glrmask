@@ -84,8 +84,16 @@ impl JSONConvertible for PrecomputedNodeContents {
 // --- Accumulator (Acc) ---
 
 /// Represents the full set of allowed tokens and terminals for a GSS node.
-/// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
-/// is computed on demand by aggregating the Accs of all reachable roots.
+/// In the enhanced design, both root and internal nodes can carry Acc values,
+/// but they must satisfy the "frontier/line" constraints:
+/// - If a node has a non-neutral Acc, none of its predecessors (at any depth)
+///   can have a non-neutral Acc.
+/// - For any internal node, if all direct predecessors have the same non-neutral
+///   Acc (and none are neutral), that Acc must be hoisted to the parent and removed from the predecessors.
+/// - If a node has exactly one predecessor with a non-neutral Acc (and no other predecessors),
+///   that Acc must be hoisted to the parent.
+/// We enforce the hoisting when constructing/merging nodes. Verification utilities
+/// are provided to assert the invariant holds in complex scenarios.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
@@ -146,7 +154,8 @@ impl Acc {
 // --- GSS Node & Core Implementation ---
 
 /// A node in the Graph-Structured Stack (GSS).
-/// Simplified design: only root nodes carry Acc; internal nodes carry only predecessors.
+/// Enhanced design: both root and internal nodes may carry Acc.
+/// The "frontier/line" invariant ensures each path has at most one non-neutral Acc.
 #[derive(Debug, Clone)]
 pub enum GSSNode {
     Root(GSSRoot),
@@ -161,6 +170,7 @@ pub(crate) struct GSSRoot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GSSInternal {
+    acc: Arc<Acc>, // local acc; non-neutral iff this node sits on the frontier. Predecessors must then be neutral.
     predecessors: NodeMap,
     hash_key_cache: u64,
     max_depth: MaxDepth,
@@ -243,12 +253,21 @@ impl GSSPopper {
 
             let mut new_paths: BTreeMap<Arc<GSSNode>, Arc<Acc>> = BTreeMap::new();
             for (parent, path_acc) in std::mem::take(&mut self.paths) {
+                // Narrow with the parent's local acc (frontier may sit here).
+                let parent_acc_narrowed = if parent.local_acc_is_non_neutral() {
+                    Arc::new(Acc::narrow(&path_acc, &parent.local_acc()))
+                } else {
+                    path_acc.clone()
+                };
+
                 for (edge_val, preds_by_depth) in parent.predecessors().iter() {
                     for pred_vec in preds_by_depth.values() {
                         for child in pred_vec {
                             match child.as_ref() {
                                 GSSNode::Root(r) => {
-                                    let combined = Arc::new(Acc::narrow(&path_acc, &r.acc));
+                                    // Narrow with the child's local acc (if any). Because of the invariant,
+                                    // if we narrowed at the parent, the child must be neutral; this remains correct.
+                                    let combined = Arc::new(Acc::narrow(&parent_acc_narrowed, &r.acc));
                                     // Reached the bottom on this pop.
                                     let by_edge = new_below.entry(1).or_insert_with(BTreeMap::new);
                                     if let Some(existing) = by_edge.get_mut(&edge_val.clone()) {
@@ -260,9 +279,9 @@ impl GSSPopper {
                                 }
                                 GSSNode::Internal(_) => {
                                     if let Some(existing_acc) = new_paths.get_mut(child) {
-                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &path_acc));
+                                        *existing_acc = Arc::new(Acc::merge(existing_acc, &parent_acc_narrowed));
                                     } else {
-                                        new_paths.insert(child.clone(), path_acc.clone());
+                                        new_paths.insert(child.clone(), parent_acc_narrowed.clone());
                                     }
                                 }
                             }
@@ -277,13 +296,18 @@ impl GSSPopper {
 }
 
 impl<'a> GSSPopperItem<'a> {
-    /// Returns the combined `Acc` of the path and the destination node.
+    /// Returns the combined `Acc` of the path and the destination node's local acc (if any).
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
-        Acc::narrow(&self.path_acc, &self.node.acc())
+        let narrowed = if self.node.local_acc_is_non_neutral() {
+            Acc::narrow(&self.path_acc, &self.node.local_acc())
+        } else {
+            self.path_acc.as_ref().clone()
+        };
+        narrowed
     }
 
     /// Returns a new `GSSNode` representing the destination node.
-    /// In the simplified design, `Acc` is only at roots; this just returns the node.
+    /// In the enhanced design, Acc may exist on internal nodes; this just returns the node.
     #[allow(dead_code)] pub(crate) fn resolved_node(&self) -> Arc<GSSNode> {
         self.node.clone()
     }
@@ -312,12 +336,16 @@ impl<'a> GSSPopperItem<'a> {
 impl<'a> GSSPopperItemPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
-    /// Returns the combined `Acc` of the path and the predecessor node.
+    /// Returns the combined `Acc` of the path and the predecessor node's local acc (if any).
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
-        Acc::narrow(self.path_acc, &self.predecessor_node.acc())
+        if self.predecessor_node.local_acc_is_non_neutral() {
+            Acc::narrow(self.path_acc, &self.predecessor_node.local_acc())
+        } else {
+            self.path_acc.as_ref().clone()
+        }
     }
 
-    /// Returns a new `GSSNode` representing the predecessor; in the simplified design, just clones.
+    /// Returns a new `GSSNode` representing the predecessor; in the enhanced design, just clones.
     #[allow(dead_code)] pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
         self.predecessor_node.clone()
     }
@@ -367,8 +395,14 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
         .unwrap_or(0)
 }
 
-fn compute_hash_key_internal(predecessors: &NodeMap) -> u64 {
+fn compute_hash_key_internal(acc: &Acc, predecessors: &NodeMap) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+    // Include local acc in the hash (so nodes differing by acc are distinct).
+    acc.llm_tokens_union.hash(&mut hasher);
+    acc.terminals_union.hash(&mut hasher);
+    for trie2_node in &acc.trie2_nodes {
+        trie2_node.hash(&mut hasher);
+    }
     for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
         for (dest_key, pred_vec) in preds_by_depth {
@@ -485,7 +519,49 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
     }
 }
 
-fn apply_local_acc_to_all_roots(
+// Helper: return a shared neutral Acc arc
+fn neutral_acc_arc() -> Arc<Acc> {
+    Arc::new(Acc::new_fresh())
+}
+
+// Helper: retrieve local acc (by reference) for any node.
+fn local_acc_ref<'a>(node: &'a GSSNode) -> &'a Arc<Acc> {
+    match node {
+        GSSNode::Root(r) => &r.acc,
+        GSSNode::Internal(i) => &i.acc,
+    }
+}
+
+// Helper: whether node has non-neutral local acc
+fn local_acc_is_non_neutral(node: &GSSNode) -> bool {
+    !local_acc_ref(node).is_merge_neutral()
+}
+
+// Helper: clone node with a replaced local acc (structure and preds kept identical)
+fn clone_with_local_acc(node_arc: &Arc<GSSNode>, new_acc: Arc<Acc>) -> Arc<GSSNode> {
+    match node_arc.as_ref() {
+        GSSNode::Root(r) => {
+            let acc_arc = new_acc;
+            let hash_key_cache = compute_hash_key_root(&acc_arc);
+            Arc::new(GSSNode::Root(GSSRoot { acc: acc_arc, hash_key_cache }))
+        }
+        GSSNode::Internal(i) => {
+            let mut preds = i.predecessors.clone();
+            let acc_arc = new_acc;
+            let hash_key_cache = compute_hash_key_internal(&acc_arc, &preds);
+            let max_depth = i.max_depth;
+            Arc::new(GSSNode::Internal(GSSInternal {
+                acc: acc_arc,
+                predecessors: preds,
+                hash_key_cache,
+                max_depth,
+            }))
+        }
+    }
+}
+
+// Push a local 'narrowing' acc down to all frontier nodes (roots or internals that already carry acc).
+fn apply_local_acc_to_frontier(
     node_arc: &Arc<GSSNode>,
     local_acc: &Acc,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
@@ -498,27 +574,79 @@ fn apply_local_acc_to_all_roots(
     let out = match node_arc.as_ref() {
         GSSNode::Root(r) => {
             let narrowed = Acc::narrow(local_acc, &r.acc);
-            Arc::new(GSSNode::new(narrowed))
+            clone_with_local_acc(node_arc, Arc::new(narrowed))
         }
         GSSNode::Internal(i) => {
-            let mut new_map: NodeMap = BTreeMap::new();
-            for (edge, by_depth) in &i.predecessors {
-                let mut new_by_depth = BTreeMap::new();
-                for (dk, vec) in by_depth {
-                    let mut nv = Vec::with_capacity(vec.len());
-                    for p in vec {
-                        nv.push(apply_local_acc_to_all_roots(p, local_acc, memo));
+            if !i.acc.is_merge_neutral() {
+                // Frontier hits here: narrow and stop descending.
+                let narrowed = Acc::narrow(local_acc, &i.acc);
+                clone_with_local_acc(node_arc, Arc::new(narrowed))
+            } else {
+                // Recurse into children
+                let mut new_map: NodeMap = BTreeMap::new();
+                for (edge, by_depth) in &i.predecessors {
+                    let mut new_by_depth = BTreeMap::new();
+                    for (dk, vec) in by_depth {
+                        let mut nv = Vec::with_capacity(vec.len());
+                        for p in vec {
+                            nv.push(apply_local_acc_to_frontier(p, local_acc, memo));
+                        }
+                        new_by_depth.insert(*dk, nv);
                     }
-                    new_by_depth.insert(*dk, nv);
+                    new_map.insert(edge.clone(), new_by_depth);
                 }
-                new_map.insert(edge.clone(), new_by_depth);
+                // Preserve the local acc (neutral) of this node.
+                Arc::new(GSSNode::new_internal_exact(i.acc.clone(), new_map))
             }
-            Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map))
         }
     };
 
     memo.insert(ptr, out.clone());
     out
+}
+
+// Try to hoist acc from direct predecessors if all have the same non-neutral acc and none is neutral.
+// Return the hoisted acc if successful, and mutate the predecessor arcs in-place (replacing with clones with neutral acc).
+fn try_hoist_from_predecessors(predecessors: &mut NodeMap) -> Option<Arc<Acc>> {
+    // Collect all direct predecessor arcs into a vec
+    let mut all_preds: Vec<Arc<GSSNode>> = Vec::new();
+    for preds_by_depth in predecessors.values() {
+        for pred_vec in preds_by_depth.values() {
+            for p in pred_vec {
+                all_preds.push(p.clone());
+            }
+        }
+    }
+    if all_preds.is_empty() {
+        return None;
+    }
+
+    let mut base_acc: Option<Arc<Acc>> = None;
+    for p in &all_preds {
+        let pa = local_acc_ref(p.as_ref());
+        if pa.is_merge_neutral() {
+            return None; // neutral pred prevents hoist
+        }
+        if let Some(b) = &base_acc {
+            if **b != **pa {
+                return None; // differing acc prevents hoist
+            }
+        } else {
+            base_acc = Some(pa.clone());
+        }
+    }
+
+    // All preds have equal, non-neutral acc: we can hoist.
+    let hoisted = base_acc.unwrap();
+    let neutral = neutral_acc_arc();
+    for preds_by_depth in predecessors.values_mut() {
+        for pred_vec in preds_by_depth.values_mut() {
+            for p in pred_vec.iter_mut() {
+                *p = clone_with_local_acc(p, neutral.clone());
+            }
+        }
+    }
+    Some(hoisted)
 }
 
 impl GSSNode {
@@ -530,7 +658,17 @@ impl GSSNode {
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
-    /// In the simplified design, `acc` is ignored (kept only for compatibility with call sites).
+    /// This version preserves the provided acc exactly on this internal node without
+    /// pushing/hoisting/transforming. Use with care (canonicalization/deep-clone).
+    fn new_internal_exact(acc: Arc<Acc>, predecessors: NodeMap) -> Self {
+        let hash_key_cache = compute_hash_key_internal(&acc, &predecessors);
+        let max_depth = compute_max_depth(&predecessors);
+        GSSNode::Internal(GSSInternal { acc, predecessors, hash_key_cache, max_depth })
+    }
+
+    /// Private constructor for internal methods that build a node from a pre-computed map.
+    /// Applies provided 'acc' as a local narrowing to all frontier acc nodes below,
+    /// then tries to hoist accs from direct predecessors if constraints request it.
     fn new_with_map(acc: Arc<Acc>, mut predecessors: NodeMap) -> Self {
         // An internal node must have predecessors. If the map is effectively empty, create a root node instead.
         // The provided `acc` becomes the local accumulator for this new root.
@@ -538,60 +676,54 @@ impl GSSNode {
             return GSSNode::new((*acc).clone());
         }
 
-        // Push local acc into all reachable roots
-        // Note: predecessors is guaranteed not to be empty here due to the check above.
+        // Push local acc into all reachable frontier acc nodes (roots or internals with acc).
         if !acc.is_merge_neutral() {
             let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
             for preds_by_depth in predecessors.values_mut() {
                 for pred_vec in preds_by_depth.values_mut() {
                     for pred_arc in pred_vec.iter_mut() {
-                        let transformed = apply_local_acc_to_all_roots(pred_arc, &acc, &mut memo);
+                        let transformed = apply_local_acc_to_frontier(pred_arc, &acc, &mut memo);
                         *pred_arc = transformed;
                     }
                 }
             }
         }
-        let hash_key_cache = compute_hash_key_internal(&predecessors);
+
+        // Try to hoist from direct predecessors if they all carry the same non-neutral acc.
+        let mut local_acc = neutral_acc_arc();
+        if let Some(hoisted) = try_hoist_from_predecessors(&mut predecessors) {
+            local_acc = hoisted;
+        }
+
+        let hash_key_cache = compute_hash_key_internal(&local_acc, &predecessors);
         let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { predecessors, hash_key_cache, max_depth })
+        GSSNode::Internal(GSSInternal { acc: local_acc, predecessors, hash_key_cache, max_depth })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
-    /// In simplified design, `acc` is ignored (kept for API compatibility).
+    /// Acc param is interpreted as a local narrowing to be applied to the frontier below.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
-        let pred_tx = if acc.is_merge_neutral() {
-            predecessor_arc
-        } else {
-            let mut memo = HashMap::new();
-            apply_local_acc_to_all_roots(&predecessor_arc, &acc, &mut memo)
-        };
         let mut predecessors_map = NodeMap::new();
         predecessors_map
             .entry(edge_value)
             .or_default()
-            .insert(pred_tx.dest_key(), vec![pred_tx]);
-        Self::new_with_map(Arc::new(Acc::new_fresh()), predecessors_map)
+            .insert(predecessor_arc.dest_key(), vec![predecessor_arc]);
+        Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
-    /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
-    /// In simplified design, `acc` is ignored (kept for API compatibility).
+    /// Helper to create a GSSNode with multiple predecessors (same source), used by `push_many`.
+    /// Acc param is interpreted as a local narrowing to be applied to the frontier below.
     fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
-        let pred_tx = if acc.is_merge_neutral() {
-            predecessor_arc
-        } else {
-            let mut memo = HashMap::new();
-            apply_local_acc_to_all_roots(&predecessor_arc, &acc, &mut memo)
-        };
         let mut predecessors_map = NodeMap::new();
         for edge_value in edge_values {
             predecessors_map
                 .entry(edge_value)
                 .or_default()
-                .entry(pred_tx.dest_key())
+                .entry(predecessor_arc.dest_key())
                 .or_default()
-                .push(pred_tx.clone());
+                .push(predecessor_arc.clone());
         }
-        Self::new_with_map(Arc::new(Acc::new_fresh()), predecessors_map)
+        Self::new_with_map(Arc::new(acc), predecessors_map)
     }
 
     pub fn new_fresh() -> Self {
@@ -599,13 +731,16 @@ impl GSSNode {
     }
 
     /// Returns the aggregate Acc for this node.
-    /// - If root: returns the node's Acc.
-    /// - If internal: walks to all reachable roots and merges their Accs.
+    /// - If node carries a non-neutral local acc: returns that acc (frontier hit).
+    /// - Otherwise: walks to all reachable frontier accs below and merges their Accs.
     fn acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
-                // Collect all root Accs reachable from this node.
+                if !i.acc.is_merge_neutral() {
+                    return i.acc.clone();
+                }
+                // Collect all Accs reachable from this node by descending to frontier nodes.
                 let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
                 let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
                 for preds_by_depth in i.predecessors.values() {
@@ -625,10 +760,14 @@ impl GSSNode {
                     match node.as_ref() {
                         GSSNode::Root(r) => accs.push(r.acc.clone()),
                         GSSNode::Internal(ii) => {
-                            for preds_by_depth in ii.predecessors.values() {
-                                for pred_vec in preds_by_depth.values() {
-                                    for pred in pred_vec {
-                                        queue.push_back(pred.clone());
+                            if !ii.acc.is_merge_neutral() {
+                                accs.push(ii.acc.clone());
+                            } else {
+                                for preds_by_depth in ii.predecessors.values() {
+                                    for pred_vec in preds_by_depth.values() {
+                                        for pred in pred_vec {
+                                            queue.push_back(pred.clone());
+                                        }
                                     }
                                 }
                             }
@@ -648,6 +787,18 @@ impl GSSNode {
                 }
             }
         }
+    }
+
+    // Access the node's local acc directly (frontier candidate).
+    fn local_acc(&self) -> Arc<Acc> {
+        match self {
+            GSSNode::Root(r) => r.acc.clone(),
+            GSSNode::Internal(i) => i.acc.clone(),
+        }
+    }
+
+    fn local_acc_is_non_neutral(&self) -> bool {
+        !self.local_acc().is_merge_neutral()
     }
 
     pub(crate) fn predecessors(&self) -> &NodeMap {
@@ -673,13 +824,13 @@ impl GSSNode {
 
     fn dest_key(&self) -> DestKey { self.max_depth() }
 
-    /// Returns the set of LLM tokens allowed by any root reachable from this node.
+    /// Returns the set of LLM tokens allowed by any frontier acc reachable from this node.
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
         self.acc().llm_tokens_union.clone()
     }
 
     /// Returns a map of disallowed terminals for each tokenizer state.
-    /// A terminal is disallowed if it's disallowed on every root reachable from this node.
+    /// A terminal is disallowed if it's disallowed on every frontier acc reachable from this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
         self.acc().terminals_union.complement()
     }
@@ -713,6 +864,7 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
+    /// The frontier invariant is enforced: single-predecessor acc will be hoisted.
     pub(crate) fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
         GSSNode::new_with_single_predecessor(Arc::new(self.clone()), edge_value, Acc::new_fresh())
     }
@@ -751,7 +903,7 @@ impl GSSNode {
         }
 
         // If the other node is a root with a neutral Acc, it contributes nothing structurally.
-        if other.is_root() {
+        if matches!(other, GSSNode::Root(_)) {
             if other.acc().is_merge_neutral() {
                 return;
             }
@@ -800,7 +952,11 @@ impl GSSNode {
             merged_map
         };
 
+        // Construct a new internal with no extra narrowing; hoisting will apply as needed.
         *self = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), final_predecessors);
+        // Note: We intentionally do not attempt to merge top-level local accs of the inputs here
+        // because doing so without analyzing predecessor accs could violate the frontier invariant.
+        // The hoisting logic inside new_with_map ensures canonical placement of accs.
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
@@ -809,7 +965,7 @@ impl GSSNode {
     }
 
     #[allow(dead_code)] pub(crate) fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-        // In the simplified design, Acc is only at roots; this behaves like push.
+        // In the enhanced design, Acc may sit at internals; this behaves like push with neutral narrowing.
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, Acc::new_fresh())
     }
 
@@ -833,12 +989,16 @@ impl<'a> GSSPeek<'a> {
 
     #[allow(dead_code)] pub(crate) fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
-    /// Returns the combined `Acc` of the parent and the predecessor.
+    /// Returns the combined `Acc` of the parent and the predecessor's local acc, if any.
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
-        Acc::narrow(&self.parent_arc.acc(), &self.predecessor_node.acc())
+        let mut acc = self.parent_arc.local_acc();
+        if self.predecessor_node.local_acc_is_non_neutral() {
+            acc = Arc::new(Acc::narrow(&acc, &self.predecessor_node.local_acc()));
+        }
+        (*acc).clone()
     }
 
-    /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
+    /// Returns the resolved union of LLM tokens (approximate), by intersecting parent and predecessor unions.
     pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
         let parent = self.parent_arc.allowed_llm_tokens();
         let pred = self.predecessor_node.allowed_llm_tokens();
@@ -896,7 +1056,7 @@ impl PartialEq for GSSNode {
                 a.hash_key_cache == b.hash_key_cache && a.acc == b.acc
             }
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
-                a.hash_key_cache == b.hash_key_cache && a.predecessors == b.predecessors
+                a.hash_key_cache == b.hash_key_cache && a.acc == b.acc && a.predecessors == b.predecessors
             }
             _ => false,
         }
@@ -929,6 +1089,7 @@ impl Ord for GSSNode {
             (GSSNode::Internal(a), GSSNode::Internal(b)) => {
                 a.hash_key_cache.cmp(&b.hash_key_cache)
                     .then_with(|| a.predecessors.cmp(&b.predecessors))
+                    .then_with(|| a.acc.cmp(&b.acc))
             }
             _ => Ordering::Equal,
         }
@@ -944,10 +1105,9 @@ pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<
 /// - Invoking `internal_closure` on internal nodes to decide if they should be pruned entirely.
 /// - Invoking `root_closure` on root nodes to determine the replacement Acc or prune the root.
 ///
-/// Note:
-/// - There is no early-continue/stop: recursion always traverses into children of internal nodes
-///   unless `internal_closure` prunes that node.
-/// - Internal nodes never hold Acc; only roots do.
+/// NOTE: This legacy helper only changes root acc, not internal acc.
+/// New code paths that need to transform acc-bearing nodes (both root and internal)
+/// should use the `acc_transform_walk` helper below.
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
     internal_closure: &mut impl FnMut(&GSSInternal) -> bool,
@@ -1019,8 +1179,8 @@ fn prune_and_transform_recursive(
                 // No change in children, so no change in this node.
                 Some(node_arc.clone())
             } else {
-                // Children changed, create new internal node.
-                let transformed_node = GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_predecessors_map);
+                // Children changed, create new internal node with same local acc.
+                let transformed_node = GSSNode::new_internal_exact(internal.acc.clone(), new_predecessors_map);
                 Some(Arc::new(transformed_node))
             }
         }
@@ -1028,6 +1188,86 @@ fn prune_and_transform_recursive(
 
     memo.insert(node_ptr, result.clone());
     result
+}
+
+// New: generic walk that transforms acc-bearing nodes (root and internal).
+fn acc_transform_walk(
+    node_arc: &Arc<GSSNode>,
+    transform: &mut impl FnMut(&Arc<Acc>) -> Option<Arc<Acc>>,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) -> Option<Arc<GSSNode>> {
+    let ptr = Arc::as_ptr(node_arc);
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    let out = match node_arc.as_ref() {
+        GSSNode::Root(r) => {
+            let new_acc_opt = transform(&r.acc);
+            match new_acc_opt {
+                None => None,
+                Some(new_acc_arc) => {
+                    if *new_acc_arc == *r.acc {
+                        Some(node_arc.clone())
+                    } else {
+                        Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
+                    }
+                }
+            }
+        }
+        GSSNode::Internal(i) => {
+            // Transform local acc only if non-neutral. If neutral, leave neutral.
+            let mut new_local_acc = i.acc.clone();
+            if !i.acc.is_merge_neutral() {
+                match transform(&i.acc) {
+                    None => return { memo.insert(ptr, None); None },
+                    Some(na) => new_local_acc = na,
+                }
+            }
+
+            // Recurse into children
+            let mut changed = false;
+            let mut new_map: NodeMap = BTreeMap::new();
+            for (edge, by_depth) in &i.predecessors {
+                let mut new_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                for (dk, vec) in by_depth {
+                    let mut nv = Vec::with_capacity(vec.len());
+                    for p in vec {
+                        if let Some(t) = acc_transform_walk(p, transform, memo) {
+                            if !Arc::ptr_eq(&t, p) {
+                                changed = true;
+                            }
+                            nv.push(t);
+                        } else {
+                            changed = true;
+                        }
+                    }
+                    if !nv.is_empty() {
+                        new_by_depth.insert(*dk, nv);
+                    }
+                }
+                if !new_by_depth.is_empty() {
+                    new_map.insert(edge.clone(), new_by_depth);
+                }
+            }
+
+            if new_map.is_empty() {
+                None
+            } else {
+                // If local acc is non-neutral, property requires all preds are neutral already.
+                // Recreate exactly if non-neutral; otherwise allow hoisting from preds.
+                let res = if !new_local_acc.is_merge_neutral() {
+                    Arc::new(GSSNode::new_internal_exact(new_local_acc, new_map))
+                } else {
+                    Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map))
+                };
+                Some(res)
+            }
+        }
+    };
+
+    memo.insert(ptr, out.clone());
+    out
 }
 
 pub fn allow_only_llm_tokens_and_prune(
@@ -1043,19 +1283,16 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
     allowed_tokens: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
+    let mut transform = |acc_arc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        let mut new_acc = (**acc_arc).clone();
         new_acc.llm_tokens_union &= allowed_tokens;
-
-        // Prune if the union of possibilities is empty.
         if new_acc.llm_tokens_union.is_empty() {
             None
         } else {
             Some(Arc::new(new_acc))
         }
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         *root_arc = Arc::new(GSSNode::new_fresh());
@@ -1075,13 +1312,12 @@ pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
-        new_acc.llm_tokens_union = HybridBitset::max_ones();
+    let mut transform = |_acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        let mut new_acc = Acc::new_fresh();
+        new_acc.terminals_union = HybridL2Bitset::all(); // keep terminals unconstrained
         Some(Arc::new(new_acc))
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         unreachable!();
@@ -1092,13 +1328,12 @@ pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
+    let mut transform = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        let mut new_acc = (**acc).clone();
         new_acc.terminals_union = HybridL2Bitset::all();
         Some(Arc::new(new_acc))
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         unreachable!();
@@ -1110,13 +1345,12 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
+    let mut transform = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        let mut new_acc = (**acc).clone();
         new_acc.terminals_union -= disallowed_terminals;
         Some(Arc::new(new_acc))
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         unreachable!();
@@ -1128,20 +1362,18 @@ pub(crate) fn prune_disallowed_terminals(
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
+    let mut transform = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
         // If any of the matched terminals is disallowed by the union, prune.
-        let node_acc = &root.acc;
         for (state_id, matched_bv) in matched_terminals {
-            let allowed_terminals_union = node_acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
+            let allowed_terminals_union = acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_union) {
-                return None; // Prune this root
+                return None; // Prune this acc-bearing subtree
             }
         }
-        Some(root.acc.clone()) // Keep this root, no change to Acc
+        Some(acc.clone())
     };
 
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         *root_arc = Arc::new(GSSNode::new_fresh());
@@ -1153,10 +1385,7 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
-
+    let mut transform = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
         let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
             let mut new_terminals_btreemap = BTreeMap::new();
 
@@ -1175,13 +1404,13 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
             new_terminals_l2_bitset
         };
 
+        let mut new_acc = (**acc).clone();
         let new_terminals_union = map_one(&new_acc.terminals_union);
-
         new_acc.terminals_union = new_terminals_union;
 
         Some(Arc::new(new_acc))
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         *root_arc = Arc::new(GSSNode::new_fresh());
@@ -1195,17 +1424,16 @@ pub(crate) fn merge_trie2_nodes_if_needed(
 ) {
     let mut new_destinations = BTreeMap::new();
 
-    let mut internal_closure = |_internal: &GSSInternal| -> bool { false };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        if !root.acc.trie2_nodes.iter().any(
+    let mut transform = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        if !acc.trie2_nodes.iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != acc.llm_tokens_union
         ) {
-            return Some(root.acc.clone());
+            return Some(acc.clone());
         }
-        let mut new_acc = (*root.acc).clone();
+        let mut new_acc = (**acc).clone();
         // Create a single new destination for this merge operation.
-        let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
+        let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), acc.llm_tokens_union.clone()))
             .or_insert_with(|| PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
             .clone();
         let edge_key = (0, None);
@@ -1234,7 +1462,8 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         new_acc.trie2_nodes = BTreeSet::from([new_destination]);
         Some(Arc::new(new_acc))
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+
+    if let Some(new_root) = acc_transform_walk(root_arc, &mut transform, memo) {
         *root_arc = new_root;
     } else {
         unreachable!();
@@ -1243,6 +1472,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
 
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
+    /// Hoisting is applied automatically when rebuilding nodes.
     #[time_it]
     pub(crate) fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
@@ -1387,8 +1617,8 @@ fn canonicalize_node(
                 }
             }
 
-            // Important: pass a neutral Acc when rebuilding internal nodes, so we keep structure only.
-            pool.intern(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_map))
+            // Preserve internal acc exactly.
+            pool.intern(GSSNode::new_internal_exact(internal.acc.clone(), new_map))
         }
     };
 
@@ -1474,7 +1704,7 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
                     }
                     new_preds.insert(edge_val.clone(), new_by_depth);
                 }
-                Arc::new(GSSNode::new_with_map(Arc::new(Acc::new_fresh()), new_preds))
+                Arc::new(GSSNode::new_internal_exact(internal.acc.clone(), new_preds))
             }
         };
 
@@ -1514,7 +1744,13 @@ impl<'a> Ord for RootItem<'a> {
 
 impl<'a> RootItem<'a> {
     #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Arc<Acc> {
-        Arc::new(Acc::narrow(&self.path_acc, &self.node.acc()))
+        // Narrow path acc with the node's local acc (frontier semantics).
+        let narrowed = if self.node.local_acc_is_non_neutral() {
+            Acc::narrow(&self.path_acc, &self.node.local_acc())
+        } else {
+            self.path_acc.as_ref().clone()
+        };
+        Arc::new(narrowed)
     }
 }
 
@@ -1543,27 +1779,32 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
         for ((node_ptr, last_edge_opt), path_acc) in nodes_at_depth {
             let current_node = unsafe { &*node_ptr };
 
+            // Apply local acc at this node (frontier may sit here).
+            let path_acc_here = if current_node.local_acc_is_non_neutral() {
+                Arc::new(Acc::narrow(&path_acc, &current_node.local_acc()))
+            } else {
+                path_acc.clone()
+            };
+
             if current_node.is_root() {
                 if let Some(edge) = last_edge_opt {
-                    let final_acc = Arc::new(Acc::narrow(&path_acc, &current_node.acc()));
+                    // At root, we've already applied its local acc above; do not re-apply.
                     results
                         .entry(edge)
                         .or_default()
-                        .insert(final_acc);
+                        .insert(path_acc_here);
                 }
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
                     for pred_arc in preds_by_depth.values().flatten() {
-                        // Internal nodes do not contribute to the path acc. It is passed down unmodified.
-                        let per_child_acc = path_acc.clone();
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
                         queue
                             .entry(pred_depth)
                             .or_default()
                             .entry((pred_ptr, Some(edge_val.clone())))
-                            .and_modify(|e| *e = Arc::new(Acc::merge(e, &per_child_acc)))
-                            .or_insert_with(|| per_child_acc.clone());
+                            .and_modify(|e| *e = Arc::new(Acc::merge(e, &path_acc_here)))
+                            .or_insert_with(|| path_acc_here.clone());
                     }
                 }
             }
@@ -2112,6 +2353,126 @@ pub(crate) fn format_acc(
     }
 }
 
+// --- Acc frontier verification ---
+
+/// Verifies the frontier/line constraints for a set of GSS roots:
+/// 1) If a node has a non-neutral local acc, then no node reachable through predecessors
+///    (at any depth) may have a non-neutral local acc.
+/// 2) For any internal node: if all direct predecessors have the same non-neutral acc, and none is
+///    neutral, then this acc should be hoisted to the parent. It is invalid to leave it on the predecessors.
+///    This also flags the degenerate case of exactly one predecessor with a non-neutral acc.
+/// On failure, returns a detailed explanation and a pretty-printed GSS forest.
+pub fn verify_acc_constraints(roots: &[Arc<GSSNode>]) -> Result<(), String> {
+    // Helper: build error with printed forest.
+    let make_err = |why: String| -> String {
+        let (forest_str, _) = print_gss_forest(
+            roots,
+            &BiBTreeMap::new(),
+            &GSSPrintConfig { verbose: true, ..Default::default() },
+        );
+        format!("Acc frontier verification failed: {}\n\n{}", why, forest_str)
+    };
+
+    // 1) Check deep descendant acc conflict for each node with acc
+    let mut visited = HashSet::new();
+    let mut all_nodes: Vec<Arc<GSSNode>> = Vec::new();
+    let mut q = VecDeque::new();
+    for r in roots {
+        q.push_back(r.clone());
+    }
+    while let Some(n) = q.pop_front() {
+        let ptr = Arc::as_ptr(&n);
+        if !visited.insert(ptr) { continue; }
+        all_nodes.push(n.clone());
+        for pred in n.predecessors().values().flat_map(|m| m.values()).flatten() {
+            q.push_back(pred.clone());
+        }
+    }
+
+    // Build adjacency map for predecessor traversal
+    let mut adjacency: HashMap<*const GSSNode, Vec<Arc<GSSNode>>> = HashMap::new();
+    for n in &all_nodes {
+        let preds: Vec<Arc<GSSNode>> = n.predecessors().values().flat_map(|m| m.values()).flatten().cloned().collect();
+        adjacency.insert(Arc::as_ptr(n), preds);
+    }
+
+    // For each node with local acc, ensure no descendants have acc.
+    for n in &all_nodes {
+        if !local_acc_is_non_neutral(n.as_ref()) { continue; }
+        let start_ptr = Arc::as_ptr(n);
+        let mut dq: VecDeque<(Arc<GSSNode>, Vec<ParseStateEdgeContent>)> = VecDeque::new();
+        let mut seen = HashSet::new();
+        dq.push_back((n.clone(), Vec::new()));
+        seen.insert(start_ptr);
+        while let Some((cur, path)) = dq.pop_front() {
+            let cur_ptr = Arc::as_ptr(&cur);
+            for (edge, by_depth) in cur.predecessors() {
+                for preds in by_depth.values() {
+                    for p in preds {
+                        let p_ptr = Arc::as_ptr(p);
+                        if seen.insert(p_ptr) {
+                            let mut new_path = path.clone();
+                            new_path.push(edge.clone());
+                            if local_acc_is_non_neutral(p.as_ref()) {
+                                // Conflict: descendant acc found
+                                let why = format!(
+                                    "Node with local acc has descendant with local acc.\nOffending path length {} via edges {:?}.\nParent ptr={:p}, child ptr={:p}",
+                                    new_path.len(),
+                                    new_path.iter().map(|e| e.state_id.0).collect::<Vec<_>>(),
+                                    start_ptr, p_ptr
+                                );
+                                return Err(make_err(why));
+                            }
+                            dq.push_back((p.clone(), new_path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) For each internal node, if all direct predecessors carry the same non-neutral acc (and none neutral),
+    //    it should be hoisted to this node.
+    for n in &all_nodes {
+        if let GSSNode::Internal(i) = n.as_ref() {
+            let mut preds: Vec<Arc<GSSNode>> = Vec::new();
+            for v in i.predecessors.values() {
+                for vv in v.values() {
+                    for p in vv {
+                        preds.push(p.clone());
+                    }
+                }
+            }
+            if preds.is_empty() { continue; }
+
+            let mut base_acc: Option<Arc<Acc>> = None;
+            let mut has_neutral = false;
+            let mut differing = false;
+            for p in &preds {
+                let pa = local_acc_ref(p.as_ref());
+                if pa.is_merge_neutral() { has_neutral = true; break; }
+                if let Some(b) = &base_acc {
+                    if **b != **pa {
+                        differing = true;
+                        break;
+                    }
+                } else {
+                    base_acc = Some(pa.clone());
+                }
+            }
+            if !has_neutral && !differing {
+                // all preds have equal non-neutral acc
+                let why = format!(
+                    "Internal node's predecessors all have equal non-neutral acc but it was not hoisted.\nNode ptr={:p}, num_preds={}.",
+                    Arc::as_ptr(n), preds.len()
+                );
+                return Err(make_err(why));
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -2150,16 +2511,18 @@ mod tests {
 
         assert_eq!(pushed.max_depth(), 1);
 
-        // The new logic for `push` is to inherit the predecessor's acc, as the local acc is fresh.
+        // Frontier should hoist to the pushed node (single predecessor).
+        // The node's aggregate acc equals the hoisted acc.
         assert_eq!(*pushed.acc(), *root.acc());
     }
 
     #[test]
     fn test_gss_pop() {
         let root = Arc::new(GSSNode::new(mock_acc(1))); // Allows all but 1
-        let pushed = Arc::new(root.push(mock_edge(10))); // Now inherits root's acc.
+        let pushed = Arc::new(root.push(mock_edge(10))); // Hoists to internal above the root.
 
-        // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path.
+        // Pop 1 level from `pushed`. The initial_acc is "fresh" (all allowed), so it doesn't constrain the path,
+        // but we narrow at the parent with its local acc before hitting the root.
         let pop_result = pushed.popn(1);
         // We should not keep root nodes in paths.
         assert_eq!(pop_result.paths.len(), 0);
@@ -2169,7 +2532,7 @@ mod tests {
         // The map should contain the edge 10 leading to the root
         let combined_acc = combined_acc_map.get(&mock_edge(10)).unwrap();
 
-        // `pushed.acc` (same as `root.acc`) allows all but 1.
+        // `pushed` hoisted acc (same as `root.acc`) allows all but 1.
         // The narrowed union should allow all but 1.
         let mut disallowed = HybridBitset::zeros();
         disallowed.insert(1);
@@ -2732,5 +3095,104 @@ mod tests {
             allowed_tokens,
             "Allowed tokens should be restricted to only token 0 after filtering"
         );
+    }
+
+    // --- New tests for frontier/line constraints and hoisting behavior ---
+
+    #[test]
+    fn test_verify_frontier_allows_mixed_predecessors() {
+        // Two predecessors: one with acc x, one neutral. This is allowed.
+        let mut acc_x = mock_acc(7);
+        let pred_with_x = Arc::new(GSSNode::new(acc_x.clone()));
+        let pred_neutral = Arc::new(GSSNode::new(empty_acc()));
+
+        let mut preds = NodeMap::new();
+        preds.entry(mock_edge(1)).or_default().insert(pred_with_x.dest_key(), vec![pred_with_x.clone()]);
+        preds.entry(mock_edge(2)).or_default().insert(pred_neutral.dest_key(), vec![pred_neutral.clone()]);
+
+        // Build without additional narrowing; hoisting should NOT occur.
+        let node = GSSNode::new_with_map(Arc::new(empty_acc()), preds);
+        let res = verify_acc_constraints(&[Arc::new(node.clone())]);
+        assert!(res.is_ok(), "Mixed predecessor acc should be allowed: {:?}", res);
+    }
+
+    #[test]
+    fn test_verify_frontier_allows_different_predecessor_accs() {
+        // Two predecessors: acc x and acc y (x != y). This is allowed.
+        let pred_x = Arc::new(GSSNode::new(mock_acc(1)));
+        let pred_y = Arc::new(GSSNode::new(mock_acc(2)));
+
+        let mut preds = NodeMap::new();
+        preds.entry(mock_edge(3)).or_default().insert(pred_x.dest_key(), vec![pred_x.clone()]);
+        preds.entry(mock_edge(4)).or_default().insert(pred_y.dest_key(), vec![pred_y.clone()]);
+
+        let node = GSSNode::new_with_map(Arc::new(empty_acc()), preds);
+        let res = verify_acc_constraints(&[Arc::new(node.clone())]);
+        assert!(res.is_ok(), "Different predecessor accs should be allowed: {:?}", res);
+    }
+
+    #[test]
+    fn test_verify_frontier_rejects_single_predecessor_with_acc_not_hoisted() {
+        // Build a violating structure manually: internal with one predecessor that has acc,
+        // but internal did not hoist.
+        let pred = Arc::new(GSSNode::new(mock_acc(9)));
+        let mut preds = NodeMap::new();
+        preds.entry(mock_edge(10)).or_default().insert(pred.dest_key(), vec![pred.clone()]);
+
+        // Build internal exactly with neutral local acc to simulate missing hoist.
+        let bad = Arc::new(GSSNode::new_internal_exact(Arc::new(empty_acc()), preds));
+        let res = verify_acc_constraints(&[bad.clone()]);
+        assert!(res.is_err(), "Verification should fail for missing hoist on single predecessor");
+        let msg = res.err().unwrap();
+        assert!(msg.contains("Internal node's predecessors all have equal non-neutral acc"), "Unexpected message: {}", msg);
+    }
+
+    #[test]
+    fn test_verify_frontier_rejects_equal_predecessor_accs_not_hoisted() {
+        // Two predecessors with the same acc X that were not hoisted.
+        let pred1 = Arc::new(GSSNode::new(mock_acc(11)));
+        let pred2 = Arc::new(GSSNode::new(mock_acc(11)));
+
+        let mut preds = NodeMap::new();
+        preds.entry(mock_edge(5)).or_default().insert(pred1.dest_key(), vec![pred1.clone()]);
+        preds.entry(mock_edge(5)).or_default().insert(pred2.dest_key(), vec![pred2.clone()]);
+
+        let bad = Arc::new(GSSNode::new_internal_exact(Arc::new(empty_acc()), preds));
+        let res = verify_acc_constraints(&[bad.clone()]);
+        assert!(res.is_err(), "Verification should fail for equal predecessor accs without hoist");
+        let msg = res.err().unwrap();
+        assert!(msg.contains("Internal node's predecessors all have equal non-neutral acc"), "Unexpected message: {}", msg);
+    }
+
+    #[test]
+    fn test_verify_frontier_rejects_descendant_acc_conflict() {
+        // Create an internal node with local acc, and incorrectly also put an acc in its predecessor.
+        let pred_with_acc = Arc::new(GSSNode::new(mock_acc(20)));
+        let mut preds = NodeMap::new();
+        preds.entry(mock_edge(1)).or_default().insert(pred_with_acc.dest_key(), vec![pred_with_acc.clone()]);
+        let mut internal = GSSNode::new_internal_exact(Arc::new(mock_acc(21)), preds); // violation: both internal and predecessor have acc
+        let res = verify_acc_constraints(&[Arc::new(internal.clone())]);
+        assert!(res.is_err(), "Verification should fail when a node with acc has descendant with acc");
+        let msg = res.err().unwrap();
+        assert!(msg.contains("Node with local acc has descendant with local acc"), "Unexpected message: {}", msg);
+    }
+
+    #[test]
+    fn test_push_hoists_acc_from_single_predecessor() {
+        // Build a root with a non-neutral acc, then push a single edge -> the new internal must hoist.
+        let root = Arc::new(GSSNode::new(mock_acc(33)));
+        let pushed = root.push(mock_edge(99));
+        // Verify constraints and behavior
+        assert!(verify_acc_constraints(&[Arc::new(pushed.clone())]).is_ok());
+        // Allowed tokens should equal the original root's allowed tokens.
+        assert_eq!(pushed.allowed_llm_tokens(), root.allowed_llm_tokens());
+    }
+
+    #[test]
+    fn test_push_many_hoists_acc_when_all_from_same_single_predecessor() {
+        let root = Arc::new(GSSNode::new(mock_acc(44)));
+        let pushed = root.push_many(vec![mock_edge(1), mock_edge(2)]);
+        assert!(verify_acc_constraints(&[Arc::new(pushed.clone())]).is_ok());
+        assert_eq!(pushed.allowed_llm_tokens(), root.allowed_llm_tokens());
     }
 }
