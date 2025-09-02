@@ -2821,7 +2821,7 @@ mod tests {
 
         // Optional: Verify that the new leaf IS stripped of its acc.
         let mut q = VecDeque::new();
-        q.push_back(Arc::new(merged));
+        q.push_back(Arc::new(merged.clone()));
         let mut visited = HashSet::new();
         let mut final_leaf_acc: Option<Arc<Acc>> = None;
         while let Some(node) = q.pop_front() {
@@ -2835,6 +2835,28 @@ mod tests {
             }
         }
         assert!(final_leaf_acc.expect("Should have found a leaf").is_merge_neutral(), "The final leaf's acc should be stripped to default");
+
+        // --- New assertions ---
+        // 1. Check get_roots
+        let roots_map = get_roots(std::iter::once(&merged));
+        assert_eq!(roots_map.len(), 1, "get_roots should find one root path");
+        let (last_edge, acc_set) = roots_map.iter().next().unwrap();
+        assert_eq!(*last_edge, mock_edge(5));
+        assert_eq!(acc_set.len(), 1, "There should be one unique path acc");
+        let path_acc = acc_set.iter().next().unwrap();
+        assert_eq!(**path_acc, *final_acc, "Path acc from get_roots should match the hoisted acc");
+
+        // 2. Check popping
+        let tower_depth = 3;
+        let popper = merged.popn(tower_depth + 1); // Pop one level past the bottom
+        assert!(popper.paths.is_empty(), "Popper paths should be empty after popping past bottom");
+        assert_eq!(popper.below_bottom.len(), 1, "Should have one entry in below_bottom");
+        let (depth, by_edge) = popper.below_bottom.iter().next().unwrap();
+        assert_eq!(*depth, 2, "Popping 1 level past bottom should result in depth key 2");
+        assert_eq!(by_edge.len(), 1, "Should be one edge leading to bottom");
+        let (edge, acc) = by_edge.iter().next().unwrap();
+        assert_eq!(*edge, mock_edge(5));
+        assert_eq!(**acc, *final_acc, "Acc from popping past bottom should match hoisted acc");
     }
 
     #[test]
