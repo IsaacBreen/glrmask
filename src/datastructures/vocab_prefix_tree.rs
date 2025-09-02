@@ -393,6 +393,119 @@ impl VocabPrefixTree {
         }
     }
 
+     /// Finds the token ID corresponding to the exact byte sequence.
+     /// Returns `None` if the sequence does not correspond to a token in the tree.
+     /// Specifically, searching for the empty string `b""` only succeeds if an
+     /// empty string token was explicitly added during the build process.
+    pub fn find_token(&self, bytes: &[u8]) -> Option<usize> {
+        if bytes.is_empty() {
+            // Only return the root's ID if it represents an actual empty string token.
+            if self.has_empty_string_token {
+                return Some(self.root.token_id);
+            } else {
+                // The root ID (likely 0) is just a convention, not a real token here.
+                return None;
+            }
+        }
+
+        let mut current_node = &self.root;
+        let mut remaining_bytes = bytes;
+
+        loop {
+            let mut found_match = false;
+            // Iterate through the children of the current node.
+            for (edge_label, child_node) in &current_node.children {
+                if remaining_bytes.starts_with(edge_label) {
+                    // Found an edge matching a prefix of the remaining bytes.
+                    remaining_bytes = &remaining_bytes[edge_label.len()..];
+                    current_node = child_node; // Move down to the child node.
+                    found_match = true;
+                    break; // Proceed to the next level or check for final match.
+                }
+            }
+
+            if !found_match {
+                // No child edge matches the start of the remaining bytes.
+                // The full sequence is not present in the tree.
+                return None;
+            }
+
+            if remaining_bytes.is_empty() {
+                // We have consumed all bytes and landed exactly on `current_node`.
+                // Return its token_id. Every node has one.
+                return Some(current_node.token_id);
+            }
+            // If remaining_bytes is not empty, continue the loop from the new current_node.
+        }
+    }
+
+    /// Finds the longest token in the tree that is a prefix of the given `bytes`.
+    ///
+    /// Returns `Some((token_id, matched_prefix_bytes))` if a match is found.
+    /// The `matched_prefix_bytes` is a slice of the token's full byte sequence stored in the tree.
+    ///
+    /// If the input `bytes` is empty:
+    ///  - If the empty string `""` is a token in the tree, it returns `Some((empty_token_id, &[]))`.
+    ///  - Otherwise, it returns `None`.
+    ///
+    /// If the input `bytes` is not empty:
+    ///  - It searches for the longest token that is a prefix of `bytes`.
+    ///  - If the empty string `""` is a token and no non-empty token prefix is found,
+    ///    it will return `Some((empty_token_id, &[]))`.
+    ///  - If no token (including potentially the empty string) is a prefix, it returns `None`.
+    pub fn find_longest_prefix_token<'s>(&'s self, bytes: &[u8]) -> Option<(usize, &'s [u8])> {
+        let mut longest_match_info: Option<(usize, &'s [u8])> = None;
+        let mut current_node: &'s VocabPrefixTreeNode = &self.root;
+
+        // Handle empty string token possibility upfront.
+        // If it exists, it's a candidate for the longest prefix.
+        if self.has_empty_string_token {
+            longest_match_info = Some((self.root.token_id(), self.root.prefix())); // prefix is &[]
+        }
+
+        // If the input `bytes` itself is empty, the only possible match is the empty string token (if it exists).
+        if bytes.is_empty() {
+            return longest_match_info;
+        }
+
+        let mut remaining_bytes = bytes;
+
+        // Traverse the tree along the path defined by the input `bytes`.
+        // Every node landed on is a token, and thus a candidate for the longest prefix match.
+        loop {
+            let mut found_match_in_children = false;
+            for (edge_label, child_node) in current_node.children() {
+                if remaining_bytes.starts_with(edge_label) {
+                    // Descend to the child node.
+                    current_node = child_node;
+                    remaining_bytes = &remaining_bytes[edge_label.len()..];
+
+                    // This child_node represents a token. Its full prefix is `current_node.prefix()`.
+                    // This token is a prefix of the original `bytes` input.
+                    // Update longest_match_info as this is a longer or equally long (but later found) prefix.
+                    longest_match_info = Some((current_node.token_id(), current_node.prefix()));
+
+                    found_match_in_children = true;
+                    break; // Continue traversal from the new current_node.
+                }
+            }
+
+            if !found_match_in_children {
+                // No child edge matches the start of the remaining_bytes.
+                // Cannot extend the prefix further. The current longest_match_info is the result.
+                break;
+            }
+
+            if remaining_bytes.is_empty() {
+                // All input bytes have been consumed along tree edges.
+                // The token corresponding to the current_node is the longest possible match.
+                // (This was already updated when we landed on current_node).
+                break;
+            }
+        }
+        longest_match_info
+    }
+
     /// Returns `true` if the empty string `""` was provided as a token
     /// during the build process, `false` otherwise.
     pub fn has_empty_string_token(&self) -> bool {
