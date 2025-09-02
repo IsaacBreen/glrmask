@@ -1121,7 +1121,7 @@ pub(crate) fn disallow_terminals_and_prune_arc(
 ) {
     let mut internal_closure = |internal: &GSSInternal| -> Option<_> {
         let mut acc = internal.acc.as_ref().clone();
-        acc.terminals_union -= disallowed_terminals;
+        acc.terminals_union &= disallowed_terminals.complement();
         if acc == *internal.acc.as_ref() {
             Some((internal.acc.clone(), true))
         } else {
@@ -1130,7 +1130,7 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     };
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
-        new_acc.terminals_union -= disallowed_terminals;
+        new_acc.terminals_union &= &disallowed_terminals.complement();
         Some(Arc::new(new_acc))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
