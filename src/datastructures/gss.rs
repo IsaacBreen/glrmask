@@ -536,19 +536,73 @@ impl GSSNode {
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
     /// In the new design, `acc` becomes the local Acc on this new internal node.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
-        let pred_tx = predecessor_arc;
+        // --- SUCK UP LOGIC ---
+        let pred_local_acc = predecessor_arc.local_acc();
+
+        let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
+            || pred_local_acc.terminals_union != HybridL2Bitset::all();
+
+        let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+            // Suck up constraints.
+            let mut parent_acc = acc; // Start with the acc passed to the function.
+            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
+            parent_acc.terminals_union &= &pred_local_acc.terminals_union;
+
+            // Create new predecessor with stripped constraints but original payload (trie2_nodes).
+            let mut new_pred_acc = Acc::new_fresh();
+            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
+
+            let new_predecessor = match predecessor_arc.as_ref() {
+                GSSNode::Root(_) => GSSNode::new(new_pred_acc),
+                GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(new_pred_acc), i.predecessors.clone()),
+            };
+
+            (parent_acc, Arc::new(new_predecessor))
+        } else {
+            // No constraints to suck up.
+            (acc, predecessor_arc)
+        };
+
+        let pred_tx = final_predecessor_arc;
         let mut predecessors_map = NodeMap::new();
         predecessors_map
             .entry(edge_value)
             .or_default()
             .insert(pred_tx.dest_key(), vec![pred_tx]);
-        Self::new_with_map(Arc::new(acc), predecessors_map)
+        Self::new_with_map(Arc::new(final_parent_acc), predecessors_map)
     }
 
     /// Helper to create a GSSNode with multiple predecessors, used by `push_many`.
     /// In the new design, `acc` becomes the local Acc on this new internal node.
     fn new_with_many_predecessors(predecessor_arc: Arc<GSSNode>, edge_values: Vec<ParseStateEdgeContent>, acc: Acc) -> Self {
-        let pred_tx = predecessor_arc;
+        // --- SUCK UP LOGIC (identical to single predecessor) ---
+        let pred_local_acc = predecessor_arc.local_acc();
+
+        let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
+            || pred_local_acc.terminals_union != HybridL2Bitset::all();
+
+        let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+            // Suck up constraints.
+            let mut parent_acc = acc; // Start with the acc passed to the function.
+            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
+            parent_acc.terminals_union &= &pred_local_acc.terminals_union;
+
+            // Create new predecessor with stripped constraints but original payload (trie2_nodes).
+            let mut new_pred_acc = Acc::new_fresh();
+            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
+
+            let new_predecessor = match predecessor_arc.as_ref() {
+                GSSNode::Root(_) => GSSNode::new(new_pred_acc),
+                GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(new_pred_acc), i.predecessors.clone()),
+            };
+
+            (parent_acc, Arc::new(new_predecessor))
+        } else {
+            // No constraints to suck up.
+            (acc, predecessor_arc)
+        };
+
+        let pred_tx = final_predecessor_arc;
         let mut predecessors_map = NodeMap::new();
         for edge_value in edge_values {
             predecessors_map
@@ -558,7 +612,7 @@ impl GSSNode {
                 .or_default()
                 .push(pred_tx.clone());
         }
-        Self::new_with_map(Arc::new(acc), predecessors_map)
+        Self::new_with_map(Arc::new(final_parent_acc), predecessors_map)
     }
 
     pub fn new_fresh() -> Self {
