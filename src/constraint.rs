@@ -2659,7 +2659,7 @@ impl<'a> GrammarConstraintState<'a> {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
-        let mut initial_values_for_map: Vec<(PrecomputeNode3Index, GLRParserState<'a>)> = Vec::new();
+        let mut initial_values_for_map: Vec<(PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV))> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             if glr_state.active_state.stack.is_empty() {
                 continue;
@@ -2683,11 +2683,12 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
-                let mut glr_state = glr_state.clone();
+                let glr_state = glr_state.clone();
+                let mut allowed_bv = self.parent.all_internal_llm_tokens_bitset();
                 if !forbidden_llm_tokens.is_empty() {
-                    disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
+                    allowed_bv -= &forbidden_llm_tokens;
                 }
-                initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
+                initial_values_for_map.push((precomputed_trie_root_arc.clone(), (glr_state, allowed_bv)));
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
             }
@@ -2706,8 +2707,9 @@ impl<'a> GrammarConstraintState<'a> {
         Trie::special_map_grouped(
             &self.parent.trie3_god,
             initial_values_for_map,
-            // step_fn: (current_glr_state, (pop, llm_token_bv), destinations_map)
-            |glr_s, (pop, llm_token_bv), dest_map| {
+            // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
+            |state, (pop, llm_token_bv_from_edge), dest_map| {
+                let (glr_s, allowed_bv) = state;
                 let popped = glr_s.active_state.stack.popn(*pop);
                 let mut results = Vec::new();
 
@@ -2729,22 +2731,26 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut new_glr_s = glr_s.clone();
                     new_glr_s.active_state.stack = merged_gss;
 
-                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv, &mut HashMap::new());
+                    let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;
 
-                    if new_glr_s.is_ok() {
-                        results.push((dest_idx.clone(), new_glr_s));
+                    if new_glr_s.is_ok() && !new_allowed_bv.is_empty() {
+                        results.push((dest_idx.clone(), (new_glr_s, new_allowed_bv)));
                     }
                 }
                 results
             },
             // merge_fn
-            |glr_s1, glr_s2| {
+            |state1, state2| {
+                let (glr_s1, allowed_bv1) = state1;
+                let (glr_s2, allowed_bv2) = state2;
                 glr_s1.merge_with(glr_s2);
+                *allowed_bv1 |= allowed_bv2;
             },
-            // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-            |precomputed_node_data, glr_s| {
-                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                let keep_going = glr_s.is_ok();
+            // process_fn: (precomputed_node_data, final_state_for_this_path)
+            |precomputed_node_data, state| {
+                let (glr_s, allowed_bv) = state;
+                let glr_active_tokens = &glr_s.active_state.stack.allowed_llm_tokens() & allowed_bv;
+                let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();
                 if precomputed_node_data.value.end {
                     *final_mask_internal.borrow_mut() |= glr_active_tokens;
                 }
