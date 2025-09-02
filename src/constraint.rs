@@ -790,21 +790,19 @@ impl GrammarConstraint {
 
                                 let edge_key = (0, Some(last_edge.state_id));
 
-                                // let mut inserter = EdgeInserter::new(
-                                //     glr_s.active_state.trie2_god.as_ref().unwrap(),
-                                //     src_arc.clone(),
-                                //     edge_key,
-                                //     tokens_to_push.clone(),
-                                //     |e, n| *e |= n,
-                                //     |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                //     |ev, t| *ev &= &t.live_tokens,
-                                // );
-                                //
-                                // inserter = inserter.try_destination(trie2_end.clone());
+                                let mut inserter = EdgeInserter::new(
+                                    glr_s.active_state.trie2_god.as_ref().unwrap(),
+                                    src_arc.clone(),
+                                    edge_key,
+                                    tokens_to_push.clone(),
+                                    |e, n| *e |= n,
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                    |ev, t| *ev &= &t.live_tokens,
+                                );
 
-                                // let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie node");
-                                let final_dest_arc = trie2_end.clone();
+                                inserter = inserter.try_destination(trie2_end.clone());
 
+                                let final_dest_arc = inserter.clone_into_option().expect("Failed to insert end edge into Trie node");
                                 let final_dest_wr = final_dest_arc.clone();
                                 dest_agg.entry(final_dest_wr.clone()).and_modify(|bv| *bv |= &tokens_to_push).or_insert(tokens_to_push.clone());
                             }
