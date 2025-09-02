@@ -783,18 +783,67 @@ impl GSSNode {
         let mut merged_map = self_predecessors;
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
-        // Merge local Accs for internal nodes (union of alternatives).
-        let merged_local_acc = match (&self, other) {
-            (GSSNode::Internal(a), GSSNode::Internal(b)) => Arc::new(Acc::merge(&a.acc, &b.acc)),
-            (GSSNode::Internal(a), _) => a.acc.clone(),
-            _ => Arc::new(Acc::new_fresh()),
-        };
+        // --- NEW SUCK UP LOGIC ---
+        // Collect all unique predecessor accs from the merged map.
+        let mut child_accs: BTreeSet<Arc<Acc>> = BTreeSet::new();
+        let mut has_preds = false;
+        for preds_by_depth in merged_map.values() {
+            for pred_vec in preds_by_depth.values() {
+                if !pred_vec.is_empty() {
+                    has_preds = true;
+                    for pred_arc in pred_vec {
+                        child_accs.insert(pred_arc.local_acc());
+                    }
+                }
+            }
+        }
+
+        let mut final_predecessors_map = merged_map;
+        let final_parent_acc;
+
+        if has_preds && child_accs.len() == 1 {
+            // All children have the same acc. Suck it up.
+            let common_acc = child_accs.into_iter().next().unwrap();
+
+            if !common_acc.is_merge_neutral() {
+                // The parent takes on this common acc.
+                final_parent_acc = common_acc;
+
+                // And we need to create new children with a fresh acc.
+                let fresh_acc = Arc::new(Acc::new_fresh());
+                let mut new_preds_map = BTreeMap::new();
+                for (edge, preds_by_depth) in final_predecessors_map {
+                    let mut new_preds_by_depth = BTreeMap::new();
+                    for (depth, pred_vec) in preds_by_depth {
+                        let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
+                        for pred_arc in pred_vec {
+                            let new_pred = match &*pred_arc {
+                                GSSNode::Root(_) => GSSNode::new_fresh(),
+                                GSSNode::Internal(i) => GSSNode::new_with_map(fresh_acc.clone(), i.predecessors.clone()),
+                            };
+                            new_pred_vec.push(Arc::new(new_pred));
+                        }
+                        new_preds_by_depth.insert(depth, new_pred_vec);
+                    }
+                    new_preds_map.insert(edge, new_preds_by_depth);
+                }
+                final_predecessors_map = new_preds_map;
+            } else {
+                // Common acc is neutral, so parent is also neutral. No change to children needed.
+                final_parent_acc = common_acc;
+            }
+        } else {
+            // Children have different accs, or there are no children.
+            // Parent gets a fresh acc.
+            final_parent_acc = Arc::new(Acc::new_fresh());
+        }
+
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
 
-            for (edge_val, preds_by_depth) in merged_map {
+            for (edge_val, preds_by_depth) in final_predecessors_map {
                 let mut unified_preds_by_depth = BTreeMap::new();
                 for (depth, pred_vec) in preds_by_depth {
                     let mut unified_pred_vec = Vec::new();
@@ -810,10 +859,10 @@ impl GSSNode {
             }
             unified_predecessors
         } else {
-            merged_map
+            final_predecessors_map
         };
 
-        *self = GSSNode::new_with_map(merged_local_acc, final_predecessors);
+        *self = GSSNode::new_with_map(final_parent_acc, final_predecessors);
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
