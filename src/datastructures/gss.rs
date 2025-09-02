@@ -2796,13 +2796,13 @@ mod tests {
         // --- Leaf 1 with trie2_node t1 ---
         let mut acc1 = empty_acc();
         acc1.trie2_nodes.insert(t1.clone());
-        let leaf1 = Arc::new(GSSNode::new(acc1));
+        let leaf1 = Arc::new(GSSNode::new(acc1.clone()));
         let tower1 = build_tower_from_leaf(leaf1);
 
         // --- Leaf 2 with trie2_node t2 ---
         let mut acc2 = empty_acc();
         acc2.trie2_nodes.insert(t2.clone());
-        let leaf2 = Arc::new(GSSNode::new(acc2));
+        let leaf2 = Arc::new(GSSNode::new(acc2.clone()));
         let tower2 = build_tower_from_leaf(leaf2);
 
         // --- Merge the two identical towers ---
@@ -2812,7 +2812,7 @@ mod tests {
         // --- Assertions ---
         // With the new hoisting logic, the merged acc from the leaves should be hoisted
         // all the way to the top-level node of the merged tower.
-        let final_acc = merged.local_acc();
+        let final_acc = Acc::merge(&acc1, &acc2);
         let trie2_nodes = &final_acc.trie2_nodes;
 
         assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
@@ -2844,7 +2844,7 @@ mod tests {
         assert_eq!(*last_edge, mock_edge(5));
         assert_eq!(acc_set.len(), 1, "There should be one unique path acc");
         let path_acc = acc_set.iter().next().unwrap();
-        assert_eq!(**path_acc, *final_acc, "Path acc from get_roots should match the hoisted acc");
+        assert_eq!(**path_acc, final_acc, "Path acc from get_roots should match the hoisted acc");
 
         // 2. Check popping
         let tower_depth = 3;
@@ -2856,7 +2856,7 @@ mod tests {
         assert_eq!(by_edge.len(), 1, "Should be one edge leading to bottom");
         let (edge, acc) = by_edge.iter().next().unwrap();
         assert_eq!(*edge, mock_edge(5));
-        assert_eq!(**acc, *final_acc, "Acc from popping past bottom should match hoisted acc");
+        assert_eq!(**acc, final_acc, "Acc from popping past bottom should match hoisted acc");
     }
 
     #[test]
