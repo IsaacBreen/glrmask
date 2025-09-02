@@ -1609,7 +1609,7 @@ fn canonicalize_node(
 }
 
 // Convenience: canonicalize a list of roots in-place with a single pool for maximal sharing.
-fn simplify_roots_in_place(roots: &mut [Arc<GSSNode>]) {
+pub(crate) fn simplify_roots_in_place(roots: &mut [Arc<GSSNode>]) {
     if roots.is_empty() { return; }
     let mut pool = GSSInternPool::new();
     let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
