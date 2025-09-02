@@ -637,7 +637,7 @@ impl GrammarConstraint {
 
         if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             let mut acc = Acc::new_fresh();
-            acc.trie2_nodes.insert(base_trie2_root_wr.clone());
+            acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
             let gss_leaf = Arc::new(GSSNode::new(acc));
             base_gss_nodes.push(Arc::new(
                 gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
@@ -645,7 +645,7 @@ impl GrammarConstraint {
         } else {
             for state_id in parser.table.keys() {
                 let mut acc = Acc::new_fresh();
-                acc.trie2_nodes.insert(base_trie2_root_wr.clone());
+                acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
                 let gss_leaf = Arc::new(GSSNode::new(acc));
                 base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
             }
@@ -773,7 +773,7 @@ impl GrammarConstraint {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                             crate::debug!(4, "Trie: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
-                            for src_wr in gss_root_acc.trie2_nodes.iter() {
+                            for src_wr in gss_root_acc.trie2_nodes().iter() {
                                 let src_arc = src_wr.as_arc().clone();
                                 let src_live = { src_arc.read(&trie2_god).expect("poison").value.live_tokens.clone() };
                                 let tokens_to_push = &active_llm_tokens_for_root & &src_live;
