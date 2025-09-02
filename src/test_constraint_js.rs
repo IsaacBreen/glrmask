@@ -529,7 +529,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 1;
+        let x = 5;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -672,12 +672,12 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // constraint_state.print_gss();
         // constraint_state.explain_stack();
 
-        // let current_mask = constraint_state.get_mask();
-        // println!("  get_mask took: {:?}", mask_start.elapsed());
-        // println!("  Current mask: {:?}", current_mask);
-        //
-        // assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
-        // println!("  Token is in the mask.");
+        let current_mask = constraint_state.get_mask();
+        println!("  get_mask took: {:?}", mask_start.elapsed());
+        println!("  Current mask: {:?}", current_mask);
+
+        assert!(current_mask.contains(llm_token_id.0), "Token {:?} (ID {}) not in mask at step {}", current_token_str, llm_token_id.0, i + 1);
+        println!("  Token is in the mask.");
 
         let commit_start = Instant::now();
         constraint_state.commit(llm_token_id);
@@ -685,9 +685,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
         current_text_byte_offset = token_end_byte;
 
-        profiler::print_summary_flat();
-        profiler::print_summary();
-        profiler::reset()
+        // profiler::print_summary_flat();
+        // profiler::print_summary();
+        // profiler::reset()
     }
 
     println!("\nFinished processing token sequence.");
