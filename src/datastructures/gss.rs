@@ -2809,25 +2809,32 @@ mod tests {
         let mut merged = tower1.clone();
         merged.merge_with_depth(usize::MAX, &tower2);
 
-        // --- Traverse to collect leaves and inspect trie2_nodes at the bottom ---
+        // --- Assertions ---
+        // With the new hoisting logic, the merged acc from the leaves should be hoisted
+        // all the way to the top-level node of the merged tower.
+        let final_acc = merged.local_acc();
+        let trie2_nodes = &final_acc.trie2_nodes;
+
+        assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
+        assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
+        assert!(trie2_nodes.contains(&t2), "Merged acc missing trie2 node 2");
+
+        // Optional: Verify that the new leaf IS stripped of its acc.
         let mut q = VecDeque::new();
         q.push_back(Arc::new(merged));
         let mut visited = HashSet::new();
-        let mut leaves = Vec::new();
+        let mut final_leaf_acc: Option<Arc<Acc>> = None;
         while let Some(node) = q.pop_front() {
             if !visited.insert(Arc::as_ptr(&node)) { continue; }
-            if node.is_root() { leaves.push(node.clone()); }
+            if node.is_root() {
+                assert!(final_leaf_acc.is_none(), "Should only find one leaf");
+                final_leaf_acc = Some(node.local_acc());
+            }
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() {
                 q.push_back(p.clone());
             }
         }
-
-        assert_eq!(leaves.len(), 1, "Merging identical towers should result in a single unified leaf node");
-        let leaf = &leaves[0];
-        let trie2_nodes = &leaf.acc().trie2_nodes;
-        assert_eq!(trie2_nodes.len(), 2, "Unified leaf should contain the union of all trie2 nodes from merged towers");
-        assert!(trie2_nodes.contains(&t1), "Unified leaf missing trie2 node 1");
-        assert!(trie2_nodes.contains(&t2), "Unified leaf missing trie2 node 2");
+        assert!(final_leaf_acc.expect("Should have found a leaf").is_merge_neutral(), "The final leaf's acc should be stripped to default");
     }
 
     #[test]
