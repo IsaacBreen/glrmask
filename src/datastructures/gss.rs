@@ -1119,54 +1119,42 @@ pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let node_ptr = Arc::as_ptr(root_arc);
-    if let Some(cached) = memo.get(&node_ptr) {
-        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
-        return;
-    }
-
-    let new_node = match root_arc.as_ref() {
-        GSSNode::Root(root) => {
-            let mut new_acc = (*root.acc).clone();
-            new_acc.llm_tokens_union = HybridBitset::max_ones();
-            GSSNode::new(new_acc)
-        }
-        GSSNode::Internal(internal) => {
-            let mut new_acc = (*internal.acc).clone();
-            new_acc.llm_tokens_union = HybridBitset::max_ones();
-            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
-        }
+    let mut internal_closure = |internal: &GSSInternal| {
+        let mut new_acc = (*internal.acc).clone();
+        new_acc.llm_tokens_union = HybridBitset::max_ones();
+        Some((Arc::new(new_acc), true))
     };
-    let new_arc = Arc::new(new_node);
-    memo.insert(node_ptr, Some(new_arc.clone()));
-    *root_arc = new_arc;
+    let mut root_closure = |root: &GSSRoot| {
+        let mut new_acc = (*root.acc).clone();
+        new_acc.llm_tokens_union = HybridBitset::max_ones();
+        Some(Arc::new(new_acc))
+    };
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new_fresh());
+    }
 }
 
 pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let node_ptr = Arc::as_ptr(root_arc);
-    if let Some(cached) = memo.get(&node_ptr) {
-        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
-        return;
-    }
-
-    let new_node = match root_arc.as_ref() {
-        GSSNode::Root(root) => {
-            let mut new_acc = (*root.acc).clone();
-            new_acc.terminals_union = HybridL2Bitset::all();
-            GSSNode::new(new_acc)
-        }
-        GSSNode::Internal(internal) => {
-            let mut new_acc = (*internal.acc).clone();
-            new_acc.terminals_union = HybridL2Bitset::all();
-            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
-        }
+    let mut internal_closure = |internal: &GSSInternal| {
+        let mut new_acc = (*internal.acc).clone();
+        new_acc.terminals_union = HybridL2Bitset::all();
+        Some((Arc::new(new_acc), true))
     };
-    let new_arc = Arc::new(new_node);
-    memo.insert(node_ptr, Some(new_arc.clone()));
-    *root_arc = new_arc;
+    let mut root_closure = |root: &GSSRoot| {
+        let mut new_acc = (*root.acc).clone();
+        new_acc.terminals_union = HybridL2Bitset::all();
+        Some(Arc::new(new_acc))
+    };
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new_fresh());
+    }
 }
 
 pub(crate) fn disallow_terminals_and_prune_arc(
@@ -1202,19 +1190,27 @@ pub(crate) fn prune_disallowed_terminals(
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        // If any of the matched terminals is disallowed by the union, prune.
-        let node_acc = &root.acc;
+    let check_and_prune = |node_acc: &Arc<Acc>| -> bool {
+        // Returns true if the node should be pruned.
         for (state_id, matched_bv) in matched_terminals {
             let allowed_terminals_union = node_acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
             if !matched_bv.is_subset(allowed_terminals_union) {
-                return None; // Prune this root
+                return true;
             }
         }
-        Some(root.acc.clone()) // Keep this root, no change to Acc
+        false
     };
 
+    let mut internal_closure = |internal: &GSSInternal| {
+        if check_and_prune(&internal.acc) {
+            None
+        } else {
+            Some((internal.acc.clone(), true))
+        }
+    };
+    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
+        if check_and_prune(&root.acc) { None } else { Some(root.acc.clone()) }
+    };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
@@ -1227,34 +1223,34 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
+    let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
+        let mut new_terminals_btreemap = BTreeMap::new();
 
-        let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
-            let mut new_terminals_btreemap = BTreeMap::new();
+        for (old_state_id, new_state_id) in map {
+            let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
+            new_terminals_btreemap.entry(*new_state_id)
+                .and_modify(|bv| *bv |= bv_source)
+                .or_insert_with(|| bv_source.clone());
+        }
 
-            for (old_state_id, new_state_id) in map {
-                let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
-                new_terminals_btreemap.entry(*new_state_id)
-                    .and_modify(|bv| *bv |= bv_source)
-                    .or_insert_with(|| bv_source.clone());
-            }
+        let mut new_terminals_l2_bitset = HybridL2Bitset::all();
+        for (state_id, bv) in new_terminals_btreemap {
+            new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
+        }
 
-            let mut new_terminals_l2_bitset = HybridL2Bitset::all();
-            for (state_id, bv) in new_terminals_btreemap {
-                new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
-            }
+        new_terminals_l2_bitset
+    };
 
-            new_terminals_l2_bitset
-        };
-
-        let new_terminals_union = map_one(&new_acc.terminals_union);
-
+    let transform_acc = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        let mut new_acc = (**acc).clone();
+        let new_terminals_union = map_one(&acc.terminals_union);
         new_acc.terminals_union = new_terminals_union;
-
         Some(Arc::new(new_acc))
     };
+
+    let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc).map(|acc| (acc, true));
+    let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc);
+
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
