@@ -2780,6 +2780,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.commit_bytes(llm_token_bytes);
     }
 
+    #[time_it]
     pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
         if llm_token_bytes.is_empty() {
             return;
