@@ -1520,11 +1520,15 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
         max_id = i;
     }
 
-    let constraint = GrammarConstraint::from_compiled_grammar(
+    let mut config = crate::constraint::GrammarConstraintConfig::default();
+    config.skip_precomputation = true;
+
+    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
         compiled_grammar.clone(),
         llm_token_map.clone(),
         LLMTokenID(max_id + 1), // dummy EOF
         max_id,
+        &config,
     );
     println!("GrammarConstraint constructed successfully.");
 

@@ -141,6 +141,7 @@ pub struct GrammarConstraintConfig {
     pub optimize_trie2_factor_common_destinations: bool,
     pub optimize_trie2_compress_edges: bool,
     pub optimize_trie2_gc: bool,
+    pub skip_precomputation: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -158,6 +159,7 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_factor_common_destinations: false,
             optimize_trie2_compress_edges: false,
             optimize_trie2_gc: true,
+            skip_precomputation: false,
         }
     }
 }
@@ -448,6 +450,23 @@ impl GrammarConstraint {
             original_to_internal_id_bimap,
             internal_max_llm_token,
         });
+
+        if config.skip_precomputation {
+            return Self {
+                tokenizer,
+                parser,
+                precomputed: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: computed_possible_matches,
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+            };
+        }
 
         let (precomputed, trie1_god) = Self::precompute(
             &tokenizer,
