@@ -439,44 +439,58 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     result
 }
 
+fn narrow_node(node_arc: &Arc<GSSNode>, parent_acc: &Arc<Acc>) -> Arc<GSSNode> {
+    let new_local_acc = Arc::new(Acc::narrow(parent_acc, &node_arc.local_acc()));
+    if Arc::ptr_eq(&new_local_acc, &node_arc.local_acc()) {
+        return node_arc.clone();
+    }
+
+    let new_node = match node_arc.as_ref() {
+        GSSNode::Root(_) => GSSNode::new((*new_local_acc).clone()),
+        GSSNode::Internal(i) => GSSNode::new_with_map(new_local_acc, i.predecessors.clone()),
+    };
+    Arc::new(new_node)
+}
+
 /// Merges the `source` NodeMap into the `target` NodeMap.
-fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
-    for (edge_val, source_preds_by_depth) in source {
-        let target_preds_by_depth = target.entry(edge_val.clone()).or_default();
-        for (dest_key, source_preds_vec) in source_preds_by_depth {
-            let target_preds_vec = target_preds_by_depth.entry(dest_key).or_default();
+fn merge_node_maps(
+    target_map: &NodeMap,
+    target_parent_acc: &Arc<Acc>,
+    source_map: &NodeMap,
+    source_parent_acc: &Arc<Acc>,
+    merge_depth: usize,
+) -> NodeMap {
+    let mut merged_map = NodeMap::new();
+    let all_edges: BTreeSet<_> = target_map.keys().chain(source_map.keys()).cloned().collect();
 
-            if merge_depth == 0 {
-                if *target_preds_vec == source_preds_vec {
-                    continue;
-                } else if target_preds_vec.len() == 1 && source_preds_vec.len() > 1 {
-                    if source_preds_vec.contains(&target_preds_vec[0]) {
-                        *target_preds_vec = source_preds_vec;
-                        continue;
-                    } else {
-                        target_preds_vec.extend(source_preds_vec);
-                        continue;
-                    }
-                } else if target_preds_vec.len() > 1 && source_preds_vec.len() == 1 {
-                    if target_preds_vec.contains(&source_preds_vec[0]) {
-                        continue;
-                    } else {
-                        target_preds_vec.extend(source_preds_vec);
-                        continue;
-                    }
-                } else {
-                    target_preds_vec.extend(source_preds_vec);
-                    continue;
-                }
+    for edge_val in all_edges {
+        let target_preds_by_depth = target_map.get(&edge_val);
+        let source_preds_by_depth = source_map.get(&edge_val);
+
+        let all_depths: BTreeSet<_> = target_preds_by_depth.map(|m| m.keys()).into_iter().flatten()
+            .chain(source_preds_by_depth.map(|m| m.keys()).into_iter().flatten())
+            .cloned().collect();
+
+        for depth in all_depths {
+            let target_preds = target_preds_by_depth.and_then(|m| m.get(&depth)).map(|v| v.as_slice()).unwrap_or(&[]);
+            let source_preds = source_preds_by_depth.and_then(|m| m.get(&depth)).map(|v| v.as_slice()).unwrap_or(&[]);
+
+            let narrowed_target_preds: Vec<_> = target_preds.iter().map(|p| narrow_node(p, target_parent_acc)).collect();
+            let narrowed_source_preds: Vec<_> = source_preds.iter().map(|p| narrow_node(p, source_parent_acc)).collect();
+
+            let mut nodes_to_merge = narrowed_target_preds;
+            nodes_to_merge.extend(narrowed_source_preds);
+
+            if nodes_to_merge.is_empty() {
+                continue;
             }
-
-            let mut nodes_to_merge = source_preds_vec;
-            if !target_preds_vec.is_empty() {
-                nodes_to_merge.extend(target_preds_vec.drain(..));
+            if merge_depth == 0 {
+                merged_map.entry(edge_val.clone()).or_default().insert(depth, nodes_to_merge);
+                continue;
             }
 
             if nodes_to_merge.len() <= 1 {
-                *target_preds_vec = nodes_to_merge;
+                merged_map.entry(edge_val.clone()).or_default().insert(depth, nodes_to_merge);
             } else {
                 let mut iter = nodes_to_merge.into_iter();
                 let first = iter.next().unwrap();
@@ -484,14 +498,15 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
                 for other in iter {
                     merged._merge(&other, merge_depth - 1);
                 }
-                let mut merged = Arc::new(merged);
-                if merged == first {
-                    merged = first;
+                let mut merged_arc = Arc::new(merged);
+                if merged_arc == first {
+                    merged_arc = first;
                 }
-                *target_preds_vec = vec![merged];
+                merged_map.entry(edge_val.clone()).or_default().insert(depth, vec![merged_arc]);
             }
         }
     }
+    merged_map
 }
 
 impl GSSNode {
@@ -735,11 +750,10 @@ impl GSSNode {
         }
 
         // Both sides are internal (or self is internal, other internal); merge NodeMaps.
-        let self_predecessors = self.predecessors().clone();
-        let other_predecessors = other.predecessors().clone();
+        let self_predecessors = self.predecessors();
+        let other_predecessors = other.predecessors();
 
-        let mut merged_map = self_predecessors;
-        merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
+        let merged_map = merge_node_maps(self_predecessors, &self.local_acc(), other_predecessors, &other.local_acc(), merge_depth);
 
         // Merge local Accs for internal nodes (union of alternatives).
         let merged_local_acc = match (&self, other) {
@@ -1119,7 +1133,11 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |internal: &GSSInternal| -> Option<_> { Some((internal.acc.clone(), true)) };
+    let mut internal_closure = |internal: &GSSInternal| -> Option<_> {
+        let new_acc = (*internal.acc).clone();
+        new_acc.terminals_union -= disallowed_terminals;
+        if 
+    }
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
         new_acc.terminals_union -= disallowed_terminals;
