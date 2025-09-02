@@ -200,14 +200,7 @@ impl HybridL2Bitset {
     }
 
     pub fn complement(&self) -> Self {
-        let complemented_values = self
-            .inner
-            .range_values()
-            .map(|(range, bitset)| (range, bitset.inverted()));
-
-        HybridL2Bitset {
-            inner: cache::intern_l2(complemented_values.collect()),
-        }
+        &Self::all() - self
     }
 
     pub fn intersection_with(&self, other: &Self, default: Option<HybridBitset>) -> Self {
@@ -735,5 +728,26 @@ mod tests {
         expected_union_zeros.insert(30, 300);
         assert_eq!(union_zeros, expected_union_zeros);
         assert_eq!(union_zeros, &set1 | &set2);
+    }
+
+    #[test]
+    fn test_sub_is_intersection_with_complement() {
+        let mut set_a = HybridL2Bitset::new();
+        set_a.insert(10, 100);
+        set_a.insert(40, 400); // A has this, B does not.
+
+        let mut set_b = HybridL2Bitset::new();
+        set_b.insert(10, 101);
+        set_b.insert(30, 300); // B has this, A does not.
+
+        let diff = &set_a - &set_b;
+        let diff_with_complement = &set_a & &set_b.complement();
+
+        let mut expected_diff = HybridL2Bitset::new();
+        expected_diff.insert(10, 100);
+        expected_diff.insert(40, 400);
+
+        assert_eq!(diff, expected_diff);
+        assert_eq!(diff_with_complement, expected_diff);
     }
 }
