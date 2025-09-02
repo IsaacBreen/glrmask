@@ -1149,17 +1149,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let source_arc = existing.as_arc().clone();
 
                     let fallback_dest = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| *ev &= &t.live_tokens,
-                    ).try_destination(fallback_dest.clone()); // direct, strong insert
+                    // let inserter = EdgeInserter::new(
+                    //     self.active_state.trie2_god.as_ref().unwrap(),
+                    //     source_arc.clone(),
+                    //     edge_key,
+                    //     edge_bv.clone(),
+                    //     |e, n| *e |= n,
+                    //     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    //     |ev, t| *ev &= &t.live_tokens,
+                    // ).try_destination(fallback_dest.clone()); // direct, strong insert
 
-                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    // let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
+                    let final_dst_arc = fallback_dest;
                     let final_wr = final_dst_arc.clone();
                     dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
                     used.insert(final_wr);
@@ -1221,28 +1222,28 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 // For each existing trie2 source node, add an edge to the cached destination
                 for existing in &trie2_nodes {
                     let source_arc = existing.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| *ev &= &t.live_tokens,
-                    );
-
-                    if is_new {
-                        let _ = inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
-                    } else {
-                        // Replicate to_destination_weakly logic with strong edges
-                        let source_arc = existing.as_arc();
-                        let mut source_guard = source_arc.write(self.active_state.trie2_god.as_ref().unwrap()).unwrap();
-                        if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
-                            *existing_ev |= &edge_bv;
-                        } else {
-                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), dst_arc);
-                        }
-                    }
+                    // let inserter = EdgeInserter::new(
+                    //     self.active_state.trie2_god.as_ref().unwrap(),
+                    //     source_arc.clone(),
+                    //     edge_key,
+                    //     edge_bv.clone(),
+                    //     |e, n| *e |= n,
+                    //     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    //     |ev, t| *ev &= &t.live_tokens,
+                    // );
+                    //
+                    // if is_new {
+                    //     let _ = inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
+                    // } else {
+                    //     // Replicate to_destination_weakly logic with strong edges
+                    //     let source_arc = existing.as_arc();
+                    //     let mut source_guard = source_arc.write(self.active_state.trie2_god.as_ref().unwrap()).unwrap();
+                    //     if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
+                    //         *existing_ev |= &edge_bv;
+                    //     } else {
+                    //         source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), dst_arc);
+                    //     }
+                    // }
                 }
 
                 // Create the GSS node for the accepted state.
@@ -1329,24 +1330,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut out = Vec::new();
             for (k, mut acc) in below {
                 let trie2_nodes = acc.trie2_nodes();
-                let edge_key = (k, None);
+                let edge_key: (usize, Option<StateID>) = (k, None);
                 // Always use max-ones for the edge bitset
                 let edge_bv = LLMTokenBV::max_ones();
 
                 for existing in trie2_nodes {
                     let source_arc = existing.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| {},
-                    );
-
-                    // Create a new cached destination node for this nonterminal
-                    inserter.try_destination(new_trie2_node.clone());
+                    // let inserter = EdgeInserter::new(
+                    //     self.active_state.trie2_god.as_ref().unwrap(),
+                    //     source_arc.clone(),
+                    //     edge_key,
+                    //     edge_bv.clone(),
+                    //     |e, n| *e |= n,
+                    //     |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    //     |ev, t| {},
+                    // );
+                    //
+                    // // Create a new cached destination node for this nonterminal
+                    // inserter.try_destination(new_trie2_node.clone());
                 }
             }
             merged_acc.trie2_nodes_mut().insert(new_trie2_node.clone());

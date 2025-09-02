@@ -1418,23 +1418,23 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         let new_destination = new_destinations.entry((new_acc.trie2_nodes.clone(), root.acc.llm_tokens_union.clone()))
             .or_insert_with(|| PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal()))))
             .clone();
-        let edge_key = (0, None);
+        let edge_key: (usize, Option<StateID>) = (0, None);
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
         for source_wrapper in &new_acc.trie2_nodes {
             let source_arc = source_wrapper.as_arc().clone();
 
-            let inserter = EdgeInserter::new(
-                &trie2_god,
-                source_arc,
-                edge_key,
-                tokens_for_edge.clone(),
-                |e, n| *e |= n,
-                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                |_, _| {}, // Unconditional insertion
-            );
-            // Insert a strong edge to the new shared destination.
-            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
+            // let inserter = EdgeInserter::new(
+            //     &trie2_god,
+            //     source_arc,
+            //     edge_key,
+            //     tokens_for_edge.clone(),
+            //     |e, n| *e |= n,
+            //     |node_value, edge_value| node_value.live_tokens |= edge_value,
+            //     |_, _| {}, // Unconditional insertion
+            // );
+            // // Insert a strong edge to the new shared destination.
+            // inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
         }
 
         // Update the live tokens on the new destination node.

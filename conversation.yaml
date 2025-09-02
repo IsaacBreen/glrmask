@@ -8252,7 +8252,7 @@ local_system:
       pub(crate) struct Acc {
           pub(crate) llm_tokens_union: HybridBitset,
           pub(crate) terminals_union: HybridL2Bitset,
-          trie2_nodes: BTreeSet<PrecomputeNode2Index>,
+          pub(crate) trie2_nodes: BTreeSet<PrecomputeNode2Index>,
       }
 
       impl Acc {
@@ -8309,8 +8309,6 @@ local_system:
 
           // --- Accessors for final computed sets ---
           pub(crate) fn union_llm_tokens(&self) -> HybridBitset { self.llm_tokens_union.clone() }
-          pub(crate) fn trie2_nodes(&self) -> &BTreeSet<PrecomputeNode2Index> { &self.trie2_nodes }
-          pub(crate) fn trie2_nodes_mut(&mut self) -> &mut BTreeSet<PrecomputeNode2Index> { &mut self.trie2_nodes }
       }
 
 
@@ -10876,15 +10874,15 @@ local_system:
               let trie2_node3 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
               let mut acc_l1 = empty_acc();
-              acc_l1.trie2_nodes_mut().insert(trie2_node1.clone());
+              acc_l1.trie2_nodes.insert(trie2_node1.clone());
               let l1 = Arc::new(GSSNode::new(acc_l1));
 
               let mut acc_l2 = empty_acc();
-              acc_l2.trie2_nodes_mut().insert(trie2_node2.clone());
+              acc_l2.trie2_nodes.insert(trie2_node2.clone());
               let l2 = Arc::new(GSSNode::new(acc_l2));
 
               let mut acc_l3 = empty_acc();
-              acc_l3.trie2_nodes_mut().insert(trie2_node3.clone());
+              acc_l3.trie2_nodes.insert(trie2_node3.clone());
               let l3 = Arc::new(GSSNode::new(acc_l3));
 
               let mut gss1_preds = NodeMap::new();
@@ -10896,7 +10894,7 @@ local_system:
 
               // --- GSS 2 Setup ---
               let mut acc_l4 = empty_acc();
-              acc_l4.trie2_nodes_mut().insert(trie2_node1.clone()); // Shared trie2_node
+              acc_l4.trie2_nodes.insert(trie2_node1.clone()); // Shared trie2_node
               let l4 = Arc::new(GSSNode::new(acc_l4));
               let i1 = Arc::new(l4.push(mock_edge(0)));
               let gss2 = i1.push(mock_edge(1));
@@ -10913,7 +10911,7 @@ local_system:
 
               while let Some(node) = q.pop_front() {
                   if !visited.insert(Arc::as_ptr(&node)) { continue; }
-                  if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes().clone()); }
+                  if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
                   for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
               }
 
@@ -10932,12 +10930,12 @@ local_system:
               let trie2_god = Trie2GodWrapper::new();
               let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc1 = empty_acc();
-              acc1.trie2_nodes_mut().insert(trie2_node1.clone());
+              acc1.trie2_nodes.insert(trie2_node1.clone());
               let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
               let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc2 = empty_acc();
-              acc2.trie2_nodes_mut().insert(trie2_node2.clone());
+              acc2.trie2_nodes.insert(trie2_node2.clone());
               let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
 
               // --- GSS A ---
@@ -10987,7 +10985,7 @@ local_system:
               let trie2_god = Trie2GodWrapper::new();
               let trie2_node_a = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc_a = empty_acc();
-              acc_a.trie2_nodes_mut().insert(trie2_node_a.clone());
+              acc_a.trie2_nodes.insert(trie2_node_a.clone());
               let leaf_a = Arc::new(GSSNode::new(acc_a));
 
               let gss_a = GSSNode::new_with_single_predecessor(
@@ -10999,7 +10997,7 @@ local_system:
               // --- GSS B setup ---
               let trie2_node_b = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc_b = empty_acc();
-              acc_b.trie2_nodes_mut().insert(trie2_node_b.clone());
+              acc_b.trie2_nodes.insert(trie2_node_b.clone());
               let leaf_b = Arc::new(GSSNode::new(acc_b));
 
               let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
@@ -11048,13 +11046,13 @@ local_system:
 
               // --- Leaf 1 with trie2_node t1 ---
               let mut acc1 = empty_acc();
-              acc1.trie2_nodes_mut().insert(t1.clone());
+              acc1.trie2_nodes.insert(t1.clone());
               let leaf1 = Arc::new(GSSNode::new(acc1.clone()));
               let tower1 = build_tower_from_leaf(leaf1);
 
               // --- Leaf 2 with trie2_node t2 ---
               let mut acc2 = empty_acc();
-              acc2.trie2_nodes_mut().insert(t2.clone());
+              acc2.trie2_nodes.insert(t2.clone());
               let leaf2 = Arc::new(GSSNode::new(acc2.clone()));
               let tower2 = build_tower_from_leaf(leaf2);
 
@@ -11066,7 +11064,7 @@ local_system:
               // With the new hoisting logic, the merged acc from the leaves should be hoisted
               // all the way to the top-level node of the merged tower.
               let final_acc = Acc::merge(&acc1, &acc2);
-              let trie2_nodes = final_acc.trie2_nodes();
+              let trie2_nodes = &final_acc.trie2_nodes;
 
               assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
               assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
@@ -11765,7 +11763,7 @@ local_system:
 
               if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
                   let mut acc = Acc::new_fresh();
-                  acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
+                  acc.trie2_nodes.insert(base_trie2_root_wr.clone());
                   let gss_leaf = Arc::new(GSSNode::new(acc));
                   base_gss_nodes.push(Arc::new(
                       gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
@@ -11773,7 +11771,7 @@ local_system:
               } else {
                   for state_id in parser.table.keys() {
                       let mut acc = Acc::new_fresh();
-                      acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
+                      acc.trie2_nodes.insert(base_trie2_root_wr.clone());
                       let gss_leaf = Arc::new(GSSNode::new(acc));
                       base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
                   }
@@ -11901,7 +11899,7 @@ local_system:
                                   let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                                   crate::debug!(4, "Trie: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
-                                  for src_wr in gss_root_acc.trie2_nodes().iter() {
+                                  for src_wr in gss_root_acc.trie2_nodes.iter() {
                                       let src_arc = src_wr.as_arc().clone();
                                       let src_live = { src_arc.read(&trie2_god).expect("poison").value.live_tokens.clone() };
                                       let tokens_to_push = &active_llm_tokens_for_root & &src_live;
@@ -15306,7 +15304,7 @@ local_system:
                       let mut dest_agg: BTreeMap<PrecomputeNode2Index, LLMTokenBV> = BTreeMap::new();
                       let mut used = BTreeSet::new();
 
-                      for existing in acc.trie2_nodes() {
+                      for existing in &acc.trie2_nodes {
                           let source_arc = existing.as_arc().clone();
 
                           let fallback_dest = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
@@ -15334,7 +15332,7 @@ local_system:
 
                       // Update new_acc.trie2_nodes as before
                       let mut new_acc = acc.clone();
-                      *new_acc.trie2_nodes_mut() = used;
+                      new_acc.trie2_nodes = used;
                       result.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &new_acc)).or_insert(new_acc);
                   }
               }
@@ -15355,7 +15353,7 @@ local_system:
 
               for (k, acc) in below {
                   let mut acc = acc.clone();
-                  let trie2_nodes = std::mem::take(acc.trie2_nodes_mut());
+                  let trie2_nodes = std::mem::take(&mut acc.trie2_nodes);
 
                   for source_state_id in &gotos.accepting_sources {
                       let accept_cache_key = BelowBottomCacheKey {
@@ -15409,7 +15407,7 @@ local_system:
                       // Create the GSS node for the accepted state.
                       // It should have the acc from the path, and a single predecessor edge for the source_state_id.
                       let mut acc_for_gss = acc.clone();
-                      acc_for_gss.trie2_nodes_mut().insert(dst_arc.clone());
+                      acc_for_gss.trie2_nodes.insert(dst_arc.clone());
                       let gss0 = GSSNode::new(acc_for_gss);
                       let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
                       accepted_stacks.push(Arc::new(gss1));
@@ -15445,12 +15443,12 @@ local_system:
                   let first = below_it.next().unwrap().1.clone();
                   below_it.fold(first, |acc, (_k, acc2)| Acc::merge(&acc, acc2))
               };
-              merged_acc.trie2_nodes_mut().clear();
+              merged_acc.trie2_nodes.clear();
 
               if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
                   // Insert weak edges to the existing node arc.
                   for (k, mut acc) in below {
-                      let trie2_nodes = acc.trie2_nodes();
+                      let trie2_nodes = &acc.trie2_nodes;
                       let edge_key = (k, None);
                       // Always use max-ones for the edge bitset
                       let edge_bv = LLMTokenBV::max_ones();
@@ -15489,7 +15487,7 @@ local_system:
                   self.below_bottom_cache.insert(cache_key, (new_trie2_node.clone(), LLMTokenBV::max_ones()));
                   let mut out = Vec::new();
                   for (k, mut acc) in below {
-                      let trie2_nodes = acc.trie2_nodes();
+                      let trie2_nodes = &acc.trie2_nodes;
                       let edge_key = (k, None);
                       // Always use max-ones for the edge bitset
                       let edge_bv = LLMTokenBV::max_ones();
@@ -15510,7 +15508,7 @@ local_system:
                           inserter.try_destination(new_trie2_node.clone());
                       }
                   }
-                  merged_acc.trie2_nodes_mut().insert(new_trie2_node.clone());
+                  merged_acc.trie2_nodes.insert(new_trie2_node.clone());
                   for (goto_state_id, source_state_ids) in &gotos.gotos {
                       let mut edge_contents = Vec::new();
                       for source_state_id in source_state_ids {
@@ -16313,7 +16311,7 @@ local_system:
           }
           final_goto_state_ids
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
   core_guidance_inserted: true
   prev_apply_mode: git-llm
 system:
@@ -24770,27 +24768,5 @@ messages:
                        for source_state_id in source_state_ids {
 
       ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
-    metadata:
-  - user: 'Changes committed with message: "Refactor: Encapsulate trie2_nodes in Acc
-      struct"'
     metadata:
 ...
