@@ -802,15 +802,27 @@ impl GSSNode {
         let final_parent_acc;
 
         if has_preds && child_accs.len() == 1 {
-            // All children have the same acc. Suck it up.
+            // All children have the same acc.
             let common_acc = child_accs.into_iter().next().unwrap();
 
-            if !common_acc.is_merge_neutral() {
-                // The parent takes on this common acc.
-                final_parent_acc = common_acc;
+            // Separate constraints from payload (trie2_nodes).
+            let mut parent_sucked_up_acc = Acc::new_fresh();
+            parent_sucked_up_acc.llm_tokens_union = common_acc.llm_tokens_union.clone();
+            parent_sucked_up_acc.terminals_union = common_acc.terminals_union.clone();
 
-                // And we need to create new children with a fresh acc.
-                let fresh_acc = Arc::new(Acc::new_fresh());
+            // Check if there are any constraints to suck up.
+            let has_constraints_to_suck = parent_sucked_up_acc.llm_tokens_union != HybridBitset::max_ones()
+                || parent_sucked_up_acc.terminals_union != HybridL2Bitset::all();
+
+            if has_constraints_to_suck {
+                final_parent_acc = Arc::new(parent_sucked_up_acc);
+
+                // Create a new Acc for the children that only has what's left (the trie2_nodes).
+                let mut child_remaining_acc = Acc::new_fresh();
+                child_remaining_acc.trie2_nodes = common_acc.trie2_nodes.clone();
+                let new_child_acc = Arc::new(child_remaining_acc);
+
+                // Rebuild children with this new acc.
                 let mut new_preds_map = BTreeMap::new();
                 for (edge, preds_by_depth) in final_predecessors_map {
                     let mut new_preds_by_depth = BTreeMap::new();
@@ -818,8 +830,8 @@ impl GSSNode {
                         let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
                         for pred_arc in pred_vec {
                             let new_pred = match &*pred_arc {
-                                GSSNode::Root(_) => GSSNode::new_fresh(),
-                                GSSNode::Internal(i) => GSSNode::new_with_map(fresh_acc.clone(), i.predecessors.clone()),
+                                GSSNode::Root(_) => GSSNode::new((*new_child_acc).clone()),
+                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc.clone(), i.predecessors.clone()),
                             };
                             new_pred_vec.push(Arc::new(new_pred));
                         }
@@ -829,8 +841,8 @@ impl GSSNode {
                 }
                 final_predecessors_map = new_preds_map;
             } else {
-                // Common acc is neutral, so parent is also neutral. No change to children needed.
-                final_parent_acc = common_acc;
+                // No constraints to suck up. Parent gets a fresh acc, children are not modified.
+                final_parent_acc = Arc::new(Acc::new_fresh());
             }
         } else {
             // Children have different accs, or there are no children.
