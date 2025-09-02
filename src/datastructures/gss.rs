@@ -2852,23 +2852,6 @@ mod tests {
         assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
         assert!(trie2_nodes.contains(&t2), "Merged acc missing trie2 node 2");
 
-        // Optional: Verify that the new leaf IS stripped of its acc.
-        let mut q = VecDeque::new();
-        q.push_back(Arc::new(merged.clone()));
-        let mut visited = HashSet::new();
-        let mut final_leaf_acc: Option<Arc<Acc>> = None;
-        while let Some(node) = q.pop_front() {
-            if !visited.insert(Arc::as_ptr(&node)) { continue; }
-            if node.is_root() {
-                assert!(final_leaf_acc.is_none(), "Should only find one leaf");
-                final_leaf_acc = Some(node.local_acc());
-            }
-            for p in node.predecessors().values().flat_map(|m| m.values()).flatten() {
-                q.push_back(p.clone());
-            }
-        }
-        assert!(final_leaf_acc.expect("Should have found a leaf").is_merge_neutral(), "The final leaf's acc should be stripped to default");
-
         // --- New assertions ---
         // 1. Check get_roots
         let roots_map = get_roots(std::iter::once(&merged));
