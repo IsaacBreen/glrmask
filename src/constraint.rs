@@ -645,7 +645,7 @@ impl GrammarConstraint {
         } else {
             for state_id in parser.table.keys() {
                 let mut acc = Acc::new_fresh();
-                // acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
+                acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
                 let gss_leaf = Arc::new(GSSNode::new(acc));
                 base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
             }
