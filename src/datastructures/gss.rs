@@ -735,8 +735,50 @@ impl GSSNode {
         }
 
         // Both sides are internal (or self is internal, other internal); merge NodeMaps.
-        let self_predecessors = self.predecessors().clone();
-        let other_predecessors = other.predecessors().clone();
+        let mut self_predecessors = self.predecessors().clone();
+        let mut other_predecessors = other.predecessors().clone();
+
+        let self_acc = self.local_acc();
+        if !self_acc.is_merge_neutral() {
+            for preds_by_depth in self_predecessors.values_mut() {
+                for pred_vec in preds_by_depth.values_mut() {
+                    for pred_arc in pred_vec.iter_mut() {
+                        let pred_local_acc = pred_arc.local_acc();
+                        let new_local_acc = Arc::new(Acc::narrow(&self_acc, &pred_local_acc));
+                        if new_local_acc != pred_local_acc {
+                            let new_node = match &**pred_arc {
+                                GSSNode::Root(_) => GSSNode::new((*new_local_acc).clone()),
+                                GSSNode::Internal(i) => {
+                                    GSSNode::new_with_map(new_local_acc, i.predecessors.clone())
+                                }
+                            };
+                            *pred_arc = Arc::new(new_node);
+                        }
+                    }
+                }
+            }
+        }
+
+        let other_acc = other.local_acc();
+        if !other_acc.is_merge_neutral() {
+            for preds_by_depth in other_predecessors.values_mut() {
+                for pred_vec in preds_by_depth.values_mut() {
+                    for pred_arc in pred_vec.iter_mut() {
+                        let pred_local_acc = pred_arc.local_acc();
+                        let new_local_acc = Arc::new(Acc::narrow(&other_acc, &pred_local_acc));
+                        if new_local_acc != pred_local_acc {
+                            let new_node = match &**pred_arc {
+                                GSSNode::Root(_) => GSSNode::new((*new_local_acc).clone()),
+                                GSSNode::Internal(i) => {
+                                    GSSNode::new_with_map(new_local_acc, i.predecessors.clone())
+                                }
+                            };
+                            *pred_arc = Arc::new(new_node);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut merged_map = self_predecessors;
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
