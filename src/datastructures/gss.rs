@@ -783,13 +783,7 @@ impl GSSNode {
         let mut merged_map = self_predecessors;
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
-        // Merge local Accs for internal nodes (union of alternatives).
-        let merged_local_acc = match (&self, other) {
-            (GSSNode::Internal(a), GSSNode::Internal(b)) => Arc::new(Acc::merge(&a.acc, &b.acc)),
-            (GSSNode::Internal(a), _) => a.acc.clone(),
-            _ => Arc::new(Acc::new_fresh()),
-        };
-        let final_predecessors = if merge_depth > 0 {
+        let unified_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
@@ -811,6 +805,77 @@ impl GSSNode {
             unified_predecessors
         } else {
             merged_map
+        };
+
+        // --- NEW SUCK UP LOGIC ---
+        // After pushing constraints down and merging branches, we might have a situation where all
+        // children of this new merged node have the exact same Acc. If so, we can "suck up"
+        // that common Acc into the parent, and reset the children's Accs to neutral. This
+        // improves sharing and can simplify the graph. If the children's Accs are different,
+        // the parent's Acc is reset to neutral, as it represents multiple possibilities.
+        let mut unique_preds: BTreeMap<*const GSSNode, Arc<GSSNode>> = BTreeMap::new();
+        for preds_by_depth in unified_predecessors.values() {
+            for pred_vec in preds_by_depth.values() {
+                for pred_arc in pred_vec {
+                    unique_preds.insert(Arc::as_ptr(pred_arc), pred_arc.clone());
+                }
+            }
+        }
+
+        let mut common_acc: Option<Arc<Acc>> = None;
+        if !unique_preds.is_empty() {
+            let mut all_same = true;
+            let mut first_acc: Option<Arc<Acc>> = None;
+            for pred_arc in unique_preds.values() {
+                let current_acc = pred_arc.local_acc();
+                if let Some(first) = &first_acc {
+                    if **first != *current_acc {
+                        all_same = false;
+                        break;
+                    }
+                } else {
+                    first_acc = Some(current_acc);
+                }
+            }
+            if all_same {
+                common_acc = first_acc;
+            }
+        }
+
+        let (merged_local_acc, final_predecessors) = if let Some(acc_to_suck_up) = common_acc {
+            if !acc_to_suck_up.is_merge_neutral() {
+                // Suck up: parent gets the acc, children get a fresh one.
+                let mut replacement_map: BTreeMap<*const GSSNode, Arc<GSSNode>> = BTreeMap::new();
+                let fresh_acc = Arc::new(Acc::new_fresh());
+
+                let mut new_predecessors = BTreeMap::new();
+                for (edge_val, preds_by_depth) in unified_predecessors {
+                    let mut new_preds_by_depth = BTreeMap::new();
+                    for (depth, pred_vec) in preds_by_depth {
+                        let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
+                        for pred_arc in pred_vec {
+                            let pred_ptr = Arc::as_ptr(&pred_arc);
+                            let new_pred = replacement_map.entry(pred_ptr).or_insert_with(|| {
+                                let new_node = match &*pred_arc {
+                                    GSSNode::Root(_) => GSSNode::new_fresh(),
+                                    GSSNode::Internal(i) => GSSNode::new_with_map(fresh_acc.clone(), i.predecessors.clone()),
+                                };
+                                Arc::new(new_node)
+                            }).clone();
+                            new_pred_vec.push(new_pred);
+                        }
+                        new_preds_by_depth.insert(depth, new_pred_vec);
+                    }
+                    new_predecessors.insert(edge_val, new_preds_by_depth);
+                }
+                (acc_to_suck_up, new_predecessors)
+            } else {
+                // Common acc is neutral, so parent becomes neutral.
+                (acc_to_suck_up, unified_predecessors)
+            }
+        } else {
+            // Children accs are different, or no children. Parent becomes neutral.
+            (Arc::new(Acc::new_fresh()), unified_predecessors)
         };
 
         *self = GSSNode::new_with_map(merged_local_acc, final_predecessors);
