@@ -835,6 +835,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     /// Shared inner loop for phase 1 and phase 2.
     /// `action_selector` chooses between the phase-1 or phase-2 action map.
+    #[time_it("GLRParserState::process_action_queue")]
     fn process_action_queue<F>(
         &mut self,
         work_map: &mut WorkMap,
@@ -855,6 +856,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
         }
         while let Some(entry) = work_map.pop_first() {
+            hit!("GLRParserState::process_action_queue::WhileLet");
             let (key, (state, per_state_fuel)) = entry;
             if let Some(f) = fuel {
                 if *f == 0 {
@@ -869,6 +871,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let action_opt = action_selector(row);
             if let Some(action) = action_opt {
                 for peek in GSSNode::peek_iter(&state.stack) {
+                    hit!("GLRParserState::process_action_queue::ForEachPeek");
                     match action {
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                             hit!("GLRParserState::process_action_queue::Shift");
