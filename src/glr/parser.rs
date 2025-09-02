@@ -11,7 +11,7 @@ use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
 use crate::datastructures::trie::EdgeInserter;
-use crate::debug;
+use crate::{debug, hit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{stage_9, DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
@@ -871,6 +871,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for peek in GSSNode::peek_iter(&state.stack) {
                     match action {
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                            hit!("GLRParserState::process_action_queue::Shift");
                             crate::debug!(5, "Action: Shift to state {}", to.0);
                             let new_parse_state =
                                 self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
@@ -885,6 +886,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             len,
                             ..
                         }) => {
+                            hit!("GLRParserState::process_action_queue::Reduce");
                             if per_state_fuel == Some(0) { continue; }
                             let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
 
@@ -916,6 +918,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                             crate::debug!(5, "Action: Split with shift and reduces");
                             if let Some(to) = shift {
+                                hit!("GLRParserState::process_action_queue::Split::Shift");
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
                                 let new_parse_state =
                                     self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
@@ -929,6 +932,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
                                 for (len, nts) in reduces {
                                     for (nt, _prod_ids) in nts {
+                                        hit!("GLRParserState::process_action_queue::Split::Reduce");
                                         crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
                                         let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
                                         if !s_new_arc.is_empty() {
