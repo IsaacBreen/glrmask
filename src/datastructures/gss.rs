@@ -126,7 +126,8 @@ impl Acc {
             llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
             terminals_union: &from.terminals_union & &to.terminals_union,
             // For the simplified design, we do not propagate trie2 changes through internal nodes.
-            trie2_nodes: to.trie2_nodes.clone(),
+            // trie2_nodes: to.trie2_nodes.clone(),
+            trie2_nodes: &from.trie2_nodes | &to.trie2_nodes,
         }
     }
 
