@@ -1114,16 +1114,19 @@ pub(crate) fn reset_terminals(
     *root_arc = new_arc;
 }
 
-// Note: Do not mutate internal.acc here. Internal node Accs are 'blanket' path intersections
-// applied via Acc::narrow during traversal. Global filtering (allow/disallow) should update
-// only root Acc values, keeping non-pop queries stable.
 pub(crate) fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let mut internal_closure = |internal: &GSSInternal| -> Option<_> {
-        Some((internal.acc.clone(), true))
+        let mut acc = internal.acc.as_ref().clone();
+        acc.terminals_union &= disallowed_terminals.complement();
+        if acc == *internal.acc.as_ref() {
+            Some((internal.acc.clone(), true))
+        } else {
+            Some((Arc::new(acc), true))
+        }
     };
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
