@@ -1534,9 +1534,11 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
 
     let mut constraint_state = constraint.init();
 
-    // First chunk
-    for byte in repeating_chunk {
-        constraint_state.commit_bytes(&[*byte]);
+    // First chunks
+    for _ in 0..2 {
+        for byte in repeating_chunk {
+            constraint_state.commit_bytes(&[*byte]);
+        }
     }
     assert!(constraint_state.is_active());
     println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
