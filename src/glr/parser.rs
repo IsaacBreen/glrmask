@@ -870,7 +870,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let row = &self.parser.table[&state_id];
             let action_opt = action_selector(row);
             if let Some(action) = action_opt {
-                for peek in GSSNode::peek_iter(&state.stack) {
+                for peek in timeit!(GSSNode::peek_iter(&state.stack)) {
                     hit!("GLRParserState::process_action_queue::ForEachPeek");
                     match action {
                         Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
@@ -992,7 +992,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         }
 
                                         if !constrained_state.stack.is_empty() {
-                                            for peek in GSSNode::peek_iter(&constrained_state.stack) {
+                                            for peek in timeit!(GSSNode::peek_iter(&constrained_state.stack)) {
                                                 let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
                                                     &peek,
                                                     reduce.nonterminal_id,
