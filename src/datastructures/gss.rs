@@ -783,79 +783,18 @@ impl GSSNode {
         let mut merged_map = self_predecessors;
         merge_node_maps(&mut merged_map, other_predecessors, merge_depth);
 
-        // --- NEW SUCK UP LOGIC ---
-        // Collect all unique predecessor accs from the merged map.
-        let mut child_accs: BTreeSet<Arc<Acc>> = BTreeSet::new();
-        let mut has_preds = false;
-        for preds_by_depth in merged_map.values() {
-            for pred_vec in preds_by_depth.values() {
-                if !pred_vec.is_empty() {
-                    has_preds = true;
-                    for pred_arc in pred_vec {
-                        child_accs.insert(pred_arc.local_acc());
-                    }
-                }
-            }
-        }
-
-        let mut final_predecessors_map = merged_map;
-        let final_parent_acc;
-
-        if has_preds && child_accs.len() == 1 {
-            // All children have the same acc.
-            let common_acc = child_accs.into_iter().next().unwrap();
-
-            // Separate constraints from payload (trie2_nodes).
-            let mut parent_sucked_up_acc = Acc::new_fresh();
-            parent_sucked_up_acc.llm_tokens_union = common_acc.llm_tokens_union.clone();
-            parent_sucked_up_acc.terminals_union = common_acc.terminals_union.clone();
-
-            // Check if there are any constraints to suck up.
-            let has_constraints_to_suck = parent_sucked_up_acc.llm_tokens_union != HybridBitset::max_ones()
-                || parent_sucked_up_acc.terminals_union != HybridL2Bitset::all();
-
-            if has_constraints_to_suck {
-                final_parent_acc = Arc::new(parent_sucked_up_acc);
-
-                // Create a new Acc for the children that only has what's left (the trie2_nodes).
-                let mut child_remaining_acc = Acc::new_fresh();
-                child_remaining_acc.trie2_nodes = common_acc.trie2_nodes.clone();
-                let new_child_acc = Arc::new(child_remaining_acc);
-
-                // Rebuild children with this new acc.
-                let mut new_preds_map = BTreeMap::new();
-                for (edge, preds_by_depth) in final_predecessors_map {
-                    let mut new_preds_by_depth = BTreeMap::new();
-                    for (depth, pred_vec) in preds_by_depth {
-                        let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
-                        for pred_arc in pred_vec {
-                            let new_pred = match &*pred_arc {
-                                GSSNode::Root(_) => GSSNode::new((*new_child_acc).clone()),
-                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc.clone(), i.predecessors.clone()),
-                            };
-                            new_pred_vec.push(Arc::new(new_pred));
-                        }
-                        new_preds_by_depth.insert(depth, new_pred_vec);
-                    }
-                    new_preds_map.insert(edge, new_preds_by_depth);
-                }
-                final_predecessors_map = new_preds_map;
-            } else {
-                // No constraints to suck up. Parent gets a fresh acc, children are not modified.
-                final_parent_acc = Arc::new(Acc::new_fresh());
-            }
-        } else {
-            // Children have different accs, or there are no children.
-            // Parent gets a fresh acc.
-            final_parent_acc = Arc::new(Acc::new_fresh());
-        }
-
+        // Merge local Accs for internal nodes (union of alternatives).
+        let merged_local_acc = match (&self, other) {
+            (GSSNode::Internal(a), GSSNode::Internal(b)) => Arc::new(Acc::merge(&a.acc, &b.acc)),
+            (GSSNode::Internal(a), _) => a.acc.clone(),
+            _ => Arc::new(Acc::new_fresh()),
+        };
         let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
 
-            for (edge_val, preds_by_depth) in final_predecessors_map {
+            for (edge_val, preds_by_depth) in merged_map {
                 let mut unified_preds_by_depth = BTreeMap::new();
                 for (depth, pred_vec) in preds_by_depth {
                     let mut unified_pred_vec = Vec::new();
@@ -871,10 +810,10 @@ impl GSSNode {
             }
             unified_predecessors
         } else {
-            final_predecessors_map
+            merged_map
         };
 
-        *self = GSSNode::new_with_map(final_parent_acc, final_predecessors);
+        *self = GSSNode::new_with_map(merged_local_acc, final_predecessors);
     }
 
     #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
