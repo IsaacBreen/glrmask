@@ -1134,16 +1134,10 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let mut internal_closure = |internal: &GSSInternal| -> Option<_> {
-        let mut new_acc = (*internal.acc).clone();
+        let new_acc = (*internal.acc).clone();
         new_acc.terminals_union -= disallowed_terminals;
-        if Arc::ptr_eq(&internal.acc, &Arc::new(new_acc.clone())) {
-            Some((internal.acc.clone(), true)) // No change
-        } else if new_acc.terminals_union.is_empty() {
-            None // Prune
-        } else {
-            Some((Arc::new(new_acc), true))
-        }
-    };
+        if 
+    }
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         let mut new_acc = (*root.acc).clone();
         new_acc.terminals_union -= disallowed_terminals;
