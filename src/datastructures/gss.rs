@@ -1081,27 +1081,17 @@ pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let node_ptr = Arc::as_ptr(root_arc);
-    if let Some(cached) = memo.get(&node_ptr) {
-        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
-        return;
-    }
-
-    let new_node = match root_arc.as_ref() {
-        GSSNode::Root(root) => {
-            let mut new_acc = (*root.acc).clone();
-            new_acc.terminals_union = HybridL2Bitset::all();
-            GSSNode::new(new_acc)
-        }
-        GSSNode::Internal(internal) => {
-            let mut new_acc = (*internal.acc).clone();
-            new_acc.terminals_union = HybridL2Bitset::all();
-            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
-        }
+    let mut internal_closure = |internal: &GSSInternal| -> Option<_> { Some((internal.acc.clone(), true)) };
+    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
+        let mut new_acc = (*root.acc).clone();
+        new_acc.terminals_union = HybridL2Bitset::all();
+        Some(Arc::new(new_acc))
     };
-    let new_arc = Arc::new(new_node);
-    memo.insert(node_ptr, Some(new_arc.clone()));
-    *root_arc = new_arc;
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+        *root_arc = new_root;
+    } else {
+        unreachable!();
+    }
 }
 
 pub(crate) fn disallow_terminals_and_prune_arc(
