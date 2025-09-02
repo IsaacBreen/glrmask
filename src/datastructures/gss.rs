@@ -1032,23 +1032,36 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
     allowed_tokens: &LLMTokenBV,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |internal: &GSSInternal| -> Option<_> { Some((internal.acc.clone(), true)) };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
-        new_acc.llm_tokens_union &= allowed_tokens;
-
-        // Prune if the union of possibilities is empty.
-        if new_acc.llm_tokens_union.is_empty() {
-            None
-        } else {
-            Some(Arc::new(new_acc))
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
+    }
+    let new_arc_opt = match root_arc.as_ref() {
+        GSSNode::Root(root) => {
+            let mut new_acc = (*root.acc).clone();
+            new_acc.llm_tokens_union &= allowed_tokens;
+            if new_acc.llm_tokens_union.is_empty() {
+                None
+            } else {
+                Some(Arc::new(GSSNode::new(new_acc)))
+            }
+        }
+        GSSNode::Internal(internal) => {
+            let mut new_acc = (*internal.acc).clone();
+            new_acc.llm_tokens_union &= allowed_tokens;
+            if new_acc.llm_tokens_union.is_empty() {
+                None
+            } else {
+                Some(Arc::new(GSSNode::new_with_map(
+                    Arc::new(new_acc),
+                    internal.predecessors.clone(),
+                )))
+            }
         }
     };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
-        *root_arc = new_root;
-    } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
-    }
+    memo.insert(node_ptr, new_arc_opt.clone());
+    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
 }
 
 pub(crate) fn disallow_llm_tokens_and_prune_arc(
@@ -1119,17 +1132,27 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     disallowed_terminals: &HybridL2Bitset,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let mut internal_closure = |internal: &GSSInternal| -> Option<_> { Some((internal.acc.clone(), true)) };
-    let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        let mut new_acc = (*root.acc).clone();
-        new_acc.terminals_union -= disallowed_terminals;
-        Some(Arc::new(new_acc))
-    };
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
-        *root_arc = new_root;
-    } else {
-        unreachable!();
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
     }
+
+    let new_node = match root_arc.as_ref() {
+        GSSNode::Root(root) => {
+            let mut new_acc = (*root.acc).clone();
+            new_acc.terminals_union -= disallowed_terminals;
+            GSSNode::new(new_acc)
+        }
+        GSSNode::Internal(internal) => {
+            let mut new_acc = (*internal.acc).clone();
+            new_acc.terminals_union -= disallowed_terminals;
+            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
+        }
+    };
+    let new_arc = Arc::new(new_node);
+    memo.insert(node_ptr, Some(new_arc.clone()));
+    *root_arc = new_arc;
 }
 
 pub(crate) fn prune_disallowed_terminals(
