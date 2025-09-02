@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Write};
+use std::ops::{BitAnd, BitOr};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
@@ -83,6 +84,42 @@ impl JSONConvertible for PrecomputedNodeContents {
 
 // --- Accumulator (Acc) ---
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Trie2NodeSet(Option<BTreeSet<PrecomputeNode2Index>>);
+
+impl Trie2NodeSet {
+    pub(crate) fn all() -> Self { Self(None) }
+    pub(crate) fn empty() -> Self { Self(Some(BTreeSet::new())) }
+    pub(crate) fn is_all(&self) -> bool { self.0.is_none() }
+    pub(crate) fn is_empty(&self) -> bool { matches!(&self.0, Some(s) if s.is_empty()) }
+    pub(crate) fn len(&self) -> Option<usize> { self.0.as_ref().map(|s| s.len()) }
+    pub(crate) fn iter(&self) -> Option<impl Iterator<Item = &PrecomputeNode2Index>> { self.0.as_ref().map(|s| s.iter()) }
+    pub(crate) fn from_set(set: BTreeSet<PrecomputeNode2Index>) -> Self { Self(Some(set)) }
+}
+
+impl BitAnd for &Trie2NodeSet {
+    type Output = Trie2NodeSet;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        match (&self.0, &rhs.0) {
+            (None, None) => Trie2NodeSet::all(),
+            (None, Some(b)) => Trie2NodeSet(Some(b.clone())),
+            (Some(a), None) => Trie2NodeSet(Some(a.clone())),
+            (Some(a), Some(b)) => Trie2NodeSet(Some(a.intersection(b).cloned().collect())),
+        }
+    }
+}
+
+impl BitOr for &Trie2NodeSet {
+    type Output = Trie2NodeSet;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        match (&self.0, &rhs.0) {
+            (None, _) | (_, None) => Trie2NodeSet::all(),
+            (Some(a), Some(b)) => Trie2NodeSet(Some(a.union(b).cloned().collect())),
+        }
+    }
+}
+
+
 /// Represents the full set of allowed tokens and terminals for a GSS node.
 /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
 /// is computed on demand by aggregating the Accs of all reachable roots.
@@ -90,7 +127,7 @@ impl JSONConvertible for PrecomputedNodeContents {
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
     pub(crate) terminals_union: HybridL2Bitset,
-    pub(crate) trie2_nodes: BTreeSet<PrecomputeNode2Index>,
+    pub(crate) trie2_nodes: Trie2NodeSet,
 }
 
 impl Acc {
@@ -99,7 +136,7 @@ impl Acc {
         Self {
             llm_tokens_union: HybridBitset::max_ones(),
             terminals_union: HybridL2Bitset::all(),
-            trie2_nodes: BTreeSet::new(),
+            trie2_nodes: Trie2NodeSet::all(),
         }
     }
 
@@ -109,14 +146,14 @@ impl Acc {
     pub(crate) fn is_merge_neutral(&self) -> bool {
         self.llm_tokens_union == HybridBitset::max_ones()
             && self.terminals_union == HybridL2Bitset::all()
-            && self.trie2_nodes.is_empty()
+            && self.trie2_nodes.is_all()
     }
 
     /// Returns true if this Acc is the default (unconstrained) value.
     pub(crate) fn is_default(&self) -> bool {
         self.llm_tokens_union == HybridBitset::max_ones()
             && self.terminals_union == HybridL2Bitset::all()
-            && self.trie2_nodes.is_empty()
+            && self.trie2_nodes.is_all()
     }
 
     /// Creates an accumulator with specific local constraints for a root node.
@@ -124,7 +161,7 @@ impl Acc {
         Self {
             llm_tokens_union: llm_tokens,
             terminals_union: terminals,
-            trie2_nodes: BTreeSet::new(),
+            trie2_nodes: Trie2NodeSet::all(),
         }
     }
 
@@ -132,8 +169,7 @@ impl Acc {
         Acc {
             llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
             terminals_union: &from.terminals_union & &to.terminals_union,
-            // For the simplified design, we do not propagate trie2 changes through internal nodes.
-            trie2_nodes: to.trie2_nodes.clone(),
+            trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
         }
     }
 
@@ -384,7 +420,9 @@ fn compute_hash_key_internal_with_acc(acc: &Acc, predecessors: &NodeMap) -> u64 
     // Include the local acc
     acc.llm_tokens_union.hash(&mut hasher);
     acc.terminals_union.hash(&mut hasher);
-    for t2 in &acc.trie2_nodes { t2.hash(&mut hasher); }
+    if let Some(t2_nodes) = acc.trie2_nodes.iter() {
+        for t2 in t2_nodes { t2.hash(&mut hasher); }
+    }
     for (edge_val, preds_by_depth) in predecessors {
         edge_val.hash(&mut hasher);
         for (dest_key, pred_vec) in preds_by_depth {
@@ -401,8 +439,10 @@ fn compute_hash_key_root(acc: &Acc) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
     acc.llm_tokens_union.hash(&mut hasher);
     acc.terminals_union.hash(&mut hasher);
-    for trie2_node in &acc.trie2_nodes {
-        trie2_node.hash(&mut hasher);
+    if let Some(trie2_nodes) = acc.trie2_nodes.iter() {
+        for trie2_node in trie2_nodes {
+            trie2_node.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -518,19 +558,9 @@ impl GSSNode {
             return GSSNode::new((*acc).clone());
         }
 
-        // Internal nodes must not carry trie2_nodes. They belong only to leaves.
-        let final_acc = if acc.trie2_nodes.is_empty() {
-            acc
-        } else {
-            let mut sanitized_acc = (*acc).clone();
-            sanitized_acc.trie2_nodes.clear();
-            Arc::new(sanitized_acc)
-        };
-        debug_assert!(final_acc.trie2_nodes.is_empty(), "Internal nodes must not carry trie2_nodes");
-
-        let hash_key_cache = compute_hash_key_internal_with_acc(&final_acc, &predecessors);
+        let hash_key_cache = compute_hash_key_internal_with_acc(&acc, &predecessors);
         let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { acc: final_acc, predecessors, hash_key_cache, max_depth })
+        GSSNode::Internal(GSSInternal { acc, predecessors, hash_key_cache, max_depth })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
@@ -540,17 +570,15 @@ impl GSSNode {
         let pred_local_acc = predecessor_arc.local_acc();
 
         let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
-            || pred_local_acc.terminals_union != HybridL2Bitset::all();
+            || pred_local_acc.terminals_union != HybridL2Bitset::all()
+            || !pred_local_acc.trie2_nodes.is_all();
 
         let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
             // Suck up constraints.
-            let mut parent_acc = acc; // Start with the acc passed to the function.
-            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
-            parent_acc.terminals_union &= &pred_local_acc.terminals_union;
+            let parent_acc = Acc::narrow(&acc, &pred_local_acc);
 
-            // Create new predecessor with stripped constraints but original payload (trie2_nodes).
-            let mut new_pred_acc = Acc::new_fresh();
-            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
+            // Create new predecessor with stripped constraints.
+            let new_pred_acc = Acc::new_fresh();
 
             let new_predecessor = match predecessor_arc.as_ref() {
                 GSSNode::Root(_) => GSSNode::new(new_pred_acc),
@@ -579,17 +607,15 @@ impl GSSNode {
         let pred_local_acc = predecessor_arc.local_acc();
 
         let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
-            || pred_local_acc.terminals_union != HybridL2Bitset::all();
+            || pred_local_acc.terminals_union != HybridL2Bitset::all()
+            || !pred_local_acc.trie2_nodes.is_all();
 
         let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
             // Suck up constraints.
-            let mut parent_acc = acc; // Start with the acc passed to the function.
-            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
-            parent_acc.terminals_union &= &pred_local_acc.terminals_union;
+            let parent_acc = Acc::narrow(&acc, &pred_local_acc);
 
-            // Create new predecessor with stripped constraints but original payload (trie2_nodes).
-            let mut new_pred_acc = Acc::new_fresh();
-            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
+            // Create new predecessor with stripped constraints.
+            let new_pred_acc = Acc::new_fresh();
 
             let new_predecessor = match predecessor_arc.as_ref() {
                 GSSNode::Root(_) => GSSNode::new(new_pred_acc),
@@ -877,26 +903,16 @@ impl GSSNode {
             // All children have the same acc.
             let common_acc = child_accs.into_iter().next().unwrap();
 
-            // Separate constraints from payload (trie2_nodes).
-            let mut parent_sucked_up_acc = Acc::new_fresh();
-            parent_sucked_up_acc.llm_tokens_union = common_acc.llm_tokens_union.clone();
-            parent_sucked_up_acc.terminals_union = common_acc.terminals_union.clone();
-
             // Check if there are any constraints to suck up.
-            let has_constraints_to_suck = parent_sucked_up_acc.llm_tokens_union != HybridBitset::max_ones()
-                || parent_sucked_up_acc.terminals_union != HybridL2Bitset::all();
+            let has_constraints_to_suck = common_acc.llm_tokens_union != HybridBitset::max_ones()
+                || common_acc.terminals_union != HybridL2Bitset::all()
+                || !common_acc.trie2_nodes.is_all();
 
             if has_constraints_to_suck {
-                final_parent_acc = Arc::new(parent_sucked_up_acc);
+                final_parent_acc = common_acc;
 
-                // Build separate Acc arcs for root children and internal children.
-                // Root children keep the payload (trie2_nodes).
-                let mut child_acc_root = Acc::new_fresh();
-                child_acc_root.trie2_nodes = common_acc.trie2_nodes.clone();
-                let new_child_acc_root = Arc::new(child_acc_root);
-
-                // Internal children must not carry any acc (neither constraints nor payload).
-                let new_child_acc_internal = Arc::new(Acc::new_fresh());
+                // All children get a fresh acc.
+                let new_child_acc = Arc::new(Acc::new_fresh());
 
                 // Rebuild children with this new acc.
                 let mut new_preds_map = BTreeMap::new();
@@ -905,10 +921,9 @@ impl GSSNode {
                     for (depth, pred_vec) in preds_by_depth {
                         let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
                         for pred_arc in pred_vec {
-                            // Choose the correct stripped acc based on whether the child is a root or internal node.
                             let new_pred = match &*pred_arc {
-                                GSSNode::Root(_) => GSSNode::new((*new_child_acc_root).clone()),
-                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc_internal.clone(), i.predecessors.clone()),
+                                GSSNode::Root(_) => GSSNode::new((*new_child_acc).clone()),
+                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc.clone(), i.predecessors.clone()),
                             };
                             new_pred_vec.push(Arc::new(new_pred));
                         }
@@ -1405,7 +1420,7 @@ pub(crate) fn merge_trie2_nodes_if_needed(
 
     let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        if !root.acc.trie2_nodes.iter().any(
+        if root.acc.trie2_nodes.is_all() || !root.acc.trie2_nodes.iter().unwrap().any(
             // TODO: can this condition be relaxed to a subset or something?
             |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
         ) {
@@ -1419,27 +1434,29 @@ pub(crate) fn merge_trie2_nodes_if_needed(
         let edge_key = (0, None);
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
-        for source_wrapper in &new_acc.trie2_nodes {
-            let source_arc = source_wrapper.as_arc().clone();
+        if let Some(trie2_nodes) = new_acc.trie2_nodes.iter() {
+            for source_wrapper in trie2_nodes {
+                let source_arc = source_wrapper.as_arc().clone();
 
-            let inserter = EdgeInserter::new(
-                &trie2_god,
-                source_arc,
-                edge_key,
-                tokens_for_edge.clone(),
-                |e, n| *e |= n,
-                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                |_, _| {}, // Unconditional insertion
-            );
-            // Insert a strong edge to the new shared destination.
-            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
+                let inserter = EdgeInserter::new(
+                    &trie2_god,
+                    source_arc,
+                    edge_key,
+                    tokens_for_edge.clone(),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |_, _| {}, // Unconditional insertion
+                );
+                // Insert a strong edge to the new shared destination.
+                inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
+            }
         }
 
         // Update the live tokens on the new destination node.
         new_destination.write(trie2_god).expect("poison").value.live_tokens |= &tokens_for_edge;
 
         // The acc now points only to this new merged destination.
-        new_acc.trie2_nodes = BTreeSet::from([new_destination]);
+        new_acc.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([new_destination]));
         Some(Arc::new(new_acc))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -1655,18 +1672,12 @@ pub(crate) fn deep_clone_gss_with_trie2_map(
             GSSNode::Root(root_node) => {
                 // Remap trie2_nodes for the root Acc
                 let mut new_acc = (*root_node.acc).clone();
-                if !new_acc.trie2_nodes.is_empty() {
-                    let mut new_set = BTreeSet::new();
-                    for old_wr in &new_acc.trie2_nodes {
-                        let old_arc = old_wr.as_arc().clone();
-                        let old_ptr = old_arc;
-                        if let Some(new_arc) = trie2_map.get(&old_ptr) {
-                            new_set.insert(new_arc.clone());
-                        } else {
-                            new_set.insert(old_arc);
-                        }
-                    }
-                    new_acc.trie2_nodes = new_set;
+                if let Some(trie2_nodes) = new_acc.trie2_nodes.0.take() {
+                    let new_set = trie2_nodes
+                        .into_iter()
+                        .map(|old_idx| trie2_map.get(&old_idx).cloned().unwrap_or(old_idx))
+                        .collect();
+                    new_acc.trie2_nodes = Trie2NodeSet(Some(new_set));
                 }
                 Arc::new(GSSNode::new(new_acc))
             }
@@ -2292,21 +2303,22 @@ pub(crate) fn format_acc(
     let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
     let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
 
-    let trie2_nodes_str = {
+    let trie2_nodes_str = if acc.trie2_nodes.is_all() {
+        None
+    } else {
         const MAX_PTRS_TO_SHOW: usize = 5;
-        let n = acc.trie2_nodes.len();
+        let trie2_nodes = acc.trie2_nodes.0.as_ref().unwrap();
+        let n = trie2_nodes.len();
         if n == 0 {
-            None
+            Some("Trie(n=0, [])".to_string())
         } else if n <= MAX_PTRS_TO_SHOW {
-            let ptrs: Vec<String> = acc
-                .trie2_nodes
+            let ptrs: Vec<String> = trie2_nodes
                 .iter()
                 .map(|wrapper| format!("{}", wrapper.as_arc()))
                 .collect();
             Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
         } else {
-            let ptrs_sample: Vec<String> = acc
-                .trie2_nodes
+            let ptrs_sample: Vec<String> = trie2_nodes
                 .iter()
                 .take(MAX_PTRS_TO_SHOW)
                 .map(|wrapper| format!("{}", wrapper.as_arc()))
@@ -2712,15 +2724,15 @@ mod tests {
         let trie2_node3 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
         let mut acc_l1 = empty_acc();
-        acc_l1.trie2_nodes.insert(trie2_node1.clone());
+        acc_l1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
         let l1 = Arc::new(GSSNode::new(acc_l1));
 
         let mut acc_l2 = empty_acc();
-        acc_l2.trie2_nodes.insert(trie2_node2.clone());
+        acc_l2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
         let l2 = Arc::new(GSSNode::new(acc_l2));
 
         let mut acc_l3 = empty_acc();
-        acc_l3.trie2_nodes.insert(trie2_node3.clone());
+        acc_l3.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node3.clone()]));
         let l3 = Arc::new(GSSNode::new(acc_l3));
 
         let mut gss1_preds = NodeMap::new();
@@ -2732,7 +2744,7 @@ mod tests {
 
         // --- GSS 2 Setup ---
         let mut acc_l4 = empty_acc();
-        acc_l4.trie2_nodes.insert(trie2_node1.clone()); // Shared trie2_node
+        acc_l4.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()])); // Shared trie2_node
         let l4 = Arc::new(GSSNode::new(acc_l4));
         let i1 = Arc::new(l4.push(mock_edge(0)));
         let gss2 = i1.push(mock_edge(1));
@@ -2749,7 +2761,9 @@ mod tests {
 
         while let Some(node) = q.pop_front() {
             if !visited.insert(Arc::as_ptr(&node)) { continue; }
-            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
+            if node.is_root() {
+                if let Some(nodes) = &node.acc().trie2_nodes.0 { final_leaf_trie2_nodes.extend(nodes.clone()); }
+            }
             for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
         }
 
@@ -2768,12 +2782,12 @@ mod tests {
         let trie2_god = Trie2GodWrapper::new();
         let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc1 = empty_acc();
-        acc1.trie2_nodes.insert(trie2_node1.clone());
+        acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
         let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
         let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc2 = empty_acc();
-        acc2.trie2_nodes.insert(trie2_node2.clone());
+        acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
         let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
 
         // --- GSS A ---
@@ -2823,7 +2837,7 @@ mod tests {
         let trie2_god = Trie2GodWrapper::new();
         let trie2_node_a = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_a = empty_acc();
-        acc_a.trie2_nodes.insert(trie2_node_a.clone());
+        acc_a.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_a.clone()]));
         let leaf_a = Arc::new(GSSNode::new(acc_a));
 
         let gss_a = GSSNode::new_with_single_predecessor(
@@ -2835,7 +2849,7 @@ mod tests {
         // --- GSS B setup ---
         let trie2_node_b = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
         let mut acc_b = empty_acc();
-        acc_b.trie2_nodes.insert(trie2_node_b.clone());
+        acc_b.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_b.clone()]));
         let leaf_b = Arc::new(GSSNode::new(acc_b));
 
         let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
@@ -2884,13 +2898,13 @@ mod tests {
 
         // --- Leaf 1 with trie2_node t1 ---
         let mut acc1 = empty_acc();
-        acc1.trie2_nodes.insert(t1.clone());
+        acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t1.clone()]));
         let leaf1 = Arc::new(GSSNode::new(acc1.clone()));
         let tower1 = build_tower_from_leaf(leaf1);
 
         // --- Leaf 2 with trie2_node t2 ---
         let mut acc2 = empty_acc();
-        acc2.trie2_nodes.insert(t2.clone());
+        acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t2.clone()]));
         let leaf2 = Arc::new(GSSNode::new(acc2.clone()));
         let tower2 = build_tower_from_leaf(leaf2);
 
@@ -2902,7 +2916,7 @@ mod tests {
         // With the new hoisting logic, the merged acc from the leaves should be hoisted
         // all the way to the top-level node of the merged tower.
         let final_acc = Acc::merge(&acc1, &acc2);
-        let trie2_nodes = &final_acc.trie2_nodes;
+        let trie2_nodes = final_acc.trie2_nodes.0.as_ref().unwrap();
 
         assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
         assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
