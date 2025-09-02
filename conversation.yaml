@@ -2980,7 +2980,6 @@ local_system:
       use std::collections::hash_map::DefaultHasher;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::fmt::{Debug, Write};
-      use std::ops::{BitAnd, BitOr};
       use std::hash::{Hash, Hasher};
       use std::sync::Arc;
       use std::sync::{OnceLock, RwLock};
@@ -3056,42 +3055,6 @@ local_system:
 
       // --- Accumulator (Acc) ---
 
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub(crate) struct Trie2NodeSet(Option<BTreeSet<PrecomputeNode2Index>>);
-
-      impl Trie2NodeSet {
-          pub(crate) fn all() -> Self { Self(None) }
-          pub(crate) fn empty() -> Self { Self(Some(BTreeSet::new())) }
-          pub(crate) fn is_all(&self) -> bool { self.0.is_none() }
-          pub(crate) fn is_empty(&self) -> bool { matches!(&self.0, Some(s) if s.is_empty()) }
-          pub(crate) fn len(&self) -> Option<usize> { self.0.as_ref().map(|s| s.len()) }
-          pub(crate) fn iter(&self) -> Option<impl Iterator<Item = &PrecomputeNode2Index>> { self.0.as_ref().map(|s| s.iter()) }
-          pub(crate) fn from_set(set: BTreeSet<PrecomputeNode2Index>) -> Self { Self(Some(set)) }
-      }
-
-      impl BitAnd for &Trie2NodeSet {
-          type Output = Trie2NodeSet;
-          fn bitand(self, rhs: Self) -> Self::Output {
-              match (&self.0, &rhs.0) {
-                  (None, None) => Trie2NodeSet::all(),
-                  (None, Some(b)) => Trie2NodeSet(Some(b.clone())),
-                  (Some(a), None) => Trie2NodeSet(Some(a.clone())),
-                  (Some(a), Some(b)) => Trie2NodeSet(Some(a.intersection(b).cloned().collect())),
-              }
-          }
-      }
-
-      impl BitOr for &Trie2NodeSet {
-          type Output = Trie2NodeSet;
-          fn bitor(self, rhs: Self) -> Self::Output {
-              match (&self.0, &rhs.0) {
-                  (None, _) | (_, None) => Trie2NodeSet::all(),
-                  (Some(a), Some(b)) => Trie2NodeSet(Some(a.union(b).cloned().collect())),
-              }
-          }
-      }
-
-
       /// Represents the full set of allowed tokens and terminals for a GSS node.
       /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
       /// is computed on demand by aggregating the Accs of all reachable roots.
@@ -3099,7 +3062,7 @@ local_system:
       pub(crate) struct Acc {
           pub(crate) llm_tokens_union: HybridBitset,
           pub(crate) terminals_union: HybridL2Bitset,
-          pub(crate) trie2_nodes: Trie2NodeSet,
+          pub(crate) trie2_nodes: BTreeSet<PrecomputeNode2Index>,
       }
 
       impl Acc {
@@ -3108,7 +3071,7 @@ local_system:
               Self {
                   llm_tokens_union: HybridBitset::max_ones(),
                   terminals_union: HybridL2Bitset::all(),
-                  trie2_nodes: Trie2NodeSet::all(),
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -3118,14 +3081,14 @@ local_system:
           pub(crate) fn is_merge_neutral(&self) -> bool {
               self.llm_tokens_union == HybridBitset::max_ones()
                   && self.terminals_union == HybridL2Bitset::all()
-                  && self.trie2_nodes.is_all()
+                  && self.trie2_nodes.is_empty()
           }
 
           /// Returns true if this Acc is the default (unconstrained) value.
           pub(crate) fn is_default(&self) -> bool {
               self.llm_tokens_union == HybridBitset::max_ones()
                   && self.terminals_union == HybridL2Bitset::all()
-                  && self.trie2_nodes.is_all()
+                  && self.trie2_nodes.is_empty()
           }
 
           /// Creates an accumulator with specific local constraints for a root node.
@@ -3133,7 +3096,7 @@ local_system:
               Self {
                   llm_tokens_union: llm_tokens,
                   terminals_union: terminals,
-                  trie2_nodes: Trie2NodeSet::all(),
+                  trie2_nodes: BTreeSet::new(),
               }
           }
 
@@ -3141,7 +3104,8 @@ local_system:
               Acc {
                   llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
                   terminals_union: &from.terminals_union & &to.terminals_union,
-                  trie2_nodes: &from.trie2_nodes & &to.trie2_nodes,
+                  // For the simplified design, we do not propagate trie2 changes through internal nodes.
+                  trie2_nodes: to.trie2_nodes.clone(),
               }
           }
 
@@ -3392,9 +3356,7 @@ local_system:
           // Include the local acc
           acc.llm_tokens_union.hash(&mut hasher);
           acc.terminals_union.hash(&mut hasher);
-          if let Some(t2_nodes) = acc.trie2_nodes.iter() {
-              for t2 in t2_nodes { t2.hash(&mut hasher); }
-          }
+          for t2 in &acc.trie2_nodes { t2.hash(&mut hasher); }
           for (edge_val, preds_by_depth) in predecessors {
               edge_val.hash(&mut hasher);
               for (dest_key, pred_vec) in preds_by_depth {
@@ -3411,10 +3373,8 @@ local_system:
           let mut hasher = DeterministicHasher::new(DefaultHasher::new());
           acc.llm_tokens_union.hash(&mut hasher);
           acc.terminals_union.hash(&mut hasher);
-          if let Some(trie2_nodes) = acc.trie2_nodes.iter() {
-              for trie2_node in trie2_nodes {
-                  trie2_node.hash(&mut hasher);
-              }
+          for trie2_node in &acc.trie2_nodes {
+              trie2_node.hash(&mut hasher);
           }
           hasher.finish()
       }
@@ -3530,9 +3490,19 @@ local_system:
                   return GSSNode::new((*acc).clone());
               }
 
-              let hash_key_cache = compute_hash_key_internal_with_acc(&acc, &predecessors);
+              // Internal nodes must not carry trie2_nodes. They belong only to leaves.
+              let final_acc = if acc.trie2_nodes.is_empty() {
+                  acc
+              } else {
+                  let mut sanitized_acc = (*acc).clone();
+                  sanitized_acc.trie2_nodes.clear();
+                  Arc::new(sanitized_acc)
+              };
+              debug_assert!(final_acc.trie2_nodes.is_empty(), "Internal nodes must not carry trie2_nodes");
+
+              let hash_key_cache = compute_hash_key_internal_with_acc(&final_acc, &predecessors);
               let max_depth = compute_max_depth(&predecessors);
-              GSSNode::Internal(GSSInternal { acc, predecessors, hash_key_cache, max_depth })
+              GSSNode::Internal(GSSInternal { acc: final_acc, predecessors, hash_key_cache, max_depth })
           }
 
           /// Helper to create a GSSNode with a single predecessor, used by `push`.
@@ -3542,15 +3512,17 @@ local_system:
               let pred_local_acc = predecessor_arc.local_acc();
 
               let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
-                  || pred_local_acc.terminals_union != HybridL2Bitset::all()
-                  || !pred_local_acc.trie2_nodes.is_all();
+                  || pred_local_acc.terminals_union != HybridL2Bitset::all();
 
               let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
                   // Suck up constraints.
-                  let parent_acc = Acc::narrow(&acc, &pred_local_acc);
+                  let mut parent_acc = acc; // Start with the acc passed to the function.
+                  parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
+                  parent_acc.terminals_union &= &pred_local_acc.terminals_union;
 
-                  // Create new predecessor with stripped constraints.
-                  let new_pred_acc = Acc::new_fresh();
+                  // Create new predecessor with stripped constraints but original payload (trie2_nodes).
+                  let mut new_pred_acc = Acc::new_fresh();
+                  new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
 
                   let new_predecessor = match predecessor_arc.as_ref() {
                       GSSNode::Root(_) => GSSNode::new(new_pred_acc),
@@ -3579,15 +3551,17 @@ local_system:
               let pred_local_acc = predecessor_arc.local_acc();
 
               let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
-                  || pred_local_acc.terminals_union != HybridL2Bitset::all()
-                  || !pred_local_acc.trie2_nodes.is_all();
+                  || pred_local_acc.terminals_union != HybridL2Bitset::all();
 
               let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
                   // Suck up constraints.
-                  let parent_acc = Acc::narrow(&acc, &pred_local_acc);
+                  let mut parent_acc = acc; // Start with the acc passed to the function.
+                  parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
+                  parent_acc.terminals_union &= &pred_local_acc.terminals_union;
 
-                  // Create new predecessor with stripped constraints.
-                  let new_pred_acc = Acc::new_fresh();
+                  // Create new predecessor with stripped constraints but original payload (trie2_nodes).
+                  let mut new_pred_acc = Acc::new_fresh();
+                  new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
 
                   let new_predecessor = match predecessor_arc.as_ref() {
                       GSSNode::Root(_) => GSSNode::new(new_pred_acc),
@@ -3875,16 +3849,26 @@ local_system:
                   // All children have the same acc.
                   let common_acc = child_accs.into_iter().next().unwrap();
 
+                  // Separate constraints from payload (trie2_nodes).
+                  let mut parent_sucked_up_acc = Acc::new_fresh();
+                  parent_sucked_up_acc.llm_tokens_union = common_acc.llm_tokens_union.clone();
+                  parent_sucked_up_acc.terminals_union = common_acc.terminals_union.clone();
+
                   // Check if there are any constraints to suck up.
-                  let has_constraints_to_suck = common_acc.llm_tokens_union != HybridBitset::max_ones()
-                      || common_acc.terminals_union != HybridL2Bitset::all()
-                      || !common_acc.trie2_nodes.is_all();
+                  let has_constraints_to_suck = parent_sucked_up_acc.llm_tokens_union != HybridBitset::max_ones()
+                      || parent_sucked_up_acc.terminals_union != HybridL2Bitset::all();
 
                   if has_constraints_to_suck {
-                      final_parent_acc = common_acc;
+                      final_parent_acc = Arc::new(parent_sucked_up_acc);
 
-                      // All children get a fresh acc.
-                      let new_child_acc = Arc::new(Acc::new_fresh());
+                      // Build separate Acc arcs for root children and internal children.
+                      // Root children keep the payload (trie2_nodes).
+                      let mut child_acc_root = Acc::new_fresh();
+                      child_acc_root.trie2_nodes = common_acc.trie2_nodes.clone();
+                      let new_child_acc_root = Arc::new(child_acc_root);
+
+                      // Internal children must not carry any acc (neither constraints nor payload).
+                      let new_child_acc_internal = Arc::new(Acc::new_fresh());
 
                       // Rebuild children with this new acc.
                       let mut new_preds_map = BTreeMap::new();
@@ -3893,9 +3877,10 @@ local_system:
                           for (depth, pred_vec) in preds_by_depth {
                               let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
                               for pred_arc in pred_vec {
+                                  // Choose the correct stripped acc based on whether the child is a root or internal node.
                                   let new_pred = match &*pred_arc {
-                                      GSSNode::Root(_) => GSSNode::new((*new_child_acc).clone()),
-                                      GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc.clone(), i.predecessors.clone()),
+                                      GSSNode::Root(_) => GSSNode::new((*new_child_acc_root).clone()),
+                                      GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc_internal.clone(), i.predecessors.clone()),
                                   };
                                   new_pred_vec.push(Arc::new(new_pred));
                               }
@@ -4392,7 +4377,7 @@ local_system:
 
           let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-              if root.acc.trie2_nodes.is_all() || !root.acc.trie2_nodes.iter().unwrap().any(
+              if !root.acc.trie2_nodes.iter().any(
                   // TODO: can this condition be relaxed to a subset or something?
                   |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
               ) {
@@ -4406,29 +4391,27 @@ local_system:
               let edge_key = (0, None);
               let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
-              if let Some(trie2_nodes) = new_acc.trie2_nodes.iter() {
-                  for source_wrapper in trie2_nodes {
-                      let source_arc = source_wrapper.as_arc().clone();
+              for source_wrapper in &new_acc.trie2_nodes {
+                  let source_arc = source_wrapper.as_arc().clone();
 
-                      let inserter = EdgeInserter::new(
-                          &trie2_god,
-                          source_arc,
-                          edge_key,
-                          tokens_for_edge.clone(),
-                          |e, n| *e |= n,
-                          |node_value, edge_value| node_value.live_tokens |= edge_value,
-                          |_, _| {}, // Unconditional insertion
-                      );
-                      // Insert a strong edge to the new shared destination.
-                      inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
-                  }
+                  let inserter = EdgeInserter::new(
+                      &trie2_god,
+                      source_arc,
+                      edge_key,
+                      tokens_for_edge.clone(),
+                      |e, n| *e |= n,
+                      |node_value, edge_value| node_value.live_tokens |= edge_value,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  // Insert a strong edge to the new shared destination.
+                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
               }
 
               // Update the live tokens on the new destination node.
               new_destination.write(trie2_god).expect("poison").value.live_tokens |= &tokens_for_edge;
 
               // The acc now points only to this new merged destination.
-              new_acc.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([new_destination]));
+              new_acc.trie2_nodes = BTreeSet::from([new_destination]);
               Some(Arc::new(new_acc))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -4644,12 +4627,18 @@ local_system:
                   GSSNode::Root(root_node) => {
                       // Remap trie2_nodes for the root Acc
                       let mut new_acc = (*root_node.acc).clone();
-                      if let Some(trie2_nodes) = new_acc.trie2_nodes.0.take() {
-                          let new_set = trie2_nodes
-                              .into_iter()
-                              .map(|old_idx| trie2_map.get(&old_idx).cloned().unwrap_or(old_idx))
-                              .collect();
-                          new_acc.trie2_nodes = Trie2NodeSet(Some(new_set));
+                      if !new_acc.trie2_nodes.is_empty() {
+                          let mut new_set = BTreeSet::new();
+                          for old_wr in &new_acc.trie2_nodes {
+                              let old_arc = old_wr.as_arc().clone();
+                              let old_ptr = old_arc;
+                              if let Some(new_arc) = trie2_map.get(&old_ptr) {
+                                  new_set.insert(new_arc.clone());
+                              } else {
+                                  new_set.insert(old_arc);
+                              }
+                          }
+                          new_acc.trie2_nodes = new_set;
                       }
                       Arc::new(GSSNode::new(new_acc))
                   }
@@ -5275,22 +5264,21 @@ local_system:
           let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
           let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
 
-          let trie2_nodes_str = if acc.trie2_nodes.is_all() {
-              None
-          } else {
+          let trie2_nodes_str = {
               const MAX_PTRS_TO_SHOW: usize = 5;
-              let trie2_nodes = acc.trie2_nodes.0.as_ref().unwrap();
-              let n = trie2_nodes.len();
+              let n = acc.trie2_nodes.len();
               if n == 0 {
-                  Some("Trie(n=0, [])".to_string())
+                  None
               } else if n <= MAX_PTRS_TO_SHOW {
-                  let ptrs: Vec<String> = trie2_nodes
+                  let ptrs: Vec<String> = acc
+                      .trie2_nodes
                       .iter()
                       .map(|wrapper| format!("{}", wrapper.as_arc()))
                       .collect();
                   Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
               } else {
-                  let ptrs_sample: Vec<String> = trie2_nodes
+                  let ptrs_sample: Vec<String> = acc
+                      .trie2_nodes
                       .iter()
                       .take(MAX_PTRS_TO_SHOW)
                       .map(|wrapper| format!("{}", wrapper.as_arc()))
@@ -5696,15 +5684,15 @@ local_system:
               let trie2_node3 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
 
               let mut acc_l1 = empty_acc();
-              acc_l1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
+              acc_l1.trie2_nodes.insert(trie2_node1.clone());
               let l1 = Arc::new(GSSNode::new(acc_l1));
 
               let mut acc_l2 = empty_acc();
-              acc_l2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
+              acc_l2.trie2_nodes.insert(trie2_node2.clone());
               let l2 = Arc::new(GSSNode::new(acc_l2));
 
               let mut acc_l3 = empty_acc();
-              acc_l3.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node3.clone()]));
+              acc_l3.trie2_nodes.insert(trie2_node3.clone());
               let l3 = Arc::new(GSSNode::new(acc_l3));
 
               let mut gss1_preds = NodeMap::new();
@@ -5716,7 +5704,7 @@ local_system:
 
               // --- GSS 2 Setup ---
               let mut acc_l4 = empty_acc();
-              acc_l4.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()])); // Shared trie2_node
+              acc_l4.trie2_nodes.insert(trie2_node1.clone()); // Shared trie2_node
               let l4 = Arc::new(GSSNode::new(acc_l4));
               let i1 = Arc::new(l4.push(mock_edge(0)));
               let gss2 = i1.push(mock_edge(1));
@@ -5733,9 +5721,7 @@ local_system:
 
               while let Some(node) = q.pop_front() {
                   if !visited.insert(Arc::as_ptr(&node)) { continue; }
-                  if node.is_root() {
-                      if let Some(nodes) = &node.acc().trie2_nodes.0 { final_leaf_trie2_nodes.extend(nodes.clone()); }
-                  }
+                  if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
                   for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
               }
 
@@ -5754,12 +5740,12 @@ local_system:
               let trie2_god = Trie2GodWrapper::new();
               let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc1 = empty_acc();
-              acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
+              acc1.trie2_nodes.insert(trie2_node1.clone());
               let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
               let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc2 = empty_acc();
-              acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
+              acc2.trie2_nodes.insert(trie2_node2.clone());
               let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
 
               // --- GSS A ---
@@ -5809,7 +5795,7 @@ local_system:
               let trie2_god = Trie2GodWrapper::new();
               let trie2_node_a = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc_a = empty_acc();
-              acc_a.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_a.clone()]));
+              acc_a.trie2_nodes.insert(trie2_node_a.clone());
               let leaf_a = Arc::new(GSSNode::new(acc_a));
 
               let gss_a = GSSNode::new_with_single_predecessor(
@@ -5821,7 +5807,7 @@ local_system:
               // --- GSS B setup ---
               let trie2_node_b = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
               let mut acc_b = empty_acc();
-              acc_b.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_b.clone()]));
+              acc_b.trie2_nodes.insert(trie2_node_b.clone());
               let leaf_b = Arc::new(GSSNode::new(acc_b));
 
               let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
@@ -5870,13 +5856,13 @@ local_system:
 
               // --- Leaf 1 with trie2_node t1 ---
               let mut acc1 = empty_acc();
-              acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t1.clone()]));
+              acc1.trie2_nodes.insert(t1.clone());
               let leaf1 = Arc::new(GSSNode::new(acc1.clone()));
               let tower1 = build_tower_from_leaf(leaf1);
 
               // --- Leaf 2 with trie2_node t2 ---
               let mut acc2 = empty_acc();
-              acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t2.clone()]));
+              acc2.trie2_nodes.insert(t2.clone());
               let leaf2 = Arc::new(GSSNode::new(acc2.clone()));
               let tower2 = build_tower_from_leaf(leaf2);
 
@@ -5888,7 +5874,7 @@ local_system:
               // With the new hoisting logic, the merged acc from the leaves should be hoisted
               // all the way to the top-level node of the merged tower.
               let final_acc = Acc::merge(&acc1, &acc2);
-              let trie2_nodes = final_acc.trie2_nodes.0.as_ref().unwrap();
+              let trie2_nodes = &final_acc.trie2_nodes;
 
               assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
               assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
@@ -8975,78 +8961,92 @@ messages:
   - assistant: |-
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
+      index 898b307..8f57f49 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -5,6 +5,7 @@
-       use std::collections::hash_map::DefaultHasher;
-       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-       use std::fmt::{Debug, Write};
-      +use std::ops::{BitAnd, BitOr};
-       use std::hash::{Hash, Hasher};
-       use std::sync::Arc;
-       use std::sync::{OnceLock, RwLock};
-      @@ -70,12 +71,53 @@
+      @@ -87,13 +87,62 @@
        
        // --- Accumulator (Acc) ---
        
       +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      +pub(crate) struct Trie2NodeSet(Option<BTreeSet<PrecomputeNode2Index>>);
+      +pub(crate) struct Trie2NodesSet(Option<BTreeSet<PrecomputeNode2Index>>);
       +
-      +impl Trie2NodeSet {
-      +    pub(crate) fn all() -> Self { Self(None) }
-      +    pub(crate) fn empty() -> Self { Self(Some(BTreeSet::new())) }
-      +    pub(crate) fn is_all(&self) -> bool { self.0.is_none() }
-      +    pub(crate) fn is_empty(&self) -> bool { matches!(&self.0, Some(s) if s.is_empty()) }
-      +    pub(crate) fn len(&self) -> Option<usize> { self.0.as_ref().map(|s| s.len()) }
-      +    pub(crate) fn iter(&self) -> Option<impl Iterator<Item = &PrecomputeNode2Index>> { self.0.as_ref().map(|s| s.iter()) }
-      +    pub(crate) fn from_set(set: BTreeSet<PrecomputeNode2Index>) -> Self { Self(Some(set)) }
-      +}
+      +impl Trie2NodesSet {
+      +    pub(crate) fn is_all(&self) -> bool {
+      +        self.0.is_none()
+      +    }
       +
-      +impl BitAnd for &Trie2NodeSet {
-      +    type Output = Trie2NodeSet;
-      +    fn bitand(self, rhs: Self) -> Self::Output {
-      +        match (&self.0, &rhs.0) {
-      +            (None, None) => Trie2NodeSet::all(),
-      +            (None, Some(b)) => Trie2NodeSet(Some(b.clone())),
-      +            (Some(a), None) => Trie2NodeSet(Some(a.clone())),
-      +            (Some(a), Some(b)) => Trie2NodeSet(Some(a.intersection(b).cloned().collect())),
+      +    pub(crate) fn is_empty(&self) -> bool {
+      +        matches!(&self.0, Some(s) if s.is_empty())
+      +    }
+      +
+      +    pub(crate) fn iter(&self) -> impl Iterator<Item = &PrecomputeNode2Index> {
+      +        self.0.as_ref().into_iter().flatten()
+      +    }
+      +
+      +    pub(crate) fn len(&self) -> usize {
+      +        self.0.as_ref().map_or(0, |s| s.len())
+      +    }
+      +
+      +    pub(crate) fn clear(&mut self) {
+      +        if let Some(s) = &mut self.0 {
+      +            s.clear();
       +        }
       +    }
       +}
       +
-      +impl BitOr for &Trie2NodeSet {
-      +    type Output = Trie2NodeSet;
-      +    fn bitor(self, rhs: Self) -> Self::Output {
+      +use std::ops::{BitAnd, BitOr};
+      +
+      +impl<'a, 'b> BitAnd<&'b Trie2NodesSet> for &'a Trie2NodesSet {
+      +    type Output = Trie2NodesSet;
+      +
+      +    fn bitand(self, rhs: &'b Trie2NodesSet) -> Self::Output {
       +        match (&self.0, &rhs.0) {
-      +            (None, _) | (_, None) => Trie2NodeSet::all(),
-      +            (Some(a), Some(b)) => Trie2NodeSet(Some(a.union(b).cloned().collect())),
+      +            (None, _) => rhs.clone(),
+      +            (_, None) => self.clone(),
+      +            (Some(lhs_set), Some(rhs_set)) => {
+      +                Trie2NodesSet(Some(lhs_set.intersection(rhs_set).cloned().collect()))
+      +            }
       +        }
       +    }
       +}
       +
+      +impl<'a, 'b> BitOr<&'b Trie2NodesSet> for &'a Trie2NodesSet {
+      +    type Output = Trie2NodesSet;
       +
+      +    fn bitor(self, rhs: &'b Trie2NodesSet) -> Self::Output {
+      +        match (&self.0, &rhs.0) {
+      +            (None, _) => Trie2NodesSet(None),
+      +            (_, None) => Trie2NodesSet(None),
+      +            (Some(lhs_set), Some(rhs_set)) => {
+      +                Trie2NodesSet(Some(lhs_set.union(rhs_set).cloned().collect()))
+      +            }
+      +        }
+      +    }
+      +}
        /// Represents the full set of allowed tokens and terminals for a GSS node.
        /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
        /// is computed on demand by aggregating the Accs of all reachable roots.
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      @@ -101,7 +150,7 @@
        pub(crate) struct Acc {
            pub(crate) llm_tokens_union: HybridBitset,
            pub(crate) terminals_union: HybridL2Bitset,
       -    pub(crate) trie2_nodes: BTreeSet<PrecomputeNode2Index>,
-      +    pub(crate) trie2_nodes: Trie2NodeSet,
+      +    pub(crate) trie2_nodes: Trie2NodesSet,
        }
        
        impl Acc {
-      @@ -84,7 +124,7 @@
+      @@ -110,7 +159,7 @@
                Self {
                    llm_tokens_union: HybridBitset::max_ones(),
                    terminals_union: HybridL2Bitset::all(),
       -            trie2_nodes: BTreeSet::new(),
-      +            trie2_nodes: Trie2NodeSet::all(),
+      +            trie2_nodes: Trie2NodesSet(None),
                }
            }
        
-      @@ -94,28 +134,27 @@
+      @@ -119,23 +168,23 @@
+           /// This is used to detect safe early-return cases in GSS merges.
            pub(crate) fn is_merge_neutral(&self) -> bool {
                self.llm_tokens_union == HybridBitset::max_ones()
                    && self.terminals_union == HybridL2Bitset::all()
@@ -9068,11 +9068,11 @@ messages:
                    llm_tokens_union: llm_tokens,
                    terminals_union: terminals,
       -            trie2_nodes: BTreeSet::new(),
-      +            trie2_nodes: Trie2NodeSet::all(),
+      +            trie2_nodes: Trie2NodesSet(Some(BTreeSet::new())),
                }
            }
        
-           pub(crate) fn narrow(from: &Self, to: &Self) -> Self {
+      @@ -143,15 +192,14 @@
                Acc {
                    llm_tokens_union: &from.llm_tokens_union & &to.llm_tokens_union,
                    terminals_union: &from.terminals_union & &to.terminals_union,
@@ -9082,7 +9082,7 @@ messages:
                }
            }
        
-      @@ -123,7 +162,7 @@
+           pub(crate) fn merge(lhs: &Self, rhs: &Self) -> Self {
                Acc {
                    llm_tokens_union: &lhs.llm_tokens_union | &rhs.llm_tokens_union,
                    terminals_union: &lhs.terminals_union | &rhs.terminals_union,
@@ -9091,31 +9091,25 @@ messages:
                }
            }
        
-      @@ -354,7 +393,9 @@
+      @@ -467,7 +516,7 @@
            // Include the local acc
            acc.llm_tokens_union.hash(&mut hasher);
            acc.terminals_union.hash(&mut hasher);
       -    for t2 in &acc.trie2_nodes { t2.hash(&mut hasher); }
-      +    if let Some(t2_nodes) = acc.trie2_nodes.iter() {
-      +        for t2 in t2_nodes { t2.hash(&mut hasher); }
-      +    }
+      +    for t2 in acc.trie2_nodes.iter() { t2.hash(&mut hasher); }
            for (edge_val, preds_by_depth) in predecessors {
                edge_val.hash(&mut hasher);
                for (dest_key, pred_vec) in preds_by_depth {
-      @@ -370,8 +411,10 @@
+      @@ -484,7 +533,7 @@
            let mut hasher = DeterministicHasher::new(DefaultHasher::new());
            acc.llm_tokens_union.hash(&mut hasher);
            acc.terminals_union.hash(&mut hasher);
       -    for trie2_node in &acc.trie2_nodes {
-      -        trie2_node.hash(&mut hasher);
-      +    if let Some(trie2_nodes) = acc.trie2_nodes.iter() {
-      +        for trie2_node in trie2_nodes {
-      +            trie2_node.hash(&mut hasher);
-      +        }
+      +    for trie2_node in acc.trie2_nodes.iter() {
+               trie2_node.hash(&mut hasher);
            }
            hasher.finish()
-       }
-      @@ -501,21 +544,10 @@
+      @@ -582,20 +631,10 @@
                    return GSSNode::new((*acc).clone());
                }
        
@@ -9137,15 +9131,15 @@ messages:
            }
        
            /// Helper to create a GSSNode with a single predecessor, used by `push`.
-      @@ -525,23 +557,18 @@
+      @@ -604,21 +643,15 @@
+               // --- SUCK UP LOGIC ---
                let pred_local_acc = predecessor_arc.local_acc();
        
-               let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
+      -        let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
       -            || pred_local_acc.terminals_union != HybridL2Bitset::all();
-      +            || pred_local_acc.terminals_union != HybridL2Bitset::all()
-      +            || !pred_local_acc.trie2_nodes.is_all();
-       
-               let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+      -
+      -        let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+      +        let (final_parent_acc, final_predecessor_arc) = if !pred_local_acc.is_default() {
                    // Suck up constraints.
       -            let mut parent_acc = acc; // Start with the acc passed to the function.
       -            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
@@ -9156,7 +9150,7 @@ messages:
       -            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
       +            let parent_acc = Acc::narrow(&acc, &pred_local_acc);
       +
-      +            // Create new predecessor with stripped constraints.
+      +            // Create new predecessor with fresh acc.
       +            let new_pred_acc = Acc::new_fresh();
        
                    let new_predecessor = match predecessor_arc.as_ref() {
@@ -9164,16 +9158,15 @@ messages:
                        GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(new_pred_acc), i.predecessors.clone()),
                    };
        
-                   (parent_acc, Arc::new(new_predecessor))
-      @@ -563,23 +590,18 @@
+      @@ -642,21 +675,15 @@
+               // --- SUCK UP LOGIC (identical to single predecessor) ---
                let pred_local_acc = predecessor_arc.local_acc();
        
-               let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
+      -        let has_constraints_to_suck_up = pred_local_acc.llm_tokens_union != HybridBitset::max_ones()
       -            || pred_local_acc.terminals_union != HybridL2Bitset::all();
-      +            || pred_local_acc.terminals_union != HybridL2Bitset::all()
-      +            || !pred_local_acc.trie2_nodes.is_all();
-       
-               let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+      -
+      -        let (final_parent_acc, final_predecessor_arc) = if has_constraints_to_suck_up {
+      +        let (final_parent_acc, final_predecessor_arc) = if !pred_local_acc.is_default() {
                    // Suck up constraints.
       -            let mut parent_acc = acc; // Start with the acc passed to the function.
       -            parent_acc.llm_tokens_union &= &pred_local_acc.llm_tokens_union;
@@ -9184,7 +9177,7 @@ messages:
       -            new_pred_acc.trie2_nodes = pred_local_acc.trie2_nodes.clone();
       +            let parent_acc = Acc::narrow(&acc, &pred_local_acc);
       +
-      +            // Create new predecessor with stripped constraints.
+      +            // Create new predecessor with fresh acc.
       +            let new_pred_acc = Acc::new_fresh();
        
                    let new_predecessor = match predecessor_arc.as_ref() {
@@ -9192,8 +9185,8 @@ messages:
                        GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(new_pred_acc), i.predecessors.clone()),
                    };
        
-                   (parent_acc, Arc::new(new_predecessor))
-      @@ -838,32 +860,24 @@
+      @@ -874,44 +901,31 @@
+               if has_preds && child_accs.len() == 1 {
                    // All children have the same acc.
                    let common_acc = child_accs.into_iter().next().unwrap();
        
@@ -9202,14 +9195,11 @@ messages:
       -            parent_sucked_up_acc.llm_tokens_union = common_acc.llm_tokens_union.clone();
       -            parent_sucked_up_acc.terminals_union = common_acc.terminals_union.clone();
       -
-                   // Check if there are any constraints to suck up.
+      -            // Check if there are any constraints to suck up.
       -            let has_constraints_to_suck = parent_sucked_up_acc.llm_tokens_union != HybridBitset::max_ones()
       -                || parent_sucked_up_acc.terminals_union != HybridL2Bitset::all();
-      +            let has_constraints_to_suck = common_acc.llm_tokens_union != HybridBitset::max_ones()
-      +                || common_acc.terminals_union != HybridL2Bitset::all()
-      +                || !common_acc.trie2_nodes.is_all();
-       
-                   if has_constraints_to_suck {
+      -
+      -            if has_constraints_to_suck {
       -                final_parent_acc = Arc::new(parent_sucked_up_acc);
       -
       -                // Build separate Acc arcs for root children and internal children.
@@ -9220,9 +9210,8 @@ messages:
       -
       -                // Internal children must not carry any acc (neither constraints nor payload).
       -                let new_child_acc_internal = Arc::new(Acc::new_fresh());
-      +                final_parent_acc = common_acc;
-      +
-      +                // All children get a fresh acc.
+      +            if !common_acc.is_default() {
+      +                final_parent_acc = common_acc; // Suck it up
       +                let new_child_acc = Arc::new(Acc::new_fresh());
        
                        // Rebuild children with this new acc.
@@ -9241,40 +9230,501 @@ messages:
                                    };
                                    new_pred_vec.push(Arc::new(new_pred));
                                }
-      @@ -1186,21 +1200,16 @@
-                   GSSNode::Root(root_node) => {
-                       // Remap trie2_nodes for the root Acc
-                       let mut new_acc = (*root_node.acc).clone();
-      -                if !new_acc.trie2_nodes.is_empty() {
-      -                    let mut new_set = BTreeSet::new();
-      -                    for old_wr in &new_acc.trie2_nodes {
-      -                        let old_arc = old_wr.as_arc().clone();
-      -                        let old_ptr = old_arc;
-      -                        if let Some(new_arc) = trie2_map.get(&old_ptr) {
-      -                            new_set.insert(new_arc.clone());
-      -                        } else {
-      -                            new_set.insert(old_arc);
-      -                        }
-      -                    }
-      -                    new_acc.trie2_nodes = new_set;
-      +                if let Some(trie2_nodes) = new_acc.trie2_nodes.0.take() {
-      +                    let new_set = trie2_nodes
-      +                        .into_iter()
-      +                        .map(|old_idx| trie2_map.get(&old_idx).cloned().unwrap_or(old_idx))
-      +                        .collect();
-      +                    new_acc.trie2_nodes = Trie2NodeSet(Some(new_set));
+                               new_preds_by_depth.insert(depth, new_pred_vec);
+                           }
+                           new_preds_map.insert(edge, new_preds_by_depth);
                        }
-                       Arc::new(GSSNode::new(new_acc))
+                       final_predecessors_map = new_preds_map;
+                   } else {
+                       // No constraints to suck up. Parent gets a fresh acc, children are not modified.
+                       final_parent_acc = Arc::new(Acc::new_fresh());
                    }
-                   GSSNode::Internal(internal) => {
-                       // Clone predecessors recursively
-                       let mut new_preds: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
-      @@ -1502,36 +1511,42 @@
+               } else {
+                   // Children have different accs, or there are no children.
+                   // Parent gets a fresh acc.
+                   final_parent_acc = Arc::new(Acc::new_fresh());
+               }
+       
+               let final_predecessors = if merge_depth > 0 {
+                   // After merging, unify structurally identical predecessors to increase sharing.
+                   let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+                   let mut unified_predecessors = BTreeMap::new();
+       
+                   for (edge_val, preds_by_depth) in final_predecessors_map {
+                       let mut unified_preds_by_depth = BTreeMap::new();
+                       for (depth, pred_vec) in preds_by_depth {
+                           let mut unified_pred_vec = Vec::new();
+                           for pred_arc in pred_vec {
+                               let canonical_arc = canonical_map.entry((*pred_arc).clone()).or_insert_with(|| pred_arc.clone()).clone();
+                               unified_pred_vec.push(canonical_arc);
+                           }
+                           unified_pred_vec.sort_by_key(|a| Arc::as_ptr(a) as usize);
+                           unified_pred_vec.dedup_by_key(|a| Arc::as_ptr(a));
+                           unified_preds_by_depth.insert(depth, unified_pred_vec);
+                       }
+                       unified_predecessors.insert(edge_val, unified_preds_by_depth);
+                   }
+                   unified_predecessors
+               } else {
+                   final_predecessors_map
+               };
+       
+               *self = GSSNode::new_with_map(final_parent_acc, final_predecessors);
+           }
+       
+           #[allow(dead_code)] pub(crate) fn merged(mut self, other: Self, merge_depth: usize) -> Self {
+               self.merge_with_depth(merge_depth, &other);
+               self
+           }
+       
+           #[allow(dead_code)] pub(crate) fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+               // In the simplified design, Acc is only at roots; this behaves like push.
+               Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, Acc::new_fresh())
+           }
+       
+           /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
+           pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+               parent_arc.predecessors().iter().flat_map(move |(edge_val, preds_by_depth)| {
+                   preds_by_depth.values().flat_map(move |pred_vec| {
+                       pred_vec.iter().map(move |pred_arc| GSSPeek {
+                           parent_arc,
+                           edge_value: edge_val,
+                           predecessor_node: pred_arc,
+                       })
+                   })
+               })
+           }
+       }
+       
+       
+       impl<'a> GSSPeek<'a> {
+           pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+       
+           #[allow(dead_code)] pub(crate) fn predecessor_node(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+       
+           /// Returns the combined `Acc` of the parent and the predecessor.
+           #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Acc {
+               Acc::narrow(&self.parent_arc.local_acc(), &self.predecessor_node.local_acc())
+           }
+       
+           /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
+           pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+               let parent = self.parent_arc.allowed_llm_tokens();
+               let pred = self.predecessor_node.allowed_llm_tokens();
+               &parent & &pred
+           }
+       
+           /// Returns a new `GSSNode` representing the predecessor.
+           #[allow(dead_code)] pub(crate) fn resolved_predecessor_node(&self) -> Arc<GSSNode> {
+               self.predecessor_node.clone()
+           }
+       
+           /// Pushes a new state onto the resolved predecessor.
+           #[allow(dead_code)] pub(crate) fn push_on_predecessor(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+               GSSNode::new_with_single_predecessor(self.predecessor_node.clone(), edge_value, Acc::new_fresh())
+           }
+       
+           pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+               self.isolated_parent().as_ref().push(edge_value)
+           }
+           pub fn popn(&self, len: usize) -> GSSPopper {
+               let isolated_parent = self.isolated_parent();
+               let mut popper = GSSPopper::new_from_node(isolated_parent, Arc::new(Acc::new_fresh()));
+               popper.popn(len);
+               popper
+           }
+       
+           /// Creates a new `GSSNode` that represents only the path segment of this peek.
+           pub fn isolated_parent(&self) -> Arc<GSSNode> {
+               if self.parent_arc.num_predecessors() == 1 {
+                   return self.parent_arc.clone();
+               }
+       
+               Arc::new(GSSNode::new_with_single_predecessor(
+                   self.predecessor_node.clone(),
+                   self.edge_value.clone(),
+                   (*self.parent_arc.local_acc()).clone(),
+               ))
+           }
+       }
+       
+       // Trait implementations for GSSNode
+       impl Hash for GSSNode {
+           fn hash<H: Hasher>(&self, state: &mut H) {
+               match self {
+                   GSSNode::Root(r) => r.hash_key_cache.hash(state),
+                   GSSNode::Internal(i) => i.hash_key_cache.hash(state),
+               }
+           }
+       }
+       
+       impl PartialEq for GSSNode {
+           fn eq(&self, other: &Self) -> bool {
+               match (self, other) {
+                   (GSSNode::Root(a), GSSNode::Root(b)) => {
+                       a.hash_key_cache == b.hash_key_cache && a.acc == b.acc
+                   }
+                   (GSSNode::Internal(a), GSSNode::Internal(b)) => {
+                       a.hash_key_cache == b.hash_key_cache && a.acc == b.acc && a.predecessors == b.predecessors
+                   }
+                   _ => false,
+               }
+           }
+       }
+       
+       impl Eq for GSSNode {}
+       
+       impl PartialOrd for GSSNode {
+           fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+               Some(self.cmp(other))
+           }
+       }
+       
+       impl Ord for GSSNode {
+           fn cmp(&self, other: &Self) -> Ordering {
+               use std::mem::discriminant;
+               let da = discriminant(self);
+               let db = discriminant(other);
+               if da != db {
+                   // Order by variant first
+                   return if matches!(self, GSSNode::Root(_)) { Ordering::Less } else { Ordering::Greater };
+               }
+       
+               match (self, other) {
+                   (GSSNode::Root(a), GSSNode::Root(b)) => {
+                       a.hash_key_cache.cmp(&b.hash_key_cache)
+                           .then_with(|| a.acc.cmp(&b.acc))
+                   }
+                   (GSSNode::Internal(a), GSSNode::Internal(b)) => {
+                       a.hash_key_cache.cmp(&b.hash_key_cache)
+                           .then_with(|| a.acc.cmp(&b.acc))
+                           .then_with(|| a.predecessors.cmp(&b.predecessors))
+                   }
+                   _ => Ordering::Equal,
+               }
+           }
+       }
+       
+       
+       // --- Pruning and Transformation ---
+       
+       pub(crate) type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+       
+       /// Prunes and/or transforms a GSS by:
+       /// - Invoking `internal_closure` on internal nodes to decide if they should be pruned entirely.
+       /// - Invoking `root_closure` on root nodes to determine the replacement Acc or prune the root.
+       ///
+       /// Note:
+       /// - There is no early-continue/stop: recursion always traverses into children of internal nodes
+       ///   unless `internal_closure` prunes that node.
+       /// - Internal nodes never hold Acc; only roots do.
+       fn prune_and_transform_recursive(
+           node_arc: &Arc<GSSNode>,
+           internal_closure: &mut impl FnMut(&GSSInternal) -> Option<(Arc<Acc>, bool)>,
+           root_closure: &mut impl FnMut(&GSSRoot) -> Option<Arc<Acc>>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) -> Option<Arc<GSSNode>> {
+           let node_ptr = Arc::as_ptr(node_arc);
+           if let Some(cached_result) = memo.get(&node_ptr) {
+               return cached_result.clone();
+           }
+           let result = match node_arc.as_ref() {
+               GSSNode::Root(root) => {
+                   match root_closure(root) {
+                       None => None, // Prune
+                       Some(new_acc_arc) => {
+                           if Arc::ptr_eq(&new_acc_arc, &root.acc) {
+                               // No change
+                               Some(node_arc.clone())
+                           } else {
+                               // Acc changed, create new root node
+                               let new_node = GSSNode::new((*new_acc_arc).clone());
+                               Some(Arc::new(new_node))
+                           }
+                       }
+                   }
+               }
+               GSSNode::Internal(internal) => {
+                   match internal_closure(internal) {
+                       None => { // Prune
+                           memo.insert(node_ptr, None);
+                           return None;
+                       }
+                       Some((new_acc_arc, recurse)) => {
+                           let acc_changed = !Arc::ptr_eq(&new_acc_arc, &internal.acc);
+       
+                           if !recurse {
+                               let result = if acc_changed {
+                                   // Acc changed, but no recursion. Rebuild node with old predecessors.
+                                   let new_node = GSSNode::new_with_map(new_acc_arc, internal.predecessors.clone());
+                                   Some(Arc::new(new_node))
+                               } else {
+                                   // No change at all.
+                                   Some(node_arc.clone())
+                               };
+                               memo.insert(node_ptr, result.clone());
+                               return result;
+                           }
+       
+                           // Recurse into children.
+                           let mut any_child_changed = false;
+                           let mut new_predecessors_map: NodeMap = BTreeMap::new();
+       
+                           for (edge_val, preds_by_depth) in &internal.predecessors {
+                               let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                               for (dest_key, pred_vec) in preds_by_depth {
+                                   let mut new_vec: Vec<Arc<GSSNode>> = Vec::new();
+                                   for pred_arc in pred_vec {
+                                       match prune_and_transform_recursive(pred_arc, internal_closure, root_closure, memo) {
+                                           Some(new_pred_arc) => {
+                                               if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                                   any_child_changed = true;
+                                               }
+                                               new_vec.push(new_pred_arc);
+                                           }
+                                           None => {
+                                               // Child was pruned.
+                                               any_child_changed = true;
+                                           }
+                                       }
+                                   }
+                                   if !new_vec.is_empty() {
+                                       new_preds_by_depth.insert(*dest_key, new_vec);
+                                   }
+                               }
+                               if !new_preds_by_depth.is_empty() {
+                                   new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
+                               }
+                           }
+       
+                           if new_predecessors_map.is_empty() {
+                               // All children pruned, so prune this node.
+                               None
+                           } else if !any_child_changed && !acc_changed {
+                               // No change in children or acc, so no change in this node.
+                               Some(node_arc.clone())
+                           } else {
+                               // Children or acc changed, create new internal node.
+                               let transformed_node = GSSNode::new_with_map(new_acc_arc, new_predecessors_map);
+                               Some(Arc::new(transformed_node))
+                           }
+                       }
+                   }
+               }
+           };
+       
+           memo.insert(node_ptr, result.clone());
+           result
+       }
+       
+       pub fn allow_only_llm_tokens_and_prune(
+           root_arc: &mut Arc<GSSNode>,
+           allowed_tokens: &LLMTokenBV,
+       ) {
+           let mut memo = HashMap::new();
+           allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
+       }
+       
+       pub(crate) fn allow_only_llm_tokens_and_prune_arc(
+           root_arc: &mut Arc<GSSNode>,
+           allowed_tokens: &LLMTokenBV,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let node_ptr = Arc::as_ptr(root_arc);
+           if let Some(cached) = memo.get(&node_ptr) {
+               *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+               return;
+           }
+           let new_arc_opt = match root_arc.as_ref() {
+               GSSNode::Root(root) => {
+                   let mut new_acc = (*root.acc).clone();
+                   new_acc.llm_tokens_union &= allowed_tokens;
+                   if new_acc.llm_tokens_union.is_empty() {
+                       None
+                   } else {
+                       Some(Arc::new(GSSNode::new(new_acc)))
+                   }
+               }
+               GSSNode::Internal(internal) => {
+                   let mut new_acc = (*internal.acc).clone();
+                   new_acc.llm_tokens_union &= allowed_tokens;
+                   if new_acc.llm_tokens_union.is_empty() {
+                       None
+                   } else {
+                       Some(Arc::new(GSSNode::new_with_map(
+                           Arc::new(new_acc),
+                           internal.predecessors.clone(),
+                       )))
+                   }
+               }
+           };
+           memo.insert(node_ptr, new_arc_opt.clone());
+           *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+       }
+       
+       pub(crate) fn disallow_llm_tokens_and_prune_arc(
+           root_arc: &mut Arc<GSSNode>,
+           tokens_to_disallow: &LLMTokenBV,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let allowed_mask = HybridBitset::max_ones() - tokens_to_disallow.clone();
+           allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
+       }
+       
+       pub(crate) fn reset_llm_tokens(
+           root_arc: &mut Arc<GSSNode>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let mut internal_closure = |internal: &GSSInternal| {
+               let mut new_acc = (*internal.acc).clone();
+               new_acc.llm_tokens_union = HybridBitset::max_ones();
+               Some((Arc::new(new_acc), true))
+           };
+           let mut root_closure = |root: &GSSRoot| {
+               let mut new_acc = (*root.acc).clone();
+               new_acc.llm_tokens_union = HybridBitset::max_ones();
+               Some(Arc::new(new_acc))
+           };
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+               *root_arc = Arc::new(GSSNode::new_fresh());
+           }
+       }
+       
+       pub(crate) fn reset_terminals(
+           root_arc: &mut Arc<GSSNode>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let mut internal_closure = |internal: &GSSInternal| {
+               let mut new_acc = (*internal.acc).clone();
+               new_acc.terminals_union = HybridL2Bitset::all();
+               Some((Arc::new(new_acc), true))
+           };
+           let mut root_closure = |root: &GSSRoot| {
+               let mut new_acc = (*root.acc).clone();
+               new_acc.terminals_union = HybridL2Bitset::all();
+               Some(Arc::new(new_acc))
+           };
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+               *root_arc = Arc::new(GSSNode::new_fresh());
+           }
+       }
+       
+       pub(crate) fn disallow_terminals_and_prune_arc(
+           root_arc: &mut Arc<GSSNode>,
+           disallowed_terminals: &HybridL2Bitset,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let node_ptr = Arc::as_ptr(root_arc);
+           if let Some(cached) = memo.get(&node_ptr) {
+               *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+               return;
+           }
+       
+           let new_node = match root_arc.as_ref() {
+               GSSNode::Root(root) => {
+                   let mut new_acc = (*root.acc).clone();
+                   new_acc.terminals_union -= disallowed_terminals;
+                   GSSNode::new(new_acc)
+               }
+               GSSNode::Internal(internal) => {
+                   let mut new_acc = (*internal.acc).clone();
+                   new_acc.terminals_union -= disallowed_terminals;
+                   GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
+               }
+           };
+           let new_arc = Arc::new(new_node);
+           memo.insert(node_ptr, Some(new_arc.clone()));
+           *root_arc = new_arc;
+       }
+       
+       pub(crate) fn prune_disallowed_terminals(
+           root_arc: &mut Arc<GSSNode>,
+           matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let check_and_prune = |node_acc: &Arc<Acc>| -> bool {
+               // Returns true if the node should be pruned.
+               for (state_id, matched_bv) in matched_terminals {
+                   let allowed_terminals_union = node_acc.terminals_union.get_l2_bitset(state_id.0).unwrap();
+                   if !matched_bv.is_subset(allowed_terminals_union) {
+                       return true;
+                   }
+               }
+               false
+           };
+       
+           let mut internal_closure = |internal: &GSSInternal| {
+               if check_and_prune(&internal.acc) {
+                   None
+               } else {
+                   Some((internal.acc.clone(), true))
+               }
+           };
+           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
+               if check_and_prune(&root.acc) { None } else { Some(root.acc.clone()) }
+           };
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+               *root_arc = Arc::new(GSSNode::new_fresh());
+           }
+       }
+       
+       pub(crate) fn map_allowed_terminals_tokenizer_states(
+           root_arc: &mut Arc<GSSNode>,
+           map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+       ) {
+           let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
+               let mut new_terminals_btreemap = BTreeMap::new();
+       
+               for (old_state_id, new_state_id) in map {
+                   let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
+                   new_terminals_btreemap.entry(*new_state_id)
+                       .and_modify(|bv| *bv |= bv_source)
+                       .or_insert_with(|| bv_source.clone());
+               }
+       
+               let mut new_terminals_l2_bitset = HybridL2Bitset::all();
+               for (state_id, bv) in new_terminals_btreemap {
+                   new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
+               }
+       
+               new_terminals_l2_bitset
+           };
+       
+           let transform_acc = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+               let mut new_acc = (**acc).clone();
+               let new_terminals_union = map_one(&acc.terminals_union);
+               new_acc.terminals_union = new_terminals_union;
+               Some(Arc::new(new_acc))
+           };
+       
+           let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc).map(|acc| (acc, true));
+           let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc);
+       
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+               *root_arc = Arc::new(GSSNode::new_fresh());
+           }
+       }
+       
+       pub(crate) fn merge_trie2_nodes_if_needed(
+           root_arc: &mut Arc<GSSNode>,
+           memo: &mut PruneAndTransformRecursiveMemo,
+           trie2_god: &Trie2GodWrapper,
+       ) {
+           let mut new_destinations = BTreeMap::new();
        
            let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
            let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
       -        if !root.acc.trie2_nodes.iter().any(
-      +        if root.acc.trie2_nodes.is_all() || !root.acc.trie2_nodes.iter().unwrap().any(
+      +        if root.acc.trie2_nodes.is_all() || !root.acc.trie2_nodes.iter().any(
                    // TODO: can this condition be relaxed to a subset or something?
                    |n| n.as_arc().read(trie2_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
                ) {
@@ -9289,220 +9739,742 @@ messages:
                let tokens_for_edge = new_acc.llm_tokens_union.clone();
        
       -        for source_wrapper in &new_acc.trie2_nodes {
-      -            let source_arc = source_wrapper.as_arc().clone();
-      -
-      -            let inserter = EdgeInserter::new(
-      -                &trie2_god,
-      -                source_arc,
-      -                edge_key,
-      -                tokens_for_edge.clone(),
-      -                |e, n| *e |= n,
-      -                |node_value, edge_value| node_value.live_tokens |= edge_value,
-      -                |_, _| {}, // Unconditional insertion
-      -            );
-      -            // Insert a strong edge to the new shared destination.
-      -            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
-      +        if let Some(trie2_nodes) = new_acc.trie2_nodes.iter() {
-      +            for source_wrapper in trie2_nodes {
-      +                let source_arc = source_wrapper.as_arc().clone();
-      +
-      +                let inserter = EdgeInserter::new(
-      +                    &trie2_god,
-      +                    source_arc,
-      +                    edge_key,
-      +                    tokens_for_edge.clone(),
-      +                    |e, n| *e |= n,
-      +                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-      +                    |_, _| {}, // Unconditional insertion
-      +                );
-      +                // Insert a strong edge to the new shared destination.
-      +                inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging trie2 nodes; this should be impossible.");
-      +            }
-               }
+      +        for source_wrapper in new_acc.trie2_nodes.iter() {
+                   let source_arc = source_wrapper.as_arc().clone();
        
-               // Update the live tokens on the new destination node.
+                   let inserter = EdgeInserter::new(
+      @@ -1218,7 +1415,7 @@
                new_destination.write(trie2_god).expect("poison").value.live_tokens |= &tokens_for_edge;
        
                // The acc now points only to this new merged destination.
       -        new_acc.trie2_nodes = BTreeSet::from([new_destination]);
-      +        new_acc.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([new_destination]));
+      +        new_acc.trie2_nodes = Trie2NodesSet(Some(BTreeSet::from([new_destination])));
                Some(Arc::new(new_acc))
            };
            if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
-      @@ -1659,31 +1674,37 @@
-           let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
-           let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+               *root_arc = new_root;
+           } else {
+               unreachable!();
+           }
+       }
        
-      -    let trie2_nodes_str = {
-      -        const MAX_PTRS_TO_SHOW: usize = 5;
-      -        let n = acc.trie2_nodes.len();
-      -        if n == 0 {
-      -            None
-      -        } else if n <= MAX_PTRS_TO_SHOW {
-      -            let ptrs: Vec<String> = acc
-      -                .trie2_nodes
-      -                .iter()
-      -                .map(|wrapper| format!("{}", wrapper.as_arc()))
-      -                .collect();
-      -            Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
-      -        } else {
-      -            let ptrs_sample: Vec<String> = acc
-      -                .trie2_nodes
-      -                .iter()
-      -                .take(MAX_PTRS_TO_SHOW)
-      -                .map(|wrapper| format!("{}", wrapper.as_arc()))
-      -                .collect();
-      -            let remaining = n - MAX_PTRS_TO_SHOW;
-      -            Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
-      -        }
-      -    };
-      +    let trie2_nodes_str = if acc.trie2_nodes.is_all() {
-      +        None
-      +    } else {
-      +        const MAX_PTRS_TO_SHOW: usize = 5;
-      +        let trie2_nodes = acc.trie2_nodes.0.as_ref().unwrap();
-      +        let n = trie2_nodes.len();
-      +        if n == 0 {
-      +            Some("Trie(n=0, [])".to_string())
-      +        } else if n <= MAX_PTRS_TO_SHOW {
-      +            let ptrs: Vec<String> = trie2_nodes
-      +                .iter()
-      +                .map(|wrapper| format!("{}", wrapper.as_arc()))
-      +                .collect();
-      +            Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
-      +        } else {
-      +            let ptrs_sample: Vec<String> = trie2_nodes
-      +                .iter()
-      +                .take(MAX_PTRS_TO_SHOW)
-      +                .map(|wrapper| format!("{}", wrapper.as_arc()))
-      +                .collect();
-      +            let remaining = n - MAX_PTRS_TO_SHOW;
-      +            Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
-      +        }
-      +    };
+       impl GSSNode {
+           /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
+           #[time_it]
+           pub(crate) fn fuse_predecessors(&mut self, levels: usize) {
+               if levels == 0 {
+                   return;
+               }
+               let temp_arc = Arc::new(self.clone());
+               let mut memo = HashMap::new();
+               let fused_arc = fuse_predecessors_recursive(&temp_arc, levels, &mut memo);
+               *self = Arc::try_unwrap(fused_arc).unwrap_or_else(|arc| (*arc).clone());
+           }
+       }
        
-           let mut parts: Vec<String> = Vec::new();
-           if let Some(s) = union_llm_opt { parts.push(s); }
-           if let Some(s) = union_terminals_opt { parts.push(s); }
-           if let Some(s) = trie2_nodes_str { parts.push(s); }
+       pub(crate) fn fuse_predecessors_recursive(
+           node_arc: &Arc<GSSNode>,
+           levels: usize,
+           memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+       ) -> Arc<GSSNode> {
+           if levels == 0 {
+               return node_arc.clone();
+           }
+           let node_ptr = Arc::as_ptr(node_arc);
+           if let Some(fused_arc) = memo.get(&node_ptr) {
+               return fused_arc.clone();
+           }
        
-           if parts.is_empty() {
-               String::new()
-      @@ -1949,27 +1970,27 @@
-               let trie2_node3 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
+           // 1. Recursively fuse the predecessors first (post-order traversal).
+           let mut recursively_fused_predecessors = Vec::new();
+           for (edge_val, preds_by_depth) in node_arc.predecessors() {
+               for pred_vec in preds_by_depth.values() {
+                   for pred_arc in pred_vec {
+                       let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
+                       recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+                   }
+               }
+           }
        
-               let mut acc_l1 = empty_acc();
-      -        acc_l1.trie2_nodes.insert(trie2_node1.clone());
-      +        acc_l1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
-               let l1 = Arc::new(GSSNode::new(acc_l1));
+           // 2. Group the now-fused predecessors by their edge value.
+           let mut grouped_by_edge = BTreeMap::<ParseStateEdgeContent, Vec<Arc<GSSNode>>>::new();
+           for (edge_val, pred_arc) in recursively_fused_predecessors {
+               grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
+           }
        
-               let mut acc_l2 = empty_acc();
-      -        acc_l2.trie2_nodes.insert(trie2_node2.clone());
-      +        acc_l2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
-               let l2 = Arc::new(GSSNode::new(acc_l2));
+           // 3. For each edge value, merge all predecessors associated with it into a single node.
+           let mut new_predecessors_set = NodeSet::new();
+           for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
+               if pred_arcs_to_merge.is_empty() { continue; }
        
-               let mut acc_l3 = empty_acc();
-      -        acc_l3.trie2_nodes.insert(trie2_node3.clone());
-      +        acc_l3.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node3.clone()]));
-               let l3 = Arc::new(GSSNode::new(acc_l3));
+               let mut iter = pred_arcs_to_merge.into_iter();
+               let first = iter.next().unwrap();
        
-               let mut gss1_preds = NodeMap::new();
-               gss1_preds.entry(mock_edge(0)).or_default().insert(l1.dest_key(), vec![l1.clone()]);
-               gss1_preds.entry(mock_edge(1)).or_default().insert(l2.dest_key(), vec![l2.clone()]);
-               gss1_preds.entry(mock_edge(2)).or_default().insert(l3.dest_key(), vec![l3.clone()]);
+               let final_pred_arc = if iter.len() == 0 {
+                   first
+               } else {
+                   let mut merged_node = (*first).clone();
+                   for other_arc in iter {
+                       merged_node.merge_with_depth(1, &other_arc);
+                   }
+                   Arc::new(merged_node)
+               };
+               new_predecessors_set.insert((final_pred_arc, edge_val));
+           }
        
-               let mut gss1 = GSSNode::new_with_map(Arc::new(mock_acc(0)), gss1_preds); // mock_acc(0) restricts token 0
+           // 4. Rebuild the current node with the new, fused set of predecessors.
+           let new_predecessors_map = process_predecessors(&new_predecessors_set);
+           let local = node_arc.local_acc();
+           let fused_node = GSSNode::new_with_map(local, new_predecessors_map);
        
-               // --- GSS 2 Setup ---
-               let mut acc_l4 = empty_acc();
-      -        acc_l4.trie2_nodes.insert(trie2_node1.clone()); // Shared trie2_node
-      +        acc_l4.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()])); // Shared trie2_node
-               let l4 = Arc::new(GSSNode::new(acc_l4));
-               let i1 = Arc::new(l4.push(mock_edge(0)));
-               let gss2 = i1.push(mock_edge(1));
-      @@ -1984,7 +2005,9 @@
+           let result_arc = Arc::new(fused_node);
+           memo.insert(node_ptr, result_arc.clone());
+           result_arc
+       }
        
-               while let Some(node) = q.pop_front() {
-                   if !visited.insert(Arc::as_ptr(&node)) { continue; }
-      -            if node.is_root() { final_leaf_trie2_nodes.extend(node.acc().trie2_nodes.clone()); }
-      +            if node.is_root() {
-      +                if let Some(nodes) = &node.acc().trie2_nodes.0 { final_leaf_trie2_nodes.extend(nodes.clone()); }
-      +            }
-                   for p in node.predecessors().values().flat_map(|m| m.values()).flatten() { q.push_back(p.clone()); }
+       // --- Deep canonicalization & interning ---
+       
+       #[derive(Default)]
+       struct GSSInternPool {
+           // Intern by full structural equality. Using BTreeMap keeps the process deterministic.
+           by_node: BTreeMap<GSSNode, Arc<GSSNode>>,
+       }
+       
+       impl GSSInternPool {
+           fn new() -> Self { Self { by_node: BTreeMap::new() } }
+       
+           fn intern(&mut self, node: GSSNode) -> Arc<GSSNode> {
+               if let Some(existing) = self.by_node.get(&node) {
+                   return existing.clone();
+               }
+               // Store an Arc of the created node as the canonical representative.
+               let arc = Arc::new(node);
+               // Key is a value-clone of the node; that's fine because we want structural keying.
+               self.by_node.insert((*arc).clone(), arc.clone());
+               arc
+           }
+       }
+       
+       // Canonicalize a single GSS node (bottom-up) using a global intern pool and a per-walk memo.
+       fn canonicalize_node(
+           node_arc: &Arc<GSSNode>,
+           pool: &mut GSSInternPool,
+           memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+       ) -> Arc<GSSNode> {
+           let ptr = Arc::as_ptr(node_arc);
+           if let Some(cached) = memo.get(&ptr) {
+               return cached.clone();
+           }
+       
+           let out = match node_arc.as_ref() {
+               GSSNode::Root(root) => {
+                   // Intern roots by their Acc value. This makes identical roots share a single Arc.
+                   let acc = (*root.acc).clone();
+                   pool.intern(GSSNode::new(acc))
+               }
+               GSSNode::Internal(internal) => {
+                   // 1) Recursively canonicalize all predecessors.
+                   // 2) Deduplicate siblings that are structurally equal under the same (edge, DestKey).
+                   // 3) Build a new NodeMap and intern it.
+       
+                   let mut new_map: NodeMap = BTreeMap::new();
+       
+                   for (edge_val, preds_by_depth) in &internal.predecessors {
+                       let mut new_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+       
+                       for (dest_key, pred_vec) in preds_by_depth {
+                           // Deduplicate by structure: multiple identical preds collapse into one.
+                           let mut unify: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
+       
+                           for pred_arc in pred_vec {
+                               let canon_pred = canonicalize_node(pred_arc, pool, memo);
+                               // Use value-based keying to ensure structural dedup, not pointer-only.
+                               let key = (*canon_pred).clone();
+                               // Keep a single canonical Arc per structural node.
+                               unify.entry(key).or_insert(canon_pred);
+                           }
+       
+                           let mut uniq_vec: Vec<Arc<GSSNode>> = unify.into_values().collect();
+                           // Deterministic ordering: sort by structural value.
+                           uniq_vec.sort_by(|a, b| (**a).cmp(&**b));
+                           new_by_depth.insert(*dest_key, uniq_vec);
+                       }
+       
+                       if !new_by_depth.is_empty() {
+                           new_map.insert(edge_val.clone(), new_by_depth);
+                       }
+                   }
+       
+                   // Important: pass a neutral Acc when rebuilding internal nodes, so we keep structure only.
+                   // Now: we must preserve local acc as well.
+                   pool.intern(GSSNode::new_with_map(internal.acc.clone(), new_map))
+               }
+           };
+       
+           memo.insert(ptr, out.clone());
+           out
+       }
+       
+       // Convenience: canonicalize a list of roots in-place with a single pool for maximal sharing.
+       fn simplify_roots_in_place(roots: &mut [Arc<GSSNode>]) {
+           if roots.is_empty() { return; }
+           let mut pool = GSSInternPool::new();
+           let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+       
+           for r in roots.iter_mut() {
+               let canon = canonicalize_node(r, &mut pool, &mut memo);
+               *r = canon;
+           }
+       }
+       
+       pub fn simplify(states: &mut BTreeMap<TokenizerStateID, Arc<GSSNode>>) {
+           // We want cross-state sharing, so we collect all roots, canonicalize with a single pool, then write back.
+           // 1) Collect all roots from all states.
+           let mut all_roots: Vec<Arc<GSSNode>> =
+               states.values().map(|s| s.clone()).collect();
+       
+           if all_roots.is_empty() { return; }
+       
+           // 2) Canonicalize them in place using one shared pool.
+           simplify_roots_in_place(&mut all_roots);
+       
+           // 3) Write the canonicalized roots back.
+           let mut canonical_roots_iter = all_roots.into_iter();
+           for state in states.values_mut() {
+               // This assumes a 1-to-1 mapping and preserved order, which BTreeMap provides.
+               *state = canonical_roots_iter.next().unwrap();
+           }
+       }
+       
+       pub(crate) fn deep_clone_gss_with_trie2_map(
+           root: &Arc<GSSNode>,
+           trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
+       ) -> Arc<GSSNode> {
+           fn clone_one(
+               node: &Arc<GSSNode>,
+               trie2_map: &HashMap<PrecomputeNode2Index, PrecomputeNode2Index>,
+               memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+           ) -> Arc<GSSNode> {
+               let ptr = Arc::as_ptr(node);
+               if let Some(cached) = memo.get(&ptr) {
+                   return cached.clone();
                }
        
-      @@ -2001,12 +2024,12 @@
-               // --- Shared Nodes ---
-               let trie2_god = Trie2GodWrapper::new();
-               let trie2_node1 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-               let mut acc1 = empty_acc();
-      -        acc1.trie2_nodes.insert(trie2_node1.clone());
-      +        acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node1.clone()]));
-               let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
+               let out = match node.as_ref() {
+                   GSSNode::Root(root_node) => {
+                       // Remap trie2_nodes for the root Acc
+                       let mut new_acc = (*root_node.acc).clone();
+      -                if !new_acc.trie2_nodes.is_empty() {
+      -                    let mut new_set = BTreeSet::new();
+      -                    for old_wr in &new_acc.trie2_nodes {
+      -                        let old_arc = old_wr.as_arc().clone();
+      -                        let old_ptr = old_arc;
+      -                        if let Some(new_arc) = trie2_map.get(&old_ptr) {
+      -                            new_set.insert(new_arc.clone());
+      -                        } else {
+      -                            new_set.insert(old_arc);
+      +                if let Some(nodes) = new_acc.trie2_nodes.0.as_mut() {
+      +                    if !nodes.is_empty() {
+      +                        let mut new_set = BTreeSet::new();
+      +                        for old_wr in nodes.iter() {
+      +                            if let Some(new_wr) = trie2_map.get(old_wr) {
+      +                                new_set.insert(new_wr.clone());
+      +                            } else {
+      +                                new_set.insert(old_wr.clone());
+      +                            }
+                               }
+      +                        *nodes = new_set;
+                           }
+      -                    new_acc.trie2_nodes = new_set;
+                       }
+                       Arc::new(GSSNode::new(new_acc))
+                   }
+                   GSSNode::Internal(internal) => {
+                       // Clone predecessors recursively
+                       let mut new_preds: BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>> = BTreeMap::new();
+                       for (edge_val, preds_by_depth) in &internal.predecessors {
+                           let mut new_by_depth = BTreeMap::new();
+                           for (dest_key, pred_vec) in preds_by_depth {
+                               let mut new_vec = Vec::with_capacity(pred_vec.len());
+                               for pred in pred_vec {
+                                   new_vec.push(clone_one(pred, trie2_map, memo));
+                               }
+                               new_by_depth.insert(*dest_key, new_vec);
+                           }
+                           new_preds.insert(edge_val.clone(), new_by_depth);
+                       }
+                       Arc::new(GSSNode::new_with_map(internal.acc.clone(), new_preds))
+                   }
+               };
        
-               let trie2_node2 = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-               let mut acc2 = empty_acc();
-      -        acc2.trie2_nodes.insert(trie2_node2.clone());
-      +        acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node2.clone()]));
-               let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
+               memo.insert(ptr, out.clone());
+               out
+           }
        
-               // --- GSS A ---
-      @@ -2048,7 +2071,7 @@
-               let trie2_god = Trie2GodWrapper::new();
-               let trie2_node_a = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-               let mut acc_a = empty_acc();
-      -        acc_a.trie2_nodes.insert(trie2_node_a.clone());
-      +        acc_a.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_a.clone()]));
-               let leaf_a = Arc::new(GSSNode::new(acc_a));
+           let mut memo: HashMap<*const GSSNode, Arc<GSSNode>> = HashMap::new();
+           clone_one(root, trie2_map, &mut memo)
+       }
        
-               let gss_a = GSSNode::new_with_single_predecessor(
-      @@ -2060,7 +2083,7 @@
-               // --- GSS B setup ---
-               let trie2_node_b = PrecomputeNode2Index::new(trie2_god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-               let mut acc_b = empty_acc();
-      -        acc_b.trie2_nodes.insert(trie2_node_b.clone());
-      +        acc_b.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([trie2_node_b.clone()]));
-               let leaf_b = Arc::new(GSSNode::new(acc_b));
+       // --- Analysis and Debugging ---
+       #[derive(Debug, Clone, Eq, Hash)]
+       #[allow(dead_code)] pub(crate) struct RootItem<'a> {
+           node: &'a GSSNode,
+           path_acc: Arc<Acc>,
+       }
        
-               let intermediate_b = Arc::new(GSSNode::new_with_single_predecessor(
-      @@ -2105,12 +2128,12 @@
+       impl<'a> PartialEq for RootItem<'a> {
+           fn eq(&self, other: &Self) -> bool {
+               self.node == other.node && self.path_acc == other.path_acc
+           }
+       }
        
-               // --- Leaf 1 with trie2_node t1 ---
-               let mut acc1 = empty_acc();
-      -        acc1.trie2_nodes.insert(t1.clone());
-      +        acc1.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t1.clone()]));
-               let leaf1 = Arc::new(GSSNode::new(acc1.clone()));
-               let tower1 = build_tower_from_leaf(leaf1);
+       impl<'a> PartialOrd for RootItem<'a> {
+           fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+               Some(self.cmp(other))
+           }
+       }
        
-               // --- Leaf 2 with trie2_node t2 ---
-               let mut acc2 = empty_acc();
-      -        acc2.trie2_nodes.insert(t2.clone());
-      +        acc2.trie2_nodes = Trie2NodeSet::from_set(BTreeSet::from([t2.clone()]));
-               let leaf2 = Arc::new(GSSNode::new(acc2.clone()));
-               let tower2 = build_tower_from_leaf(leaf2);
+       impl<'a> Ord for RootItem<'a> {
+           fn cmp(&self, other: &Self) -> Ordering {
+               self.node.cmp(other.node)
+                   .then_with(|| self.path_acc.cmp(&other.path_acc))
+           }
+       }
        
-      @@ -2121,7 +2144,7 @@
-               // With the new hoisting logic, the merged acc from the leaves should be hoisted
-               // all the way to the top-level node of the merged tower.
-               let final_acc = Acc::merge(&acc1, &acc2);
-      -        let trie2_nodes = &final_acc.trie2_nodes;
-      +        let trie2_nodes = final_acc.trie2_nodes.0.as_ref().unwrap();
+       impl<'a> RootItem<'a> {
+           #[allow(dead_code)] pub(crate) fn resolved_acc(&self) -> Arc<Acc> {
+               Arc::new(Acc::narrow(&self.path_acc, &self.node.acc()))
+           }
+       }
        
-               assert_eq!(trie2_nodes.len(), 2, "Merged tower root should contain the union of trie2 nodes from the leaves");
-               assert!(trie2_nodes.contains(&t1), "Merged acc missing trie2 node 1");
-
-      ```
+       /// Traverses the GSS graph from the given nodes and returns all unique root nodes (nodes with no predecessors).
+       pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+           // We carry the "last edge" used to reach the next node; when we finally hit a root,
+           // that last edge is the key used for the result map.
+           let mut queue: BTreeMap<
+               MaxDepth,
+               BTreeMap<(*const GSSNode, Option<ParseStateEdgeContent>), BTreeSet<Arc<Acc>>>
+           > = BTreeMap::new();
+       
+           let mut results: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
+       
+           for node in nodes {
+               let node_ptr = node as *const GSSNode;
+               let depth = node.max_depth();
+               queue
+                   .entry(depth)
+                   .or_default()
+                   .entry((node_ptr, None))
+                   .or_insert_with(|| {
+                       // Initialize path_acc with the starting node's local acc.
+                       BTreeSet::from([Arc::new((*node.local_acc()).clone())])
+                   });
+           }
+       
+           while let Some((_depth, nodes_at_depth)) = queue.pop_last() {
+               for ((node_ptr, last_edge_opt), path_acc_set) in nodes_at_depth {
+                   let current_node = unsafe { &*node_ptr };
+       
+                   if current_node.is_root() {
+                       if let Some(edge) = last_edge_opt {
+                           results
+                               .entry(edge)
+                               .or_default()
+                               .extend(path_acc_set);
+                       }
+                   } else {
+                       for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
+                           for pred_arc in preds_by_depth.values().flatten() {
+                               // For each incoming path acc, create a new outgoing path acc
+                               let mut per_child_acc_set = BTreeSet::new();
+                               for path_acc in &path_acc_set {
+                                   let per_child_acc = Arc::new(Acc::narrow(path_acc, &pred_arc.local_acc()));
+                                   per_child_acc_set.insert(per_child_acc);
+                               }
+       
+                               let pred_ptr = pred_arc.as_ref() as *const GSSNode;
+                               let pred_depth = pred_arc.max_depth();
+                               queue
+                                   .entry(pred_depth)
+                                   .or_default()
+                                   .entry((pred_ptr, Some(edge_val.clone())))
+                                   .and_modify(|e| e.extend(per_child_acc_set.clone()))
+                                   .or_insert_with(|| per_child_acc_set);
+                           }
+                       }
+                   }
+               }
+           }
+       
+           results
+       }
+       
+       impl GSSNode {
+           #[allow(dead_code)] pub(crate) fn reset_llm_tokens(&mut self) {
+               let mut node_arc = Arc::new(self.clone());
+               reset_llm_tokens(&mut node_arc, &mut HashMap::new());
+               *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+           }
+       
+           #[allow(dead_code)] pub(crate) fn get_roots(&self) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+               get_roots(std::iter::once(self))
+           }
+       }
+       
+       #[derive(Debug, Clone, Default, PartialEq)]
+       pub(crate) struct GSSStats {
+           pub(crate) num_roots: usize,
+           pub(crate) num_root_predecessors: usize,
+           pub(crate) num_unique_root_predecessor_keys: usize,
+           pub(crate) total_edges: usize,
+           pub(crate) unique_nodes: usize,
+           pub(crate) num_leaves: usize,
+           pub(crate) structurally_unique_nodes: usize,
+           pub(crate) structural_redundancy: f64,
+           pub(crate) num_redundant_nodes: usize,
+           pub(crate) max_depth: usize,
+           pub(crate) average_depth: f64,
+           pub(crate) merge_points: usize,
+           pub(crate) max_predecessors_with_values: usize,
+           pub(crate) average_predecessors_with_values: f64,
+       }
+       
+       /// Gathers statistics about the structure and complexity of a GSS forest.
+       #[time_it]
+       pub(crate) fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
+           let mut stats = GSSStats::default();
+           stats.num_roots = roots.len();
+       
+           let mut visited = HashSet::new();
+           let mut queue = VecDeque::new();
+           let mut total_depth = 0u64;
+           let mut total_preds = 0u64;
+       
+           let mut root_predecessor_dest_keys = HashSet::new();
+           for root_node in roots {
+               stats.num_root_predecessors += root_node.num_predecessors();
+               for edge_value in root_node.predecessors().keys() {
+                   root_predecessor_dest_keys.insert(edge_value.clone());
+               }
+       
+               let node_ptr = *root_node as *const GSSNode;
+               if visited.insert(node_ptr) {
+                   queue.push_back((*root_node, 0));
+               }
+           }
+           stats.num_unique_root_predecessor_keys = root_predecessor_dest_keys.len();
+       
+           // Reset visited for the main traversal to correctly process all nodes.
+           visited.clear();
+       
+           while let Some((node, depth)) = queue.pop_front() {
+               let node_ptr = node as *const GSSNode;
+               if !visited.insert(node_ptr) {
+                   continue;
+               }
+       
+               if node.is_root() {
+                   stats.num_leaves += 1;
+               }
+       
+               stats.unique_nodes += 1;
+               stats.max_depth = stats.max_depth.max(depth);
+               total_depth += depth as u64;
+       
+               let num_preds = node.num_predecessors();
+               stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds);
+               total_preds += num_preds as u64;
+       
+               let unique_pred_arcs: HashSet<_> = node
+                   .predecessors()
+                   .values()
+                   .flat_map(|v| v.values())
+                   .flat_map(|v| v.iter())
+                   .map(Arc::as_ptr)
+                   .collect();
+               if unique_pred_arcs.len() > 1 {
+                   stats.merge_points += 1;
+               }
+       
+               for pred_arc in node
+                   .predecessors()
+                   .values()
+                   .flat_map(|v| v.values())
+                   .flat_map(|v| v.iter()) {
+                   queue.push_back((pred_arc.as_ref(), depth + 1));
+               }
+           }
+       
+           stats.total_edges = total_preds as usize;
+       
+           if stats.unique_nodes > 0 {
+               stats.average_depth = total_depth as f64 / stats.unique_nodes as f64;
+               stats.average_predecessors_with_values = total_preds as f64 / stats.unique_nodes as f64;
+           }
+       
+           // Calculate structural uniqueness
+           let mut structural_memo = HashMap::new();
+           let mut structural_cache: BTreeMap<BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<usize>>>, usize> = BTreeMap::new();
+           for root_node in roots {
+               get_structural_id(root_node, &mut structural_memo, &mut structural_cache);
+           }
+           stats.structurally_unique_nodes = structural_cache.len();
+           if stats.unique_nodes > 0 {
+               stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
+           }
+           stats.num_redundant_nodes = stats.unique_nodes - stats.structurally_unique_nodes;
+           stats
+       }
+       
+       /// Helper for `gather_gss_stats` to compute a unique ID for a node's structure.
+       fn get_structural_id(
+           node: &GSSNode,
+           memo: &mut HashMap<*const GSSNode, usize>,
+           structural_cache: &mut BTreeMap<BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<usize>>>, usize>,
+       ) -> usize {
+           let node_ptr = node as *const GSSNode;
+           if let Some(id) = memo.get(&node_ptr) {
+               return *id;
+           }
+       
+           let mut pred_structural_ids = BTreeMap::new();
+           for (edge_val, preds_by_depth) in node.predecessors() {
+               let mut ids_by_depth = BTreeMap::new();
+               for (dest_key, pred_vec) in preds_by_depth {
+                   let mut ids_vec = Vec::new();
+                   for pred_arc in pred_vec {
+                       let pred_id = get_structural_id(pred_arc.as_ref(), memo, structural_cache);
+                       ids_vec.push(pred_id);
+                   }
+                   ids_vec.sort();
+                   ids_by_depth.insert(*dest_key, ids_vec);
+               }
+               pred_structural_ids.insert(edge_val.clone(), ids_by_depth);
+           }
+       
+           let next_id = structural_cache.len();
+           let id = *structural_cache.entry(pred_structural_ids).or_insert(next_id);
+           memo.insert(node_ptr, id);
+           id
+       }
+       
+       /// Finds the longest path from any leaf to the given root node.
+       /// Returns `None` if the node has no predecessors.
+       pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+           if root_node.predecessors().is_empty() {
+               return None;
+           }
+       
+           fn find_longest_recursive(
+               node_arc: &Arc<GSSNode>,
+               memo: &mut HashMap<*const GSSNode, Vec<(ParseStateEdgeContent, Arc<GSSNode>)>>,
+           ) -> Vec<(ParseStateEdgeContent, Arc<GSSNode>)> {
+               let node_ptr = Arc::as_ptr(node_arc);
+               if let Some(cached) = memo.get(&node_ptr) {
+                   return cached.clone();
+               }
+       
+               if node_arc.predecessors().is_empty() {
+                   return Vec::new();
+               }
+       
+               let mut longest_path = Vec::new();
+               for (edge_val, preds_by_depth) in node_arc.predecessors().iter() {
+                   for pred_vec in preds_by_depth.values() {
+                       for pred_arc in pred_vec {
+                           let mut path_from_pred = find_longest_recursive(pred_arc, memo);
+                           path_from_pred.push((edge_val.clone(), node_arc.clone()));
+                           if path_from_pred.len() > longest_path.len() {
+                               longest_path = path_from_pred;
+                           }
+                       }
+                   }
+               }
+       
+               memo.insert(node_ptr, longest_path.clone());
+               longest_path
+           }
+       
+           let mut memo = HashMap::new();
+           let path = find_longest_recursive(root_node, &mut memo);
+           if path.is_empty() { None } else { Some(path) }
+       }
+       
+       /// Randomly samples a single path from a GSS forest.
+       #[allow(dead_code)] pub(crate) fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+           if roots.is_empty() {
+               return None;
+           }
+       
+           let mut rng = StdRng::seed_from_u64(seed);
+           let root_index = rng.random_range(0..roots.len());
+           let mut current_node_arc = Arc::new(roots[root_index].clone());
+       
+           let mut path = Vec::new();
+       
+           loop {
+               if current_node_arc.is_empty() {
+                   break;
+               }
+       
+               let predecessors: Vec<_> = GSSNode::peek_iter(&current_node_arc).collect();
+               if predecessors.is_empty() {
+                   break;
+               }
+       
+               let chosen_index = rng.random_range(0..predecessors.len());
+               let chosen_peek = &predecessors[chosen_index];
+       
+               path.push(chosen_peek.edge_value().clone());
+       
+               current_node_arc = chosen_peek.predecessor_node.clone();
+           }
+       
+           Some(path)
+       }
+       
+       pub fn popn_collect_isolated_parents(
+           node_arc: &Arc<GSSNode>,
+           n: usize,
+       ) -> Vec<(crate::glr::table::StateID, Arc<GSSNode>)> {
+           let popper = node_arc.popn(n);
+           let mut out = Vec::new();
+           for item in popper.iter() {
+               for peek in item.peek_iter() {
+                   out.push((peek.edge_value().state_id, peek.isolated_parent()));
+               }
+           }
+           out
+       }
+       
+       pub(crate) struct GSSPrintConfig<'a> {
+           pub(crate) labels: Option<&'a [String]>,
+           pub(crate) max_edges: usize,
+           pub(crate) original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
+           pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+           pub(crate) verbose: bool,
+       }
+       
+       impl<'a> Default for GSSPrintConfig<'a> {
+           fn default() -> Self {
+               Self {
+                   labels: None,
+                   max_edges: usize::MAX,
+                   original_internal_bimap: None,
+                   llm_token_map: None,
+                   verbose: false,
+               }
+           }
+       }
+       
+       /// Pretty-prints a GSS forest for debugging.
+       pub(crate) fn print_gss_forest(
+           roots: &[Arc<GSSNode>],
+           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           config: &GSSPrintConfig,
+       ) -> (String, Vec<StateID>) {
+           fn print_predecessors_recursive(
+               node_arc: &Arc<GSSNode>,
+               node_ids: &mut HashMap<*const GSSNode, usize>,
+               visited_nodes: &mut HashSet<*const GSSNode>,
+               prefix: &str,
+               node_count: &mut usize,
+               output: &mut String,
+               terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+               state_ids_in_order: &mut Vec<StateID>,
+               seen_state_ids: &mut HashSet<StateID>,
+               config: &GSSPrintConfig,
+           ) -> Result<(), std::fmt::Error> {
+               let node_ptr = Arc::as_ptr(node_arc);
+               if visited_nodes.contains(&node_ptr) {
+                   return Ok(());
+               }
+               visited_nodes.insert(node_ptr);
+       
+               let predecessors: Vec<_> = node_arc.predecessors()
+                   .iter()
+                   .flat_map(|(edge_val, preds_by_depth)| {
+                       preds_by_depth.values().flat_map(move |pred_vec| {
+                           pred_vec.iter().map(move |pred_arc| (edge_val, pred_arc))
+                       })
+                   })
+                   .collect();
+       
+               for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
+                   if *node_count >= config.max_edges {
+                       writeln!(output, "{}... (Truncated)", prefix)?;
+                       return Ok(());
+                   }
+       
+                   let is_last = i == predecessors.len() - 1;
+                   let connector = if is_last { "└──" } else { "├──" };
+                   let new_prefix = if is_last {
+                       format!("{}  ", prefix)
+                   } else {
+                       format!("{}│ ", prefix)
+                   };
+       
+                   let pred_ptr = Arc::as_ptr(pred_arc);
+                   let node_ids_len = node_ids.len();
+                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
+       
+                   // Collect state ID for explanation
+                   if seen_state_ids.insert(edge_val.state_id) {
+                       state_ids_in_order.push(edge_val.state_id);
+                   }
+       
+                   let acc_child = format_acc(
+                       pred_arc.as_ref(),
+                       terminal_map,
+                       config.original_internal_bimap,
+                       config.llm_token_map,
+                   );
+                   if config.verbose {
+                       if acc_child.is_empty() {
+                           writeln!(
+                               output,
+                               "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x})",
+                               prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_code(),
+                           )?;
+                       } else {
+                           writeln!(
+                               output,
+                               "{}{} edge {} -> Node {} (ptr: {:p}, hash: {:x}) {}",
+                               prefix, connector, edge_val.state_id.0, pred_id, pred_ptr, pred_arc.hash_code(), acc_child,
+                           )?;
+                       }
+                   } else if acc_child.is_empty() {
+                       writeln!(
+                           output,
+                           "{}{} edge {} -> Node {}",
+                           prefix, connector, edge_val.state_id.0, pred_id,
+                       )?;
+                   } else {
+                       writeln!(
+                           output,
+                           "{}{} edge {} -> Node {} {}",
+                           prefix, connector, edge_val.state_id.0, pred_id, acc_child,
+                       )?;
+                   }
+                   *node_count += 1;
+       
+                   print_predecessors_recursive(
+                       pred_arc, node_ids, visited_nodes, &new_prefix, node_count,
+                       output, terminal_map, state_ids_in_order, seen_state_ids, config,
+                   )?;
+               }
+               Ok(())
+           }
+       
+           let mut node_ids = HashMap::new();
+           let mut visited_nodes = HashSet::new();
+           let mut count = 0;
+           let mut
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
-  - user: 'Changes committed with message: "feat: Introduce Trie2NodeSet for unified
-      trie2_nodes management"'
+  - user: 'Changes committed with message: "No changes detected in the provided diff."'
     metadata:
 ...
