@@ -1498,7 +1498,7 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
     // that last edge is the key used for the result map.
     let mut queue: BTreeMap<
         MaxDepth,
-        BTreeMap<(*const GSSNode, Option<ParseStateEdgeContent>), Arc<Acc>>
+        BTreeMap<(*const GSSNode, Option<ParseStateEdgeContent>), BTreeSet<Arc<Acc>>>
     > = BTreeMap::new();
 
     let mut results: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
@@ -1512,36 +1512,39 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
             .entry((node_ptr, None))
             .or_insert_with(|| {
                 // Initialize path_acc with the starting node's local acc.
-                Arc::new((*node.local_acc()).clone())
+                BTreeSet::from([Arc::new((*node.local_acc()).clone())])
             });
     }
 
     while let Some((_depth, nodes_at_depth)) = queue.pop_last() {
-        for ((node_ptr, last_edge_opt), path_acc) in nodes_at_depth {
+        for ((node_ptr, last_edge_opt), path_acc_set) in nodes_at_depth {
             let current_node = unsafe { &*node_ptr };
 
             if current_node.is_root() {
                 if let Some(edge) = last_edge_opt {
-                    // path_acc already includes narrowing through this root when we stepped to it.
-                    let final_acc = path_acc.clone();
                     results
                         .entry(edge)
                         .or_default()
-                        .insert(final_acc);
+                        .extend(path_acc_set);
                 }
             } else {
                 for (edge_val, preds_by_depth) in current_node.predecessors().iter() {
                     for pred_arc in preds_by_depth.values().flatten() {
-                        // Narrow with the predecessor's local Acc as we traverse.
-                        let per_child_acc = Arc::new(Acc::narrow(&path_acc, &pred_arc.local_acc()));
+                        // For each incoming path acc, create a new outgoing path acc
+                        let mut per_child_acc_set = BTreeSet::new();
+                        for path_acc in &path_acc_set {
+                            let per_child_acc = Arc::new(Acc::narrow(path_acc, &pred_arc.local_acc()));
+                            per_child_acc_set.insert(per_child_acc);
+                        }
+
                         let pred_ptr = pred_arc.as_ref() as *const GSSNode;
                         let pred_depth = pred_arc.max_depth();
                         queue
                             .entry(pred_depth)
                             .or_default()
                             .entry((pred_ptr, Some(edge_val.clone())))
-                            .and_modify(|e| *e = Arc::new(Acc::merge(e, &per_child_acc)))
-                            .or_insert_with(|| per_child_acc.clone());
+                            .and_modify(|e| e.extend(per_child_acc_set.clone()))
+                            .or_insert_with(|| per_child_acc_set);
                     }
                 }
             }
