@@ -112,6 +112,13 @@ impl Acc {
             && self.trie2_nodes.is_empty()
     }
 
+    /// Returns true if this Acc is the default (unconstrained) value.
+    pub(crate) fn is_default(&self) -> bool {
+        self.llm_tokens_union == HybridBitset::max_ones()
+            && self.terminals_union == HybridL2Bitset::all()
+            && self.trie2_nodes.is_empty()
+    }
+
     /// Creates an accumulator with specific local constraints for a root node.
     #[allow(dead_code)] pub(crate) fn new_with_local_constraints(llm_tokens: HybridBitset, terminals: HybridL2Bitset) -> Self {
         Self {
@@ -511,10 +518,19 @@ impl GSSNode {
             return GSSNode::new((*acc).clone());
         }
 
-        // Store local acc on the internal node (no propagation)
-        let hash_key_cache = compute_hash_key_internal_with_acc(&acc, &predecessors);
+        // Internal nodes must not carry trie2_nodes. They belong only to leaves.
+        let final_acc = if acc.trie2_nodes.is_empty() {
+            acc
+        } else {
+            let mut sanitized_acc = (*acc).clone();
+            sanitized_acc.trie2_nodes.clear();
+            Arc::new(sanitized_acc)
+        };
+        debug_assert!(final_acc.trie2_nodes.is_empty(), "Internal nodes must not carry trie2_nodes");
+
+        let hash_key_cache = compute_hash_key_internal_with_acc(&final_acc, &predecessors);
         let max_depth = compute_max_depth(&predecessors);
-        GSSNode::Internal(GSSInternal { acc, predecessors, hash_key_cache, max_depth })
+        GSSNode::Internal(GSSInternal { acc: final_acc, predecessors, hash_key_cache, max_depth })
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
@@ -739,7 +755,7 @@ impl GSSNode {
         let mut other_predecessors = other.predecessors().clone();
 
         let self_acc = self.local_acc();
-        if !self_acc.is_merge_neutral() {
+        if !self_acc.is_default() {
             for preds_by_depth in self_predecessors.values_mut() {
                 for pred_vec in preds_by_depth.values_mut() {
                     for pred_arc in pred_vec.iter_mut() {
@@ -760,7 +776,7 @@ impl GSSNode {
         }
 
         let other_acc = other.local_acc();
-        if !other_acc.is_merge_neutral() {
+        if !other_acc.is_default() {
             for preds_by_depth in other_predecessors.values_mut() {
                 for pred_vec in preds_by_depth.values_mut() {
                     for pred_arc in pred_vec.iter_mut() {
@@ -817,10 +833,14 @@ impl GSSNode {
             if has_constraints_to_suck {
                 final_parent_acc = Arc::new(parent_sucked_up_acc);
 
-                // Create a new Acc for the children that only has what's left (the trie2_nodes).
-                let mut child_remaining_acc = Acc::new_fresh();
-                child_remaining_acc.trie2_nodes = common_acc.trie2_nodes.clone();
-                let new_child_acc = Arc::new(child_remaining_acc);
+                // Build separate Acc arcs for root children and internal children.
+                // Root children keep the payload (trie2_nodes).
+                let mut child_acc_root = Acc::new_fresh();
+                child_acc_root.trie2_nodes = common_acc.trie2_nodes.clone();
+                let new_child_acc_root = Arc::new(child_acc_root);
+
+                // Internal children must not carry any acc (neither constraints nor payload).
+                let new_child_acc_internal = Arc::new(Acc::new_fresh());
 
                 // Rebuild children with this new acc.
                 let mut new_preds_map = BTreeMap::new();
@@ -829,9 +849,10 @@ impl GSSNode {
                     for (depth, pred_vec) in preds_by_depth {
                         let mut new_pred_vec = Vec::with_capacity(pred_vec.len());
                         for pred_arc in pred_vec {
+                            // Choose the correct stripped acc based on whether the child is a root or internal node.
                             let new_pred = match &*pred_arc {
-                                GSSNode::Root(_) => GSSNode::new((*new_child_acc).clone()),
-                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc.clone(), i.predecessors.clone()),
+                                GSSNode::Root(_) => GSSNode::new((*new_child_acc_root).clone()),
+                                GSSNode::Internal(i) => GSSNode::new_with_map(new_child_acc_internal.clone(), i.predecessors.clone()),
                             };
                             new_pred_vec.push(Arc::new(new_pred));
                         }
