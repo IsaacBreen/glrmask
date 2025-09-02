@@ -1023,39 +1023,67 @@ pub fn allow_only_llm_tokens_and_prune(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
 ) {
-    allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens);
+    let mut memo = HashMap::new();
+    allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
 }
 
 pub(crate) fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    let new_node = match root_arc.as_ref() {
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
+    }
+
+    let new_arc_opt = match root_arc.as_ref() {
         GSSNode::Root(root) => {
             let mut new_acc = (*root.acc).clone();
             new_acc.llm_tokens_union &= allowed_tokens;
-            GSSNode::new(new_acc)
+            if new_acc.llm_tokens_union.is_empty() {
+                None
+            } else {
+                Some(Arc::new(GSSNode::new(new_acc)))
+            }
         }
         GSSNode::Internal(internal) => {
             let mut new_acc = (*internal.acc).clone();
             new_acc.llm_tokens_union &= allowed_tokens;
-            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
+            if new_acc.llm_tokens_union.is_empty() {
+                None
+            } else {
+                Some(Arc::new(GSSNode::new_with_map(
+                    Arc::new(new_acc),
+                    internal.predecessors.clone(),
+                )))
+            }
         }
     };
-    *root_arc = Arc::new(new_node);
+    memo.insert(node_ptr, new_arc_opt.clone());
+    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
 }
 
 pub(crate) fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let allowed_mask = HybridBitset::max_ones() - tokens_to_disallow.clone();
-    allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask);
+    allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
 }
 
 pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
+    }
+
     let new_node = match root_arc.as_ref() {
         GSSNode::Root(root) => {
             let mut new_acc = (*root.acc).clone();
@@ -1068,12 +1096,21 @@ pub(crate) fn reset_llm_tokens(
             GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
         }
     };
-    *root_arc = Arc::new(new_node);
+    let new_arc = Arc::new(new_node);
+    memo.insert(node_ptr, Some(new_arc.clone()));
+    *root_arc = new_arc;
 }
 
 pub(crate) fn reset_terminals(
     root_arc: &mut Arc<GSSNode>,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
+    }
+
     let new_node = match root_arc.as_ref() {
         GSSNode::Root(root) => {
             let mut new_acc = (*root.acc).clone();
@@ -1086,13 +1123,22 @@ pub(crate) fn reset_terminals(
             GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
         }
     };
-    *root_arc = Arc::new(new_node);
+    let new_arc = Arc::new(new_node);
+    memo.insert(node_ptr, Some(new_arc.clone()));
+    *root_arc = new_arc;
 }
 
 pub(crate) fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &HybridL2Bitset,
+    memo: &mut PruneAndTransformRecursiveMemo,
 ) {
+    let node_ptr = Arc::as_ptr(root_arc);
+    if let Some(cached) = memo.get(&node_ptr) {
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        return;
+    }
+
     let new_node = match root_arc.as_ref() {
         GSSNode::Root(root) => {
             let mut new_acc = (*root.acc).clone();
@@ -1105,7 +1151,9 @@ pub(crate) fn disallow_terminals_and_prune_arc(
             GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
         }
     };
-    *root_arc = Arc::new(new_node);
+    let new_arc = Arc::new(new_node);
+    memo.insert(node_ptr, Some(new_arc.clone()));
+    *root_arc = new_arc;
 }
 
 pub(crate) fn prune_disallowed_terminals(
