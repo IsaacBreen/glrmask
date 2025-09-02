@@ -1618,7 +1618,7 @@ pub(crate) fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTr
 impl GSSNode {
     #[allow(dead_code)] pub(crate) fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
-        reset_llm_tokens(&mut node_arc);
+        reset_llm_tokens(&mut node_arc, &mut HashMap::new());
         *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
     }
 
@@ -2764,7 +2764,7 @@ mod tests {
         // 3. Filter to allow only token 0.
         let mut allowed_tokens = LLMTokenBV::zeros();
         allowed_tokens.insert(0);
-        allow_only_llm_tokens_and_prune_arc(&mut root_arc, &allowed_tokens);
+        allow_only_llm_tokens_and_prune_arc(&mut root_arc, &allowed_tokens, &mut HashMap::new());
 
         // 4. Assert that the allowed tokens for the whole GSS have been updated.
         assert_eq!(
