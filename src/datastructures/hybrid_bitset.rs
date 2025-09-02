@@ -1221,4 +1221,18 @@ mod tests {
             "Cost should not change for sets with no adjacencies"
         );
     }
+
+    #[test]
+    fn test_sub_is_intersection_with_inverted() {
+        let set_a = HybridBitset::from_iter(vec![1, 2, 10, 100]);
+        let set_b = HybridBitset::from_iter(vec![2, 3, 20, 100]);
+
+        let diff = &set_a - &set_b;
+        let diff_with_inverted = &set_a & &set_b.inverted();
+
+        let expected_diff = HybridBitset::from_iter(vec![1, 10]);
+
+        assert_eq!(diff, expected_diff);
+        assert_eq!(diff_with_inverted, expected_diff);
+    }
 }

@@ -750,4 +750,29 @@ mod tests {
         assert_eq!(diff, expected_diff);
         assert_eq!(diff_with_complement, expected_diff);
     }
+
+    #[test]
+    fn test_sub_complement_with_ranges() {
+        let set_a = HybridL2Bitset::from_iter([
+            (10..=15, HybridBitset::from_iter([100, 200])),
+            (40..=45, HybridBitset::from_iter([400])),
+        ]);
+
+        let set_b = HybridL2Bitset::from_iter([
+            (12..=17, HybridBitset::from_iter([100, 300])),
+            (50..=55, HybridBitset::from_iter([500])),
+        ]);
+
+        let diff = &set_a - &set_b;
+        let diff_with_complement = &set_a & &set_b.complement();
+
+        let expected_diff = HybridL2Bitset::from_iter([
+            (10..=11, HybridBitset::from_iter([100, 200])),
+            (12..=15, HybridBitset::from_iter([200])),
+            (40..=45, HybridBitset::from_iter([400])),
+        ]);
+
+        assert_eq!(diff, expected_diff);
+        assert_eq!(diff_with_complement, expected_diff);
+    }
 }
