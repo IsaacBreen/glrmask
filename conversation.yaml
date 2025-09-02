@@ -1137,7 +1137,7 @@ local_system:
           };
           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
               let mut new_acc = (*root.acc).clone();
-              new_acc.terminals_union &= &disallowed_terminals.complement();
+              new_acc.terminals_union &= disallowed_terminals;
               Some(Arc::new(new_acc))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -3263,44 +3263,6 @@ local_system:
           }
       }
 
-      fn compute_resolved_acc(node: &GSSNode, memo: &mut HashMap<*const GSSNode, Arc<Acc>>) -> Arc<Acc> {
-          let ptr = node as *const GSSNode;
-          if let Some(cached) = memo.get(&ptr) {
-              return cached.clone();
-          }
-
-          let result = match node {
-              GSSNode::Root(_) => node.local_acc(),
-              GSSNode::Internal(_) => {
-                  if node.predecessors().is_empty() {
-                      node.local_acc()
-                  } else {
-                      let mut aggregated_from_preds: Option<Acc> = None;
-
-                      for pred_arc in node.predecessors().values().flat_map(|m| m.values()).flatten() {
-                          let pred_resolved_acc = compute_resolved_acc(pred_arc.as_ref(), memo);
-                          if let Some(current_agg) = aggregated_from_preds.as_mut() {
-                              *current_agg = Acc::merge(current_agg, &pred_resolved_acc);
-                          } else {
-                              aggregated_from_preds = Some((*pred_resolved_acc).clone());
-                          }
-                      }
-
-                      // This node's final acc is its local acc intersected with the union of its predecessors' final accs.
-                      let final_acc = if let Some(agg) = aggregated_from_preds {
-                          Arc::new(Acc::narrow(&node.local_acc(), &Arc::new(agg)))
-                      } else {
-                          node.local_acc()
-                      };
-                      final_acc
-                  }
-              }
-          };
-
-          memo.insert(ptr, result.clone());
-          result
-      }
-
       impl GSSNode {
           /// Creates a new GSS root node with the given local constraints.
           pub(crate) fn new(acc: Acc) -> Self {
@@ -3360,8 +3322,53 @@ local_system:
           /// - If root: returns the node's Acc.
           /// - If internal: walks to all reachable roots and merges their Accs.
           fn acc(&self) -> Arc<Acc> {
-              let mut memo = HashMap::new();
-              compute_resolved_acc(self, &mut memo)
+              match self {
+                  GSSNode::Root(r) => r.acc.clone(),
+                  GSSNode::Internal(i) => {
+                      // Aggregate over reachable roots (does not include local acc here).
+                      // Collect all root Accs reachable from this node.
+                      let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
+                      let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+                      for preds_by_depth in i.predecessors.values() {
+                          for pred_vec in preds_by_depth.values() {
+                              for pred in pred_vec {
+                                  queue.push_back(pred.clone());
+                              }
+                          }
+                      }
+
+                      let mut accs: Vec<Arc<Acc>> = Vec::new();
+                      while let Some(node) = queue.pop_front() {
+                          let ptr = Arc::as_ptr(&node);
+                          if !visited_nodes.insert(ptr) {
+                              continue;
+                          }
+                          match node.as_ref() {
+                              GSSNode::Root(r) => accs.push(r.acc.clone()),
+                              GSSNode::Internal(ii) => {
+                                  for preds_by_depth in ii.predecessors.values() {
+                                      for pred_vec in preds_by_depth.values() {
+                                          for pred in pred_vec {
+                                              queue.push_back(pred.clone());
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      if accs.is_empty() {
+                          Arc::new(Acc::new_fresh())
+                      } else {
+                          let mut iter = accs.into_iter();
+                          let first = (*iter.next().unwrap()).clone();
+                          let mut merged = first;
+                          for next in iter {
+                              merged = Acc::merge(&merged, &next);
+                          }
+                          Arc::new(merged)
+                      }
+                  }
+              }
           }
 
           /// Returns the local Acc stored on this node (both internal and root).
@@ -3398,13 +3405,17 @@ local_system:
           /// Returns the set of LLM tokens allowed by any root reachable from this node.
           /// Applies the node's local Acc as a final intersection (blanket restriction).
           pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-              self.acc().llm_tokens_union.clone()
+              let local = self.local_acc().llm_tokens_union.clone();
+              let aggregated = self.acc().llm_tokens_union.clone();
+              &local & &aggregated
           }
 
           /// Returns a map of disallowed terminals for each tokenizer state.
           /// A terminal is disallowed if it's disallowed on every root reachable from this node.
           pub fn disallowed_terminals(&self) -> TerminalInfo {
-              self.acc().terminals_union.complement()
+              let local = self.local_acc().terminals_union.clone();
+              let aggregated = self.acc().terminals_union.clone();
+              (&local & &aggregated).complement()
           }
 
           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
@@ -6685,7 +6696,7 @@ messages:
           };
           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
               let mut new_acc = (*root.acc).clone();
-              new_acc.terminals_union &= &disallowed_terminals.complement();
+              new_acc.terminals_union &= disallowed_terminals;
               Some(Arc::new(new_acc))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -8338,7 +8349,7 @@ messages:
           };
           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
               let mut new_acc = (*root.acc).clone();
-              new_acc.terminals_union &= disallowed_terminals.complement();
+              new_acc.terminals_union &= disallowed_terminals;
               Some(Arc::new(new_acc))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -8360,7 +8371,7 @@ messages:
           };
           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
               let mut new_acc = (*root.acc).clone();
-              new_acc.terminals_union &= disallowed_terminals.complement();
+              new_acc.terminals_union &= disallowed_terminals;
               Some(Arc::new(new_acc))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
@@ -8370,7 +8381,7 @@ messages:
           }
       }
       ```
-      the behaviour changes (and in fact external tests start working). But this change should not be visible from the outside in any way at all.
+      the behaviour changes (and in fact external tests start working).
     metadata:
   - user: |-
       Mode instruction: For this turn, output git diff patches.
@@ -8387,139 +8398,29 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      You've correctly identified the core issue: the `acc()` method was not correctly accumulating constraints from internal nodes along paths to the roots. It was only considering the union of `Acc`s from the roots themselves, and then `allowed_llm_tokens` and `disallowed_terminals` were trying to patch this by applying the top-level node's local `Acc`, which missed all intermediate constraints.
+      You've correctly identified a subtle but critical issue with how accumulator constraints are being applied. The problem lies in how `disallow_terminals_and_prune_arc` handles root nodes versus internal nodes, leading to incorrect accumulation of constraints. Your observation that removing the `internal_closure` logic improves behavior points directly to an inconsistency between how local (internal node) and global (root node) constraints are being calculated.
 
-      Your analysis that this requires a recursive, memoized traversal to correctly calculate the resolved `Acc` is spot on. Each node's resolved `Acc` is the intersection of its local `Acc` with the union of the resolved `Acc`s of all its predecessors.
+      The issue is a logical error in the `root_closure`: it was intersecting the set of allowed terminals with the set of *disallowed* terminals, which is the opposite of the intended operation. The correct approach is to intersect the allowed terminals with the *complement* of the disallowed terminals, just as the `internal_closure` does.
 
-      Here is the patch to fix this. It introduces a new recursive helper function to compute the resolved `Acc` correctly and updates `acc()`, `allowed_llm_tokens()`, and `disallowed_terminals()` to use it.
+      Here is the patch to correct the logic in `disallow_terminals_and_prune_arc`:
 
       ```diff
+      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -524,6 +524,43 @@
-           }
-       }
-       
-      +fn compute_resolved_acc(node: &GSSNode, memo: &mut HashMap<*const GSSNode, Arc<Acc>>) -> Arc<Acc> {
-      +    let ptr = node as *const GSSNode;
-      +    if let Some(cached) = memo.get(&ptr) {
-      +        return cached.clone();
-      +    }
-      +
-      +    let result = match node {
-      +        GSSNode::Root(_) => node.local_acc(),
-      +        GSSNode::Internal(_) => {
-      +            if node.predecessors().is_empty() {
-      +                node.local_acc()
-      +            } else {
-      +                let mut aggregated_from_preds: Option<Acc> = None;
-      +
-      +                for pred_arc in node.predecessors().values().flat_map(|m| m.values()).flatten() {
-      +                    let pred_resolved_acc = compute_resolved_acc(pred_arc.as_ref(), memo);
-      +                    if let Some(current_agg) = aggregated_from_preds.as_mut() {
-      +                        *current_agg = Acc::merge(current_agg, &pred_resolved_acc);
-      +                    } else {
-      +                        aggregated_from_preds = Some((*pred_resolved_acc).clone());
-      +                    }
-      +                }
-      +
-      +                // This node's final acc is its local acc intersected with the union of its predecessors' final accs.
-      +                let final_acc = if let Some(agg) = aggregated_from_preds {
-      +                    Arc::new(Acc::narrow(&node.local_acc(), &Arc::new(agg)))
-      +                } else {
-      +                    node.local_acc()
-      +                };
-      +                final_acc
-      +            }
-      +        }
-      +    };
-      +
-      +    memo.insert(ptr, result.clone());
-      +    result
-      +}
-      +
-       impl GSSNode {
-           /// Creates a new GSS root node with the given local constraints.
-           pub(crate) fn new(acc: Acc) -> Self {
-      @@ -614,56 +651,9 @@
-           /// Returns the aggregate Acc for this node.
-           /// - If root: returns the node's Acc.
-           /// - If internal: walks to all reachable roots and merges their Accs.
-           fn acc(&self) -> Arc<Acc> {
-      -        match self {
-      -            GSSNode::Root(r) => r.acc.clone(),
-      -            GSSNode::Internal(i) => {
-      -                // Aggregate over reachable roots (does not include local acc here).
-      -                // Collect all root Accs reachable from this node.
-      -                let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
-      -                let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-      -                for preds_by_depth in i.predecessors.values() {
-      -                    for pred_vec in preds_by_depth.values() {
-      -                        for pred in pred_vec {
-      -                            queue.push_back(pred.clone());
-      -                        }
-      -                    }
-      -                }
-      -
-      -                let mut accs: Vec<Arc<Acc>> = Vec::new();
-      -                while let Some(node) = queue.pop_front() {
-      -                    let ptr = Arc::as_ptr(&node);
-      -                    if !visited_nodes.insert(ptr) {
-      -                        continue;
-      -                    }
-      -                    match node.as_ref() {
-      -                        GSSNode::Root(r) => accs.push(r.acc.clone()),
-      -                        GSSNode::Internal(ii) => {
-      -                            for preds_by_depth in ii.predecessors.values() {
-      -                                for pred_vec in preds_by_depth.values() {
-      -                                    for pred in pred_vec {
-      -                                        queue.push_back(pred.clone());
-      -                                    }
-      -                                }
-      -                            }
-      -                        }
-      -                    }
-      -                }
-      -                if accs.is_empty() {
-      -                    Arc::new(Acc::new_fresh())
-      -                } else {
-      -                    let mut iter = accs.into_iter();
-      -                    let first = (*iter.next().unwrap()).clone();
-      -                    let mut merged = first;
-      -                    for next in iter {
-      -                        merged = Acc::merge(&merged, &next);
-      -                    }
-      -                    Arc::new(merged)
-      -                }
-      -            }
-      -        }
-      +        let mut memo = HashMap::new();
-      +        compute_resolved_acc(self, &mut memo)
-           }
-       
-           /// Returns the local Acc stored on this node (both internal and root).
-      @@ -696,17 +686,13 @@
-           /// Returns the set of LLM tokens allowed by any root reachable from this node.
-           /// Applies the node's local Acc as a final intersection (blanket restriction).
-           pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-      -        let local = self.local_acc().llm_tokens_union.clone();
-      -        let aggregated = self.acc().llm_tokens_union.clone();
-      -        &local & &aggregated
-      +        self.acc().llm_tokens_union.clone()
-           }
-       
-           /// Returns a map of disallowed terminals for each tokenizer state.
-           /// A terminal is disallowed if it's disallowed on every root reachable from this node.
-           pub fn disallowed_terminals(&self) -> TerminalInfo {
-      -        let local = self.local_acc().terminals_union.clone();
-      -        let aggregated = self.acc().terminals_union.clone();
-      -        (&local & &aggregated).complement()
-      +        self.acc().terminals_union.complement()
-           }
-       
-           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
+      @@ -1404,7 +1404,7 @@
+           };
+           let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
+               let mut new_acc = (*root.acc).clone();
+      -        new_acc.terminals_union &= disallowed_terminals;
+      +        new_acc.terminals_union &= &disallowed_terminals.complement();
+               Some(Arc::new(new_acc))
+           };
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
 
       ```
+
+      This change aligns the logic for root nodes with the logic for internal nodes, ensuring that "disallowed" terminals are correctly removed from the set of allowed terminals throughout the GSS. This will restore the intended behavior of accumulating "blanket" intersection operations as you traverse the graph.
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -8530,7 +8431,7 @@ messages:
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly accumulate GSS Accs along
-      paths"'
+  - user: 'Changes committed with message: "Fix: Correctly apply terminal disallowance
+      in GSS root nodes"'
     metadata:
 ...
