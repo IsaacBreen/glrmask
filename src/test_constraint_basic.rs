@@ -1751,7 +1751,6 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
         prod("S", vec![nt("A")]),
         prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
         prod("A", vec![]),
-        prod("dead", vec![t("ANYTHING")]),
     ];
 
     // 3. LLM Vocabulary
@@ -1764,6 +1763,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("OPEN_BRACE"), TerminalID(0));
     grammar_token_map.insert(regex_name("CLOSE_BRACE"), TerminalID(1));
+    grammar_token_map.insert(regex_name("ANYTHING"), TerminalID(2));
 
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert(regex_name("OPEN_BRACE"), 0);
