@@ -853,10 +853,10 @@ pub fn compute_hallucinated_state(table: &Table) -> HallucinatedStateInfo {
     for (&source_state_id, row) in table {
         for (&nt_id, goto) in &row.gotos {
             if goto.accept {
-                info.accepts.entry(nt_id).or_default().insert(source_state_id.0);
+                info.accepts.entry(nt_id).or_insert(StateIDBV::zeros()).insert(source_state_id.0);
             }
             if let Some(goto_state_id) = goto.state_id {
-                info.gotos.entry(nt_id).or_default().entry(goto_state_id).or_default().insert(source_state_id.0);
+                info.gotos.entry(nt_id).or_default().entry(goto_state_id).or_insert(StateIDBV::zeros()).insert(source_state_id.0);
             }
         }
     }
@@ -865,7 +865,7 @@ pub fn compute_hallucinated_state(table: &Table) -> HallucinatedStateInfo {
     let mut all_actions: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
     for (&source_state_id, row) in table {
         for (&tid, action) in &row.shifts_and_reduces_full {
-            all_actions.entry(tid).or_default().entry(action.clone()).or_default().insert(source_state_id.0);
+            all_actions.entry(tid).or_default().entry(action.clone()).or_insert(StateIDBV::zeros()).insert(source_state_id.0);
         }
     }
 

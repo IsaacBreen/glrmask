@@ -704,34 +704,6 @@ impl Display for GLRParser {
             writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
         }
 
-        writeln!(f, "\nSubstring Gotos ({} entries):", self.substring_gotos.len())?;
-        if !self.substring_gotos.is_empty() {
-            // Sort by NT name for deterministic output
-            let mut sorted_substring_gotos: Vec<_> = self.substring_gotos.iter().collect();
-            sorted_substring_gotos.sort_by_key(|(nt_id, _)| self.non_terminal_map.get_by_right(nt_id).unwrap());
-
-            for (nt_id, gotos) in sorted_substring_gotos {
-                let nt = self.non_terminal_map.get_by_right(nt_id).unwrap();
-                writeln!(f, "  - For NT '{}' (ID {}):", nt.0, nt_id.0)?;
-                if !gotos.accepting_sources.is_empty() {
-                    let sources: Vec<String> = gotos.accepting_sources.iter().map(|s| s.0.to_string()).collect();
-                    writeln!(f, "    - accepting sources: [{}]", sources.join(", "))?;
-                }
-                let mut sorted_gotos_by_dest: Vec<_> = gotos.gotos.iter().collect();
-                sorted_gotos_by_dest.sort_by_key(|(k, _)| *k);
-
-                for (goto_id, source_ids) in sorted_gotos_by_dest {
-                    let sources: Vec<String> = source_ids.iter().map(|s| s.0.to_string()).collect();
-                    writeln!(
-                        f,
-                        "    - goto: {:<4} from sources: [{}]",
-                        goto_id.0,
-                        sources.join(", ")
-                    )?;
-                }
-            }
-        }
-
         Ok(())
     }
 }
