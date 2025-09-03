@@ -806,6 +806,128 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
+    fn handle_action<F>(
+        &mut self,
+        action: &Action<'a>,
+        state: &ParseState,
+        per_state_fuel: &Option<usize>,
+        work_map: &mut WorkMap,
+        reduce_map: &mut Option<&mut WorkMap>,
+        shifted_states_todo: &mut VecDeque<ParseState>,
+        accepted_states_todo: &mut VecDeque<ParseState>,
+        action_selector: &F,
+        config: &ProcessTokenAdvancedConfig,
+        early_exit_on_shift: bool,
+    ) -> (bool, bool) // (found_shift, should_early_exit)
+    where
+        F: Fn(StateID) -> Option<Action<'a>>,
+    {
+        let mut found_shift = false;
+        for peek in GSSNode::peek_iter(&state.stack) {
+            hit!("GLRParserState::handle_action::ForEachPeek");
+            match action {
+                Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                    hit!("GLRParserState::handle_action::Shift");
+                    crate::debug!(5, "Action: Shift to state {}", to.0);
+                    let new_parse_state =
+                        self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                    shifted_states_todo.push_back(new_parse_state);
+                    found_shift = true;
+                    if early_exit_on_shift {
+                        return (found_shift, true);
+                    }
+                }
+                Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                    nonterminal_id: nt,
+                    len,
+                    ..
+                }) => {
+                    hit!("GLRParserState::handle_action::Reduce");
+                    if per_state_fuel == &Some(0) { continue; }
+                    let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
+
+                    crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
+                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                    if !s_new_arc.is_empty() {
+                        let new_parse_state = ParseState {
+                            stack: s_new_arc,
+                            accepted_state: state.accepted_state.clone(),
+                            prev_accepted_state: state.prev_accepted_state.clone(),
+                            trie2_god: state.trie2_god.clone(),
+                        };
+                        if let Some(ref mut r_map) = reduce_map {
+                            Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
+                        } else {
+                            Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
+                        }
+                    }
+                    if !accepted_s_new_arc.is_empty() {
+                        let accepted_parse_state = ParseState {
+                            stack: Arc::new(GSSNode::new_fresh()),
+                            accepted_state: Some(accepted_s_new_arc),
+                            prev_accepted_state: state.prev_accepted_state.clone(),
+                            trie2_god: state.trie2_god.clone(),
+                        };
+                        accepted_states_todo.push_back(accepted_parse_state);
+                    }
+                }
+                Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                    crate::debug!(5, "Action: Split with shift and reduces");
+                    if let Some(to) = shift {
+                        hit!("GLRParserState::handle_action::Split::Shift");
+                        crate::debug!(5, "Action (Split): Shift to state {}", to.0);
+                        let new_parse_state =
+                            self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                        shifted_states_todo.push_back(new_parse_state);
+                        found_shift = true;
+                        if early_exit_on_shift {
+                            return (found_shift, true);
+                        }
+                    }
+                    if per_state_fuel != &Some(0) {
+                        let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
+                        for (len, nts) in reduces {
+                            for (nt, _prod_ids) in nts {
+                                hit!("GLRParserState::handle_action::Split::Reduce");
+                                crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
+                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                                if !s_new_arc.is_empty() {
+                                    let new_parse_state = ParseState {
+                                        stack: s_new_arc,
+                                        accepted_state: state.accepted_state.clone(),
+                                        prev_accepted_state: state.prev_accepted_state.clone(),
+                                        trie2_god: state.trie2_god.clone(),
+                                    };
+                                    if let Some(ref mut r_map) = reduce_map {
+                                        Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
+                                    } else {
+                                        Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
+                                    }
+                                }
+                                if !accepted_s_new_arc.is_empty() {
+                                    let accepted_parse_state = ParseState {
+                                        stack: Arc::new(GSSNode::new_fresh()),
+                                        accepted_state: Some(accepted_s_new_arc),
+                                        prev_accepted_state: state.prev_accepted_state.clone(),
+                                        trie2_god: state.trie2_god.clone(),
+                                    };
+                                    accepted_states_todo.push_back(accepted_parse_state);
+                                }
+                            }
+                        }
+                    }
+                }
+                Action::Default(default_reduce) => {
+                    // This logic is directly moved from process_action_queue.
+                    // It operates on `state` within a loop over `peek`, which might be inefficient
+                    // but preserves the original behavior.
+                    self.handle_default_action(default_reduce, state, per_state_fuel, work_map, reduce_map, shifted_states_todo, accepted_states_todo, action_selector, config);
+                }
+            }
+        }
+        (found_shift, false)
+    }
+
     /// Shared inner loop for phase 1 and phase 2.
     /// `action_selector` chooses between the phase-1 or phase-2 action map.
     #[time_it("GLRParserState::process_action_queue")]
@@ -842,31 +964,78 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let WorkMapKey(_depth, state_id) = key;
             let action_opt = action_selector(state_id);
             if let Some(action) = action_opt {
-                for peek in GSSNode::peek_iter(&state.stack) {
-                    hit!("GLRParserState::process_action_queue::ForEachPeek");
-                    match action {
-                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
-                            hit!("GLRParserState::process_action_queue::Shift");
-                            crate::debug!(5, "Action: Shift to state {}", to.0);
-                            let new_parse_state =
-                                self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
-                            shifted_states_todo.push_back(new_parse_state);
-                            found_shift = true;
-                            if early_exit_on_shift {
-                                return true;
-                            }
-                        }
-                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                            nonterminal_id: nt,
-                            len,
-                            ..
-                        }) => {
-                            hit!("GLRParserState::process_action_queue::Reduce");
-                            if per_state_fuel == Some(0) { continue; }
-                            let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
+                let (new_found_shift, early_exit) = self.handle_action(
+                    &action,
+                    &state,
+                    &per_state_fuel,
+                    work_map,
+                    &mut reduce_map,
+                    shifted_states_todo,
+                    accepted_states_todo,
+                    &action_selector,
+                    config,
+                    early_exit_on_shift,
+                );
+                found_shift |= new_found_shift;
+                if early_exit {
+                    return found_shift;
+                }
+            } else {
+                crate::debug!(5, "No action found in state {}", state_id.0);
+            }
+        }
+        return found_shift;
+    }
 
-                            crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+    fn handle_default_action<F>(
+        &mut self,
+        default_reduce: &DefaultReduce,
+        state: &ParseState,
+        per_state_fuel: &Option<usize>,
+        work_map: &mut WorkMap,
+        reduce_map: &mut Option<&mut WorkMap>,
+        shifted_states_todo: &mut VecDeque<ParseState>,
+        accepted_states_todo: &mut VecDeque<ParseState>,
+        action_selector: &F,
+        config: &ProcessTokenAdvancedConfig,
+    ) where
+        F: Fn(StateID) -> Option<Action<'a>>,
+    {
+        // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
+        if default_reduce.clone_and_merge {
+            shifted_states_todo.push_back(state.clone());
+        }
+
+        // 2) If there's a reduction in the default, do it like a normal reduce.
+        if let Some((reduce, allowed_terminals)) = &default_reduce.reduce {
+            if per_state_fuel != &Some(0) {
+                let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
+                let mut constrained_state = state.clone();
+                let can_proceed = constrained_state.stack.is_alive();
+
+                if can_proceed {
+                    let disallowed_terminals_bv = allowed_terminals.inverted();
+                    if !disallowed_terminals_bv.is_empty() {
+                        let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                            std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                        );
+
+                        crate::datastructures::gss::disallow_terminals_and_prune_arc(
+                            &mut constrained_state.stack,
+                            &disallowed_l2,
+                            &mut HashMap::new(),
+                        );
+                    }
+
+                    if !constrained_state.stack.is_empty() {
+                        for peek in GSSNode::peek_iter(&constrained_state.stack) {
+                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
+                                &peek,
+                                reduce.nonterminal_id,
+                                reduce.len,
+                                action_selector,
+                                config,
+                            );
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState {
                                     stack: s_new_arc,
@@ -890,126 +1059,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 accepted_states_todo.push_back(accepted_parse_state);
                             }
                         }
-                        Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
-                            crate::debug!(5, "Action: Split with shift and reduces");
-                            if let Some(to) = shift {
-                                hit!("GLRParserState::process_action_queue::Split::Shift");
-                                crate::debug!(5, "Action (Split): Shift to state {}", to.0);
-                                let new_parse_state =
-                                    self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
-                                shifted_states_todo.push_back(new_parse_state);
-                                found_shift = true;
-                                if early_exit_on_shift {
-                                    return true;
-                                }
-                            }
-                            if per_state_fuel != Some(0) {
-                                let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
-                                for (len, nts) in reduces {
-                                    for (nt, _prod_ids) in nts {
-                                        hit!("GLRParserState::process_action_queue::Split::Reduce");
-                                        crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                        let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
-                                        if !s_new_arc.is_empty() {
-                                            let new_parse_state = ParseState {
-                                                stack: s_new_arc,
-                                                accepted_state: state.accepted_state.clone(),
-                                                prev_accepted_state: state.prev_accepted_state.clone(),
-                                                trie2_god: state.trie2_god.clone(),
-                                            };
-                                            if let Some(ref mut r_map) = reduce_map {
-                                                Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
-                                            } else {
-                                                Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
-                                            }
-                                        }
-                                        if !accepted_s_new_arc.is_empty() {
-                                            let accepted_parse_state = ParseState {
-                                                stack: Arc::new(GSSNode::new_fresh()),
-                                                accepted_state: Some(accepted_s_new_arc),
-                                                prev_accepted_state: state.prev_accepted_state.clone(),
-                                                trie2_god: state.trie2_god.clone(),
-                                            };
-                                            accepted_states_todo.push_back(accepted_parse_state);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Action::Default(default_reduce) => {
-                            // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
-                            if default_reduce.clone_and_merge {
-                                shifted_states_todo.push_back(state.clone());
-                            }
-
-                            // 2) If there's a reduction in the default, do it like a normal reduce.
-                            if let Some((reduce, allowed_terminals)) = &default_reduce.reduce {
-                                if per_state_fuel != Some(0) {
-                                    let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
-                                    let mut constrained_state = state.clone();
-                                    let can_proceed = constrained_state.stack.is_alive();
-
-                                    if can_proceed {
-                                        let disallowed_terminals_bv = allowed_terminals.inverted();
-                                        if !disallowed_terminals_bv.is_empty() {
-                                            let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
-                                                std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
-                                            );
-
-                                            crate::datastructures::gss::disallow_terminals_and_prune_arc(
-                                                &mut constrained_state.stack,
-                                                &disallowed_l2,
-                                                &mut HashMap::new(),
-                                            );
-                                        }
-
-                                        if !constrained_state.stack.is_empty() {
-                                            for peek in GSSNode::peek_iter(&constrained_state.stack) {
-                                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
-                                                    &peek,
-                                                    reduce.nonterminal_id,
-                                                    reduce.len,
-                                                    &action_selector,
-                                                    config,
-                                                );
-                                                if !s_new_arc.is_empty() {
-                                                    let new_parse_state = ParseState {
-                                                        stack: s_new_arc,
-                                                        accepted_state: state.accepted_state.clone(),
-                                                        prev_accepted_state: state.prev_accepted_state.clone(),
-                                                        trie2_god: state.trie2_god.clone(),
-                                                    };
-                                                    if let Some(ref mut r_map) = reduce_map {
-                                                        Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
-                                                    } else {
-                                                        Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
-                                                    }
-                                                }
-                                                if !accepted_s_new_arc.is_empty() {
-                                                    let accepted_parse_state = ParseState {
-                                                        stack: Arc::new(GSSNode::new_fresh()),
-                                                        accepted_state: Some(accepted_s_new_arc),
-                                                        prev_accepted_state: state.prev_accepted_state.clone(),
-                                                        trie2_god: state.trie2_god.clone(),
-                                                    };
-                                                    accepted_states_todo.push_back(accepted_parse_state);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // No reduction in default: we already handled clone_and_merge above.
-                                // Nothing else to do for this action.
-                            }
-                        }
                     }
                 }
-            } else {
-                crate::debug!(5, "No action found in state {}", state_id.0);
             }
         }
-        return found_shift;
     }
 
     fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
