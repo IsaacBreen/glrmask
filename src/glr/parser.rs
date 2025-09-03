@@ -791,7 +791,7 @@ impl Ord for WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    pub fn with_god(mut self, trie2_god: Trie2GodWrapper) -> GLRParserState<'a> {
+    pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
     }
@@ -1138,7 +1138,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // Union of Acc over all last-edge entries for this k
             let mut acc_union: Option<Acc> = None;
             // New set of stored trie nodes created/used by these insertions (for this k)
-            let mut new_stored: BTreeSet<PrecomputeNode2Index> = BTreeSet::new();
+            let mut new_stored: BTreeSet<PrecomputeNode3Index> = BTreeSet::new();
 
             for (last_edge, acc_arc) in accs_by_edge {
                 let acc = acc_arc.as_ref();
@@ -1164,7 +1164,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let dst = EdgeInserter::new(
                             god,
                             source,
-                            edge_key,
+                            edge_key.clone(),
                             edge_value.clone(),
                             |e, n| *e |= n,                                 // merge edge bitset
                             |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update, // propagate to node
@@ -1239,7 +1239,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let _ = EdgeInserter::new(
                         god,
                         existing.as_arc().clone(),
-                        edge_key,
+                        edge_key.clone(),
                         edge_value.clone(),
                         |e, n| *e |= n,
                         |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),

@@ -1433,7 +1433,7 @@ pub(crate) fn merge_stored_trie_nodes(
             let inserter = EdgeInserter::new(
                 &stored_trie_god,
                 source_arc,
-                edge_key,
+                edge_key.clone(),
                 edge_value.clone(),
                 |e, n| *e |= n,
                 |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
