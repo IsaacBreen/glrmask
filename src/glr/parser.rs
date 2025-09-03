@@ -741,7 +741,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode2Index, LLMTokenBV)>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode2Index>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1204,11 +1204,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     k: 0, // Sentinel for any k
                 };
 
-                let (dst_arc, is_new) = if let Some((arc, _)) = self.below_bottom_cache.get(&accept_cache_key) {
-                    (arc.as_arc().clone(), false)
+                let (dst_arc, is_new) = if let Some(arc) = self.below_bottom_cache.get(&accept_cache_key) {
+                    (arc.clone(), false)
                 } else {
                     let new_trie2_node = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    self.below_bottom_cache.insert(accept_cache_key.clone(), (new_trie2_node.clone(), LLMTokenBV::max_ones()));
+                    self.below_bottom_cache.insert(accept_cache_key.clone(), new_trie2_node.clone());
                     (new_trie2_node, true)
                 };
 
@@ -1286,25 +1286,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         merged_acc.stored_trie_nodes_mut().clear();
 
-        let (dest_node, enqueue_gss) =
-            if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
-                let enqueue = !llm_tokens.is_superset(&merged_acc.llm_tokens_union);
-                if enqueue {
-                    *llm_tokens |= &merged_acc.llm_tokens_union;
-                }
-                (arc.clone(), enqueue)
-            } else {
-                let new_trie2_node = PrecomputeNode2Index::new(
-                    self.active_state
-                        .trie2_god
-                        .as_ref()
-                        .unwrap()
-                        .insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
-                );
-                self.below_bottom_cache
-                    .insert(cache_key, (new_trie2_node.clone(), LLMTokenBV::max_ones()));
-                (new_trie2_node, true)
-            };
+        let (dest_node, enqueue_gss) = if let Some(arc) = self.below_bottom_cache.get(&cache_key) {
+            (arc.clone(), false)
+        } else {
+            let new_trie2_node = PrecomputeNode2Index::new(
+                self.active_state
+                    .trie2_god
+                    .as_ref()
+                    .unwrap()
+                    .insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+            );
+            self.below_bottom_cache.insert(cache_key, new_trie2_node.clone());
+            (new_trie2_node, true)
+        };
 
         // Insert edges from all source trie nodes to the destination node.
         for (k, acc) in below {
