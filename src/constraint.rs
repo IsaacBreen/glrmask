@@ -637,7 +637,7 @@ impl GrammarConstraint {
 
         if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
             let mut acc = Acc::new_fresh();
-            acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
+            acc.stored_trie_nodes_mut().insert(base_trie2_root_wr.clone());
             let gss_leaf = Arc::new(GSSNode::new(acc));
             base_gss_nodes.push(Arc::new(
                 gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
@@ -645,7 +645,7 @@ impl GrammarConstraint {
         } else {
             for state_id in parser.table.keys() {
                 let mut acc = Acc::new_fresh();
-                acc.trie2_nodes_mut().insert(base_trie2_root_wr.clone());
+                acc.stored_trie_nodes_mut().insert(base_trie2_root_wr.clone());
                 let gss_leaf = Arc::new(GSSNode::new(acc));
                 base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
             }
@@ -673,8 +673,8 @@ impl GrammarConstraint {
             // Deep clone Trie
             let (cloned_trie2_root, trie2_map) = constraint_precompute2_utils::clone_trie2_graph(&base_trie2_root, &trie2_god);
 
-            // Deep clone the base GSS, remapping trie2_nodes
-            let cloned_gss = crate::datastructures::gss::deep_clone_gss_with_trie2_map(
+            // Deep clone the base GSS, remapping stored_trie_nodes
+            let cloned_gss = crate::datastructures::gss::deep_clone_gss_with_stored_trie_map(
                 &base_glr_state.active_state.stack,
                 &trie2_map,
             );
@@ -748,7 +748,7 @@ impl GrammarConstraint {
                 // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
 
-                crate::datastructures::gss::merge_trie2_nodes_if_needed(
+                crate::datastructures::gss::merge_stored_trie_nodes_if_needed(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
@@ -773,7 +773,7 @@ impl GrammarConstraint {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                             crate::debug!(4, "Trie: For GSS root with edge {:?}, active LLM tokens: {:?}", last_edge, active_llm_tokens_for_root);
 
-                            for src_wr in gss_root_acc.trie2_nodes().iter() {
+                            for src_wr in gss_root_acc.stored_trie_nodes().iter() {
                                 let src_arc = src_wr.as_arc().clone();
                                 let src_live = { src_arc.read(&trie2_god).expect("poison").value.live_tokens.clone() };
                                 let tokens_to_push = &active_llm_tokens_for_root & &src_live;
