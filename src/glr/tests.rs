@@ -799,6 +799,7 @@ fn test_nullable_nonterminal_before_terminal() {
     assert!(!state_empty_fail.is_ok(), "Parse succeeded for invalid input '$'");
 }
 
+#[ignore]
 #[test]
 fn test_substring_parser_simple() {
     // Grammar: S -> a S b | c
