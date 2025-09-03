@@ -819,13 +819,12 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
 /// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
 /// states would be if a reduction for that non-terminal occurred, and we could start
 /// from *any* state in the automaton (as is the case for substring parsing).
-///
 /// This avoids a very expensive runtime loop over all table states.
-pub fn stage_9(
+pub fn compute_hallucinated_gotos(
     table: &Table,
     non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
 ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-    let mut substring_gotos = BTreeMap::new();
+    let mut hallucinated_gotos = BTreeMap::new();
 
     let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
 
@@ -845,14 +844,13 @@ pub fn stage_9(
         }
 
         if !accepting_sources.is_empty() || !gotos.is_empty() {
-            substring_gotos.insert(nt_id, SubstringGoto {
+            hallucinated_gotos.insert(nt_id, SubstringGoto {
                 accepting_sources,
                 gotos,
             });
         }
     }
-
-    substring_gotos
+    hallucinated_gotos
 }
 
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
@@ -1074,8 +1072,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
 
-    crate::debug!(2, "Stage 9: Precomputing substring gotos");
-    let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+    crate::debug!(2, "Stage 9: Precomputing hallucinated gotos");
+    let hallucinated_gotos = compute_hallucinated_gotos(&stage_8_table, &non_terminal_map);
 
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
@@ -1087,7 +1085,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, hallucinated_gotos)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
