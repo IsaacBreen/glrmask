@@ -61,12 +61,12 @@ impl PrecomputedNodeContents {
 }
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::constraint::{PrecomputeNode3, PrecomputeNode3Contents, PrecomputeNode3Index, Trie3God, Trie3GodWrapper};
+use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNode3Contents, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("clean_end".to_string(), self.end.to_json());
         obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
         JSONNode::Object(obj)
@@ -1413,7 +1413,8 @@ pub(crate) fn merge_stored_trie_nodes(
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
         if !root.acc.stored_trie_nodes.iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            // |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            // |n| todo!(),
         ) {
             return Some(root.acc.clone());
         }

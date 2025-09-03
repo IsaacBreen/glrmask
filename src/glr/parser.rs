@@ -1,6 +1,6 @@
-use crate::constraint::{LLMVocab, PrecomputeNode3, PrecomputeNode3Contents, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::constraint::{LLMVocab, PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie2GodWrapper, Trie3God, Trie3GodWrapper};
 use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV, PrecomputedNodeContents};
-use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -468,7 +468,7 @@ impl GLRParser {
             stack: Arc::new(stack_top),
             accepted_state: None,
             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
-            trie2_god: None,
+            stored_trie_god: None,
         }
     }
 
@@ -493,7 +493,7 @@ impl GLRParser {
             stack,
             accepted_state: None,
             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
-            trie2_god: None,
+            stored_trie_god: None,
         }
     }
 
@@ -509,7 +509,7 @@ impl GLRParser {
             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
             accepted_state: None,
             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
-            trie2_god: None,
+            stored_trie_god: None,
         }
     }
 
@@ -791,8 +791,8 @@ impl Ord for WorkMapKey {
 type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 
 impl<'a> GLRParserState<'a> { // No longer generic
-    pub fn with_god(mut self, trie2_god: Trie2GodWrapper) -> GLRParserState<'a> {
-        self.active_state.trie2_god = Some(trie2_god);
+    pub fn with_god(mut self, stored_trie_god: Trie3GodWrapper) -> GLRParserState<'a> {
+        self.active_state.stored_trie_god = Some(stored_trie_god);
         self
     }
 
@@ -1163,7 +1163,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let dst = EdgeInserter::new(
                             god,
                             source,
-                            edge_key,
+                            edge_key.clone(),
                             edge_bv.clone(),
                             |e, n| *e |= n,                                 // merge edge bitset
                             |_, _| {}, // propagate to node

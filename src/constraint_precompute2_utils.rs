@@ -1,4 +1,4 @@
-use crate::constraint::{GrammarConstraintConfig, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNodeIndex, Trie2GodWrapper};
+use crate::constraint::{GrammarConstraintConfig, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3Index, PrecomputeNodeIndex, Trie2GodWrapper, Trie3GodWrapper};
 use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
@@ -851,4 +851,11 @@ pub fn clone_trie2_graph(
     // Recompute max_depths in the clone to keep invariants consistent.
     Trie::recompute_all_max_depths(trie2_god, &[new_root.clone()]);
     (new_root, map)
+}
+
+pub fn clone_trie3_graph(
+    root: &PrecomputeNode3Index,
+    trie3_god: &Trie3GodWrapper,
+) -> (PrecomputeNode3Index, HashMap<PrecomputeNode3Index, PrecomputeNode3Index>) {
+    todo!()
 }
