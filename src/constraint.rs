@@ -625,12 +625,19 @@ impl GrammarConstraint {
         let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
         if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            panic!("ContinueFromEverything is not supported with hallucinated state");
-        } else {
             let mut acc = Acc::new_fresh();
             acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
             let gss_leaf = Arc::new(GSSNode::new(acc));
-            base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id })));
+            base_gss_nodes.push(Arc::new(
+                gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
+            ));
+        } else {
+            for state_id in parser.table.keys() {
+                let mut acc = Acc::new_fresh();
+                acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
+                let gss_leaf = Arc::new(GSSNode::new(acc));
+                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
+            }
         }
 
         let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
