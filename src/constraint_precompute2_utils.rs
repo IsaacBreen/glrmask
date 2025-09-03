@@ -857,6 +857,7 @@ pub fn clone_trie3_graph(
     root: &PrecomputeNode3Index,
     trie3_god: &Trie3GodWrapper,
 ) -> (PrecomputeNode3Index, HashMap<PrecomputeNode3Index, PrecomputeNode3Index>) {
+    return (root.clone(), HashMap::from([(root.clone(), root.clone())])); // TEMP disable clone
     // old_ptr -> new arc
     let mut map: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
     let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();

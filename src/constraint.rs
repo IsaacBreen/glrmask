@@ -59,7 +59,7 @@ pub type StateIDBV = HybridBitset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNode3Contents {
-    pub end: bool,
+    end: bool,
 }
 impl JSONConvertible for PrecomputedNode3Contents {
     fn to_json(&self) -> JSONNode {
@@ -88,6 +88,9 @@ impl PrecomputedNode3Contents {
     }
     pub fn leaf() -> Self {
         PrecomputedNode3Contents { end: true }
+    }
+    pub fn end(&self) -> bool {
+        self.end
     }
 }
 
