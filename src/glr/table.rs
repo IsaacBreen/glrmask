@@ -1092,8 +1092,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
-    let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
+    generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
