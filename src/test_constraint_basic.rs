@@ -1751,6 +1751,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
         prod("S", vec![nt("A")]),
         prod("A", vec![t("OPEN_BRACE"), nt("A"), t("CLOSE_BRACE")]),
         prod("A", vec![]),
+        prod("dead", vec![t("ANYTHING")]),
     ];
 
     // 3. LLM Vocabulary
