@@ -57,35 +57,6 @@ const MERGE_THRESHOLD: usize = 20;
 
 pub type StateIDBV = HybridBitset;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNode3Contents {
-    pub end: bool,
-    pub live_tokens: LLMTokenBV,
-}
-impl JSONConvertible for PrecomputedNode3Contents {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("end".to_string(), self.end.to_json());
-        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let end = obj.remove("end").ok_or_else(|| "Missing field end".to_string())
-                             .and_then(bool::from_json)?;
-                let live_tokens = match obj.remove("live_tokens") {
-                    Some(n) => LLMTokenBV::from_json(n)?,
-                    None => LLMTokenBV::zeros(),
-                };
-                Ok(PrecomputedNode3Contents { end, live_tokens })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedNode3Contents".to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalAllowanceCheckMode {
     None,
@@ -122,7 +93,7 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
 
 pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
+pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 pub type PrecomputeNodeIndex = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
@@ -906,7 +877,7 @@ impl GrammarConstraint {
         }
 
         let node2 = node2_idx.read(trie2_god).unwrap();
-        let node3 = PrecomputeNode3::new(PrecomputedNode3Contents {
+        let node3 = PrecomputeNode3::new(PrecomputedNodeContents {
             end: node2.value.end,
             live_tokens: node2.value.live_tokens.clone(),
         });
@@ -1924,8 +1895,8 @@ pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, Precompu
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
-pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNode3Contents>;
+pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
+pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
