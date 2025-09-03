@@ -5,7 +5,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::glr::analyze::{create_unique_name_generator, inline_null_productions, inline_unit_productions, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
 pub use crate::types::TerminalID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -157,6 +157,30 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                 }
             }
             _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SubstringGoto {
+    pub accepting_sources: BTreeSet<StateID>,
+    pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
+}
+
+impl JSONConvertible for SubstringGoto {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
+        obj.insert("gotos".to_string(), self.gotos.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(SubstringGoto {
+                accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
+                gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
         }
     }
 }
@@ -790,6 +814,84 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
+/// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
+///
+/// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
+/// states would be if a reduction for that non-terminal occurred, and we could start
+/// from *any* state in the automaton (as is the case for substring parsing).
+///
+/// This avoids a very expensive runtime loop over all table states.
+pub fn stage_9(
+    table: &Table,
+    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+) -> BTreeMap<NonTerminalID, SubstringGoto> {
+    let mut substring_gotos = BTreeMap::new();
+
+    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+
+    for &nt_id in &all_nt_ids {
+        let mut accepting_sources = BTreeSet::new();
+        let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+
+        for (&source_state_id, row) in table {
+            if let Some(goto) = row.gotos.get(&nt_id) {
+                if goto.accept {
+                    accepting_sources.insert(source_state_id);
+                }
+                if let Some(goto_state_id) = goto.state_id {
+                    gotos.entry(goto_state_id).or_default().insert(source_state_id);
+                }
+            }
+        }
+
+        if !accepting_sources.is_empty() || !gotos.is_empty() {
+            substring_gotos.insert(nt_id, SubstringGoto {
+                accepting_sources,
+                gotos,
+            });
+        }
+    }
+
+    substring_gotos
+}
+
+/// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
+fn compute_unit_reduction_chain<F>(
+    table: &Table,
+    source_state_id: StateID,
+    initial_nt: NonTerminalID,
+    token_id: TerminalID,
+    action_selector: F,
+) -> (BTreeSet<StateID>, bool)
+where
+    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+{
+    let mut final_goto_state_ids_for_source = BTreeSet::new();
+    let mut accepted = false;
+    let mut current_nt_local = initial_nt;
+    let row = &table[&source_state_id];
+
+    loop {
+        if let Some(goto) = row.gotos.get(&current_nt_local) {
+            if goto.accept {
+                accepted = true;
+            }
+            if let Some(goto_state_id) = goto.state_id {
+                let next_row = &table[&goto_state_id];
+                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                    current_nt_local = *next_nt;
+                    continue; // Follow the unit-reduction chain.
+                }
+                // Not a unit reduction, this is a final state for this chain.
+                final_goto_state_ids_for_source.insert(goto_state_id);
+            }
+        }
+        // End of chain (no GOTO, no further state, or not a unit reduction).
+        break;
+    }
+    (final_goto_state_ids_for_source, accepted)
+}
+
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
 ///
 /// This function takes a table and a list of compatible state pairs. It merges these
@@ -972,6 +1074,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
 
+    crate::debug!(2, "Stage 9: Precomputing substring gotos");
+    let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
 
@@ -982,7 +1087,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {

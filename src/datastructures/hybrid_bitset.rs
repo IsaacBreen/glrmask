@@ -14,7 +14,7 @@ use std::ops::{
 use std::sync::Arc;
 
 // --- The Hybrid Bitset Struct ---
-#[derive(Default, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct HybridBitset {
     pub(crate) inner: Acc<RangeSetBlaze<usize>>,
 }
