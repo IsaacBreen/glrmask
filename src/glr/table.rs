@@ -856,15 +856,15 @@ pub fn stage_9(
 }
 
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
-fn compute_unit_reduction_chain<F>(
-    table: &Table,
+fn compute_unit_reduction_chain<'a, F>(
+    table: &'a Table,
     source_state_id: StateID,
     initial_nt: NonTerminalID,
     token_id: TerminalID,
     action_selector: F,
 ) -> (BTreeSet<StateID>, bool)
 where
-    F: Fn(StateID) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+    F: Fn(StateID) -> &'a BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
 {
     let mut final_goto_state_ids_for_source = BTreeSet::new();
     let mut accepted = false;
