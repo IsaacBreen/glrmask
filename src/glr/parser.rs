@@ -517,6 +517,10 @@ impl GLRParser {
         }
     }
 
+    pub fn is_hallucinate_state(&self, state_id: StateID) -> bool {
+        state_id == self.hallucinate_state_id
+    }
+
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
@@ -1088,8 +1092,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 },
                 config,
                 &mut None,
-                Some(token_id),
                 false,
+                Some(token_id),
             );
         });
     }
@@ -1112,8 +1116,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 },
                 config,
                 &mut None,
-                Some(token_id),
                 false,
+                Some(token_id),
             );
             self.phase = ParserPhase::ReadyForDefaultReductions;
         });
@@ -1253,7 +1257,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 (*k, LLMTokenBV::max_ones()),
                                 StateIDBV::max_ones(),
                                 |e, n| *e |= n,
-                                |node_value, _| node_value.live_tokens.set_all(true),
+                                |node_value, _| node_value.live_tokens |= LLMTokenBV::max_ones(),
                                 |_, _| {},
                             ).try_destination(dest_node);
                         }
