@@ -1862,7 +1862,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let accepted_now = self.active_state.accepted_state.is_some();
         let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
         crate::debug!(3, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
-                      phase, self.phase, accepted_now, accepted_prev, self.parser.terminal_map.get_by_right(&token).unwrap(), token.0, stats_breakdown);
+                      phase, self.phase, accepted_now, accepted_prev, self.parser.terminal_map.get_by_right(&token).expect_else(|| format!("Token {} not found in terminal map: {:?}", token.0, self.parser.terminal_map)), token.0, stats_breakdown);
 
         let mut gss_strings = vec![];
         let mut all_state_ids = BTreeSet::new();
