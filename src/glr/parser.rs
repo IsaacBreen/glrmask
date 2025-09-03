@@ -1286,13 +1286,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         merged_acc.stored_trie_nodes_mut().clear();
 
-        let (dest_node, create_gss) =
+        let (dest_node, enqueue_gss) =
             if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
-                let create = !merged_acc.llm_tokens_union.is_subset(llm_tokens);
-                if create {
+                let enqueue = !merged_acc.llm_tokens_union.is_subset(llm_tokens);
+                if enqueue {
                 *llm_tokens |= &merged_acc.llm_tokens_union;
                 }
-                (arc.clone(), create)
+                (arc.clone(), enqueue)
             } else {
                 let new_trie2_node = PrecomputeNode2Index::new(
                     self.active_state
@@ -1326,7 +1326,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
 
-        if create_gss {
+        if enqueue_gss {
             merged_acc.stored_trie_nodes_mut().insert(dest_node);
             let mut out = Vec::new();
             for (goto_state_id, source_state_ids) in &gotos.gotos {
