@@ -857,5 +857,71 @@ pub fn clone_trie3_graph(
     root: &PrecomputeNode3Index,
     trie3_god: &Trie3GodWrapper,
 ) -> (PrecomputeNode3Index, HashMap<PrecomputeNode3Index, PrecomputeNode3Index>) {
-    todo!()
+    // old_ptr -> new arc
+    let mut map: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
+    let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+
+    let root_ptr = *root;
+    let root_value = { root.read(trie3_god).expect("poison").value.clone() };
+    let new_root = PrecomputeNode3Index::new(trie3_god.insert(crate::constraint::PrecomputeNode3::new(root_value)));
+    map.insert(root_ptr, new_root.clone());
+    q.push_back(root.clone());
+
+    while let Some(old_arc) = q.pop_front() {
+        let old_ptr = old_arc;
+        let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
+
+        // Snapshot children outside of lock to avoid recursive lock explosion.
+        let children_snapshot: Vec<(
+            (usize, LLMTokenBV),
+            Vec<(PrecomputeNode3Index, crate::constraint::StateIDBV)>,
+        )> = {
+            let g = old_arc.read(trie3_god).expect("poison");
+            g.children()
+                .iter()
+                .map(|(ek, dest_map)| {
+                    let entries = dest_map
+                        .iter()
+                        .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
+                        .collect::<Vec<_>>();
+                    (ek.clone(), entries)
+                })
+                .collect()
+        };
+
+        // For each child, ensure it exists in map (create a blank new node with same value).
+        for (_ek, entries) in &children_snapshot {
+            for (node_ptr, _ev) in entries {
+                let child_arc_old = node_ptr.as_arc().clone();
+                let child_ptr_old = child_arc_old;
+                if !map.contains_key(&child_ptr_old) {
+                    let child_value = { child_arc_old.read(trie3_god).expect("poison").value.clone() };
+                    let child_arc_new = PrecomputeNode3Index::new(
+                        trie3_god.insert(crate::constraint::PrecomputeNode3::new(child_value)),
+                    );
+                    map.insert(child_ptr_old, child_arc_new);
+                    q.push_back(child_arc_old);
+                }
+            }
+        }
+
+        // Now wire edges on new_arc
+        {
+            let mut new_g = new_arc.write(trie3_god).expect("poison");
+            for (ek, entries) in children_snapshot {
+                let dest_map = new_g.children_mut().entry(ek).or_default();
+                for (old_node_ptr, ev) in entries {
+                    let child_arc_old = old_node_ptr.as_arc().clone();
+                    let child_ptr_old = child_arc_old;
+                    let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
+                    let new_key = child_arc_new;
+                    dest_map.insert(new_key, ev);
+                }
+            }
+        }
+    }
+
+    // Recompute max_depths in the clone to keep invariants consistent.
+    Trie::recompute_all_max_depths(trie3_god, &[new_root.clone()]);
+    (new_root, map)
 }
