@@ -35,10 +35,10 @@ type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeCon
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
 pub type TerminalInfo = HybridL2Bitset;
 
-type StoredPrecomputeNodeIndex = PrecomputeNode3Index;
-type StoredPrecomputeNode = PrecomputeNode3;
-type StoredTrieGod = Trie3God;
-type StoredTrieGodWrapper = Trie3GodWrapper;
+type StoredPrecomputeNodeIndex = PrecomputeNode2Index;
+type StoredPrecomputeNode = PrecomputeNode2;
+type StoredTrieGod = Trie2God;
+type StoredTrieGodWrapper = Trie2GodWrapper;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
@@ -61,12 +61,13 @@ impl PrecomputedNodeContents {
 }
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNode3Contents, Trie3God, Trie3GodWrapper};
+use std::collections::BTreeMap as StdMap;
+use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
 use crate::datastructures::trie::God;
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
-        let mut obj = BTreeMap::new();
+        let mut obj = StdMap::new();
         obj.insert("clean_end".to_string(), self.end.to_json());
         obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
         JSONNode::Object(obj)
@@ -1411,20 +1412,19 @@ pub(crate) fn merge_stored_trie_nodes(
 
     let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        // if !root.acc.stored_trie_nodes.iter().any(
-        //     // TODO: can this condition be relaxed to a subset or something?
-        //     // |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
-        //     |n| todo!(),
-        // ) {
-        //     return Some(root.acc.clone());
-        // }
+        if !root.acc.stored_trie_nodes.iter().any(
+            // TODO: can this condition be relaxed to a subset or something?
+            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+        ) {
+            return Some(root.acc.clone());
+        }
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
         let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), root.acc.llm_tokens_union.clone()))
-            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal()))))
+            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal()))))
             .clone();
-        let edge_key = (0, new_acc.llm_tokens_union.clone());
-        let edge_value = crate::constraint::StateIDBV::max_ones();
+        let edge_key = (0, None);
+        let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
         for source_wrapper in &new_acc.stored_trie_nodes {
             let source_arc = source_wrapper.as_arc().clone();
@@ -1432,15 +1432,18 @@ pub(crate) fn merge_stored_trie_nodes(
             let inserter = EdgeInserter::new(
                 &stored_trie_god,
                 source_arc,
-                edge_key.clone(),
-                edge_value.clone(),
+                edge_key,
+                tokens_for_edge.clone(),
                 |e, n| *e |= n,
-                |_, _| {}, // node value has no live_tokens
+                |node_value, edge_value| node_value.live_tokens |= edge_value,
                 |_, _| {}, // Unconditional insertion
             );
             // Insert a strong edge to the new shared destination.
             inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
         }
+
+        // Update the live tokens on the new destination node.
+        new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
 
         // The acc now points only to this new merged destination.
         new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
@@ -2711,9 +2714,9 @@ mod tests {
 
         // --- GSS 1 Setup ---
         let stored_trie_god = StoredTrieGodWrapper::new();
-        let stored_trie_node1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
-        let stored_trie_node2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
-        let stored_trie_node3 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let stored_trie_node1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
+        let stored_trie_node2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
+        let stored_trie_node3 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
 
         let mut acc_l1 = empty_acc();
         acc_l1.stored_trie_nodes_mut().insert(stored_trie_node1.clone());
@@ -2770,12 +2773,12 @@ mod tests {
 
         // --- Shared Nodes ---
         let stored_trie_god = StoredTrieGodWrapper::new();
-        let stored_trie_node1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let stored_trie_node1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
         let mut acc1 = empty_acc();
         acc1.stored_trie_nodes_mut().insert(stored_trie_node1.clone());
         let leaf1 = Arc::new(GSSNode::new(acc1)); // This is "Node 2" with trie ...6f0
 
-        let stored_trie_node2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let stored_trie_node2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
         let mut acc2 = empty_acc();
         acc2.stored_trie_nodes_mut().insert(stored_trie_node2.clone());
         let leaf2 = Arc::new(GSSNode::new(acc2)); // This is "Node 2" with trie ...560
@@ -2825,7 +2828,7 @@ mod tests {
 
         // --- GSS A setup ---
         let stored_trie_god = StoredTrieGodWrapper::new();
-        let stored_trie_node_a = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let stored_trie_node_a = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
         let mut acc_a = empty_acc();
         acc_a.stored_trie_nodes_mut().insert(stored_trie_node_a.clone());
         let leaf_a = Arc::new(GSSNode::new(acc_a));
@@ -2837,7 +2840,7 @@ mod tests {
         );
 
         // --- GSS B setup ---
-        let stored_trie_node_b = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let stored_trie_node_b = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
         let mut acc_b = empty_acc();
         acc_b.stored_trie_nodes_mut().insert(stored_trie_node_b.clone());
         let leaf_b = Arc::new(GSSNode::new(acc_b));
@@ -2876,8 +2879,8 @@ mod tests {
 
         // --- Build two distinct stored_trie nodes ---
         let stored_trie_god = StoredTrieGodWrapper::new();
-        let t1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
-        let t2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal())));
+        let t1 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
+        let t2 = StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal())));
 
         // Helper to build one tower given a leaf with a unique stored_trie node.
         let build_tower_from_leaf = |leaf: Arc<GSSNode>| -> GSSNode {

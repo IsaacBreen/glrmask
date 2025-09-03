@@ -273,7 +273,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie3_god).unwrap();
                 root_ptr = root_node_trie;
-                root_info = format!("Root Node {} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end() { " [END]" } else { "" });
+                root_info = format!("Root Node {} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
             }
             println!("{}", root_info);
 
@@ -373,7 +373,7 @@ pub fn dump_precompute_trie3_recursive(
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read(trie3_god).unwrap();
             let ptr = child_arc;
-            (ptr, format!("Node {} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end() { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end())
+            (ptr, format!("Node {} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
         };
 
         if is_visited && !is_end_node {
@@ -538,7 +538,7 @@ pub fn calculate_final_stats3(
                 stats.final_total_ranges_in_bvs += state_id_bv_on_edge.inner().ranges_len();
             }
         }
-        if node_guard.value.end() { stats.final_nodes_with_clean_end += 1; }
+        if node_guard.value.end { stats.final_nodes_with_clean_end += 1; }
     }
     crate::debug!(2, "Finished calculating final precompute3 statistics.");
 }
