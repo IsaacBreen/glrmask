@@ -1996,7 +1996,7 @@ pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseSt
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let root_index = rng.random_range(0..roots.len());
+    let root_index = rng.gen_range(0..roots.len());
     let mut current_node_arc = Arc::new(roots[root_index].clone());
 
     let mut path = Vec::new();
@@ -2011,7 +2011,7 @@ pub(crate) fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseSt
             break;
         }
 
-        let chosen_index = rng.random_range(0..predecessors.len());
+        let chosen_index = rng.gen_range(0..predecessors.len());
         let chosen_peek = &predecessors[chosen_index];
 
         path.push(chosen_peek.edge_value().clone());
@@ -2355,7 +2355,7 @@ mod tests {
     }
 
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
-        ParseStateEdgeContent { state_id: StateID(id) }
+        ParseStateEdgeContent { state_id: StateID(id), filter: None }
     }
 
     #[test]

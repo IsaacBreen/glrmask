@@ -622,26 +622,19 @@ impl GrammarConstraint {
 
         let base_trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
 
-        let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
+		let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
 
-        if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            let mut acc = Acc::new_fresh();
-            acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
-            let gss_leaf = Arc::new(GSSNode::new(acc));
-            base_gss_nodes.push(Arc::new(
-                gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
-            ));
-        } else {
-            for state_id in parser.table.keys() {
-                let mut acc = Acc::new_fresh();
-                acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
-                let gss_leaf = Arc::new(GSSNode::new(acc));
-                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
-            }
-        }
+		let mut acc = Acc::new_fresh();
+		acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
+		let gss_leaf = Arc::new(GSSNode::new(acc));
+		let hallucinate_edge = ParseStateEdgeContent {
+			state_id: parser.hallucinate_state_id,
+			filter: None,
+		};
+		base_gss_nodes.push(Arc::new(gss_leaf.push(hallucinate_edge)));
 
-        let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
-        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(trie3_god.clone());
+		let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
+		let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(trie3_god.clone());
 
         const PROCESS_DEFAULT_REDUCTIONS: bool = false;
         if PROCESS_DEFAULT_REDUCTIONS {
@@ -719,14 +712,19 @@ impl GrammarConstraint {
                                 {
                                     let mut src_w = src_arc.write(&trie3_god).expect("poison");
                                     src_w.value.live_tokens |= &tokens_to_push;
-                                }
+								}
 
-                                let edge_key = (0, tokens_to_push.clone());
-                                let mut edge_value = StateIDBV::zeros();
-                                edge_value.insert(last_edge.state_id.0);
+								let edge_key = (0, tokens_to_push.clone());
+								let edge_value = if let Some(filter) = &last_edge.filter {
+									filter.clone()
+								} else {
+									let mut bv = StateIDBV::zeros();
+									bv.insert(last_edge.state_id.0);
+									bv
+								};
 
-                                let inserter = EdgeInserter::new(
-                                    glr_s.active_state.trie2_god.as_ref().unwrap(),
+								let inserter = EdgeInserter::new(
+									glr_s.active_state.trie2_god.as_ref().unwrap(),
                                     src_arc.clone(),
                                     edge_key,
                                     edge_value,

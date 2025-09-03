@@ -3,7 +3,7 @@ use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, G
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -14,7 +14,7 @@ use crate::datastructures::trie::EdgeInserter;
 use crate::{debug, hit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::table::{stage_9, DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
+use crate::glr::table::{DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use bimap::BiBTreeMap;
@@ -82,30 +82,31 @@ pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Syn
 
 
 #[derive(Debug, Clone)]
-pub struct ParseStateEdgeContent { 
+pub struct ParseStateEdgeContent {
     pub state_id: StateID,
+    pub filter: Option<StateIDBV>,
 }
 impl PartialEq for ParseStateEdgeContent {
     fn eq(&self, other: &Self) -> bool {
-        self.state_id == other.state_id
+        self.state_id == other.state_id && self.filter == other.filter
     }
 }
 impl Eq for ParseStateEdgeContent {}
 impl PartialOrd for ParseStateEdgeContent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.state_id.partial_cmp(&other.state_id) {
-            other_ord => other_ord,
-        }
+        Some(self.cmp(other))
     }
 }
 impl Ord for ParseStateEdgeContent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.state_id.cmp(&other.state_id)
+            .then_with(|| self.filter.cmp(&other.filter))
     }
 }
 impl Hash for ParseStateEdgeContent {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.state_id.hash(state);
+        self.filter.hash(state);
     }
 }
 
@@ -114,8 +115,7 @@ impl JSONConvertible for ParseStateEdgeContent {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
         obj.insert("state_id".to_string(), self.state_id.to_json());
-        // Handle user_data serialization:
-        // Option 1: Panic if not default.
+        obj.insert("filter".to_string(), self.filter.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -123,7 +123,11 @@ impl JSONConvertible for ParseStateEdgeContent {
             JSONNode::Object(mut obj) => {
                 let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string()) // Corrected struct name
                                   .and_then(StateID::from_json)?;
-                Ok(ParseStateEdgeContent { state_id })
+                let filter = obj.remove("filter")
+                    .map(Option::<StateIDBV>::from_json)
+                    .transpose()?
+                    .flatten();
+                Ok(ParseStateEdgeContent { state_id, filter })
             }
             _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()), // Corrected struct name
         }
@@ -252,6 +256,22 @@ impl Default for ProcessDefaultReductionsAdvancedConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HallucinateTokenActions {
+    // For a given token, SHIFTs grouped by target state with source filters
+    pub shifts: BTreeMap<StateID, StateIDBV>,
+    // For a given token, REDUCEs keyed by (len, NT) with source filters
+    pub reduces: BTreeMap<(usize, NonTerminalID), StateIDBV>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HallucinateGotoActions {
+    // Gotos for a given NT: target state -> sources filter
+    pub gotos: BTreeMap<StateID, StateIDBV>,
+    // Sources for which accepting the NT is true
+    pub accepting_sources: StateIDBV,
+}
+
 #[derive(Clone)]
 pub struct GLRParser {
     pub table: Table,
@@ -262,8 +282,9 @@ pub struct GLRParser {
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
-    // Precomputed tables for substring parsing reductions.
-    pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+    pub hallucinate_state_id: StateID,
+    pub hallucinate_token_actions: BTreeMap<TerminalID, HallucinateTokenActions>,
+    pub hallucinate_gotos: BTreeMap<NonTerminalID, HallucinateGotoActions>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -278,8 +299,6 @@ impl JSONConvertible for GLRParser {
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
-        // Do not serialize self.actions
         JSONNode::Object(obj)
     }
 
@@ -306,7 +325,42 @@ impl JSONConvertible for GLRParser {
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
 
-                let substring_gotos = stage_9(&table, &non_terminal_map);
+                let hallucinate_state_id = StateID(usize::MAX);
+                let mut hallucinate_token_actions: BTreeMap<TerminalID, HallucinateTokenActions> = BTreeMap::new();
+                let mut hallucinate_gotos: BTreeMap<NonTerminalID, HallucinateGotoActions> = BTreeMap::new();
+
+                for (&source_state_id, row) in &table {
+                    for (&tid, action) in &row.shifts_and_reduces_full {
+                        let entry = hallucinate_token_actions.entry(tid).or_default();
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => {
+                                entry.shifts.entry(*sid).or_default().insert(source_state_id.0);
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                                entry.reduces.entry((*len, *nt)).or_default().insert(source_state_id.0);
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                if let Some(sid) = shift {
+                                    entry.shifts.entry(*sid).or_default().insert(source_state_id.0);
+                                }
+                                for (len, nts) in reduces {
+                                    for (nt, _pids) in nts {
+                                        entry.reduces.entry((*len, *nt)).or_default().insert(source_state_id.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (&nt, goto) in &row.gotos {
+                        let entry = hallucinate_gotos.entry(nt).or_default();
+                        if goto.accept {
+                            entry.accepting_sources.insert(source_state_id.0);
+                        }
+                        if let Some(to) = goto.state_id {
+                            entry.gotos.entry(to).or_default().insert(source_state_id.0);
+                        }
+                    }
+                }
 
                 Ok(GLRParser {
                     table,
@@ -317,7 +371,9 @@ impl JSONConvertible for GLRParser {
                     start_state_id,
                     everything_state_id,
                     ignore_terminal_id,
-                    substring_gotos,
+                    hallucinate_state_id,
+                    hallucinate_token_actions,
+                    hallucinate_gotos,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -336,7 +392,9 @@ impl Debug for GLRParser {
             .field("start_state_id", &self.start_state_id)
             .field("everything_state_id", &self.everything_state_id)
             .field("ignore_terminal_id", &self.ignore_terminal_id)
-            .field("substring_gotos_size", &self.substring_gotos.len())
+            .field("hallucinate_state_id", &self.hallucinate_state_id)
+            .field("hallucinate_token_actions_size", &self.hallucinate_token_actions.len())
+            .field("hallucinate_gotos_size", &self.hallucinate_gotos.len())
             .finish()
     }
 }
@@ -351,7 +409,9 @@ impl PartialEq for GLRParser {
         self.start_state_id == other.start_state_id &&
         self.everything_state_id == other.everything_state_id &&
         self.ignore_terminal_id == other.ignore_terminal_id &&
-        self.substring_gotos == other.substring_gotos
+        self.hallucinate_state_id == other.hallucinate_state_id &&
+        self.hallucinate_token_actions == other.hallucinate_token_actions &&
+        self.hallucinate_gotos == other.hallucinate_gotos
     }
 }
 
@@ -368,7 +428,6 @@ impl GLRParser {
         everything_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
         ignore_terminal_id: Option<TerminalID>,
-        substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -379,6 +438,43 @@ impl GLRParser {
             })
             .collect();
 
+        let hallucinate_state_id = StateID(usize::MAX);
+        let mut hallucinate_token_actions: BTreeMap<TerminalID, HallucinateTokenActions> = BTreeMap::new();
+        let mut hallucinate_gotos: BTreeMap<NonTerminalID, HallucinateGotoActions> = BTreeMap::new();
+
+        for (&source_state_id, row) in &table {
+            for (&tid, action) in &row.shifts_and_reduces_full {
+                let entry = hallucinate_token_actions.entry(tid).or_default();
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => {
+                        entry.shifts.entry(*sid).or_default().insert(source_state_id.0);
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                        entry.reduces.entry((*len, *nt)).or_default().insert(source_state_id.0);
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        if let Some(sid) = shift {
+                            entry.shifts.entry(*sid).or_default().insert(source_state_id.0);
+                        }
+                        for (len, nts) in reduces {
+                            for (nt, _pids) in nts {
+                                entry.reduces.entry((*len, *nt)).or_default().insert(source_state_id.0);
+                            }
+                        }
+                    }
+                }
+            }
+            for (&nt, goto) in &row.gotos {
+                let entry = hallucinate_gotos.entry(nt).or_default();
+                if goto.accept {
+                    entry.accepting_sources.insert(source_state_id.0);
+                }
+                if let Some(to) = goto.state_id {
+                    entry.gotos.entry(to).or_default().insert(source_state_id.0);
+                }
+            }
+        }
+
         Self {
             table,
             productions,
@@ -388,7 +484,9 @@ impl GLRParser {
             start_state_id,
             everything_state_id,
             ignore_terminal_id,
-            substring_gotos,
+            hallucinate_state_id,
+            hallucinate_token_actions,
+            hallucinate_gotos,
         }
     }
 
@@ -461,7 +559,7 @@ impl GLRParser {
     pub fn init_parse_state_substring_with_all_states(&self) -> ParseState {
         let all_edges: Vec<ParseStateEdgeContent> = self.table
             .keys()
-            .map(|sid| ParseStateEdgeContent { state_id: *sid })
+            .map(|sid| ParseStateEdgeContent { state_id: *sid, filter: None })
             .collect();
         let stack_top = GSSNode::new_fresh().push_many(all_edges);
         ParseState {
@@ -487,6 +585,7 @@ impl GLRParser {
     pub fn init_parse_state_substring_with_everything_state(&self) -> ParseState {
         let initial_content = ParseStateEdgeContent {
             state_id: self.everything_state_id,
+            filter: None,
         };
         let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
         ParseState {
@@ -504,6 +603,7 @@ impl GLRParser {
     pub fn init_parse_state_with_acc(&self) -> ParseState { // No longer generic
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
+            filter: None,
         };
         ParseState {
             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
@@ -811,6 +911,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::process_action_queue")]
     fn process_action_queue<F>(
         &mut self,
+        maybe_token_id: Option<TerminalID>,
         work_map: &mut WorkMap,
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
@@ -840,6 +941,53 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 *f -= 1;
             }
             let WorkMapKey(_depth, state_id) = key;
+
+            if state_id == self.parser.hallucinate_state_id {
+                if let Some(tid) = maybe_token_id {
+                    let actions = self.parser.hallucinate_token_actions.get(&tid).cloned().unwrap_or_default();
+                    for peek in GSSNode::peek_iter(&state.stack) {
+                        // Shifts
+                        for (to, sources_bv) in &actions.shifts {
+                            let new_content = ParseStateEdgeContent { state_id: *to, filter: Some(sources_bv.clone()) };
+                            let new_parse_state = self.push_state(&peek, new_content);
+                            shifted_states_todo.push_back(new_parse_state);
+                            found_shift = true;
+                            if early_exit_on_shift {
+                                return true;
+                            }
+                        }
+                        // Reduces
+                        for ((len, nt), _sources_bv) in &actions.reduces {
+                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, &action_selector, config);
+                            if !s_new_arc.is_empty() {
+                                let new_parse_state = ParseState {
+                                    stack: s_new_arc,
+                                    accepted_state: state.accepted_state.clone(),
+                                    prev_accepted_state: state.prev_accepted_state.clone(),
+                                    trie2_god: state.trie2_god.clone(),
+                                };
+                                if let Some(ref mut r_map) = reduce_map {
+                                    Self::enqueue(r_map, new_parse_state, per_state_fuel);
+                                } else {
+                                    Self::enqueue(work_map, new_parse_state, per_state_fuel);
+                                }
+                            }
+                            if !accepted_s_new_arc.is_empty() {
+                                let accepted_parse_state = ParseState {
+                                    stack: Arc::new(GSSNode::new_fresh()),
+                                    accepted_state: Some(accepted_s_new_arc),
+                                    prev_accepted_state: state.prev_accepted_state.clone(),
+                                    trie2_god: state.trie2_god.clone(),
+                                };
+                                accepted_states_todo.push_back(accepted_parse_state);
+                            }
+                        }
+                    }
+                }
+                // No default reductions for hallucinate state for now.
+                continue;
+            }
+
             let row = &self.parser.table[&state_id];
             let action_opt = action_selector(row);
             if let Some(action) = action_opt {
@@ -850,7 +998,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             hit!("GLRParserState::process_action_queue::Shift");
                             crate::debug!(5, "Action: Shift to state {}", to.0);
                             let new_parse_state =
-                                self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                                self.push_state(&peek, ParseStateEdgeContent { state_id: *to, filter: None });
                             shifted_states_todo.push_back(new_parse_state);
                             found_shift = true;
                             if early_exit_on_shift {
@@ -897,7 +1045,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 hit!("GLRParserState::process_action_queue::Split::Shift");
                                 crate::debug!(5, "Action (Split): Shift to state {}", to.0);
                                 let new_parse_state =
-                                    self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                                    self.push_state(&peek, ParseStateEdgeContent { state_id: *to, filter: None });
                                 shifted_states_todo.push_back(new_parse_state);
                                 found_shift = true;
                                 if early_exit_on_shift {
@@ -1019,6 +1167,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!("GLRParserState::step::phase1", {
             let tid = token_id;
             self.process_action_queue(
+                Some(token_id),
                 phase1_todo,
                 Some(phase2_todo),
                 shifted_states_todo,
@@ -1041,6 +1190,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // Reduces are pushed back onto the same queue (`None`).
             let tid = token_id;
             self.process_action_queue(
+                Some(token_id),
                 phase2_todo,
                 None,
                 shifted_states_todo,
@@ -1064,95 +1214,32 @@ impl<'a> GLRParserState<'a> { // No longer generic
     // ----------------------------------------------------------------------
 
     #[inline]
-    fn substring_gotos_for<'b>(
+    fn substring_gotos_for(
         &self,
-        nt: NonTerminalID,
-        config: &ProcessTokenAdvancedConfig,
-        storage: &'b mut SubstringGoto,
-    ) -> &'b SubstringGoto where 'a: 'b {
-        match config.below_bottom_mode {
-            BelowBottomReductionMode::ContinueFromAll => {
-                self.parser.substring_gotos.get(&nt).unwrap_or(storage)
-            }
-            BelowBottomReductionMode::ContinueFromEverything => {
-                // Build a compact SubstringGoto from the synthetic "everything" state.
-                let everything = self.parser.everything_state_id;
-                if let Some(goto) = self
-                    .parser
-                    .table
-                    .get(&everything)
-                    .and_then(|row| row.gotos.get(&nt))
-                {
-                    storage.accepting_sources.clear();
-                    storage.gotos.clear();
-                    if goto.accept {
-                        storage.accepting_sources.insert(everything);
-                    }
-                    if let Some(goto_state_id) = goto.state_id {
-                        storage.gotos.insert(goto_state_id, BTreeSet::from([everything]));
-                    }
-                }
-                storage
-            }
-            BelowBottomReductionMode::Fail => storage,
-            BelowBottomReductionMode::Panic => {
-                // Handled by caller if a below-bottom pop happens; not used here.
-                storage
-            }
-        }
+        nt: NonTerminalID
+    ) -> HallucinateGotoActions {
+        self.parser.hallucinate_gotos.get(&nt).cloned().unwrap_or_default()
     }
 
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
-        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
             // Union of Acc over all last-edge entries for this k
             let mut acc_union: Option<Acc> = None;
-            // New set of stored trie nodes created/used by these insertions (for this k)
-            let mut new_stored: BTreeSet<PrecomputeNode3Index> = BTreeSet::new();
 
-            for (last_edge, acc_arc) in accs_by_edge {
+            for (_last_edge, acc_arc) in accs_by_edge {
                 let acc = acc_arc.as_ref();
-                let edge_key = (0, LLMTokenBV::max_ones());
-                let mut edge_value = StateIDBV::zeros();
-                edge_value.insert(last_edge.state_id.0);
-                let tokens_for_update = LLMTokenBV::max_ones();
 
                 // Union this acc into the accumulator for k
                 acc_union = Some(match acc_union.take() {
                     None => acc.clone(),
                     Some(prev) => Acc::merge(&prev, acc),
                 });
-
-                // For each existing stored trie node, wire a strong edge to a fresh destination,
-                // and make sure the destination accumulates max-ones (same as original behavior).
-                for existing_wrapper in acc.stored_trie_nodes() {
-                    let source = existing_wrapper.as_arc().clone();
-                    let fallback = PrecomputeNode3Index::new(
-                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
-                    );
-
-                    let dst = EdgeInserter::new(
-                            god,
-                            source,
-                            edge_key.clone(),
-                            edge_value.clone(),
-                            |e, n| *e |= n,                                 // merge edge bitset
-                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update, // propagate to node
-                            |ev, t| *ev &= &t.live_tokens,                  // edge_value &= source.live_tokens
-                        )
-                        .try_destination(fallback)
-                        .expect("build_below_bottom_accs: insert failed");
-
-                    dst.write(god).expect("poison").value.live_tokens |= &tokens_for_update;
-                    new_stored.insert(dst);
-                }
             }
 
             // Build final Acc for this k: union of all accs (same as before) with new stored_trie set.
-            let mut final_acc = acc_union.unwrap_or_else(Acc::new_fresh);
-            *final_acc.stored_trie_nodes_mut() = new_stored;
+            let final_acc = acc_union.unwrap_or_else(Acc::new_fresh);
 
             result
                 .entry(*k)
@@ -1167,7 +1254,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &mut self,
         nt: NonTerminalID,
         below: &BTreeMap<usize, Acc>,
-        gotos: &SubstringGoto,
+        gotos: &HallucinateGotoActions,
     ) -> Option<Arc<GSSNode>> {
         if gotos.accepting_sources.is_empty() {
             return None;
@@ -1202,11 +1289,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // then build the accepted GSS node that starts from that source.
         for (k, acc) in below {
             let stored = acc.stored_trie_nodes().clone();
-            for source_state_id in &gotos.accepting_sources {
-                let edge_key = (*k, LLMTokenBV::max_ones());
-                let mut edge_value = StateIDBV::zeros();
-                edge_value.insert(source_state_id.0);
-
+            let edge_key = (*k, LLMTokenBV::max_ones());
+            let edge_value = gotos.accepting_sources.clone();
+            if !edge_value.is_empty() {
                 for existing in &stored {
                     let _ = EdgeInserter::new(
                         god,
@@ -1226,7 +1311,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 acc_for_gss.stored_trie_nodes_mut().clear();
                 acc_for_gss.stored_trie_nodes_mut().insert(dst_arc.clone());
                 let gss0 = GSSNode::new(acc_for_gss);
-                let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
+                let gss1 = gss0.push(ParseStateEdgeContent {
+                    state_id: self.parser.hallucinate_state_id,
+                    filter: Some(gotos.accepting_sources.clone()),
+                });
                 accepted_stacks.push(Arc::new(gss1));
             }
         }
@@ -1242,7 +1330,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &mut self,
         nt: NonTerminalID,
         below: BTreeMap<usize, Acc>,
-        gotos: &SubstringGoto,
+        gotos: &HallucinateGotoActions,
     ) -> Arc<GSSNode> {
         if gotos.gotos.is_empty() {
             return Arc::new(GSSNode::new_fresh());
@@ -1284,19 +1372,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
 
         // Insert strong edges from all source trie nodes to the cached destination, keyed by (k, None).
-        let edge_value = StateIDBV::max_ones();
         for (k, acc) in &below {
-            for existing in acc.stored_trie_nodes() {
-                let _ = EdgeInserter::new(
-                    god,
-                    existing.as_arc().clone(),
-                    (*k, LLMTokenBV::max_ones()),
-                    edge_value.clone(),
-                    |e, n| *e |= n,
-                    |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
-                    |_, _| {}, // no per-source restriction here
-                )
-                .try_destination(dest_node.clone());
+            for (_goto_state_id, sources_bv) in &gotos.gotos {
+                for existing in acc.stored_trie_nodes() {
+                    let _ = EdgeInserter::new(
+                        god,
+                        existing.as_arc().clone(),
+                        (*k, LLMTokenBV::max_ones()),
+                        sources_bv.clone(),
+                        |e, n| *e |= n,
+                        |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
+                        |_, _| {}, // no per-source restriction here
+                    )
+                    .try_destination(dest_node.clone());
+                }
             }
         }
 
@@ -1306,14 +1395,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut out: Vec<Arc<GSSNode>> = Vec::new();
 
             for (goto_state_id, source_state_ids) in &gotos.gotos {
-                let edge_contents = source_state_ids
-                    .iter()
-                    .map(|sid| ParseStateEdgeContent { state_id: *sid })
-                    .collect::<Vec<_>>();
-
                 let gss0 = GSSNode::new(merged_acc.clone());
-                let gss1 = gss0.push_many(edge_contents);
-                let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
+                let gss1 = gss0.push(ParseStateEdgeContent {
+                    state_id: self.parser.hallucinate_state_id,
+                    filter: Some(source_state_ids.clone()),
+                });
+                let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id, filter: None });
                 out.push(Arc::new(gss2));
             }
 
@@ -1348,6 +1435,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // 2) Standard reductions along in-graph paths
         for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
+                if peek2.edge_value().state_id == self.parser.hallucinate_state_id {
+                    let hg = self.parser.hallucinate_gotos.get(&nt).cloned().unwrap_or_default();
+                    for (goto_state_id, sources_bv) in &hg.gotos {
+                        let content_h = ParseStateEdgeContent {
+                            state_id: self.parser.hallucinate_state_id,
+                            filter: Some(sources_bv.clone()),
+                        };
+                        let content_g = ParseStateEdgeContent { state_id: *goto_state_id, filter: None };
+                        out.push(Arc::new(peek2.push_on_parent(content_h).push(content_g)));
+                    }
+                    if !hg.accepting_sources.is_empty() {
+                        accepted_out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent {
+                            state_id: self.parser.hallucinate_state_id,
+                            filter: Some(hg.accepting_sources.clone()),
+                        })));
+                    }
+                    continue;
+                }
                 // Follow unit-reduction chains quickly on the goto side
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let mut current_nt = nt;
@@ -1395,6 +1500,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     out.push(Arc::new(peek2.push_on_parent(
                                         ParseStateEdgeContent {
                                             state_id: goto_state_id,
+                                            filter: None,
                                         },
                                     )));
                                 }
@@ -1412,6 +1518,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
                                 out.push(Arc::new(peek2.push_on_parent(ParseStateEdgeContent {
                                     state_id: goto_state_id,
+                                    filter: None,
                                 })));
                                 break;
                             }
@@ -1436,20 +1543,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 _ => {
                     // Build Accs aggregated by k, then continue from either all states or the everything state.
                     let below_accs = self.build_below_bottom_accs(&popper);
-
-                    let mut storage = SubstringGoto::default();
-                    let gotos_for_nt =
-                        self.substring_gotos_for(nt, config, &mut storage);
+                    let gotos_for_nt = self.substring_gotos_for(nt);
 
                     // Accepting sources (if any)
                     if let Some(accepted_merged) =
-                        self.handle_below_bottom_accepts(nt, &below_accs, gotos_for_nt)
+                        self.handle_below_bottom_accepts(nt, &below_accs, &gotos_for_nt)
                     {
                         accepted_out.push(accepted_merged);
                     }
 
                     // Non-accepting gotos
-                    let merged_below = self.handle_below_bottom_gotos(nt, below_accs, gotos_for_nt);
+                    let merged_below = self.handle_below_bottom_gotos(nt, below_accs, &gotos_for_nt);
                     out.push(merged_below);
                 }
             }
@@ -1545,6 +1649,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
         // - action_selector returns the Default action for each row (no token actions here).
         self.process_action_queue(
+            None,
             &mut work_map,
             None,
             &mut shifted_states_todo,
@@ -1636,6 +1741,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, s.active_state.clone(), None);
             if s.process_action_queue(
+                Some(token_id),
                 &mut phase1_todo,
                 Some(&mut phase2_todo),
                 &mut shifted_states_todo,
@@ -1655,6 +1761,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         s.process_action_queue(
+            Some(token_id),
             &mut phase2_todo,
             None,
             &mut shifted_states_todo,
