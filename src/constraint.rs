@@ -33,7 +33,7 @@ use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{Item, LRMode, LR_MODE};
-use crate::glr::parser::{BelowBottomReductionMode, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
+use crate::glr::parser::{BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
 use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
 use crate::glr::table::StateID;
 use crate::interface::CompiledGrammar;
@@ -431,7 +431,7 @@ impl GrammarConstraint {
 
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
-            let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
+            let t1_id = *grammar_term_map.get_by_left(&terminal1).expect_else(|| format!("Terminal {:?} from follow sets not found in grammar_term_map {:?}", terminal1, grammar_term_map));
             let mut following_ids = BTreeSet::new();
             for t2 in following_terminals {
                 let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
