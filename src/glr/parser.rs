@@ -1286,70 +1286,49 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         merged_acc.stored_trie_nodes_mut().clear();
 
-        if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
-            // Insert weak edges to the existing node arc.
-            for (k, mut acc) in below {
-                let stored_trie_nodes = acc.stored_trie_nodes();
-                let edge_key = (k, None);
-                // Always use max-ones for the edge bitset
-                let edge_bv = LLMTokenBV::max_ones();
-
-                for existing in stored_trie_nodes {
-                    let source_arc = existing.as_arc();
-                    let mut source_guard = source_arc.write(self.active_state.trie2_god.as_ref().unwrap()).unwrap();
-                    if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), arc.as_arc()) {
-                        *existing_ev |= &edge_bv;
-                    } else {
-                        source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), *arc.as_arc());
-                    }
-                }
-            }
-
-            // If needed, enqueue the GSS.
-            if !merged_acc.llm_tokens_union.is_subset(llm_tokens) {
+        let (dest_node, create_gss) =
+            if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
+                let create = !merged_acc.llm_tokens_union.is_subset(llm_tokens);
+                if create {
                 *llm_tokens |= &merged_acc.llm_tokens_union;
-                let mut out = Vec::new();
-                for (goto_state_id, source_state_ids) in &gotos.gotos {
-                    let mut edge_contents = Vec::new();
-                    for source_state_id in source_state_ids {
-                        edge_contents.push(ParseStateEdgeContent { state_id: *source_state_id });
-                    }
-                    let gss0 = GSSNode::new(merged_acc.clone());
-                    let gss1 = gss0.push_many(edge_contents);
-                    let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
-                    out.push(Arc::new(gss2));
                 }
-                GSSNode::merge_many_with_depth(usize::MAX, out)
+                (arc.clone(), create)
             } else {
-                Arc::new(GSSNode::new_fresh())
+                let new_trie2_node = PrecomputeNode2Index::new(
+                    self.active_state
+                        .trie2_god
+                        .as_ref()
+                        .unwrap()
+                        .insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+                );
+                self.below_bottom_cache
+                    .insert(cache_key, (new_trie2_node.clone(), LLMTokenBV::max_ones()));
+                (new_trie2_node, true)
+            };
+
+        // Insert edges from all source trie nodes to the destination node.
+        for (k, acc) in below {
+            let stored_trie_nodes = acc.stored_trie_nodes();
+            let edge_key = (k, None);
+            let edge_bv = LLMTokenBV::max_ones(); // Always use max-ones for the edge bitset
+
+            for existing in stored_trie_nodes {
+                let _ = EdgeInserter::new(
+                    self.active_state.trie2_god.as_ref().unwrap(),
+                    existing.as_arc().clone(),
+                    edge_key,
+                    edge_bv.clone(),
+                    |e, n| *e |= n,
+                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |_, _| {}, // In this context, we don't constrain by source node value
+                )
+                .try_destination(dest_node.clone());
             }
-        } else {
-            let new_trie2_node = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-            self.below_bottom_cache.insert(cache_key, (new_trie2_node.clone(), LLMTokenBV::max_ones()));
+        }
+
+        if create_gss {
+            merged_acc.stored_trie_nodes_mut().insert(dest_node);
             let mut out = Vec::new();
-            for (k, mut acc) in below {
-                let stored_trie_nodes = acc.stored_trie_nodes();
-                let edge_key = (k, None);
-                // Always use max-ones for the edge bitset
-                let edge_bv = LLMTokenBV::max_ones();
-
-                for existing in stored_trie_nodes {
-                    let source_arc = existing.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| {},
-                    );
-
-                    // Create a new cached destination node for this nonterminal
-                    inserter.try_destination(new_trie2_node.clone());
-                }
-            }
-            merged_acc.stored_trie_nodes_mut().insert(new_trie2_node.clone());
             for (goto_state_id, source_state_ids) in &gotos.gotos {
                 let mut edge_contents = Vec::new();
                 for source_state_id in source_state_ids {
@@ -1361,6 +1340,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 out.push(Arc::new(gss2));
             }
             GSSNode::merge_many_with_depth(usize::MAX, out)
+        } else {
+            Arc::new(GSSNode::new_fresh())
         }
     }
 
