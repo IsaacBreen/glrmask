@@ -1,6 +1,6 @@
 use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
-use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
+use crate::datastructures::hybrid_bitset::{HybridBitset as StateIDBV, HybridBitset as TerminalBV};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -157,30 +157,6 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                 }
             }
             _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SubstringGoto {
-    pub accepting_sources: BTreeSet<StateID>,
-    pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
-}
-
-impl JSONConvertible for SubstringGoto {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
-        obj.insert("gotos".to_string(), self.gotos.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(SubstringGoto {
-                accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
-                gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
-            }),
-            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
         }
     }
 }
@@ -814,82 +790,94 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
-/// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
-///
-/// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
-/// states would be if a reduction for that non-terminal occurred, and we could start
-/// from *any* state in the automaton (as is the case for substring parsing).
-///
-/// This avoids a very expensive runtime loop over all table states.
-pub fn stage_9(
-    table: &Table,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> BTreeMap<NonTerminalID, SubstringGoto> {
-    let mut substring_gotos = BTreeMap::new();
-
-    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-
-    for &nt_id in &all_nt_ids {
-        let mut accepting_sources = BTreeSet::new();
-        let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-
-        for (&source_state_id, row) in table {
-            if let Some(goto) = row.gotos.get(&nt_id) {
-                if goto.accept {
-                    accepting_sources.insert(source_state_id);
-                }
-                if let Some(goto_state_id) = goto.state_id {
-                    gotos.entry(goto_state_id).or_default().insert(source_state_id);
-                }
-            }
-        }
-
-        if !accepting_sources.is_empty() || !gotos.is_empty() {
-            substring_gotos.insert(nt_id, SubstringGoto {
-                accepting_sources,
-                gotos,
-            });
-        }
-    }
-
-    substring_gotos
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HallucinatedAction {
+    pub action: Stage7ShiftsAndReducesLookaheadValue,
+    pub source_states: StateIDBV,
 }
 
-/// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
-fn compute_unit_reduction_chain<F>(
-    table: &Table,
-    source_state_id: StateID,
-    initial_nt: NonTerminalID,
-    token_id: TerminalID,
-    action_selector: F,
-) -> (BTreeSet<StateID>, bool)
-where
-    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-{
-    let mut final_goto_state_ids_for_source = BTreeSet::new();
-    let mut accepted = false;
-    let mut current_nt_local = initial_nt;
-    let row = &table[&source_state_id];
+impl JSONConvertible for HallucinatedAction {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("action".to_string(), self.action.to_json());
+        obj.insert("source_states".to_string(), self.source_states.to_json());
+        JSONNode::Object(obj)
+    }
 
-    loop {
-        if let Some(goto) = row.gotos.get(&current_nt_local) {
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(HallucinatedAction {
+                action: Stage7ShiftsAndReducesLookaheadValue::from_json(obj.remove("action").ok_or_else(|| "Missing field action for HallucinatedAction".to_string())?)?,
+                source_states: StateIDBV::from_json(obj.remove("source_states").ok_or_else(|| "Missing field source_states for HallucinatedAction".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for HallucinatedAction".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HallucinatedStateInfo {
+    // terminal -> list of (action, source_states)
+    pub shifts_and_reduces: BTreeMap<TerminalID, Vec<HallucinatedAction>>,
+    // nonterminal -> destination -> source_states
+    pub gotos: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+    // nonterminal -> source_states that accept
+    pub accepts: BTreeMap<NonTerminalID, StateIDBV>,
+}
+
+impl JSONConvertible for HallucinatedStateInfo {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
+        obj.insert("gotos".to_string(), self.gotos.to_json());
+        obj.insert("accepts".to_string(), self.accepts.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(HallucinatedStateInfo {
+                shifts_and_reduces: BTreeMap::<TerminalID, Vec<HallucinatedAction>>::from_json(obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for HallucinatedStateInfo".to_string())?)?,
+                gotos: BTreeMap::<NonTerminalID, BTreeMap<StateID, StateIDBV>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for HallucinatedStateInfo".to_string())?)?,
+                accepts: BTreeMap::<NonTerminalID, StateIDBV>::from_json(obj.remove("accepts").ok_or_else(|| "Missing field accepts for HallucinatedStateInfo".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for HallucinatedStateInfo".to_string()),
+        }
+    }
+}
+
+pub fn compute_hallucinated_state(table: &Table) -> HallucinatedStateInfo {
+    let mut info = HallucinatedStateInfo::default();
+
+    // Gotos and Accepts
+    for (&source_state_id, row) in table {
+        for (&nt_id, goto) in &row.gotos {
             if goto.accept {
-                accepted = true;
+                info.accepts.entry(nt_id).or_default().insert(source_state_id.0);
             }
             if let Some(goto_state_id) = goto.state_id {
-                let next_row = &table[&goto_state_id];
-                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
-                    current_nt_local = *next_nt;
-                    continue; // Follow the unit-reduction chain.
-                }
-                // Not a unit reduction, this is a final state for this chain.
-                final_goto_state_ids_for_source.insert(goto_state_id);
+                info.gotos.entry(nt_id).or_default().entry(goto_state_id).or_default().insert(source_state_id.0);
             }
         }
-        // End of chain (no GOTO, no further state, or not a unit reduction).
-        break;
     }
-    (final_goto_state_ids_for_source, accepted)
+
+    // Shifts and Reduces
+    let mut all_actions: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
+    for (&source_state_id, row) in table {
+        for (&tid, action) in &row.shifts_and_reduces_full {
+            all_actions.entry(tid).or_default().entry(action.clone()).or_default().insert(source_state_id.0);
+        }
+    }
+
+    for (tid, actions) in all_actions {
+        let mut hallucinated_actions = Vec::new();
+        for (action, source_states) in actions {
+            hallucinated_actions.push(HallucinatedAction { action, source_states });
+        }
+        info.shifts_and_reduces.insert(tid, hallucinated_actions);
+    }
+
+    info
 }
 
 /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
@@ -1074,8 +1062,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let stage_8_table = stage_8(stage_7_table);
     crate::debug!(6, &stage_8_table);
 
-    crate::debug!(2, "Stage 9: Precomputing substring gotos");
-    let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+    crate::debug!(2, "Stage 9: Computing hallucinated state");
+    let hallucinated_state = compute_hallucinated_state(&stage_8_table);
 
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
@@ -1087,7 +1075,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, hallucinated_state)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
