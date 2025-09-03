@@ -1157,7 +1157,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 for existing in acc.stored_trie_nodes() {
                     let source = existing.as_arc().clone();
                     let fallback = PrecomputeNode3Index::new(
-                        god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents { end: false })),
+                        god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents::internal())),
                     );
 
                     let dst = EdgeInserter::new(
@@ -1217,7 +1217,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             (dst.clone(), false)
         } else {
             let dst = PrecomputeNode3Index::new(
-                god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents { end: false })),
+                god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents::internal())),
             );
             self.below_bottom_cache.insert(accept_cache_key, dst.clone());
             (dst, true)
@@ -1304,7 +1304,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             (dst.clone(), false)
         } else {
             let dst = PrecomputeNode3Index::new(
-                god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents { end: false })),
+                god.insert(PrecomputeNode3::new(crate::constraint::PrecomputedNode3Contents::internal())),
             );
             self.below_bottom_cache.insert(cache_key, dst.clone());
             (dst, true)

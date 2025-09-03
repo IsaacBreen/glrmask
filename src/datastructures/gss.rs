@@ -1421,7 +1421,7 @@ pub(crate) fn merge_stored_trie_nodes(
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
         let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), root.acc.llm_tokens_union.clone()))
-            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents { end: false }))))
+            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNode3Contents::internal()))))
             .clone();
         let edge_key = (0, new_acc.llm_tokens_union.clone());
         let edge_value = crate::constraint::StateIDBV::max_ones();

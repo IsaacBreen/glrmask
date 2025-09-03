@@ -657,7 +657,7 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
         let mut precomputed3 = BTreeMap::new();
 
-        let base_trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNode3Contents { end: false })));
+        let base_trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNode3Contents::root())));
         let mut acc = Acc::new_fresh();
         acc.stored_trie_nodes_mut().insert(base_trie3_root);
         let gss_leaf = Arc::new(GSSNode::new(acc));
@@ -674,7 +674,7 @@ impl GrammarConstraint {
             initial_values_for_map.push((*trie1_root, glr_state_for_sid));
         }
 
-        let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNode3Contents { end: true })));
+        let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNode3Contents::leaf())));
 
         Trie::special_map_grouped(
             trie1_god,
