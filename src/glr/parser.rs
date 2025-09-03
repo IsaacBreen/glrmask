@@ -1,4 +1,4 @@
-use crate::constraint::{LLMVocab, PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
+use crate::constraint::{LLMVocab, PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, LLMTokenBV};
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
@@ -136,7 +136,7 @@ pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Option<Arc<GSSNode>>,
     pub prev_accepted_state: Arc<GSSNode>,
-    pub trie2_god: Option<Trie2GodWrapper>,
+    pub trie2_god: Option<Trie3GodWrapper>,
 }
 
 impl ParseState {
@@ -158,12 +158,12 @@ impl ParseState {
         }
     }
 
-    pub(crate) fn with_god(mut self, trie2_god: Trie2GodWrapper) -> Self {
+    pub(crate) fn with_god(mut self, trie2_god: Trie3GodWrapper) -> Self {
         self.trie2_god = Some(trie2_god);
         self
     }
 
-    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie2GodWrapper>) -> Self {
+    pub(crate) fn with_maybe_god(mut self, maybe_god: Option<Trie3GodWrapper>) -> Self {
         self.trie2_god = maybe_god;
         self
     }
@@ -741,7 +741,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode2Index>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1142,8 +1142,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             for (last_edge, acc_arc) in accs_by_edge {
                 let acc = acc_arc.as_ref();
-                let edge_key = (0, Some(last_edge.state_id));
-                let edge_bv = LLMTokenBV::max_ones();
+                let edge_key = (0, LLMTokenBV::max_ones());
+                let mut edge_value = StateIDBV::zeros();
+                edge_value.insert(last_edge.state_id.0);
+                let tokens_for_update = LLMTokenBV::max_ones();
 
                 // Union this acc into the accumulator for k
                 acc_union = Some(match acc_union.take() {
@@ -1153,26 +1155,25 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 // For each existing stored trie node, wire a strong edge to a fresh destination,
                 // and make sure the destination accumulates max-ones (same as original behavior).
-                for existing in acc.stored_trie_nodes() {
-                    let source = existing.as_arc().clone();
-                    let fallback = PrecomputeNode2Index::new(
-                        god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+                for existing_wrapper in acc.stored_trie_nodes() {
+                    let source = existing_wrapper.as_arc().clone();
+                    let fallback = PrecomputeNode3Index::new(
+                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
                     );
 
                     let dst = EdgeInserter::new(
                             god,
                             source,
                             edge_key,
-                            edge_bv.clone(),
+                            edge_value.clone(),
                             |e, n| *e |= n,                                 // merge edge bitset
-                            |node_value, edge_value| node_value.live_tokens |= edge_value, // propagate to node
+                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update, // propagate to node
                             |ev, t| *ev &= &t.live_tokens,                  // edge_value &= source.live_tokens
                         )
                         .try_destination(fallback)
                         .expect("build_below_bottom_accs: insert failed");
 
-                    // Ensure destination accumulates max-ones (matches original OR with dest_agg).
-                    dst.write(god).expect("poison").value.live_tokens |= &edge_bv;
+                    dst.write(god).expect("poison").value.live_tokens |= &tokens_for_update;
                     new_stored.insert(dst);
                 }
             }
@@ -1216,14 +1217,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let (dst_arc, _is_new) = if let Some(dst) = self.below_bottom_cache.get(&accept_cache_key) {
             (dst.clone(), false)
         } else {
-            let dst = PrecomputeNode2Index::new(
-                god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+            let dst = PrecomputeNode3Index::new(
+                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
             );
             self.below_bottom_cache.insert(accept_cache_key, dst.clone());
             (dst, true)
         };
 
-        let edge_bv = LLMTokenBV::max_ones();
         let mut accepted_stacks: Vec<Arc<GSSNode>> = Vec::new();
 
         // For each k and its Acc, add edges for every accepting source state,
@@ -1231,16 +1231,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, acc) in below {
             let stored = acc.stored_trie_nodes().clone();
             for source_state_id in &gotos.accepting_sources {
-                let edge_key = (*k, Some(*source_state_id));
+                let edge_key = (*k, LLMTokenBV::max_ones());
+                let mut edge_value = StateIDBV::zeros();
+                edge_value.insert(source_state_id.0);
 
                 for existing in &stored {
                     let _ = EdgeInserter::new(
                         god,
                         existing.as_arc().clone(),
                         edge_key,
-                        edge_bv.clone(),
+                        edge_value.clone(),
                         |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
+                        |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
                         |ev, t| *ev &= &t.live_tokens,
                     )
                     .try_destination(dst_arc.clone())
@@ -1302,24 +1304,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let (dest_node, enqueue_gss) = if let Some(dst) = self.below_bottom_cache.get(&cache_key) {
             (dst.clone(), false)
         } else {
-            let dst = PrecomputeNode2Index::new(
-                god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+            let dst = PrecomputeNode3Index::new(
+                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
             );
             self.below_bottom_cache.insert(cache_key, dst.clone());
             (dst, true)
         };
 
         // Insert strong edges from all source trie nodes to the cached destination, keyed by (k, None).
-        let edge_bv = LLMTokenBV::max_ones();
+        let edge_value = StateIDBV::max_ones();
         for (k, acc) in &below {
             for existing in acc.stored_trie_nodes() {
                 let _ = EdgeInserter::new(
                     god,
                     existing.as_arc().clone(),
-                    (*k, None),
-                    edge_bv.clone(),
+                    (*k, LLMTokenBV::max_ones()),
+                    edge_value.clone(),
                     |e, n| *e |= n,
-                    |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
                     |_, _| {}, // no per-source restriction here
                 )
                 .try_destination(dest_node.clone());

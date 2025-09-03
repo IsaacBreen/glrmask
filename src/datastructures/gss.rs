@@ -35,10 +35,10 @@ type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeCon
 /// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
 pub type TerminalInfo = HybridL2Bitset;
 
-type StoredPrecomputeNodeIndex = PrecomputeNode2Index;
-type StoredPrecomputeNode = PrecomputeNode2;
-type StoredTrieGod = Trie2God;
-type StoredTrieGodWrapper = Trie2GodWrapper;
+type StoredPrecomputeNodeIndex = PrecomputeNode3Index;
+type StoredPrecomputeNode = PrecomputeNode3;
+type StoredTrieGod = Trie3God;
+type StoredTrieGodWrapper = Trie3GodWrapper;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
@@ -62,7 +62,7 @@ impl PrecomputedNodeContents {
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::constraint::{PrecomputeNode2, PrecomputeNode2Index, Trie2God, Trie2GodWrapper};
+use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
 impl JSONConvertible for PrecomputedNodeContents {
@@ -1423,7 +1423,8 @@ pub(crate) fn merge_stored_trie_nodes(
         let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), root.acc.llm_tokens_union.clone()))
             .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal()))))
             .clone();
-        let edge_key = (0, None);
+        let edge_key = (0, new_acc.llm_tokens_union.clone());
+        let edge_value = StateIDBV::max_ones();
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
         for source_wrapper in &new_acc.stored_trie_nodes {
@@ -1433,9 +1434,9 @@ pub(crate) fn merge_stored_trie_nodes(
                 &stored_trie_god,
                 source_arc,
                 edge_key,
-                tokens_for_edge.clone(),
+                edge_value.clone(),
                 |e, n| *e |= n,
-                |node_value, edge_value| node_value.live_tokens |= edge_value,
+                |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
                 |_, _| {}, // Unconditional insertion
             );
             // Insert a strong edge to the new shared destination.

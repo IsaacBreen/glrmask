@@ -634,7 +634,7 @@ pub fn compress_trie2_edges(
     let mut iterations = 0usize;
     let _all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
 
-    while changed {
+    while changed && iterations < 5 { // Add iteration limit to prevent infinite loops in buggy cases
         iterations += 1;
         changed = false;
         let all_nodes = Trie::all_nodes(trie2_god, &roots_vec);
