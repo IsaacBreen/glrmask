@@ -1403,7 +1403,7 @@ pub(crate) fn map_allowed_terminals_tokenizer_states(
     }
 }
 
-pub(crate) fn merge_stored_trie_nodes_if_needed(
+pub(crate) fn merge_stored_trie_nodes(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,

@@ -748,7 +748,7 @@ impl GrammarConstraint {
                 // pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>) {
                 // GrammarConstraint::_dump_precomputed2(&precomputed2, &llm_vocab.as_ref().unwrap().original_to_internal_id_bimap, &llm_vocab.as_ref().unwrap().llm_token_map);
 
-                crate::datastructures::gss::merge_stored_trie_nodes_if_needed(
+                crate::datastructures::gss::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
