@@ -1290,7 +1290,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
                 let enqueue = !merged_acc.llm_tokens_union.is_subset(llm_tokens);
                 if enqueue {
-                *llm_tokens |= &merged_acc.llm_tokens_union;
+                    *llm_tokens |= &merged_acc.llm_tokens_union;
                 }
                 (arc.clone(), enqueue)
             } else {
