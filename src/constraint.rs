@@ -79,6 +79,17 @@ impl JSONConvertible for PrecomputedNode3Contents {
         }
     }
 }
+impl PrecomputedNode3Contents {
+    pub fn root() -> Self {
+        PrecomputedNode3Contents { end: false }
+    }
+    pub fn internal() -> Self {
+        PrecomputedNode3Contents { end: false }
+    }
+    pub fn leaf() -> Self {
+        PrecomputedNode3Contents { end: true }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalAllowanceCheckMode {
