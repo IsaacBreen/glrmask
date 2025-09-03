@@ -160,6 +160,9 @@ impl HybridBitset {
     pub fn is_subset(&self, other: &Self) -> bool {
         self.inner.is_subset(&other.inner)
     }
+    pub fn is_superset(&self, other: &Self) -> bool {
+        self.inner.is_superset(&other.inner)
+    }
     pub fn is_disjoint(&self, other: &Self) -> bool {
         self.inner.is_disjoint(&other.inner)
     }

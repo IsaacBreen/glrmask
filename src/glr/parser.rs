@@ -1288,7 +1288,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let (dest_node, enqueue_gss) =
             if let Some((arc, llm_tokens)) = self.below_bottom_cache.get_mut(&cache_key) {
-                let enqueue = !merged_acc.llm_tokens_union.is_subset(llm_tokens);
+                let enqueue = !llm_tokens.is_superset(&merged_acc.llm_tokens_union);
                 if enqueue {
                     *llm_tokens |= &merged_acc.llm_tokens_union;
                 }
