@@ -821,7 +821,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         early_exit_on_shift: bool,
     ) -> bool
     where
-        F: for<'r> Fn(StateID) -> Option<Action<'r>>,
+        F: Fn(StateID) -> Option<Action<'a>>,
     {
         let mut found_shift = false;
         assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
@@ -1334,7 +1334,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         config: &ProcessTokenAdvancedConfig,
     ) -> (Arc<GSSNode>, Arc<GSSNode>)
     where
-        G: for<'r> Fn(StateID) -> Option<Action<'r>>,
+        G: Fn(StateID) -> Option<Action<'a>>,
     {
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));

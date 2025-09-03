@@ -5215,7 +5215,7 @@ local_system:
               early_exit_on_shift: bool,
           ) -> bool
           where
-              F: for<'r> Fn(StateID) -> Option<Action<'r>>,
+              F: Fn(StateID) -> Option<Action<'a>>,
           {
               let mut found_shift = false;
               assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
@@ -5728,7 +5728,7 @@ local_system:
               config: &ProcessTokenAdvancedConfig,
           ) -> (Arc<GSSNode>, Arc<GSSNode>)
           where
-              G: for<'r> Fn(StateID) -> Option<Action<'r>>,
+              G: Fn(StateID) -> Option<Action<'a>>,
           {
               // 1) Pop len
               let popper: GSSPopper = timeit!(peek.popn(len));
@@ -10081,5 +10081,129 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Add lifetime specifier to compute_unit_reduction_chain
       closure"'
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_constraint_indirect_recursion_simplified --profile test -- --nocapture
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0582]: binding for associated type `Output` references lifetime `'r`, which does not appear in the trait input types
+         --> src/glr/parser.rs:824:35
+          |
+      824 |         F: for<'r> Fn(StateID) -> Option<Action<'r>>,
+          |                                   ^^^^^^^^^^^^^^^^^^
+
+      error[E0582]: binding for associated type `Output` references lifetime `'r`, which does not appear in the trait input types
+          --> src/glr/parser.rs:1337:35
+           |
+      1337 |         G: for<'r> Fn(StateID) -> Option<Action<'r>>,
+           |                                   ^^^^^^^^^^^^^^^^^^
+
+      error: lifetime may not live long enough
+          --> src/glr/parser.rs:1026:21
+           |
+       765 |   impl<'a> GLRParserState<'a> { // No longer generic
+           |        -- lifetime `'a` defined here
+      ...
+      1026 | /                     parser.table[&state_id].shifts_and_reduces_without_default_reduce
+      1027 | |                         .get(&token_id)
+      1028 | |                         .map(Action::Normal)
+           | |____________________________________________^ returning this value requires that `'a` must outlive `'static`
+
+      error: lifetime may not live long enough
+          --> src/glr/parser.rs:1049:21
+           |
+       765 |   impl<'a> GLRParserState<'a> { // No longer generic
+           |        -- lifetime `'a` defined here
+      ...
+      1049 | /                     parser.table[&state_id].shifts_and_reduces_full
+      1050 | |                         .get(&token_id)
+      1051 | |                         .map(Action::Normal)
+           | |____________________________________________^ returning this value requires that `'a` must outlive `'static`
+
+      error: lifetime may not live long enough
+          --> src/glr/parser.rs:1551:24
+           |
+       765 | impl<'a> GLRParserState<'a> { // No longer generic
+           |      -- lifetime `'a` defined here
+      ...
+      1551 |             |state_id| Some(Action::Default(&parser.table[&state_id].default_reduce)),
+           |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'a` must outlive `'static`
+
+      error: lifetime may not live long enough
+          --> src/glr/parser.rs:1643:28
+           |
+       765 |   impl<'a> GLRParserState<'a> { // No longer generic
+           |        -- lifetime `'a` defined here
+      ...
+      1643 |                   |state_id| parser.table[&state_id]
+           |  ____________________________^
+      1644 | |                     .shifts_and_reduces_without_default_reduce
+      1645 | |                     .get(&token_id)
+      1646 | |                     .map(Action::Normal),
+           | |________________________________________^ returning this value requires that `'a` must outlive `'static`
+           |
+      help: consider adding 'move' keyword before the nested closure
+           |
+      1662 |             move |state_id| parser.table[&state_id]
+           |             ++++
+
+      For more information about this error, try `rustc --explain E0582`.
+      error: could not compile `sep1` (lib test) due to 6 previous errors
+    metadata:
+  - assistant: |-
+      You've encountered a series of related lifetime errors. The core issue is that the `action_selector` closure returns an `Action` that contains references to data within the `GLRParser`. The lifetime of this data is tied to the lifetime of the `GLRParserState`, which is `'a`.
+
+      The previous `for<'r> Fn(...) -> Option<Action<'r>>` trait bound was incorrect because it required the closure to be valid for *any* lifetime `'r`, but it can only produce an `Action` with the specific lifetime `'a`.
+
+      The fix is to change the trait bounds for the `action_selector` in `process_action_queue` and `reduce_and_goto` to use the lifetime `'a` from `GLRParserState<'a>`. This correctly expresses the relationship between the closure's output and the parser state's lifetime.
+
+      Here is the patch to fix the compilation errors:
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -821,7 +821,7 @@
+               early_exit_on_shift: bool,
+           ) -> bool
+           where
+      -        F: for<'r> Fn(StateID) -> Option<Action<'r>>,
+      +        F: Fn(StateID) -> Option<Action<'a>>,
+           {
+               let mut found_shift = false;
+               assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
+      @@ -1334,7 +1334,7 @@
+               config: &ProcessTokenAdvancedConfig,
+           ) -> (Arc<GSSNode>, Arc<GSSNode>)
+           where
+      -        G: for<'r> Fn(StateID) -> Option<Action<'r>>,
+      +        G: Fn(StateID) -> Option<Action<'a>>,
+           {
+               // 1) Pop len
+               let popper: GSSPopper = timeit!(peek.popn(len));
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct lifetime annotations for
+      action_selector closures in GLR parser"'
     metadata:
 ...
