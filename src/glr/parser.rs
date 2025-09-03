@@ -821,7 +821,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         early_exit_on_shift: bool,
     ) -> bool
     where
-        F: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
+        F: for<'r> Fn(StateID) -> Option<Action<'r>>,
     {
         let mut found_shift = false;
         assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
@@ -840,8 +840,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 *f -= 1;
             }
             let WorkMapKey(_depth, state_id) = key;
-            let row = &self.parser.table[&state_id];
-            let action_opt = action_selector(row);
+            let action_opt = action_selector(state_id);
             if let Some(action) = action_opt {
                 for peek in GSSNode::peek_iter(&state.stack) {
                     hit!("GLRParserState::process_action_queue::ForEachPeek");
@@ -1016,16 +1015,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn _do_actions_without_default(&mut self, token_id: TerminalID, phase1_todo: &mut WorkMap, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         let token_display = self.parser.terminal_map.get_by_right(&token_id).unwrap();
         crate::debug!(4, "Phase 1: Processing token '{}'", token_display);
+        let parser = self.parser;
         timeit!("GLRParserState::step::phase1", {
-            let tid = token_id;
             self.process_action_queue(
                 phase1_todo,
                 Some(phase2_todo),
                 shifted_states_todo,
                 accepted_states_todo,
-                move |row| {
-                    row.shifts_and_reduces_without_default_reduce
-                        .get(&tid)
+                |state_id| {
+                    parser.table[&state_id].shifts_and_reduces_without_default_reduce
+                        .get(&token_id)
                         .map(Action::Normal)
                 },
                 config,
@@ -1037,18 +1036,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     fn _do_actions_with_default(&mut self, token_id: TerminalID, phase2_todo: &mut WorkMap, shifted_states_todo: &mut VecDeque<ParseState>, accepted_states_todo: &mut VecDeque<ParseState>, config: &ProcessTokenAdvancedConfig) {
         crate::debug!(4, "Phase 1 completed, proceeding to Phase 2 with {} shifted states", shifted_states_todo.len());
+        let parser = self.parser;
         timeit!("GLRParserState::step::phase2", {
             // Reduces are pushed back onto the same queue (`None`).
-            let tid = token_id;
             self.process_action_queue(
                 phase2_todo,
                 None,
                 shifted_states_todo,
                 accepted_states_todo,
-                move |row| {
+                |state_id| {
                     // Prefer a concrete token action; otherwise use the default reduce.
-                    row.shifts_and_reduces_full
-                        .get(&tid)
+                    parser.table[&state_id].shifts_and_reduces_full
+                        .get(&token_id)
                         .map(Action::Normal)
                 },
                 config,
@@ -1335,7 +1334,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         config: &ProcessTokenAdvancedConfig,
     ) -> (Arc<GSSNode>, Arc<GSSNode>)
     where
-        G: for<'r> Fn(&'r Row) -> Option<Action<'r>>,
+        G: for<'r> Fn(StateID) -> Option<Action<'r>>,
     {
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
@@ -1373,8 +1372,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
-                        let next_row = &self.parser.table[&goto_state_id];
-                        match action_selector(next_row) {
+                        match action_selector(goto_state_id) {
                             Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                                 nonterminal_id: next_nt,
                                 len: 1,
@@ -1541,6 +1539,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut fuel = config.fuel;
         let token_config = ProcessTokenAdvancedConfig { below_bottom_mode: config.below_bottom_mode };
 
+        let parser = self.parser;
         // Run the generic action-processing loop with a Default-only selector.
         // - reduce_map = None to keep enqueuing reductions back to the same queue until closure.
         // - action_selector returns the Default action for each row (no token actions here).
@@ -1549,7 +1548,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
-            |row| Some(Action::Default(&row.default_reduce)),
+            |state_id| Some(Action::Default(&parser.table[&state_id].default_reduce)),
             &token_config,
             &mut fuel,
             false,
@@ -1632,6 +1631,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
         let cfg = ProcessTokenAdvancedConfig::default();
 
+        let parser = s.parser;
         if s.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
             Self::enqueue(&mut phase1_todo, s.active_state.clone(), None);
@@ -1640,7 +1640,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Some(&mut phase2_todo),
                 &mut shifted_states_todo,
                 &mut accepted_states_todo,
-                |row| row
+                |state_id| parser.table[&state_id]
                     .shifts_and_reduces_without_default_reduce
                     .get(&token_id)
                     .map(Action::Normal),
@@ -1659,7 +1659,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
-            |row| row
+            |state_id| parser.table[&state_id]
                 .shifts_and_reduces_full
                 .get(&token_id)
                 .map(Action::Normal),

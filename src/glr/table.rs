@@ -864,7 +864,7 @@ fn compute_unit_reduction_chain<F>(
     action_selector: F,
 ) -> (BTreeSet<StateID>, bool)
 where
-    F: Fn(&Row) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+    F: Fn(StateID) -> &BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
 {
     let mut final_goto_state_ids_for_source = BTreeSet::new();
     let mut accepted = false;
@@ -877,8 +877,7 @@ where
                 accepted = true;
             }
             if let Some(goto_state_id) = goto.state_id {
-                let next_row = &table[&goto_state_id];
-                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(next_row).get(&token_id) {
+                if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(goto_state_id).get(&token_id) {
                     current_nt_local = *next_nt;
                     continue; // Follow the unit-reduction chain.
                 }
