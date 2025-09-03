@@ -1131,52 +1131,62 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
+        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
+
         for (k, accs_by_edge) in popper.below_bottom() {
-            for (last_edge_content, acc_arc) in accs_by_edge {
+            // Union of Acc over all last-edge entries for this k
+            let mut acc_union: Option<Acc> = None;
+            // New set of stored trie nodes created/used by these insertions (for this k)
+            let mut new_stored: BTreeSet<PrecomputeNode2Index> = BTreeSet::new();
+
+            for (last_edge, acc_arc) in accs_by_edge {
                 let acc = acc_arc.as_ref();
-
-                let edge_key = (0, Some(last_edge_content.state_id));
-
-                // Always use max-ones for the edge bitset when popping below bottom
+                let edge_key = (0, Some(last_edge.state_id));
                 let edge_bv = LLMTokenBV::max_ones();
 
-                // For each existing trie2 node: just create the edge directly to a fresh destination
-                let mut dest_agg: BTreeMap<PrecomputeNode2Index, LLMTokenBV> = BTreeMap::new();
-                let mut used = BTreeSet::new();
+                // Union this acc into the accumulator for k
+                acc_union = Some(match acc_union.take() {
+                    None => acc.clone(),
+                    Some(prev) => Acc::merge(&prev, acc),
+                });
 
+                // For each existing stored trie node, wire a strong edge to a fresh destination,
+                // and make sure the destination accumulates max-ones (same as original behavior).
                 for existing in acc.stored_trie_nodes() {
-                    let source_arc = existing.as_arc().clone();
+                    let source = existing.as_arc().clone();
+                    let fallback = PrecomputeNode2Index::new(
+                        god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+                    );
 
-                    let fallback_dest = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
-                        edge_key,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                        |node_value, edge_value| node_value.live_tokens |= edge_value,
-                        |ev, t| *ev &= &t.live_tokens,
-                    ).try_destination(fallback_dest.clone()); // direct, strong insert
+                    let dst = EdgeInserter::new(
+                            god,
+                            source,
+                            edge_key,
+                            edge_bv.clone(),
+                            |e, n| *e |= n,                                 // merge edge bitset
+                            |node_value, edge_value| node_value.live_tokens |= edge_value, // propagate to node
+                            |ev, t| *ev &= &t.live_tokens,                  // edge_value &= source.live_tokens
+                        )
+                        .try_destination(fallback)
+                        .expect("build_below_bottom_accs: insert failed");
 
-                    let final_dst_arc = inserter.clone_into_option().expect("build_below_bottom_accs: insert failed");
-                    let final_wr = final_dst_arc.clone();
-                    dest_agg.entry(final_wr.clone()).and_modify(|bv| *bv |= &edge_bv).or_insert(edge_bv.clone());
-                    used.insert(final_wr);
+                    // Ensure destination accumulates max-ones (matches original OR with dest_agg).
+                    dst.write(god).expect("poison").value.live_tokens |= &edge_bv;
+                    new_stored.insert(dst);
                 }
-
-                // Update destination live tokens
-                for (dst_wr, added) in &dest_agg {
-                    let mut g = dst_wr.as_arc().write(self.active_state.trie2_god.as_ref().unwrap()).expect("poison");
-                    g.value.live_tokens |= added.clone();
-                }
-
-                // Update new_acc.stored_trie_nodes as before
-                let mut new_acc = acc.clone();
-                *new_acc.stored_trie_nodes_mut() = used;
-                result.entry(*k).and_modify(|existing| *existing = Acc::merge(existing, &new_acc)).or_insert(new_acc);
             }
+
+            // Build final Acc for this k: union of all accs (same as before) with new stored_trie set.
+            let mut final_acc = acc_union.unwrap_or_else(Acc::new_fresh);
+            *final_acc.stored_trie_nodes_mut() = new_stored;
+
+            result
+                .entry(*k)
+                .and_modify(|existing| *existing = Acc::merge(existing, &final_acc))
+                .or_insert(final_acc);
         }
+
         result
     }
 
@@ -1190,64 +1200,56 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return None;
         }
 
+        let god = self
+            .active_state
+            .trie2_god
+            .as_ref()
+            .expect("Trie2 god missing");
+
+        // Single cached destination for all accept contributions (same sentinel keying as before)
+        let accept_cache_key = BelowBottomCacheKey {
+            nonterminal_id: nt,
+            source_state_id: StateID(usize::MAX), // sentinel
+            goto_state_id: StateID(usize::MAX),   // sentinel
+            k: 0,                                 // sentinel
+        };
+        let (dst_arc, _is_new) = if let Some(dst) = self.below_bottom_cache.get(&accept_cache_key) {
+            (dst.clone(), false)
+        } else {
+            let dst = PrecomputeNode2Index::new(
+                god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+            );
+            self.below_bottom_cache.insert(accept_cache_key, dst.clone());
+            (dst, true)
+        };
+
+        let edge_bv = LLMTokenBV::max_ones();
         let mut accepted_stacks: Vec<Arc<GSSNode>> = Vec::new();
 
+        // For each k and its Acc, add edges for every accepting source state,
+        // then build the accepted GSS node that starts from that source.
         for (k, acc) in below {
-            let mut acc = acc.clone();
-            let stored_trie_nodes = std::mem::take(acc.stored_trie_nodes_mut());
-
+            let stored = acc.stored_trie_nodes().clone();
             for source_state_id in &gotos.accepting_sources {
-                let accept_cache_key = BelowBottomCacheKey {
-                    nonterminal_id: nt,
-                    source_state_id: StateID(usize::MAX), // Sentinel for any source
-                    goto_state_id: StateID(usize::MAX), // Sentinel for accept
-                    k: 0, // Sentinel for any k
-                };
-
-                let (dst_arc, is_new) = if let Some(arc) = self.below_bottom_cache.get(&accept_cache_key) {
-                    (arc.clone(), false)
-                } else {
-                    let new_trie2_node = PrecomputeNode2Index::new(self.active_state.trie2_god.as_ref().unwrap().insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())));
-                    self.below_bottom_cache.insert(accept_cache_key.clone(), new_trie2_node.clone());
-                    (new_trie2_node, true)
-                };
-
-                // Always use max-ones for the edge bitset
-                let edge_bv = LLMTokenBV::max_ones();
-
-                // Edge key for below-bottom accepts: (k, Some(source_state_id))
                 let edge_key = (*k, Some(*source_state_id));
 
-                // For each existing trie2 source node, add an edge to the cached destination
-                for existing in &stored_trie_nodes {
-                    let source_arc = existing.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        self.active_state.trie2_god.as_ref().unwrap(),
-                        source_arc.clone(),
+                for existing in &stored {
+                    let _ = EdgeInserter::new(
+                        god,
+                        existing.as_arc().clone(),
                         edge_key,
                         edge_bv.clone(),
                         |e, n| *e |= n,
                         |node_value, edge_value| node_value.live_tokens |= edge_value,
                         |ev, t| *ev &= &t.live_tokens,
-                    );
-
-                    if is_new {
-                        let _ = inserter.try_destination(dst_arc.clone()).expect("Cycle in below-bottom accept wiring");
-                    } else {
-                        // Replicate to_destination_weakly logic with strong edges
-                        let source_arc = existing.as_arc();
-                        let mut source_guard = source_arc.write(self.active_state.trie2_god.as_ref().unwrap()).unwrap();
-                        if let Some(existing_ev) = source_guard.get_edge_value_mut(edge_key.clone(), &dst_arc) {
-                            *existing_ev |= &edge_bv;
-                        } else {
-                            source_guard.force_insert_to_node(edge_key.clone(), edge_bv.clone(), dst_arc);
-                        }
-                    }
+                    )
+                    .try_destination(dst_arc.clone())
+                    .expect("Cycle in below-bottom accept wiring");
                 }
 
-                // Create the GSS node for the accepted state.
-                // It should have the acc from the path, and a single predecessor edge for the source_state_id.
+                // Create the accepted stack node with the updated Acc (points only to the cached dst).
                 let mut acc_for_gss = acc.clone();
+                acc_for_gss.stored_trie_nodes_mut().clear();
                 acc_for_gss.stored_trie_nodes_mut().insert(dst_arc.clone());
                 let gss0 = GSSNode::new(acc_for_gss);
                 let gss1 = gss0.push(ParseStateEdgeContent { state_id: *source_state_id });
@@ -1261,7 +1263,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             Some(GSSNode::merge_many_with_depth(usize::MAX, accepted_stacks))
         }
     }
-
+    
     fn handle_below_bottom_gotos(
         &mut self,
         nt: NonTerminalID,
@@ -1272,6 +1274,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return Arc::new(GSSNode::new_fresh());
         }
 
+        let god = self
+            .active_state
+            .trie2_god
+            .as_ref()
+            .expect("Trie2 god missing");
+
+        // Cache key (same as original)
         let cache_key = BelowBottomCacheKey {
             nonterminal_id: nt,
             source_state_id: StateID(0),
@@ -1279,60 +1288,61 @@ impl<'a> GLRParserState<'a> { // No longer generic
             k: 0,
         };
 
+        // Merge all k-accs (then clear stored nodes; we’ll point to the cached dest below)
         let mut merged_acc = {
-            let mut below_it = below.iter();
-            let first = below_it.next().unwrap().1.clone();
-            below_it.fold(first, |acc, (_k, acc2)| Acc::merge(&acc, acc2))
+            let mut it = below.values();
+            match it.next() {
+                None => Acc::new_fresh(),
+                Some(first) => it.fold(first.clone(), |acc, nxt| Acc::merge(&acc, nxt)),
+            }
         };
         merged_acc.stored_trie_nodes_mut().clear();
 
-        let (dest_node, enqueue_gss) = if let Some(arc) = self.below_bottom_cache.get(&cache_key) {
-            (arc.clone(), false)
+        // Obtain or create a shared destination trie node.
+        let (dest_node, enqueue_gss) = if let Some(dst) = self.below_bottom_cache.get(&cache_key) {
+            (dst.clone(), false)
         } else {
-            let new_trie2_node = PrecomputeNode2Index::new(
-                self.active_state
-                    .trie2_god
-                    .as_ref()
-                    .unwrap()
-                    .insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
+            let dst = PrecomputeNode2Index::new(
+                god.insert(PrecomputeNode2::new(PrecomputedNodeContents::internal())),
             );
-            self.below_bottom_cache.insert(cache_key, new_trie2_node.clone());
-            (new_trie2_node, true)
+            self.below_bottom_cache.insert(cache_key, dst.clone());
+            (dst, true)
         };
 
-        // Insert edges from all source trie nodes to the destination node.
-        for (k, acc) in below {
-            let stored_trie_nodes = acc.stored_trie_nodes();
-            let edge_key = (k, None);
-            let edge_bv = LLMTokenBV::max_ones(); // Always use max-ones for the edge bitset
-
-            for existing in stored_trie_nodes {
+        // Insert strong edges from all source trie nodes to the cached destination, keyed by (k, None).
+        let edge_bv = LLMTokenBV::max_ones();
+        for (k, acc) in &below {
+            for existing in acc.stored_trie_nodes() {
                 let _ = EdgeInserter::new(
-                    self.active_state.trie2_god.as_ref().unwrap(),
+                    god,
                     existing.as_arc().clone(),
-                    edge_key,
+                    (*k, None),
                     edge_bv.clone(),
                     |e, n| *e |= n,
                     |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    |_, _| {}, // In this context, we don't constrain by source node value
+                    |_, _| {}, // no per-source restriction here
                 )
                 .try_destination(dest_node.clone());
             }
         }
 
+        // Only build the GSS result when we first created the cached destination.
         if enqueue_gss {
             merged_acc.stored_trie_nodes_mut().insert(dest_node);
-            let mut out = Vec::new();
+            let mut out: Vec<Arc<GSSNode>> = Vec::new();
+
             for (goto_state_id, source_state_ids) in &gotos.gotos {
-                let mut edge_contents = Vec::new();
-                for source_state_id in source_state_ids {
-                    edge_contents.push(ParseStateEdgeContent { state_id: *source_state_id });
-                }
+                let edge_contents = source_state_ids
+                    .iter()
+                    .map(|sid| ParseStateEdgeContent { state_id: *sid })
+                    .collect::<Vec<_>>();
+
                 let gss0 = GSSNode::new(merged_acc.clone());
                 let gss1 = gss0.push_many(edge_contents);
                 let gss2 = gss1.push(ParseStateEdgeContent { state_id: *goto_state_id });
                 out.push(Arc::new(gss2));
             }
+
             GSSNode::merge_many_with_depth(usize::MAX, out)
         } else {
             Arc::new(GSSNode::new_fresh())
