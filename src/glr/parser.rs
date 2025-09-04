@@ -1199,7 +1199,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             _ => unreachable!(),
         };
 
-        let mut all_source_states = BTreeSet::new();
+        let mut all_source_states: BTreeSet<StateID> = BTreeSet::new();
         for sources in gotos_for_nt.gotos.values() {
             all_source_states.extend(sources);
         }
@@ -1259,7 +1259,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let below_bottom_gss_root = Arc::new(GSSNode::new(merged_acc));
 
             for source_state_id in all_source_states {
-                new_todo_items.push((source_state_id, below_bottom_gss_root.clone()));
+                let new_gss = Arc::new(below_bottom_gss_root.push(ParseStateEdgeContent {
+                    state_id: source_state_id,
+                }));
+                new_todo_items.push((source_state_id, new_gss));
             }
         }
 
