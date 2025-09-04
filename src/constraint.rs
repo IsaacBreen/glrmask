@@ -675,7 +675,7 @@ impl GrammarConstraint {
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
-                    for (last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
+                    for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                             for src_wr in gss_root_acc.stored_trie_nodes().iter() {
@@ -690,8 +690,7 @@ impl GrammarConstraint {
                                 }
 
                                 let edge_key = (0, tokens_to_push.clone());
-                                let mut edge_value = StateIDBV::zeros();
-                                edge_value.insert(last_edge.state_id.0);
+                                let edge_value = StateIDBV::max_ones();
 
                                 let inserter = EdgeInserter::new(
                                     glr_s.active_state.trie2_god.as_ref().unwrap(),
