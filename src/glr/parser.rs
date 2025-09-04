@@ -28,7 +28,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
 // Added for deep-add of precompute trie edges
-use crate::datastructures::gss::deep_add_precompute_trie_edges;
+use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss};
 use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
 // A single combined action for a given (state,row) and token:
@@ -1537,8 +1537,55 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
 
+        // --- NEW CACHING LOGIC ---
+        let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+        if let Some(god) = self.active_state.trie2_god.as_ref() {
+            for gss_arc in out {
+                if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                    let cache_key = BelowBottomCacheKey {
+                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+                        source_state_id: StateID(usize::MAX),      // Dummy value
+                        goto_state_id: state_id,
+                        k: usize::MAX,                             // Dummy value
+                    };
+
+                    let cached_dest = self.below_bottom_cache.entry(cache_key)
+                        .or_insert_with(|| {
+                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                        })
+                        .clone();
+
+                    // Link all stored nodes from the simple GSS to the canonical cached destination.
+                    let edge_key = (0, LLMTokenBV::max_ones());
+                    let edge_value = StateIDBV::max_ones();
+                    let tokens_for_update = LLMTokenBV::max_ones();
+
+                    for source_wrapper in &stored_nodes {
+                        let source_arc = source_wrapper.as_arc().clone();
+                        let inserter = EdgeInserter::new(
+                            god,
+                            source_arc,
+                            edge_key.clone(),
+                            edge_value.clone(),
+                            |e, n| *e |= n,
+                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                            |_, _| {}, // Unconditional insertion
+                        );
+                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+                    }
+                    // The GSS path is now represented by the trie link, so we discard it.
+                } else {
+                    // Not a simple GSS, keep it for merging.
+                    final_out.push(gss_arc);
+                }
+            }
+        } else {
+            // No trie god, so no caching is possible.
+            final_out = out;
+        }
+
         // Merge results and return
-        let new_active = GSSNode::merge_many_with_depth(usize::MAX, out);
+        let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
         let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
         (new_active, new_accepted)
     }
