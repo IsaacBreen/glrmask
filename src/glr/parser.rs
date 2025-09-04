@@ -1307,7 +1307,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         replace_stored_trie_nodes_with_new_edge(
                             &mut parent_for_this_goto,
                             (0, LLMTokenBV::max_ones()), // Pop depth is not relevant here, use 0
-                            filter,
+                            &filter,
                             dest_node,
                             god,
                             &mut HashMap::new(),
