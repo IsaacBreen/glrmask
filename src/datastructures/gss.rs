@@ -1114,57 +1114,9 @@ impl GSSNode {
             })
         })
     }
-
-    pub(crate) fn check_cacheable_structure(&self, hallucinated_state_id: StateID) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
-        // This function checks for two patterns:
-        // 1. Internal(state_id) -> Root(acc)
-        // 2. Internal(state_id) -> Internal(hallucinated_state_id) -> Root(acc)
-        if self.num_predecessors() != 1 {
-            return None;
-        }
-
-        let (edge_content, preds_by_depth) = self.predecessors().iter().next().unwrap();
-        let pred_node = preds_by_depth.values().next().unwrap().iter().next().unwrap();
-        let state_id = edge_content.state_id;
-
-        // Now check the two patterns for the predecessor.
-        match pred_node.as_ref() {
-            // Pattern 1: Direct predecessor is a root.
-            GSSNode::Root(root) => {
-                let stored_trie_nodes = root.acc.stored_trie_nodes().clone();
-                if stored_trie_nodes.is_empty() {
-                    None
-                } else {
-                    Some((state_id, stored_trie_nodes))
-                }
-            }
-            // Pattern 2: Predecessor is an internal node (the hallucinated one).
-            GSSNode::Internal(_) => {
-                if pred_node.num_predecessors() != 1 {
-                    return None;
-                }
-                let (inner_edge, inner_preds_by_depth) = pred_node.predecessors().iter().next().unwrap();
-                if inner_edge.state_id != hallucinated_state_id {
-                    return None;
-                }
-                let final_pred_node = inner_preds_by_depth.values().next().unwrap().iter().next().unwrap();
-
-                if let GSSNode::Root(root) = final_pred_node.as_ref() {
-                    let stored_trie_nodes = root.acc.stored_trie_nodes().clone();
-                    if stored_trie_nodes.is_empty() {
-                        None
-                    } else {
-                        Some((state_id, stored_trie_nodes))
-                    }
-                } else {
-                    None // Must end in a root.
-                }
-            }
-        }
-    }
 }
 
-// Core GSS operations
+
 impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
 
@@ -1635,24 +1587,6 @@ pub(crate) fn merge_stored_trie_nodes(
         unreachable!();
     }
 }
-
-pub(crate) fn deep_replace_leaf_stored_trie_nodes(
-    root_arc: &Arc<GSSNode>,
-    new_nodes: &BTreeSet<StoredPrecomputeNodeIndex>,
-    memo: &mut PruneAndTransformRecursiveMemo,
-) -> Option<Arc<GSSNode>> {
-    prune_and_transform_recursive(
-        root_arc,
-        &mut |internal| Some((internal.acc.clone(), true)), // Recurse through internal nodes
-        &mut |root| { // Transform root nodes
-            let mut new_acc = (*root.acc).clone();
-            new_acc.stored_trie_nodes = new_nodes.clone();
-            Some(Arc::new(new_acc))
-        },
-        memo,
-    )
-}
-
 
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
