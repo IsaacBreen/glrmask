@@ -1123,45 +1123,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
     // Refactored helpers to make reduce_and_goto clearer
     // ----------------------------------------------------------------------
 
-    #[inline]
-    fn substring_gotos_for<'b>(
-        &self,
-        nt: NonTerminalID,
-        config: &ProcessTokenAdvancedConfig,
-        storage: &'b mut SubstringGoto,
-    ) -> &'b SubstringGoto where 'a: 'b {
-        match config.below_bottom_mode {
-            BelowBottomReductionMode::ContinueFromAll => {
-                self.parser.substring_gotos.get(&nt).unwrap_or(storage)
-            }
-            BelowBottomReductionMode::ContinueFromEverything => {
-                // Build a compact SubstringGoto from the synthetic "everything" state.
-                let everything = self.parser.everything_state_id;
-                if let Some(goto) = self
-                    .parser
-                    .table
-                    .get(&everything)
-                    .and_then(|row| row.gotos.get(&nt))
-                {
-                    storage.accepting_sources.clear();
-                    storage.gotos.clear();
-                    if goto.accept {
-                        storage.accepting_sources.insert(everything);
-                    }
-                    if let Some(goto_state_id) = goto.state_id {
-                        storage.gotos.insert(goto_state_id, BTreeSet::from([everything]));
-                    }
-                }
-                storage
-            }
-            BelowBottomReductionMode::Fail => storage,
-            BelowBottomReductionMode::Panic => {
-                // Handled by caller if a below-bottom pop happens; not used here.
-                storage
-            }
-        }
-    }
-
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
         let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
@@ -1493,8 +1454,31 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let below_accs = self.build_below_bottom_accs(&popper);
 
                     let mut storage = SubstringGoto::default();
-                    let gotos_for_nt =
-                        self.substring_gotos_for(nt, config, &mut storage);
+                    let gotos_for_nt: &SubstringGoto = match config.below_bottom_mode {
+                        BelowBottomReductionMode::ContinueFromAll => {
+                            self.parser.substring_gotos.get(&nt).unwrap_or(&storage)
+                        }
+                        BelowBottomReductionMode::ContinueFromEverything => {
+                            // Build a compact SubstringGoto from the synthetic "everything" state.
+                            let everything = self.parser.everything_state_id;
+                            if let Some(goto) = self
+                                .parser
+                                .table
+                                .get(&everything)
+                                .and_then(|row| row.gotos.get(&nt))
+                            {
+                                if goto.accept {
+                                    storage.accepting_sources.insert(everything);
+                                }
+                                if let Some(goto_state_id) = goto.state_id {
+                                    storage.gotos.insert(goto_state_id, BTreeSet::from([everything]));
+                                }
+                            }
+                            &storage
+                        }
+                        // The outer match ensures we are in one of the two modes above.
+                        BelowBottomReductionMode::Fail | BelowBottomReductionMode::Panic => unreachable!(),
+                    };
 
                     // Accepting sources (if any)
                     if let Some(accepted_merged) =
