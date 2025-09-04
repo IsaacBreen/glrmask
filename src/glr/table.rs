@@ -254,6 +254,13 @@ pub struct Row {
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HallucinatedRow {
+    pub shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>>,
+    pub gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>>,
+    pub default_reduce: DefaultReduce,
+}
+
 // Manual impl for Row (could be derived)
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
@@ -878,6 +885,56 @@ pub fn stage_10(
     reduce_goto_map
 }
 
+pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
+    let mut shifts_and_reduces: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
+    let mut gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, StateIDBV>> = BTreeMap::new();
+
+    for (&state_id, row) in table {
+        // Aggregate shifts and reduces
+        for (&terminal_id, action) in &row.shifts_and_reduces_full {
+            shifts_and_reduces
+                .entry(terminal_id)
+                .or_default()
+                .entry(action.clone())
+                .or_default()
+                .insert(state_id.0);
+        }
+
+        // Aggregate gotos
+        for (&nonterminal_id, goto) in &row.gotos {
+            gotos
+                .entry(nonterminal_id)
+                .or_default()
+                .entry(*goto)
+                .or_default()
+                .insert(state_id.0);
+        }
+    }
+
+    // Convert the intermediate maps to the final Vec format
+    let final_shifts_and_reduces = shifts_and_reduces
+        .into_iter()
+        .map(|(tid, actions)| {
+            let action_vec = actions.into_iter().collect::<Vec<_>>();
+            (tid, action_vec)
+        })
+        .collect();
+
+    let final_gotos = gotos
+        .into_iter()
+        .map(|(ntid, gotos_map)| {
+            let goto_vec = gotos_map.into_iter().collect::<Vec<_>>();
+            (ntid, goto_vec)
+        })
+        .collect();
+
+    HallucinatedRow {
+        shifts_and_reduces: final_shifts_and_reduces,
+        gotos: final_gotos,
+        default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+    }
+}
+
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
 fn compute_unit_reduction_chain<'a, F>(
     table: &'a Table,
@@ -1105,6 +1162,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
 
+    let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
+    let hallucinated_state_id = StateID(usize::MAX);
+
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
@@ -1112,7 +1172,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {

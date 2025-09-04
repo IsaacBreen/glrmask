@@ -3,7 +3,7 @@ use crate::datastructures::gss::{find_longest_path, gather_gss_stats, GSSNode, G
 use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -265,6 +265,8 @@ pub struct GLRParser {
     // Precomputed tables for substring parsing reductions.
     pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+    pub hallucinated_row: HallucinatedRow,
+    pub hallucinated_state_id: StateID,
 }
 
 impl JSONConvertible for GLRParser {
@@ -310,6 +312,8 @@ impl JSONConvertible for GLRParser {
 
                 let substring_gotos = stage_9(&table, &non_terminal_map);
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
+                let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
+                let hallucinated_state_id = StateID(usize::MAX);
 
                 Ok(GLRParser {
                     table,
@@ -322,6 +326,8 @@ impl JSONConvertible for GLRParser {
                     ignore_terminal_id,
                     substring_gotos,
                     reduce_goto_map,
+                    hallucinated_row,
+                    hallucinated_state_id,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -342,6 +348,7 @@ impl Debug for GLRParser {
             .field("ignore_terminal_id", &self.ignore_terminal_id)
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+            .field("hallucinated_state_id", &self.hallucinated_state_id)
             .finish()
     }
 }
@@ -357,7 +364,9 @@ impl PartialEq for GLRParser {
         self.everything_state_id == other.everything_state_id &&
         self.ignore_terminal_id == other.ignore_terminal_id &&
         self.substring_gotos == other.substring_gotos &&
-        self.reduce_goto_map == other.reduce_goto_map
+        self.reduce_goto_map == other.reduce_goto_map &&
+        self.hallucinated_row == other.hallucinated_row &&
+        self.hallucinated_state_id == other.hallucinated_state_id
     }
 }
 
@@ -376,6 +385,8 @@ impl GLRParser {
         ignore_terminal_id: Option<TerminalID>,
         substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+        hallucinated_row: HallucinatedRow,
+        hallucinated_state_id: StateID,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -397,6 +408,8 @@ impl GLRParser {
             ignore_terminal_id,
             substring_gotos,
             reduce_goto_map,
+            hallucinated_row,
+            hallucinated_state_id,
         }
     }
 
