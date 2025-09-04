@@ -828,7 +828,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         early_exit_on_shift: bool,
     ) -> (bool, bool) // (found_shift, should_early_exit)
     where
-        F: Fn(StateID) -> Option<Action<'a>>,
+        F: Fn(StateID) -> Vec<Action<'a>>,
     {
         let mut found_shift = false;
         for peek in GSSNode::peek_iter(&state.stack) {
@@ -951,7 +951,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         early_exit_on_shift: bool,
     ) -> bool
     where
-        F: Fn(StateID) -> Option<Action<'a>>,
+        F: Fn(StateID) -> Vec<Action<'a>>,
     {
         let mut found_shift = false;
         assert!(fuel.is_none(), "Fuel is not supported in process_action_queue yet");
@@ -970,23 +970,25 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 *f -= 1;
             }
             let WorkMapKey(_depth, state_id) = key;
-            let action_opt = action_selector(state_id);
-            if let Some(action) = action_opt {
-                let (new_found_shift, early_exit) = self.handle_action(
-                    &action,
-                    &state,
-                    &per_state_fuel,
-                    work_map,
-                    &mut reduce_map,
-                    shifted_states_todo,
-                    accepted_states_todo,
-                    &action_selector,
-                    config,
-                    early_exit_on_shift,
-                );
-                found_shift |= new_found_shift;
-                if early_exit {
-                    return found_shift;
+            let actions = action_selector(state_id);
+            if !actions.is_empty() {
+                for action in actions {
+                    let (new_found_shift, early_exit) = self.handle_action(
+                        &action,
+                        &state,
+                        &per_state_fuel,
+                        work_map,
+                        &mut reduce_map,
+                        shifted_states_todo,
+                        accepted_states_todo,
+                        &action_selector,
+                        config,
+                        early_exit_on_shift,
+                    );
+                    found_shift |= new_found_shift;
+                    if early_exit {
+                        return found_shift;
+                    }
                 }
             } else {
                 crate::debug!(5, "No action found in state {}", state_id.0);
@@ -1007,7 +1009,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         action_selector: &F,
         config: &ProcessTokenAdvancedConfig,
     ) where
-        F: Fn(StateID) -> Option<Action<'a>>,
+        F: Fn(StateID) -> Vec<Action<'a>>,
     {
         // 1) If clone_and_merge is set, add the "current stuff" (not the reduce result) to the shifted queue.
         if default_reduce.clone_and_merge {
@@ -1087,6 +1089,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     parser.table[&state_id].shifts_and_reduces_without_default_reduce
                         .get(&token_id)
                         .map(Action::Normal)
+                        .into_iter()
+                        .collect()
                 },
                 config,
                 &mut None,
@@ -1110,6 +1114,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     parser.table[&state_id].shifts_and_reduces_full
                         .get(&token_id)
                         .map(Action::Normal)
+                        .into_iter()
+                        .collect()
                 },
                 config,
                 &mut None,
@@ -1281,7 +1287,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         config: &ProcessTokenAdvancedConfig,
     ) -> (Arc<GSSNode>, Arc<GSSNode>)
     where
-        G: Fn(StateID) -> Option<Action<'a>>,
+        G: Fn(StateID) -> Vec<Action<'a>>,
     {
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
@@ -1345,47 +1351,58 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
-                        match action_selector(goto_state_id) {
-                            Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                                nonterminal_id: next_nt,
-                                len: 1,
-                                ..
-                            })) => {
-                                // Unit reduce chain: continue
-                                current_nt = *next_nt;
-                                continue 'chain;
-                            }
-                            Some(Action::Default(def)) => {
-                                // If the default reduce isn't a unit reduce, we must commit the current goto result.
-                                if def.clone_and_merge
-                                    || def
-                                        .reduce
-                                        .as_ref()
-                                        .map_or(false, |r| r.0.len != 1)
-                                {
+                        let actions = action_selector(goto_state_id);
+                        if actions.len() == 1 {
+                            match &actions[0] {
+                                Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                                    nonterminal_id: next_nt,
+                                    len: 1,
+                                    ..
+                                }) => {
+                                    // Unit reduce chain: continue
+                                    current_nt = *next_nt;
+                                    continue 'chain;
+                                }
+                                Action::Default(def) => {
+                                    // If the default reduce isn't a unit reduce, we must commit the current goto result.
+                                    if def.clone_and_merge
+                                        || def
+                                            .reduce
+                                            .as_ref()
+                                            .map_or(false, |r| r.0.len != 1)
+                                    {
+                                        out.push(Arc::new(isolated_parent.push(
+                                            ParseStateEdgeContent {
+                                                state_id: goto_state_id,
+                                            },
+                                        )));
+                                    }
+                                    // If it's a unit reduction, continue chaining.
+                                    if let Some(reduce) = &def.reduce {
+                                        if reduce.0.len == 1 {
+                                            current_nt = reduce.0.nonterminal_id;
+                                            continue 'chain;
+                                        }
+                                    }
+                                    // Otherwise, end chain
+                                    break 'chain;
+                                }
+                                _ => {
+                                    // Not a unit reduction path anymore -> emit a single push to goto_state
                                     out.push(Arc::new(isolated_parent.push(
                                         ParseStateEdgeContent {
                                             state_id: goto_state_id,
                                         },
                                     )));
+                                    break 'chain;
                                 }
-                                // If it's a unit reduction, continue chaining.
-                                if let Some(reduce) = &def.reduce {
-                                    if reduce.0.len == 1 {
-                                        current_nt = reduce.0.nonterminal_id;
-                                        continue 'chain;
-                                    }
-                                }
-                                // Otherwise, end chain
-                                break 'chain;
                             }
-                            _ => {
-                                // Not a unit reduction path anymore -> emit a single push to goto_state
-                                out.push(Arc::new(isolated_parent.push(ParseStateEdgeContent {
-                                    state_id: goto_state_id,
-                                })));
-                                break 'chain;
-                            }
+                        } else {
+                            // Not a unit reduction path anymore -> emit a single push to goto_state
+                            out.push(Arc::new(isolated_parent.push(ParseStateEdgeContent {
+                                state_id: goto_state_id,
+                            })));
+                            break 'chain;
                         }
                     } else {
                         // No goto target -> we're done.
@@ -1490,7 +1507,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
-            |state_id| Some(Action::Default(&parser.table[&state_id].default_reduce)),
+            |state_id| vec![Action::Default(&parser.table[&state_id].default_reduce)],
             &token_config,
             &mut fuel,
             false,
@@ -1532,19 +1549,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let mut llm_tokens = LLMTokenBV::zeros();
                 for peek in GSSNode::peek_iter(&self.active_state.stack) {
                     let row = &self.parser.table[&peek.edge_value().state_id];
-                    let action_opt = match self.phase {
-                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal),
-                        ParserPhase::ReadyForDefaultReductions => row.shifts_and_reduces_full.get(&token_id).map(Action::Normal).or_else(|| Some(Action::Default(&row.default_reduce))),
+                    let actions: Vec<Action> = match self.phase {
+                        ParserPhase::ReadyForToken => row.shifts_and_reduces_without_default_reduce.get(&token_id).map(Action::Normal).into_iter().collect(),
+                        ParserPhase::ReadyForDefaultReductions => {
+                            if let Some(action) = row.shifts_and_reduces_full.get(&token_id) {
+                                vec![Action::Normal(action)]
+                            } else {
+                                vec![Action::Default(&row.default_reduce)]
+                            }
+                        }
                     };
-                    if let Some(action) = action_opt {
-                        crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
-                                      self.parser.terminal_map.get_by_right(&token_id).unwrap(),
-                                      peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
-                        // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
-                        timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
-                            let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
-                            timeit!(llm_tokens |= peek_llm_tokens);
-                        });
+                    if !actions.is_empty() {
+                        for action in actions {
+                            crate::debug!(4, "Found action for token '{}' in state {}: {:?}. LLM tokens: {:?}",
+                                          self.parser.terminal_map.get_by_right(&token_id).unwrap(),
+                                          peek.edge_value().state_id.0, action, peek.resolved_llm_tokens_union());
+                            // That's it! Since this is a LR(1) parser, it's enough to know that there's *any* action.
+                            timeit!("GLRParserState::has_action_for::action_found::add_llm_tokens", {
+                                let peek_llm_tokens = timeit!(peek.resolved_llm_tokens_union());
+                                timeit!(llm_tokens |= peek_llm_tokens);
+                            });
+                        }
                     } else {
                         timeit!("GLRParserState::has_action_for::no_action_found", {
                             crate::debug!(4, "No action for token '{}' in state {}", self.parser.terminal_map.get_by_right(&token_id).unwrap(), peek.edge_value().state_id.0);
@@ -1585,7 +1610,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 |state_id| parser.table[&state_id]
                     .shifts_and_reduces_without_default_reduce
                     .get(&token_id)
-                    .map(Action::Normal),
+                    .map(Action::Normal)
+                    .into_iter()
+                    .collect(),
                 &cfg,
                 &mut None,
                 true, // early_exit_on_shift
@@ -1604,7 +1631,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             |state_id| parser.table[&state_id]
                 .shifts_and_reduces_full
                 .get(&token_id)
-                .map(Action::Normal),
+                .map(Action::Normal)
+                .into_iter()
+                .collect(),
             &cfg,
             &mut None,
             true, // early_exit_on_shift
