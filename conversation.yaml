@@ -10212,25 +10212,19 @@ local_system:
                               nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                               source_state_id: StateID(usize::MAX),      // Dummy value
                               goto_state_id: state_id,
-                              k: usize::MAX,                             // Dummy value
-                          };
+                      k: usize::MAX,                             // Dummy value
+                  };
 
-                          // Use the entry API so we can tell whether we had a cache hit or miss.
-                          let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
-                              std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
-                              std::collections::btree_map::Entry::Vacant(vac) => {
-                                  // Cache miss: create and insert a new precompute destination.
-                                  let new_dest = PrecomputeNode3Index::new(
-                                      god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                                  );
-                                  vac.insert(new_dest.clone());
-                                  (new_dest, false)
-                              }
-                          };
+                  let is_miss = !self.below_bottom_cache.contains_key(&cache_key);
+                  let cached_dest = self.below_bottom_cache.entry(cache_key)
+                      .or_insert_with(|| {
+                          PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                      })
+                      .clone();
 
-                          // Link all stored nodes from the simple GSS to the canonical cached destination.
-                          let edge_key = (0, LLMTokenBV::max_ones());
-                          let edge_value = StateIDBV::max_ones();
+                  // Link all stored nodes from the simple GSS to the canonical cached destination.
+                  let edge_key = (0, LLMTokenBV::max_ones());
+                  let edge_value = StateIDBV::max_ones();
                           let tokens_for_update = LLMTokenBV::max_ones();
 
                           for source_wrapper in &stored_nodes {
@@ -10243,19 +10237,18 @@ local_system:
                                   |e, n| *e |= n,
                                   |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
                                   |_, _| {}, // Unconditional insertion
-                              );
-                              inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-                          }
-
-                          // If this was a cache miss we must also keep the GSS result so it participates
-                          // in the subsequent merge (the new cache entry will now be usable).
-                          if !was_hit {
-                              final_out.push(gss_arc);
-                          }
-                          // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
-                      } else {
-                          // Not a simple GSS, keep it for merging.
-                          final_out.push(gss_arc);
+                      );
+                      inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+                  }
+                  if is_miss {
+                      // On a cache miss, this is the first time we see this simple GSS structure.
+                      // We add it to the output to serve as the canonical GSS representation.
+                      final_out.push(gss_arc);
+                  }
+                  // On a cache hit, the GSS is redundant. We've added the trie links, so we can discard it.
+              } else {
+                  // Not a simple GSS, keep it for merging.
+                  final_out.push(gss_arc);
                       }
                   }
               } else {
@@ -11021,7 +11014,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5-mini
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -16584,141 +16577,90 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Step-by-step instructions
-      1. File to edit:
-         - src/glr/parser.rs
+      Of course. Here are the step-by-step instructions to fix the caching logic, followed by the corresponding git diff.
 
-      2. What to change and why (summary):
-         - In GLRParserState::reduce_and_goto, the "NEW CACHING LOGIC" block currently always inserts/looks up a cached precompute3 destination and then discards the corresponding simple GSS path. This loses the opportunity to retain the new GSS when we actually created a new cache entry (cache miss). We must detect whether the cache entry was an existing one (hit) or a newly-created one (miss). On a miss, after creating the new precompute destination and linking stored trie nodes to it, we must keep (push) the GSS result into final_out so it will be merged into the final result. On a hit we continue to omit the GSS (it's represented by the cached trie node) so not pushing it is correct.
-         - The fix uses the BTreeMap entry API to detect Occupied (hit) vs Vacant (miss), creating a new PrecomputeNode3Index only on Vacant and setting a boolean flag (was_hit). We push gss_arc into final_out only when was_hit is false (i.e., on a cache miss).
+      ### Step-by-step Instructions
 
-      3. Exact region to change:
-         - Replace the block beginning at the comment:
-           // --- NEW CACHING LOGIC ---
-           through the matching else { ... } branch that assigns final_out.
+      1.  **Open the file `src/glr/parser.rs`**.
 
-      4. Exact code to insert:
-         - Use the BTreeMap entry API and detect Occupied vs Vacant. After linking stored_nodes to the cached/new destination, push gss_arc into final_out only when this was a cache miss.
+      2.  **Navigate to the `reduce_and_goto` function**. You can search for `fn reduce_and_goto`.
 
-      5. How to apply:
-         - Edit src/glr/parser.rs and replace the existing "NEW CACHING LOGIC" block with the new code shown in the patch below.
-         - Save the file and run cargo build / cargo test as needed.
+      3.  **Locate the caching logic section**, which starts with the comment `// --- NEW CACHING LOGIC ---`.
 
-      Git patch
-      - The patch below modifies only src/glr/parser.rs.
-      - It replaces the previous caching block with logic that detects cache hits vs misses and pushes the GSS result into final_out on cache miss.
+      4.  Inside the `if let Some((state_id, stored_nodes)) = is_simple_gss(...)` block, you will modify the code to detect a cache miss and conditionally keep the GSS structure.
+
+          a.  **Delete** the following lines that define `cached_dest`:
+              ```rust
+              -            let cached_dest = self.below_bottom_cache.entry(cache_key)
+              -                .or_insert_with(|| {
+              -                    PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+              -                })
+              -                .clone();
+              ```
+
+          b.  **In its place, insert** these lines to first check for a cache miss and then get or create the cached destination:
+              ```rust
+              +            let is_miss = !self.below_bottom_cache.contains_key(&cache_key);
+              +            let cached_dest = self.below_bottom_cache.entry(cache_key)
+              +                .or_insert_with(|| {
+              +                    PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+              +                })
+              +                .clone();
+              ```
+
+          c.  **Find and replace** the comment at the end of the `if` block:
+              ```rust
+              -            // The GSS path is now represented by the trie link, so we discard it.
+              ```
+              with this conditional logic:
+              ```rust
+              +            if is_miss {
+              +                // On a cache miss, this is the first time we see this simple GSS structure.
+              +                // We add it to the output to serve as the canonical GSS representation.
+              +                final_out.push(gss_arc);
+              +            }
+              +            // On a cache hit, the GSS is redundant. We've added the trie links, so we can discard it.
+              ```
+
+      After these changes, the logic will correctly preserve the GSS structure on a cache miss while discarding it on a cache hit, preventing redundant structures.
+
+      ### Git Diff
+
+      Here is the git patch for the changes described above.
 
       ```diff
       diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 0000000..0000000 100644
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@
-      -        // --- NEW CACHING LOGIC ---
-      -        let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
-      -        if let Some(god) = self.active_state.trie2_god.as_ref() {
-      -            for gss_arc in out {
-      -                if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
-      -                    let cache_key = BelowBottomCacheKey {
-      -                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
-      -                        source_state_id: StateID(usize::MAX),      // Dummy value
-      -                        goto_state_id: state_id,
-      -                        k: usize::MAX,                             // Dummy value
-      -                    };
-      -
-      -                    let cached_dest = self.below_bottom_cache.entry(cache_key)
-      -                        .or_insert_with(|| {
-      -                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-      -                        })
-      -                        .clone();
-      -
-      -                    // Link all stored nodes from the simple GSS to the canonical cached destination.
-      -                    let edge_key = (0, LLMTokenBV::max_ones());
-      -                    let edge_value = StateIDBV::max_ones();
-      -                    let tokens_for_update = LLMTokenBV::max_ones();
-      -
-      -                    for source_wrapper in &stored_nodes {
-      -                        let source_arc = source_wrapper.as_arc().clone();
-      -                        let inserter = EdgeInserter::new(
-      -                            god,
-      -                            source_arc,
-      -                            edge_key.clone(),
-      -                            edge_value.clone(),
-      -                            |e, n| *e |= n,
-      -                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
-      -                            |_, _| {}, // Unconditional insertion
-      -                        );
-      -                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-      -                    }
-      -                    // The GSS path is now represented by the trie link, so we discard it.
-      -                } else {
-      -                    // Not a simple GSS, keep it for merging.
-      -                    final_out.push(gss_arc);
-      -                }
-      -            }
-      -        } else {
-      -            // No trie god, so no caching is possible.
-      -            final_out = out;
-      -        }
-      +        // --- NEW CACHING LOGIC ---
-      +        let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
-      +        if let Some(god) = self.active_state.trie2_god.as_ref() {
-      +            for gss_arc in out {
-      +                if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
-      +                    let cache_key = BelowBottomCacheKey {
-      +                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
-      +                        source_state_id: StateID(usize::MAX),      // Dummy value
-      +                        goto_state_id: state_id,
-      +                        k: usize::MAX,                             // Dummy value
-      +                    };
-      +
-      +                    // Use the entry API so we can tell whether we had a cache hit or miss.
-      +                    let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
-      +                        std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
-      +                        std::collections::btree_map::Entry::Vacant(vac) => {
-      +                            // Cache miss: create and insert a new precompute destination.
-      +                            let new_dest = PrecomputeNode3Index::new(
-      +                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-      +                            );
-      +                            vac.insert(new_dest.clone());
-      +                            (new_dest, false)
-      +                        }
-      +                    };
-      +
-      +                    // Link all stored nodes from the simple GSS to the canonical cached destination.
-      +                    let edge_key = (0, LLMTokenBV::max_ones());
-      +                    let edge_value = StateIDBV::max_ones();
-      +                    let tokens_for_update = LLMTokenBV::max_ones();
-      +
-      +                    for source_wrapper in &stored_nodes {
-      +                        let source_arc = source_wrapper.as_arc().clone();
-      +                        let inserter = EdgeInserter::new(
-      +                            god,
-      +                            source_arc,
-      +                            edge_key.clone(),
-      +                            edge_value.clone(),
-      +                            |e, n| *e |= n,
-      +                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
-      +                            |_, _| {}, // Unconditional insertion
-      +                        );
-      +                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-      +                    }
-      +
-      +                    // If this was a cache miss we must also keep the GSS result so it participates
-      +                    // in the subsequent merge (the new cache entry will now be usable).
-      +                    if !was_hit {
-      +                        final_out.push(gss_arc);
-      +                    }
-      +                    // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
-      +                } else {
-      +                    // Not a simple GSS, keep it for merging.
-      +                    final_out.push(gss_arc);
-      +                }
+      @@ -1488,13 +1488,14 @@
+                       k: usize::MAX,                             // Dummy value
+                   };
+       
+      +            let is_miss = !self.below_bottom_cache.contains_key(&cache_key);
+                   let cached_dest = self.below_bottom_cache.entry(cache_key)
+                       .or_insert_with(|| {
+                           PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                       })
+                       .clone();
+       
+                   // Link all stored nodes from the simple GSS to the canonical cached destination.
+                   let edge_key = (0, LLMTokenBV::max_ones());
+                   let edge_value = StateIDBV::max_ones();
+      @@ -1513,7 +1514,13 @@
+                       );
+                       inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+                   }
+      -            // The GSS path is now represented by the trie link, so we discard it.
+      +            if is_miss {
+      +                // On a cache miss, this is the first time we see this simple GSS structure.
+      +                // We add it to the output to serve as the canonical GSS representation.
+      +                final_out.push(gss_arc);
       +            }
-      +        } else {
-      +            // No trie god, so no caching is possible.
-      +            final_out = out;
-      +        }
+      +            // On a cache hit, the GSS is redundant. We've added the trie links, so we can discard it.
+               } else {
+                   // Not a simple GSS, keep it for merging.
+                   final_out.push(gss_arc);
+
       ```
     metadata:
   - user: |
@@ -16730,7 +16672,7 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "fix(glr): Correctly handle simple GSS
-      caching in reduce_and_goto"'
+  - user: 'Changes committed with message: "Fix: Preserve GSS structure on cache miss
+      during reduction"'
     metadata:
 ...

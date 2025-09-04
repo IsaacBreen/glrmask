@@ -1546,25 +1546,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                         source_state_id: StateID(usize::MAX),      // Dummy value
                         goto_state_id: state_id,
-                        k: usize::MAX,                             // Dummy value
-                    };
+                k: usize::MAX,                             // Dummy value
+            };
 
-                    // Use the entry API so we can tell whether we had a cache hit or miss.
-                    let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
-                        std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
-                        std::collections::btree_map::Entry::Vacant(vac) => {
-                            // Cache miss: create and insert a new precompute destination.
-                            let new_dest = PrecomputeNode3Index::new(
-                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                            );
-                            vac.insert(new_dest.clone());
-                            (new_dest, false)
-                        }
-                    };
+            let is_miss = !self.below_bottom_cache.contains_key(&cache_key);
+            let cached_dest = self.below_bottom_cache.entry(cache_key)
+                .or_insert_with(|| {
+                    PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                })
+                .clone();
 
-                    // Link all stored nodes from the simple GSS to the canonical cached destination.
-                    let edge_key = (0, LLMTokenBV::max_ones());
-                    let edge_value = StateIDBV::max_ones();
+            // Link all stored nodes from the simple GSS to the canonical cached destination.
+            let edge_key = (0, LLMTokenBV::max_ones());
+            let edge_value = StateIDBV::max_ones();
                     let tokens_for_update = LLMTokenBV::max_ones();
 
                     for source_wrapper in &stored_nodes {
@@ -1577,19 +1571,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             |e, n| *e |= n,
                             |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
                             |_, _| {}, // Unconditional insertion
-                        );
-                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-                    }
-
-                    // If this was a cache miss we must also keep the GSS result so it participates
-                    // in the subsequent merge (the new cache entry will now be usable).
-                    if !was_hit {
-                        final_out.push(gss_arc);
-                    }
-                    // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
-                } else {
-                    // Not a simple GSS, keep it for merging.
-                    final_out.push(gss_arc);
+                );
+                inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+            }
+            if is_miss {
+                // On a cache miss, this is the first time we see this simple GSS structure.
+                // We add it to the output to serve as the canonical GSS representation.
+                final_out.push(gss_arc);
+            }
+            // On a cache hit, the GSS is redundant. We've added the trie links, so we can discard it.
+        } else {
+            // Not a simple GSS, keep it for merging.
+            final_out.push(gss_arc);
                 }
             }
         } else {
