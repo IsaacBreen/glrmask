@@ -1457,53 +1457,6 @@ pub(crate) fn merge_stored_trie_nodes(
     }
 }
 
-pub(crate) fn replace_stored_trie_nodes_with_new_edge(
-    root_arc: &mut Arc<GSSNode>,
-    edge_key: (usize, LLMTokenBV),
-    edge_value: &StateIDBV,
-    destination_node: StoredPrecomputeNodeIndex,
-    stored_trie_god: &StoredTrieGodWrapper,
-    memo: &mut PruneAndTransformRecursiveMemo,
-) {
-    let transform_acc = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
-        if acc.stored_trie_nodes.is_empty() {
-            return Some(acc.clone());
-        }
-
-        let mut new_acc = (**acc).clone();
-
-        for source_wrapper in &new_acc.stored_trie_nodes {
-            let source_arc = source_wrapper.as_arc().clone();
-            let inserter = EdgeInserter::new(
-                stored_trie_god,
-                source_arc,
-                edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= &edge_key.1,
-                |_, _| {}, // Unconditional insertion
-            );
-            inserter.try_destination(destination_node.clone()).expect("Cycle detected");
-        }
-
-        // Update the live tokens on the new destination node.
-        destination_node.write(stored_trie_god).expect("poison").value.live_tokens |= &edge_key.1;
-
-        new_acc.stored_trie_nodes = BTreeSet::from([destination_node.clone()]);
-        Some(Arc::new(new_acc))
-    };
-
-    let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc).map(|acc| (acc, true));
-    let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc);
-
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
-        *root_arc = new_root;
-    } else {
-        // This shouldn't happen if we're just transforming Accs.
-        *root_arc = Arc::new(GSSNode::new_fresh());
-    }
-}
-
 impl GSSNode {
     /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
     #[time_it]
