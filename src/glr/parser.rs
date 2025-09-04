@@ -1573,7 +1573,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         );
                         inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
                     }
-                    // The GSS path is now represented by the trie link, so we discard it.
+                    // Create the canonical GSS representation for this cached reduction and add it to the output.
+                    // The final merge will unify identical canonical GSS nodes.
+                    let mut new_acc = Acc::new_fresh();
+                    new_acc.stored_trie_nodes_mut().insert(cached_dest);
+                    let new_leaf = Arc::new(GSSNode::new(new_acc));
+
+                    let new_gss = if gss_arc.max_depth() == 1 {
+                        // Simple case: Internal -> Root
+                        Arc::new(new_leaf.push(ParseStateEdgeContent { state_id }))
+                    } else {
+                        // Hallucinated case: Internal -> Internal -> Root
+                        let halluc_edge = ParseStateEdgeContent { state_id: self.parser.hallucinated_state_id };
+                        let intermediate = Arc::new(new_leaf.push(halluc_edge));
+                        Arc::new(intermediate.push(ParseStateEdgeContent { state_id }))
+                    };
+                    final_out.push(new_gss);
                 } else {
                     // Not a simple GSS, keep it for merging.
                     final_out.push(gss_arc);
