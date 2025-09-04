@@ -2175,6 +2175,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -2190,6 +2191,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     );
     // constraint.dump_precomputed();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
