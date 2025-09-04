@@ -1103,9 +1103,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 shifted_states_todo,
                 accepted_states_todo,
                 |state_id| {
-                    if self.is_hallucinated_state(state_id) {
-                        // Hallucinated state only has "full" actions, no separate phase 1.
-                        // It also doesn't have default reduces, so this is fine.
+                    if state_id == parser.hallucinated_state_id {
                         parser.hallucinated_row.shifts_and_reduces.get(&token_id)
                             .map(|actions| actions.iter().map(|(a, _filter)| Action::Normal(a.clone())).collect())
                             .unwrap_or_default()
@@ -1136,7 +1134,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 shifted_states_todo,
                 accepted_states_todo,
                 |state_id| {
-                    if self.is_hallucinated_state(state_id) {
+                    if state_id == parser.hallucinated_state_id {
                         parser.hallucinated_row.shifts_and_reduces.get(&token_id)
                             .map(|actions| actions.iter().map(|(a, _filter)| Action::Normal(a.clone())).collect())
                             .unwrap_or_else(|| vec![Action::Default(parser.hallucinated_row.default_reduce.clone())])
