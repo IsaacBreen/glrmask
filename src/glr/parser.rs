@@ -1167,41 +1167,35 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
-            // Union of Acc over all last-edge entries for this k
-            let mut acc_union: Option<Acc> = None;
-            // New set of stored trie nodes created/used by these insertions (for this k)
-            let mut new_stored: BTreeSet<PrecomputeNode3Index> = BTreeSet::new();
+            // First, merge all Accs for this k. The stored_trie_nodes will be replaced.
+            let mut final_acc = accs_by_edge
+                .values()
+                .map(|arc| arc.as_ref())
+                .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
+
+            // Then, process all trie nodes for this k to create the new set of stored nodes.
+            let mut new_stored = BTreeSet::new();
 
             for (last_edge, acc_arc) in accs_by_edge {
-                let acc = acc_arc.as_ref();
-                let edge_key = (0, LLMTokenBV::max_ones());
-                let mut edge_value = StateIDBV::zeros();
-                edge_value.insert(last_edge.state_id.0);
-                let tokens_for_update = LLMTokenBV::max_ones();
-
-                // Union this acc into the accumulator for k
-                acc_union = Some(match acc_union.take() {
-                    None => acc.clone(),
-                    Some(prev) => Acc::merge(&prev, acc),
-                });
-
-                // For each existing stored trie node, wire a strong edge to a fresh destination,
-                // and make sure the destination accumulates max-ones (same as original behavior).
-                for existing_wrapper in acc.stored_trie_nodes() {
+                for existing_wrapper in acc_arc.stored_trie_nodes() {
+                    let edge_key = (0, LLMTokenBV::max_ones());
+                    let mut edge_value = StateIDBV::zeros();
+                    edge_value.insert(last_edge.state_id.0);
+                    let tokens_for_update = LLMTokenBV::max_ones();
                     let source = existing_wrapper.as_arc().clone();
                     let fallback = PrecomputeNode3Index::new(
                         god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
                     );
 
                     let dst = EdgeInserter::new(
-                            god,
-                            source,
-                            edge_key.clone(),
-                            edge_value.clone(),
-                            |e, n| *e |= n,                                 // merge edge bitset
-                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update, // propagate to node
-                            |ev, t| *ev &= &t.live_tokens,                  // edge_value &= source.live_tokens
-                        )
+                        god,
+                        source,
+                        edge_key,
+                        edge_value,
+                        |e, n| *e |= n,
+                        |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                        |ev, t| *ev &= &t.live_tokens,
+                    )
                         .try_destination(fallback)
                         .expect("build_below_bottom_accs: insert failed");
 
@@ -1210,14 +1204,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
 
-            // Build final Acc for this k: union of all accs (same as before) with new stored_trie set.
-            let mut final_acc = acc_union.unwrap_or_else(Acc::new_fresh);
             *final_acc.stored_trie_nodes_mut() = new_stored;
-
-            result
-                .entry(*k)
-                .and_modify(|existing| *existing = Acc::merge(existing, &final_acc))
-                .or_insert(final_acc);
+            result.insert(*k, final_acc);
         }
 
         result
