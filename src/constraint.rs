@@ -605,69 +605,21 @@ impl GrammarConstraint {
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         config: &GrammarConstraintConfig,
     ) -> (Precomputed3, Trie3GodWrapper) {
-        crate::debug!(2, "Precomputing Trie 3...");
-        const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
-        const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
-            BelowBottomReductionMode::ContinueFromEverything
-        } else {
-            BelowBottomReductionMode::ContinueFromAll
-        };
-
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
-
         let mut initial_values_for_map: Vec<(PrecomputeNodeIndex, GLRParserState)> =
             Vec::new();
         let parser = parser.unwrap();
 
-        let base_trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
-
-        let mut base_gss_nodes: Vec<Arc<GSSNode>> = Vec::new();
-
-        if BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING {
+        for (tokenizer_state_id, trie1_root) in precomputed.iter() {
+            let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
             let mut acc = Acc::new_fresh();
-            acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
+            acc.stored_trie_nodes_mut().insert(trie3_root.clone());
             let gss_leaf = Arc::new(GSSNode::new(acc));
-            base_gss_nodes.push(Arc::new(
-                gss_leaf.push(ParseStateEdgeContent { state_id: parser.everything_state_id })
-            ));
-        } else {
-            for state_id in parser.table.keys() {
-                let mut acc = Acc::new_fresh();
-                acc.stored_trie_nodes_mut().insert(base_trie3_root.clone());
-                let gss_leaf = Arc::new(GSSNode::new(acc));
-                base_gss_nodes.push(Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: *state_id })));
-            }
-        }
-
-        let base_gss_merged = GSSNode::merge_many_with_depth(usize::MAX, base_gss_nodes);
-        let mut base_glr_state = parser.init_glr_parser_from_stack(base_gss_merged).with_god(trie3_god.clone());
-
-        const PROCESS_DEFAULT_REDUCTIONS: bool = false;
-        if PROCESS_DEFAULT_REDUCTIONS {
-            base_glr_state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
-                fuel: None,
-                per_state_fuel: None,
-                below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE,
-            });
-        }
-
-        #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
-        #[cfg(rustrover)]
-        let it = precomputed.iter();
-        for (tokenizer_state_id, trie1_root) in it {
-            let (cloned_trie3_root, trie3_map) = clone_trie3_graph(&base_trie3_root, &trie3_god);
-
-            let cloned_gss = crate::datastructures::gss::deep_clone_gss_with_stored_trie_map(
-                &base_glr_state.active_state.stack,
-                &trie3_map,
-            );
-            let mut glr_state_for_sid = base_glr_state.clone();
-            glr_state_for_sid.active_state.stack = cloned_gss;
-
-            precomputed3.insert(*tokenizer_state_id, cloned_trie3_root);
-            initial_values_for_map.push((trie1_root.clone(), glr_state_for_sid));
+            let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+            let glr_state = parser.init_glr_parser_from_stack(gss).with_god(trie3_god.clone());
+            precomputed3.insert(*tokenizer_state_id, trie3_root);
+            initial_values_for_map.push((trie1_root.clone(), glr_state));
         }
 
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
@@ -685,7 +637,7 @@ impl GrammarConstraint {
                 allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
 
                 if let Some(gt) = edge_grammar_token_opt {
-                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                    glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
                 }
 
                 let mut out = Vec::new();
@@ -738,10 +690,6 @@ impl GrammarConstraint {
                             }
                         }
                     }
-                }
-
-                if PROCESS_DEFAULT_REDUCTIONS {
-                    // ... logic from precompute2 ...
                 }
 
                 let mut stack = vec![glr_s.active_state.stack.clone()];
