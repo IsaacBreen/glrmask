@@ -86,9 +86,140 @@ impl JSONConvertible for PrecomputedNodeContents {
     }
 }
 
-// --- Accumulator (Acc) ---
+/// Recursively traverses a GSS, and for each node (both internal and root) that has
+/// `stored_trie_nodes`, it:
+/// 1. Gets a new destination trie node from `destination_provider`.
+/// 2. Adds edges from all of the node's `stored_trie_nodes` to this new destination.
+/// 3. Replaces the node's `stored_trie_nodes` with a set containing only the new destination.
+///
+/// This is used to apply shared constraints (like a StateID bitvector) across an entire GSS branch
+/// by adding a filtered edge to the underlying precomputation trie.
+pub(crate) fn deep_add_precompute_trie_edges(
+    root_arc: &mut Arc<GSSNode>,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    if let Some(new_root) = deep_add_precompute_trie_edges_recursive(
+        root_arc,
+        god,
+        edge_key,
+        edge_value,
+        tokens_for_update,
+        destination_provider,
+        memo,
+    ) {
+        *root_arc = new_root;
+    } else {
+        // This function should not prune the root unless it becomes completely empty.
+        // If all paths are pruned, it becomes a fresh root.
+        *root_arc = Arc::new(GSSNode::new_fresh());
+    }
+}
 
-/// Represents the full set of allowed tokens and terminals for a GSS node.
+fn deep_add_precompute_trie_edges_recursive(
+    node_arc: &Arc<GSSNode>,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) -> Option<Arc<GSSNode>> {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if let Some(cached_result) = memo.get(&node_ptr) {
+        return cached_result.clone();
+    }
+
+    // 1. Process the current node's Acc
+    let local_acc = node_arc.local_acc();
+    let (new_acc_arc, acc_changed) = if !local_acc.stored_trie_nodes.is_empty() {
+        let destination = destination_provider();
+
+        for source_wrapper in local_acc.stored_trie_nodes() {
+            let source_arc = source_wrapper.as_arc().clone();
+
+            let inserter = EdgeInserter::new(
+                god,
+                source_arc,
+                edge_key.clone(),
+                edge_value.clone(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                |_, _| {}, // Unconditional insertion
+            );
+            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+        }
+
+        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+        let mut new_acc = (*local_acc).clone();
+        new_acc.stored_trie_nodes = BTreeSet::from([destination]);
+        (Arc::new(new_acc), true)
+    } else {
+        (local_acc.clone(), false)
+    };
+
+    // 2. Recurse into children (for internal nodes) and rebuild the node
+    let result = match node_arc.as_ref() {
+        GSSNode::Root(_) => {
+            if acc_changed {
+                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
+            } else {
+                Some(node_arc.clone())
+            }
+        }
+        GSSNode::Internal(internal) => {
+            let mut any_child_changed = false;
+            let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in &internal.predecessors {
+                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                for (dest_key, pred_vec) in preds_by_depth {
+                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(pred_vec.len());
+                    for pred_arc in pred_vec {
+                        if let Some(new_pred_arc) = deep_add_precompute_trie_edges_recursive(
+                            pred_arc, god, edge_key, edge_value, tokens_for_update, destination_provider, memo
+                        ) {
+                            if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                any_child_changed = true;
+                            }
+                            new_vec.push(new_pred_arc);
+                        } else {
+                            any_child_changed = true; // Child was pruned
+                        }
+                    }
+                    if !new_vec.is_empty() {
+                        new_preds_by_depth.insert(*dest_key, new_vec);
+                    }
+                }
+                if !new_preds_by_depth.is_empty() {
+                    new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
+                }
+            }
+
+            if new_predecessors_map.is_empty() {
+                // All children pruned, so this node becomes a root with its (possibly new) acc.
+                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
+            } else if !any_child_changed && !acc_changed {
+                Some(node_arc.clone())
+            } else {
+                let transformed_node = GSSNode::new_with_map(new_acc_arc, new_predecessors_map);
+                Some(Arc::new(transformed_node))
+            }
+        }
+    };
+
+    memo.insert(node_ptr, result.clone());
+    result
+}
+
+/// Recursively traverses a GSS, and for each node (both internal and root) that has
+/// `stored_trie_nodes`, it:
+/// 1. Gets a new destination trie node from `destination_provider`.
 /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
 /// is computed on demand by aggregating the Accs of all reachable roots.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1455,137 +1586,6 @@ pub(crate) fn merge_stored_trie_nodes(
     } else {
         unreachable!();
     }
-}
-
-/// Recursively traverses a GSS, and for each node (both internal and root) that has
-/// `stored_trie_nodes`, it:
-/// 1. Gets a new destination trie node from `destination_provider`.
-/// 2. Adds edges from all of the node's `stored_trie_nodes` to this new destination.
-/// 3. Replaces the node's `stored_trie_nodes` with a set containing only the new destination.
-///
-/// This is used to apply shared constraints (like a StateID bitvector) across an entire GSS branch
-/// by adding a filtered edge to the underlying precomputation trie.
-pub(crate) fn deep_add_precompute_trie_edges(
-    root_arc: &mut Arc<GSSNode>,
-    god: &StoredTrieGodWrapper,
-    edge_key: &(usize, LLMTokenBV),
-    edge_value: &StateIDBV,
-    tokens_for_update: &LLMTokenBV,
-    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
-    memo: &mut PruneAndTransformRecursiveMemo,
-) {
-    if let Some(new_root) = deep_add_precompute_trie_edges_recursive(
-        root_arc,
-        god,
-        edge_key,
-        edge_value,
-        tokens_for_update,
-        destination_provider,
-        memo,
-    ) {
-        *root_arc = new_root;
-    } else {
-        // This function should not prune the root unless it becomes completely empty.
-        // If all paths are pruned, it becomes a fresh root.
-        *root_arc = Arc::new(GSSNode::new_fresh());
-    }
-}
-
-fn deep_add_precompute_trie_edges_recursive(
-    node_arc: &Arc<GSSNode>,
-    god: &StoredTrieGodWrapper,
-    edge_key: &(usize, LLMTokenBV),
-    edge_value: &StateIDBV,
-    tokens_for_update: &LLMTokenBV,
-    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
-    memo: &mut PruneAndTransformRecursiveMemo,
-) -> Option<Arc<GSSNode>> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(cached_result) = memo.get(&node_ptr) {
-        return cached_result.clone();
-    }
-
-    // 1. Process the current node's Acc
-    let local_acc = node_arc.local_acc();
-    let (new_acc_arc, acc_changed) = if !local_acc.stored_trie_nodes.is_empty() {
-        let destination = destination_provider();
-
-        for source_wrapper in local_acc.stored_trie_nodes() {
-            let source_arc = source_wrapper.as_arc().clone();
-
-            let inserter = EdgeInserter::new(
-                god,
-                source_arc,
-                edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
-                |_, _| {}, // Unconditional insertion
-            );
-            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
-        }
-
-        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
-
-        let mut new_acc = (*local_acc).clone();
-        new_acc.stored_trie_nodes = BTreeSet::from([destination]);
-        (Arc::new(new_acc), true)
-    } else {
-        (local_acc.clone(), false)
-    };
-
-    // 2. Recurse into children (for internal nodes) and rebuild the node
-    let result = match node_arc.as_ref() {
-        GSSNode::Root(_) => {
-            if acc_changed {
-                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
-            } else {
-                Some(node_arc.clone())
-            }
-        }
-        GSSNode::Internal(internal) => {
-            let mut any_child_changed = false;
-            let mut new_predecessors_map: NodeMap = BTreeMap::new();
-
-            for (edge_val, preds_by_depth) in &internal.predecessors {
-                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
-                for (dest_key, pred_vec) in preds_by_depth {
-                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(pred_vec.len());
-                    for pred_arc in pred_vec {
-                        if let Some(new_pred_arc) = deep_add_precompute_trie_edges_recursive(
-                            pred_arc, god, edge_key, edge_value, tokens_for_update, destination_provider, memo
-                        ) {
-                            if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
-                                any_child_changed = true;
-                            }
-                            new_vec.push(new_pred_arc);
-                        } else {
-                            any_child_changed = true; // Child was pruned
-                        }
-                    }
-                    if !new_vec.is_empty() {
-                        new_preds_by_depth.insert(*dest_key, new_vec);
-                    }
-                }
-                if !new_preds_by_depth.is_empty() {
-                    new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
-                }
-            }
-
-            if new_predecessors_map.is_empty() {
-                // All children pruned, so this node becomes a root with its (possibly new) acc.
-                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
-            } else if !any_child_changed && !acc_changed {
-                Some(node_arc.clone())
-            } else {
-                let transformed_node = GSSNode::new_with_map(new_acc_arc, new_predecessors_map);
-                Some(Arc::new(transformed_node))
-            }
-        }
-    };
-
-    memo.insert(node_ptr, result.clone());
-    result
 }
 
 impl GSSNode {
