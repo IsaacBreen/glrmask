@@ -1407,9 +1407,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (predecessor_state_id, isolated_parent) in todo {
             let mut current_nt = nt;
 
-            loop {
+            'chain: loop {
                 // GOTO lookup from predecessor_state_id
-                let goto = self
+                let gotos: Vec<Goto> = vec![*self
                     .parser
                     .table
                     .get(&predecessor_state_id)
@@ -1420,59 +1420,61 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(),
                             predecessor_state_id
                         )
-                    });
+                    })];
 
-                // Accept contribution (store isolated parent)
-                if goto.accept {
-                    accepted_out.push(isolated_parent.clone());
-                }
-
-                if let Some(goto_state_id) = goto.state_id {
-                    match action_selector(goto_state_id) {
-                        Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                            nonterminal_id: next_nt,
-                            len: 1,
-                            ..
-                        })) => {
-                            // Unit reduce chain: continue
-                            current_nt = *next_nt;
-                            continue;
-                        }
-                        Some(Action::Default(def)) => {
-                            // If the default reduce isn't a unit reduce, we must commit the current goto result.
-                            if def.clone_and_merge
-                                || def
-                                    .reduce
-                                    .as_ref()
-                                    .map_or(false, |r| r.0.len != 1)
-                            {
-                                out.push(Arc::new(isolated_parent.push(
-                                    ParseStateEdgeContent {
-                                        state_id: goto_state_id,
-                                    },
-                                )));
-                            }
-                            // If it's a unit reduction, continue chaining.
-                            if let Some(reduce) = &def.reduce {
-                                if reduce.0.len == 1 {
-                                    current_nt = reduce.0.nonterminal_id;
-                                    continue;
-                                }
-                            }
-                            // Otherwise, end chain
-                            break;
-                        }
-                        _ => {
-                            // Not a unit reduction path anymore -> emit a single push to goto_state
-                            out.push(Arc::new(isolated_parent.push(ParseStateEdgeContent {
-                                state_id: goto_state_id,
-                            })));
-                            break;
-                        }
+                for goto in gotos {
+                    // Accept contribution (store isolated parent)
+                    if goto.accept {
+                        accepted_out.push(isolated_parent.clone());
                     }
-                } else {
-                    // No goto target -> we're done.
-                    break;
+
+                    if let Some(goto_state_id) = goto.state_id {
+                        match action_selector(goto_state_id) {
+                            Some(Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                                nonterminal_id: next_nt,
+                                len: 1,
+                                ..
+                            })) => {
+                                // Unit reduce chain: continue
+                                current_nt = *next_nt;
+                                continue 'chain;
+                            }
+                            Some(Action::Default(def)) => {
+                                // If the default reduce isn't a unit reduce, we must commit the current goto result.
+                                if def.clone_and_merge
+                                    || def
+                                        .reduce
+                                        .as_ref()
+                                        .map_or(false, |r| r.0.len != 1)
+                                {
+                                    out.push(Arc::new(isolated_parent.push(
+                                        ParseStateEdgeContent {
+                                            state_id: goto_state_id,
+                                        },
+                                    )));
+                                }
+                                // If it's a unit reduction, continue chaining.
+                                if let Some(reduce) = &def.reduce {
+                                    if reduce.0.len == 1 {
+                                        current_nt = reduce.0.nonterminal_id;
+                                        continue 'chain;
+                                    }
+                                }
+                                // Otherwise, end chain
+                                break 'chain;
+                            }
+                            _ => {
+                                // Not a unit reduction path anymore -> emit a single push to goto_state
+                                out.push(Arc::new(isolated_parent.push(ParseStateEdgeContent {
+                                    state_id: goto_state_id,
+                                })));
+                                break 'chain;
+                            }
+                        }
+                    } else {
+                        // No goto target -> we're done.
+                        break 'chain;
+                    }
                 }
             }
         }
