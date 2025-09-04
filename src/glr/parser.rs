@@ -426,6 +426,7 @@ impl GLRParser {
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            goto_cache: Default::default(),
         }
     }
 
@@ -435,6 +436,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            goto_cache: Default::default(),
         }
     }
 
@@ -445,6 +447,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            goto_cache: Default::default(),
         };
         parser_state
     }
@@ -455,6 +458,7 @@ impl GLRParser {
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            goto_cache: Default::default(),
         };
         parser_state
     }
@@ -477,6 +481,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            goto_cache: Default::default(),
         }
     }
 
@@ -827,6 +832,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
+    goto_cache: HashMap<(StateID, NonTerminalID), PrecomputeNode3Index>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1491,13 +1497,63 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         || def
                                             .reduce
                                             .as_ref()
-                                            .map_or(false, |r| r.0.len != 1)
+                                            .map_or(false, |r| r.0.len != 1),
                                     {
-                                        out.push(Arc::new(parent_after_filter.push(
-                                            ParseStateEdgeContent {
-                                                state_id: goto_state_id,
-                                            },
-                                        )));
+                                        let gss_for_out = Arc::new(parent_after_filter.push(ParseStateEdgeContent { state_id: goto_state_id }));
+                                        if let Some((_checked_state_id, stored_trie_nodes)) = gss_for_out.check_cacheable_structure(self.parser.hallucinated_state_id) {
+                                            let cache_key = (predecessor_state_id, current_nt);
+                                            let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing for caching");
+
+                                            if let Some(cached_node) = self.goto_cache.get(&cache_key) {
+                                                // Cache HIT
+                                                let edge_key = (0, LLMTokenBV::max_ones());
+                                                let edge_value = StateIDBV::max_ones();
+                                                let tokens_for_update = LLMTokenBV::max_ones();
+
+                                                for source_wrapper in &stored_trie_nodes {
+                                                    let source_arc = source_wrapper.as_arc().clone();
+                                                    let inserter = EdgeInserter::new(
+                                                        god,
+                                                        source_arc,
+                                                        edge_key.clone(),
+                                                        edge_value.clone(),
+                                                        |e, n| *e |= n,
+                                                        |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                                        |_, _| {}, // Unconditional insertion
+                                                    );
+                                                    inserter.try_destination(cached_node.clone()).expect("Cycle in cache linking");
+                                                }
+                                            } else {
+                                                // Cache MISS
+                                                let new_canonical_node = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                                                let edge_key = (0, LLMTokenBV::max_ones());
+                                                let edge_value = StateIDBV::max_ones();
+                                                let tokens_for_update = LLMTokenBV::max_ones();
+                                                for source_wrapper in &stored_trie_nodes {
+                                                    let source_arc = source_wrapper.as_arc().clone();
+                                                    let inserter = EdgeInserter::new(
+                                                        god,
+                                                        source_arc,
+                                                        edge_key.clone(),
+                                                        edge_value.clone(),
+                                                        |e, n| *e |= n,
+                                                        |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                                        |_, _| {}, // Unconditional insertion
+                                                    );
+                                                    inserter.try_destination(new_canonical_node.clone()).expect("Cycle in cache linking");
+                                                }
+                                                self.goto_cache.insert(cache_key, new_canonical_node.clone());
+                                                let mut memo = HashMap::new();
+                                                let new_gss = crate::datastructures::gss::deep_replace_leaf_stored_trie_nodes(
+                                                    &gss_for_out,
+                                                    &BTreeSet::from([new_canonical_node]),
+                                                    &mut memo
+                                                ).expect("Replacing trie nodes should not prune the GSS");
+                                                out.push(new_gss);
+                                            }
+                                        } else {
+                                            out.push(gss_for_out);
+                                        }
                                     }
                                     // If it's a unit reduction, continue chaining.
                                     if let Some(reduce) = &def.reduce {
@@ -1511,19 +1567,68 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 _ => {
                                     // Not a unit reduction path anymore -> emit a single push to goto_state
-                                    out.push(Arc::new(parent_after_filter.push(
-                                        ParseStateEdgeContent {
-                                            state_id: goto_state_id,
-                                        },
-                                    )));
+                                    let gss_for_out = Arc::new(parent_after_filter.push(ParseStateEdgeContent { state_id: goto_state_id }));
+                                    if let Some((_checked_state_id, stored_trie_nodes)) = gss_for_out.check_cacheable_structure(self.parser.hallucinated_state_id) {
+                                        let cache_key = (predecessor_state_id, current_nt);
+                                        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing for caching");
+
+                                        if let Some(cached_node) = self.goto_cache.get(&cache_key) {
+                                            // Cache HIT
+                                            let edge_key = (0, LLMTokenBV::max_ones());
+                                            let edge_value = StateIDBV::max_ones();
+                                            let tokens_for_update = LLMTokenBV::max_ones();
+
+                                            for source_wrapper in &stored_trie_nodes {
+                                                let source_arc = source_wrapper.as_arc().clone();
+                                                let inserter = EdgeInserter::new(
+                                                    god,
+                                                    source_arc,
+                                                    edge_key.clone(),
+                                                    edge_value.clone(),
+                                                    |e, n| *e |= n,
+                                                    |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                                    |_, _| {}, // Unconditional insertion
+                                                );
+                                                inserter.try_destination(cached_node.clone()).expect("Cycle in cache linking");
+                                            }
+                                        } else {
+                                            // Cache MISS
+                                            let new_canonical_node = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                                            let edge_key = (0, LLMTokenBV::max_ones());
+                                            let edge_value = StateIDBV::max_ones();
+                                            let tokens_for_update = LLMTokenBV::max_ones();
+                                            for source_wrapper in &stored_trie_nodes {
+                                                let source_arc = source_wrapper.as_arc().clone();
+                                                let inserter = EdgeInserter::new(
+                                                    god,
+                                                    source_arc,
+                                                    edge_key.clone(),
+                                                    edge_value.clone(),
+                                                    |e, n| *e |= n,
+                                                    |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                                    |_, _| {}, // Unconditional insertion
+                                                );
+                                                inserter.try_destination(new_canonical_node.clone()).expect("Cycle in cache linking");
+                                            }
+                                            self.goto_cache.insert(cache_key, new_canonical_node.clone());
+                                            let mut memo = HashMap::new();
+                                            let new_gss = crate::datastructures::gss::deep_replace_leaf_stored_trie_nodes(
+                                                &gss_for_out,
+                                                &BTreeSet::from([new_canonical_node]),
+                                                &mut memo
+                                            ).expect("Replacing trie nodes should not prune the GSS");
+                                            out.push(new_gss);
+                                        }
+                                    } else {
+                                        out.push(gss_for_out);
+                                    }
                                     break 'chain;
                                 }
                             }
                         } else {
                             // Not a unit reduction path anymore -> emit a single push to goto_state
-                            out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
-                                state_id: goto_state_id,
-                            })));
+                            let gss_for_out = Arc::new(parent_after_filter.push(ParseStateEdgeContent { state_id: goto_state_id }));
+                            out.push(gss_for_out);
                             break 'chain;
                         }
                     } else {
