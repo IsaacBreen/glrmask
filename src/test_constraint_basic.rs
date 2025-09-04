@@ -75,6 +75,7 @@ fn test_trivial() {
     );
     // constraint.dump_precomputed();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed3();
 
     println!("Initializing constraint state...");
     let mut state = constraint.init();
