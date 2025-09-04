@@ -1178,7 +1178,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         below: BTreeMap<usize, Acc>,
         config: &ProcessTokenAdvancedConfig,
     ) -> Vec<(StateID, Arc<GSSNode>)> {
-        let mut new_todo_items = Vec::new();
 
         let mut storage = SubstringGoto::default();
         let gotos_for_nt: &SubstringGoto = match config.below_bottom_mode {
@@ -1207,7 +1206,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         all_source_states.extend(&gotos_for_nt.accepting_sources);
 
         if all_source_states.is_empty() {
-            return new_todo_items;
+            return Vec::new();
         }
 
         let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
@@ -1229,32 +1228,33 @@ impl<'a> GLRParserState<'a> { // No longer generic
             (dst, true)
         };
 
-        if is_new {
-            let mut merged_acc = {
-                let mut it = below.values();
-                match it.next() {
-                    None => Acc::new_fresh(),
-                    Some(first) => it.fold(first.clone(), |acc, nxt| Acc::merge(&acc, nxt)),
-                }
-            };
-            merged_acc.stored_trie_nodes_mut().clear();
-
-            let edge_value = StateIDBV::max_ones();
-            for (k, acc) in &below {
-                for existing in acc.stored_trie_nodes() {
-                    let _ = EdgeInserter::new(
-                        god,
-                        existing.as_arc().clone(),
-                        (*k, LLMTokenBV::max_ones()),
-                        edge_value.clone(),
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
-                        |_, _| {},
-                    )
-                    .try_destination(dest_node.clone());
-                }
+        let mut merged_acc = {
+            let mut it = below.values();
+            match it.next() {
+                None => Acc::new_fresh(),
+                Some(first) => it.fold(first.clone(), |acc, nxt| Acc::merge(&acc, nxt)),
             }
+        };
+        merged_acc.stored_trie_nodes_mut().clear();
 
+        let edge_value = StateIDBV::max_ones();
+        for (k, acc) in &below {
+            for existing in acc.stored_trie_nodes() {
+                let _ = EdgeInserter::new(
+                    god,
+                    existing.as_arc().clone(),
+                    (*k, LLMTokenBV::max_ones()),
+                    edge_value.clone(),
+                    |e, n| *e |= n,
+                    |node_value, _edge_value| node_value.live_tokens |= &LLMTokenBV::max_ones(),
+                    |_, _| {},
+                )
+                .try_destination(dest_node.clone());
+            }
+        }
+
+        let mut new_todo_items = Vec::new();
+        if is_new {
             merged_acc.stored_trie_nodes_mut().insert(dest_node);
             let below_bottom_gss_root = Arc::new(GSSNode::new(merged_acc));
 
