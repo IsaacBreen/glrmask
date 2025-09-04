@@ -1549,11 +1549,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         k: usize::MAX,                             // Dummy value
                     };
 
-                    let cached_dest = self.below_bottom_cache.entry(cache_key)
-                        .or_insert_with(|| {
-                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-                        })
-                        .clone();
+                    // Use the entry API so we can tell whether we had a cache hit or miss.
+                    let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
+                        std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
+                        std::collections::btree_map::Entry::Vacant(vac) => {
+                            // Cache miss: create and insert a new precompute destination.
+                            let new_dest = PrecomputeNode3Index::new(
+                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                            );
+                            vac.insert(new_dest.clone());
+                            (new_dest, false)
+                        }
+                    };
 
                     // Link all stored nodes from the simple GSS to the canonical cached destination.
                     let edge_key = (0, LLMTokenBV::max_ones());
@@ -1573,7 +1580,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         );
                         inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
                     }
-                    // The GSS path is now represented by the trie link, so we discard it.
+
+                    // If this was a cache miss we must also keep the GSS result so it participates
+                    // in the subsequent merge (the new cache entry will now be usable).
+                    if !was_hit {
+                        final_out.push(gss_arc);
+                    }
+                    // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
                 } else {
                     // Not a simple GSS, keep it for merging.
                     final_out.push(gss_arc);

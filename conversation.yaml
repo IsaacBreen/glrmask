@@ -1670,6 +1670,64 @@ local_system:
           result_arc
       }
 
+      /// Checks if a GSS has a simple structure that can be cached.
+      /// The simple structures are:
+      /// 1. `Internal(state_id) -> Root(leaf)`
+      /// 2. `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
+      /// Returns `Some((state_id, stored_trie_nodes))` if it matches.
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
+          if let GSSNode::Internal(internal) = node.as_ref() {
+              // Must have exactly one predecessor edge group.
+              if internal.predecessors.len() == 1 {
+                  let (edge_content, preds_by_depth) = internal.predecessors.iter().next().unwrap();
+                  // Must have predecessors at exactly one depth.
+                  if preds_by_depth.len() == 1 {
+                      let (_depth, pred_vec) = preds_by_depth.iter().next().unwrap();
+                      // Must have exactly one predecessor node.
+                      if pred_vec.len() == 1 {
+                          let predecessor = &pred_vec[0];
+                          let state_id_x = edge_content.state_id;
+
+                          // Now check the predecessor.
+                          match predecessor.as_ref() {
+                              // Case 1: Predecessor is a leaf (Root node). This is pattern 1.
+                              GSSNode::Root(root) => {
+                                  let stored_nodes = root.acc.stored_trie_nodes().clone();
+                                  if !stored_nodes.is_empty() {
+                                      return Some((state_id_x, stored_nodes));
+                                  }
+                              }
+                              // Case 2: Predecessor is an internal node. Check for pattern 2.
+                              GSSNode::Internal(pred_internal) => {
+                                  // This must be the node with the hallucinated state ID edge.
+                                  if pred_internal.predecessors.len() == 1 {
+                                      let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
+                                      if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
+                                          let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
+                                          if halluc_pred_vec.len() == 1 {
+                                              let leaf = &halluc_pred_vec[0];
+                                              if let GSSNode::Root(leaf_root) = leaf.as_ref() {
+                                                  // This is pattern 2.
+                                                  let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
+                                                  if !stored_nodes.is_empty() {
+                                                      return Some((state_id_x, stored_nodes));
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          None
+      }
+
       // --- Deep canonicalization & interning ---
 
       #[derive(Default)]
@@ -3139,7 +3197,7 @@ local_system:
       use std::sync::Arc;
       use crate::datastructures::trie::{God, GodWrapper};
       // Added for deep-add of precompute trie edges
-      use crate::datastructures::gss::deep_add_precompute_trie_edges;
+      use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss};
       use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
       // A single combined action for a given (state,row) and token:
@@ -4648,8 +4706,55 @@ local_system:
                   }
               }
 
+              // --- NEW CACHING LOGIC ---
+              let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+              if let Some(god) = self.active_state.trie2_god.as_ref() {
+                  for gss_arc in out {
+                      if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                          let cache_key = BelowBottomCacheKey {
+                              nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+                              source_state_id: StateID(usize::MAX),      // Dummy value
+                              goto_state_id: state_id,
+                              k: usize::MAX,                             // Dummy value
+                          };
+
+                          let cached_dest = self.below_bottom_cache.entry(cache_key)
+                              .or_insert_with(|| {
+                                  PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                              })
+                              .clone();
+
+                          // Link all stored nodes from the simple GSS to the canonical cached destination.
+                          let edge_key = (0, LLMTokenBV::max_ones());
+                          let edge_value = StateIDBV::max_ones();
+                          let tokens_for_update = LLMTokenBV::max_ones();
+
+                          for source_wrapper in &stored_nodes {
+                              let source_arc = source_wrapper.as_arc().clone();
+                              let inserter = EdgeInserter::new(
+                                  god,
+                                  source_arc,
+                                  edge_key.clone(),
+                                  edge_value.clone(),
+                                  |e, n| *e |= n,
+                                  |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                  |_, _| {}, // Unconditional insertion
+                              );
+                              inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+                          }
+                          // The GSS path is now represented by the trie link, so we discard it.
+                      } else {
+                          // Not a simple GSS, keep it for merging.
+                          final_out.push(gss_arc);
+                      }
+                  }
+              } else {
+                  // No trie god, so no caching is possible.
+                  final_out = out;
+              }
+
               // Merge results and return
-              let new_active = GSSNode::merge_many_with_depth(usize::MAX, out);
+              let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
               let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
               (new_active, new_accepted)
           }
@@ -5415,7 +5520,7 @@ local_system:
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
       use crate::glr::grammar::Terminal;
-      use crate::glr::parser::{GLRParserState, ParseStateEdgeContent, is_simple_gss};
+      use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
       use crate::glr::table::StateID;
       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
       use crate::types::TerminalID;
@@ -10110,11 +10215,18 @@ local_system:
                               k: usize::MAX,                             // Dummy value
                           };
 
-                          let cached_dest = self.below_bottom_cache.entry(cache_key)
-                              .or_insert_with(|| {
-                                  PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-                              })
-                              .clone();
+                          // Use the entry API so we can tell whether we had a cache hit or miss.
+                          let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
+                              std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
+                              std::collections::btree_map::Entry::Vacant(vac) => {
+                                  // Cache miss: create and insert a new precompute destination.
+                                  let new_dest = PrecomputeNode3Index::new(
+                                      god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                                  );
+                                  vac.insert(new_dest.clone());
+                                  (new_dest, false)
+                              }
+                          };
 
                           // Link all stored nodes from the simple GSS to the canonical cached destination.
                           let edge_key = (0, LLMTokenBV::max_ones());
@@ -10134,7 +10246,13 @@ local_system:
                               );
                               inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
                           }
-                          // The GSS path is now represented by the trie link, so we discard it.
+
+                          // If this was a cache miss we must also keep the GSS result so it participates
+                          // in the subsequent merge (the new cache entry will now be usable).
+                          if !was_hit {
+                              final_out.push(gss_arc);
+                          }
+                          // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
                       } else {
                           // Not a simple GSS, keep it for merging.
                           final_out.push(gss_arc);
@@ -10903,7 +11021,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5-mini
   code_completion_model:
     - cp
   commit_message_model:
@@ -12594,6 +12712,64 @@ messages:
           result_arc
       }
 
+      /// Checks if a GSS has a simple structure that can be cached.
+      /// The simple structures are:
+      /// 1. `Internal(state_id) -> Root(leaf)`
+      /// 2. `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
+      /// Returns `Some((state_id, stored_trie_nodes))` if it matches.
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
+          if let GSSNode::Internal(internal) = node.as_ref() {
+              // Must have exactly one predecessor edge group.
+              if internal.predecessors.len() == 1 {
+                  let (edge_content, preds_by_depth) = internal.predecessors.iter().next().unwrap();
+                  // Must have predecessors at exactly one depth.
+                  if preds_by_depth.len() == 1 {
+                      let (_depth, pred_vec) = preds_by_depth.iter().next().unwrap();
+                      // Must have exactly one predecessor node.
+                      if pred_vec.len() == 1 {
+                          let predecessor = &pred_vec[0];
+                          let state_id_x = edge_content.state_id;
+
+                          // Now check the predecessor.
+                          match predecessor.as_ref() {
+                              // Case 1: Predecessor is a leaf (Root node). This is pattern 1.
+                              GSSNode::Root(root) => {
+                                  let stored_nodes = root.acc.stored_trie_nodes().clone();
+                                  if !stored_nodes.is_empty() {
+                                      return Some((state_id_x, stored_nodes));
+                                  }
+                              }
+                              // Case 2: Predecessor is an internal node. Check for pattern 2.
+                              GSSNode::Internal(pred_internal) => {
+                                  // This must be the node with the hallucinated state ID edge.
+                                  if pred_internal.predecessors.len() == 1 {
+                                      let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
+                                      if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
+                                          let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
+                                          if halluc_pred_vec.len() == 1 {
+                                              let leaf = &halluc_pred_vec[0];
+                                              if let GSSNode::Root(leaf_root) = leaf.as_ref() {
+                                                  // This is pattern 2.
+                                                  let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
+                                                  if !stored_nodes.is_empty() {
+                                                      return Some((state_id_x, stored_nodes));
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          None
+      }
+
       // --- Deep canonicalization & interning ---
 
       #[derive(Default)]
@@ -14068,7 +14244,7 @@ messages:
       use std::sync::Arc;
       use crate::datastructures::trie::{God, GodWrapper};
       // Added for deep-add of precompute trie edges
-      use crate::datastructures::gss::deep_add_precompute_trie_edges;
+      use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss};
       use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
       // A single combined action for a given (state,row) and token:
@@ -15577,8 +15753,55 @@ messages:
                   }
               }
 
+              // --- NEW CACHING LOGIC ---
+              let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+              if let Some(god) = self.active_state.trie2_god.as_ref() {
+                  for gss_arc in out {
+                      if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                          let cache_key = BelowBottomCacheKey {
+                              nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+                              source_state_id: StateID(usize::MAX),      // Dummy value
+                              goto_state_id: state_id,
+                              k: usize::MAX,                             // Dummy value
+                          };
+
+                          let cached_dest = self.below_bottom_cache.entry(cache_key)
+                              .or_insert_with(|| {
+                                  PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+                              })
+                              .clone();
+
+                          // Link all stored nodes from the simple GSS to the canonical cached destination.
+                          let edge_key = (0, LLMTokenBV::max_ones());
+                          let edge_value = StateIDBV::max_ones();
+                          let tokens_for_update = LLMTokenBV::max_ones();
+
+                          for source_wrapper in &stored_nodes {
+                              let source_arc = source_wrapper.as_arc().clone();
+                              let inserter = EdgeInserter::new(
+                                  god,
+                                  source_arc,
+                                  edge_key.clone(),
+                                  edge_value.clone(),
+                                  |e, n| *e |= n,
+                                  |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+                                  |_, _| {}, // Unconditional insertion
+                              );
+                              inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+                          }
+                          // The GSS path is now represented by the trie link, so we discard it.
+                      } else {
+                          // Not a simple GSS, keep it for merging.
+                          final_out.push(gss_arc);
+                      }
+                  }
+              } else {
+                  // No trie god, so no caching is possible.
+                  final_out = out;
+              }
+
               // Merge results and return
-              let new_active = GSSNode::merge_many_with_depth(usize::MAX, out);
+              let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
               let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
               (new_active, new_accepted)
           }
@@ -16330,14 +16553,19 @@ messages:
     metadata:
       filename: src/glr/parser.rs
   - user: |-
-      In `reduce_and_goto`, instead of putting an item in `out`, we should check whether it's possible to hit the cache.
-      Cache hits can happen for any GSS that's just a single state, or a single state on top of the hallucinate state. ie any GSS of the form
-      Root --(state ID x)--> Leaf
-      or
-      Root --(state ID x)--> Internal --(state ID [hallucinate state ID])--> Leaf
-      Write a function that detects whether the GSS is in this form, returning an `Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)>` if so.
-      And use it at every oppertunity instead of adding an item to `out` in `reduce_and_goto`. If we get a hit, link the stored precompute3 nodes to the cache hit precompute3 node with a 'blank edge', `(0, LLMTokenBV::max_ones())` and `StateIDBV::max_ones()`. The cache key should just contain the state ID x, nothing else. Set all other values (eg nt, k) to dummies. And don't push to `out` in this case (since we've already done the work, we don't want to redo it).
-      It might be neater to filter `out` when it's finished (instead of checking whether to add to `out` every time we push).
+      Fix `// --- NEW CACHING LOGIC ---`.
+      If the was a cache miss, we should make a new node precompute3 destination, and we should add precompute edges to it, and add the resulting GSS to final_out.
+      Right now, it appears to not add to `final_out`, even if there was a cache miss.
+      If there *was* a cache hit, then we don't want to add to `final_out`.
+      Fix this line:
+      ```rust
+      let cached_dest = self.below_bottom_cache.entry(cache_key)
+          .or_insert_with(|| {
+              PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+          })
+          .clone();
+      ```
+      Take note of whether there was a hit. And use that bool later to decide whether to add to `final_out`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -16356,251 +16584,82 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and the corresponding git diffs to implement the caching optimization for simple GSS structures.
+      Step-by-step instructions
+      1. File to edit:
+         - src/glr/parser.rs
 
-      ### Step-by-step Instructions
+      2. What to change and why (summary):
+         - In GLRParserState::reduce_and_goto, the "NEW CACHING LOGIC" block currently always inserts/looks up a cached precompute3 destination and then discards the corresponding simple GSS path. This loses the opportunity to retain the new GSS when we actually created a new cache entry (cache miss). We must detect whether the cache entry was an existing one (hit) or a newly-created one (miss). On a miss, after creating the new precompute destination and linking stored trie nodes to it, we must keep (push) the GSS result into final_out so it will be merged into the final result. On a hit we continue to omit the GSS (it's represented by the cached trie node) so not pushing it is correct.
+         - The fix uses the BTreeMap entry API to detect Occupied (hit) vs Vacant (miss), creating a new PrecomputeNode3Index only on Vacant and setting a boolean flag (was_hit). We push gss_arc into final_out only when was_hit is false (i.e., on a cache miss).
 
-      **1. File: `src/datastructures/gss.rs`**
+      3. Exact region to change:
+         - Replace the block beginning at the comment:
+           // --- NEW CACHING LOGIC ---
+           through the matching else { ... } branch that assigns final_out.
 
-      *   **Add an import:** At the top of the file, add the following line to import the `StateID` type:
-          ```rust
-          use crate::glr::table::StateID;
-          ```
-      *   **Add the `is_simple_gss` function:** At the very end of the file, after the `impl GSSNode` block, add the new `is_simple_gss` helper function. This function will identify GSS structures that are simple enough to be cached.
+      4. Exact code to insert:
+         - Use the BTreeMap entry API and detect Occupied vs Vacant. After linking stored_nodes to the cached/new destination, push gss_arc into final_out only when this was a cache miss.
 
-          ```rust
-          /// Checks if a GSS has a simple structure that can be cached.
-          /// The simple structures are:
-          /// 1. `Internal(state_id) -> Root(leaf)`
-          /// 2. `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
-          /// Returns `Some((state_id, stored_trie_nodes))` if it matches.
-          pub(crate) fn is_simple_gss(
-              node: &Arc<GSSNode>,
-              hallucinated_state_id: StateID,
-          ) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
-              if let GSSNode::Internal(internal) = node.as_ref() {
-                  // Must have exactly one predecessor edge group.
-                  if internal.predecessors.len() == 1 {
-                      let (edge_content, preds_by_depth) = internal.predecessors.iter().next().unwrap();
-                      // Must have predecessors at exactly one depth.
-                      if preds_by_depth.len() == 1 {
-                          let (_depth, pred_vec) = preds_by_depth.iter().next().unwrap();
-                          // Must have exactly one predecessor node.
-                          if pred_vec.len() == 1 {
-                              let predecessor = &pred_vec[0];
-                              let state_id_x = edge_content.state_id;
-          
-                              // Now check the predecessor.
-                              match predecessor.as_ref() {
-                                  // Case 1: Predecessor is a leaf (Root node). This is pattern 1.
-                                  GSSNode::Root(root) => {
-                                      let stored_nodes = root.acc.stored_trie_nodes().clone();
-                                      if !stored_nodes.is_empty() {
-                                          return Some((state_id_x, stored_nodes));
-                                      }
-                                  }
-                                  // Case 2: Predecessor is an internal node. Check for pattern 2.
-                                  GSSNode::Internal(pred_internal) => {
-                                      // This must be the node with the hallucinated state ID edge.
-                                      if pred_internal.predecessors.len() == 1 {
-                                          let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
-                                          if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
-                                              let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
-                                              if halluc_pred_vec.len() == 1 {
-                                                  let leaf = &halluc_pred_vec[0];
-                                                  if let GSSNode::Root(leaf_root) = leaf.as_ref() {
-                                                      // This is pattern 2.
-                                                      let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
-                                                      if !stored_nodes.is_empty() {
-                                                          return Some((state_id_x, stored_nodes));
-                                                      }
-                                                  }
-                                              }
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-              None
-          }
-          ```
+      5. How to apply:
+         - Edit src/glr/parser.rs and replace the existing "NEW CACHING LOGIC" block with the new code shown in the patch below.
+         - Save the file and run cargo build / cargo test as needed.
 
-      **2. File: `src/glr/parser.rs`**
-
-      *   **Add an import:** Near the top of the file, add the following line to import the new helper function:
-          ```rust
-          use crate::datastructures::gss::is_simple_gss;
-          ```
-      *   **Modify `reduce_and_goto`:** In the `reduce_and_goto` function, locate the final four lines that merge the results and return.
-          ```rust
-          // ...
-                  // Merge results and return
-                  let new_active = GSSNode::merge_many_with_depth(usize::MAX, out);
-                  let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
-                  (new_active, new_accepted)
-              }
-          ```
-          Replace those four lines with the new caching logic that filters the `out` vector.
-          ```rust
-                  // --- NEW CACHING LOGIC ---
-                  let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
-                  if let Some(god) = self.active_state.trie2_god.as_ref() {
-                      for gss_arc in out {
-                          if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
-                              let cache_key = BelowBottomCacheKey {
-                                  nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
-                                  source_state_id: StateID(usize::MAX),      // Dummy value
-                                  goto_state_id: state_id,
-                                  k: usize::MAX,                             // Dummy value
-                              };
-          
-                              let cached_dest = self.below_bottom_cache.entry(cache_key)
-                                  .or_insert_with(|| {
-                                      PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-                                  })
-                                  .clone();
-          
-                              // Link all stored nodes from the simple GSS to the canonical cached destination.
-                              let edge_key = (0, LLMTokenBV::max_ones());
-                              let edge_value = StateIDBV::max_ones();
-                              let tokens_for_update = LLMTokenBV::max_ones();
-          
-                              for source_wrapper in &stored_nodes {
-                                  let source_arc = source_wrapper.as_arc().clone();
-                                  let inserter = EdgeInserter::new(
-                                      god,
-                                      source_arc,
-                                      edge_key.clone(),
-                                      edge_value.clone(),
-                                      |e, n| *e |= n,
-                                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
-                                      |_, _| {}, // Unconditional insertion
-                                  );
-                                  inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-                              }
-                              // The GSS path is now represented by the trie link, so we discard it.
-                          } else {
-                              // Not a simple GSS, keep it for merging.
-                              final_out.push(gss_arc);
-                          }
-                      }
-                  } else {
-                      // No trie god, so no caching is possible.
-                      final_out = out;
-                  }
-          
-                  // Merge results and return
-                  let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
-                  let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
-                  (new_active, new_accepted)
-              }
-          ```
-
-      ### Git Diffs
-
-      Here are the git diffs corresponding to the changes above.
+      Git patch
+      - The patch below modifies only src/glr/parser.rs.
+      - It replaces the previous caching block with logic that detects cache hits vs misses and pushes the GSS result into final_out on cache miss.
 
       ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -10,7 +10,7 @@
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-       use crate::glr::grammar::Terminal;
-      -use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
-      +use crate::glr::parser::{GLRParserState, ParseStateEdgeContent, is_simple_gss};
-       use crate::glr::table::StateID;
-       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
-       use crate::types::TerminalID;
-      @@ -1569,3 +1569,57 @@
-           let result_arc = Arc::new(fused_node);
-           memo.insert(node_ptr, result_arc.clone());
-           result_arc
-      +}
-      +
-      +/// Checks if a GSS has a simple structure that can be cached.
-      +/// The simple structures are:
-      +/// 1. `Internal(state_id) -> Root(leaf)`
-      +/// 2. `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
-      +/// Returns `Some((state_id, stored_trie_nodes))` if it matches.
-      +pub(crate) fn is_simple_gss(
-      +    node: &Arc<GSSNode>,
-      +    hallucinated_state_id: StateID,
-      +) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
-      +    if let GSSNode::Internal(internal) = node.as_ref() {
-      +        // Must have exactly one predecessor edge group.
-      +        if internal.predecessors.len() == 1 {
-      +            let (edge_content, preds_by_depth) = internal.predecessors.iter().next().unwrap();
-      +            // Must have predecessors at exactly one depth.
-      +            if preds_by_depth.len() == 1 {
-      +                let (_depth, pred_vec) = preds_by_depth.iter().next().unwrap();
-      +                // Must have exactly one predecessor node.
-      +                if pred_vec.len() == 1 {
-      +                    let predecessor = &pred_vec[0];
-      +                    let state_id_x = edge_content.state_id;
-      +
-      +                    // Now check the predecessor.
-      +                    match predecessor.as_ref() {
-      +                        // Case 1: Predecessor is a leaf (Root node). This is pattern 1.
-      +                        GSSNode::Root(root) => {
-      +                            let stored_nodes = root.acc.stored_trie_nodes().clone();
-      +                            if !stored_nodes.is_empty() {
-      +                                return Some((state_id_x, stored_nodes));
-      +                            }
-      +                        }
-      +                        // Case 2: Predecessor is an internal node. Check for pattern 2.
-      +                        GSSNode::Internal(pred_internal) => {
-      +                            // This must be the node with the hallucinated state ID edge.
-      +                            if pred_internal.predecessors.len() == 1 {
-      +                                let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
-      +                                if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
-      +                                    let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
-      +                                    if halluc_pred_vec.len() == 1 {
-      +                                        let leaf = &halluc_pred_vec[0];
-      +                                        if let GSSNode::Root(leaf_root) = leaf.as_ref() {
-      +                                            // This is pattern 2.
-      +                                            let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
-      +                                            if !stored_nodes.is_empty() {
-      +                                                return Some((state_id_x, stored_nodes));
-      +                                            }
-      +                                        }
-      +                                    }
-      +                                }
-      +                            }
-      +                        }
-      +                    }
-      +                }
-      +            }
-      +        }
-      +    }
-      +    None
-       }
-       
-       // --- Deep canonicalization & interning ---
-
-      ``````diff
       diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 0000000..0000000 100644
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -16,7 +16,7 @@
-       use std::sync::Arc;
-       use crate::datastructures::trie::{God, GodWrapper};
-       // Added for deep-add of precompute trie edges
-      -use crate::datastructures::gss::deep_add_precompute_trie_edges;
-      +use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss};
-       use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
-       
-       // A single combined action for a given (state,row) and token:
-      @@ -1071,11 +1071,55 @@
-                   }
-               }
-       
-      -        // Merge results and return
-      -        let new_active = GSSNode::merge_many_with_depth(usize::MAX, out);
+      @@
+      -        // --- NEW CACHING LOGIC ---
+      -        let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+      -        if let Some(god) = self.active_state.trie2_god.as_ref() {
+      -            for gss_arc in out {
+      -                if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+      -                    let cache_key = BelowBottomCacheKey {
+      -                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+      -                        source_state_id: StateID(usize::MAX),      // Dummy value
+      -                        goto_state_id: state_id,
+      -                        k: usize::MAX,                             // Dummy value
+      -                    };
+      -
+      -                    let cached_dest = self.below_bottom_cache.entry(cache_key)
+      -                        .or_insert_with(|| {
+      -                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
+      -                        })
+      -                        .clone();
+      -
+      -                    // Link all stored nodes from the simple GSS to the canonical cached destination.
+      -                    let edge_key = (0, LLMTokenBV::max_ones());
+      -                    let edge_value = StateIDBV::max_ones();
+      -                    let tokens_for_update = LLMTokenBV::max_ones();
+      -
+      -                    for source_wrapper in &stored_nodes {
+      -                        let source_arc = source_wrapper.as_arc().clone();
+      -                        let inserter = EdgeInserter::new(
+      -                            god,
+      -                            source_arc,
+      -                            edge_key.clone(),
+      -                            edge_value.clone(),
+      -                            |e, n| *e |= n,
+      -                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
+      -                            |_, _| {}, // Unconditional insertion
+      -                        );
+      -                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
+      -                    }
+      -                    // The GSS path is now represented by the trie link, so we discard it.
+      -                } else {
+      -                    // Not a simple GSS, keep it for merging.
+      -                    final_out.push(gss_arc);
+      -                }
+      -            }
+      -        } else {
+      -            // No trie god, so no caching is possible.
+      -            final_out = out;
+      -        }
       +        // --- NEW CACHING LOGIC ---
       +        let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
       +        if let Some(god) = self.active_state.trie2_god.as_ref() {
@@ -16613,11 +16672,18 @@ messages:
       +                        k: usize::MAX,                             // Dummy value
       +                    };
       +
-      +                    let cached_dest = self.below_bottom_cache.entry(cache_key)
-      +                        .or_insert_with(|| {
-      +                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-      +                        })
-      +                        .clone();
+      +                    // Use the entry API so we can tell whether we had a cache hit or miss.
+      +                    let (cached_dest, was_hit) = match self.below_bottom_cache.entry(cache_key) {
+      +                        std::collections::btree_map::Entry::Occupied(occ) => (occ.get().clone(), true),
+      +                        std::collections::btree_map::Entry::Vacant(vac) => {
+      +                            // Cache miss: create and insert a new precompute destination.
+      +                            let new_dest = PrecomputeNode3Index::new(
+      +                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+      +                            );
+      +                            vac.insert(new_dest.clone());
+      +                            (new_dest, false)
+      +                        }
+      +                    };
       +
       +                    // Link all stored nodes from the simple GSS to the canonical cached destination.
       +                    let edge_key = (0, LLMTokenBV::max_ones());
@@ -16637,7 +16703,13 @@ messages:
       +                        );
       +                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
       +                    }
-      +                    // The GSS path is now represented by the trie link, so we discard it.
+      +
+      +                    // If this was a cache miss we must also keep the GSS result so it participates
+      +                    // in the subsequent merge (the new cache entry will now be usable).
+      +                    if !was_hit {
+      +                        final_out.push(gss_arc);
+      +                    }
+      +                    // If it was a hit, the path is represented by the cached trie node and we omit the GSS.
       +                } else {
       +                    // Not a simple GSS, keep it for merging.
       +                    final_out.push(gss_arc);
@@ -16647,29 +16719,18 @@ messages:
       +            // No trie god, so no caching is possible.
       +            final_out = out;
       +        }
-      +
-      +        // Merge results and return
-      +        let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
-               let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
-               (new_active, new_accepted)
-           }
-
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Cache simple GSS structures in reduce_and_goto"'
+  - user: 'Changes committed with message: "fix(glr): Correctly handle simple GSS
+      caching in reduce_and_goto"'
     metadata:
 ...
