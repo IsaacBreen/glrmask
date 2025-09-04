@@ -1163,48 +1163,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
-        let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
-            // First, merge all Accs for this k. The stored_trie_nodes will be replaced.
-            let mut final_acc = accs_by_edge
+            // Merge all Accs for this k.
+            let final_acc = accs_by_edge
                 .values()
                 .map(|arc| arc.as_ref())
                 .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
-
-            // Then, process all trie nodes for this k to create the new set of stored nodes.
-            let mut new_stored = BTreeSet::new();
-
-            for (last_edge, acc_arc) in accs_by_edge {
-                for existing_wrapper in acc_arc.stored_trie_nodes() {
-                    let edge_key = (0, LLMTokenBV::max_ones());
-                    let mut edge_value = StateIDBV::zeros();
-                    edge_value.insert(last_edge.state_id.0);
-                    let tokens_for_update = LLMTokenBV::max_ones();
-                    let source = existing_wrapper.as_arc().clone();
-                    let fallback = PrecomputeNode3Index::new(
-                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
-                    );
-
-                    let dst = EdgeInserter::new(
-                        god,
-                        source,
-                        edge_key,
-                        edge_value,
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
-                        |ev, t| *ev &= &t.live_tokens,
-                    )
-                        .try_destination(fallback)
-                        .expect("build_below_bottom_accs: insert failed");
-
-                    dst.write(god).expect("poison").value.live_tokens |= &tokens_for_update;
-                    new_stored.insert(dst);
-                }
-            }
-
-            *final_acc.stored_trie_nodes_mut() = new_stored;
             result.insert(*k, final_acc);
         }
 
