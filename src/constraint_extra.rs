@@ -273,7 +273,12 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie3_god).unwrap();
                 root_ptr = root_node_trie;
-                root_info = format!("Root Node {} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+                let max_depth_str = if root_node.max_depth == usize::MAX {
+                    "".to_string()
+                } else {
+                    format!(" (MaxDepth: {})", root_node.max_depth)
+                };
+                root_info = format!("Root Node {}{}{}", root_ptr, max_depth_str, if root_node.value.end { " [END]" } else { "" });
             }
             println!("{}", root_info);
 
@@ -366,20 +371,35 @@ pub fn dump_precompute_trie3_recursive(
         let is_last = i == children_to_visit.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
         let (pop_len, llm_bv) = edge_key;
-        let llm_tokens_display = format_bv_with_tokens(llm_bv, original_internal_bimap, llm_token_map, 5);
-        let edge_key_display = format!("(pop: {}, tokens: {})", pop_len, llm_tokens_display);
-        let state_ids_display = format_hybrid_bitset_neatly(edge_val_bv);
+
+        let mut edge_parts = vec![format!("pop: {}", pop_len)];
+        if *llm_bv != LLMTokenBV::max_ones() {
+            let llm_tokens_display = format_bv_with_tokens(llm_bv, original_internal_bimap, llm_token_map, 5);
+            edge_parts.push(format!("tokens: {}", llm_tokens_display));
+        }
+        let edge_key_display = format!("({})", edge_parts.join(", "));
+
+        let state_ids_display = if *edge_val_bv == HybridBitset::max_ones() {
+            String::new()
+        } else {
+            format!("states {} ", format_hybrid_bitset_neatly(edge_val_bv))
+        };
 
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read(trie3_god).unwrap();
             let ptr = child_arc;
-            (ptr, format!("Node {} (MaxDepth: {}){}", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
+            let max_depth_str = if child_node.max_depth == usize::MAX {
+                "".to_string()
+            } else {
+                format!(" (MaxDepth: {})", child_node.max_depth)
+            };
+            (ptr, format!("Node {}{}{}", ptr, max_depth_str, if child_node.value.end { " [END]" } else { "" }), visited.contains(&ptr), child_node.value.end)
         };
 
         if is_visited && !is_end_node {
-            println!("{}{} Edge {}: states {} -> Ref to {}", prefix, connector, edge_key_display, state_ids_display, child_info);
+            println!("{}{} Edge {}: {}-> Ref to {}", prefix, connector, edge_key_display, state_ids_display, child_info);
         } else {
-            println!("{}{} Edge {}: states {} -> {}", prefix, connector, edge_key_display, state_ids_display, child_info);
+            println!("{}{} Edge {}: {}-> {}", prefix, connector, edge_key_display, state_ids_display, child_info);
             if !is_visited {
                 visited.insert(*child_ptr);
                 let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
