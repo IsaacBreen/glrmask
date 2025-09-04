@@ -1664,8 +1664,7 @@ pub(crate) fn fuse_predecessors_recursive(
 
 /// Checks if a GSS has a simple structure that can be cached.
 /// The simple structures are:
-/// 1. `Internal(state_id) -> Root(leaf)`
-/// 2. `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
+/// `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
 /// Returns `Some((state_id, stored_trie_nodes))` if it matches.
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
@@ -1683,30 +1682,20 @@ pub(crate) fn is_simple_gss(
                     let predecessor = &pred_vec[0];
                     let state_id_x = edge_content.state_id;
 
-                    // Now check the predecessor.
-                    match predecessor.as_ref() {
-                        // Case 1: Predecessor is a leaf (Root node). This is pattern 1.
-                        GSSNode::Root(root) => {
-                            let stored_nodes = root.acc.stored_trie_nodes().clone();
-                            if !stored_nodes.is_empty() {
-                                return Some((state_id_x, stored_nodes));
-                            }
-                        }
-                        // Case 2: Predecessor is an internal node. Check for pattern 2.
-                        GSSNode::Internal(pred_internal) => {
-                            // This must be the node with the hallucinated state ID edge.
-                            if pred_internal.predecessors.len() == 1 {
-                                let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
-                                if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
-                                    let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
-                                    if halluc_pred_vec.len() == 1 {
-                                        let leaf = &halluc_pred_vec[0];
-                                        if let GSSNode::Root(leaf_root) = leaf.as_ref() {
-                                            // This is pattern 2.
-                                            let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
-                                            if !stored_nodes.is_empty() {
-                                                return Some((state_id_x, stored_nodes));
-                                            }
+                    // Now check the predecessor. It must be an internal node.
+                    if let GSSNode::Internal(pred_internal) = predecessor.as_ref() {
+                        // This must be the node with the hallucinated state ID edge.
+                        if pred_internal.predecessors.len() == 1 {
+                            let (halluc_edge, halluc_preds_by_depth) = pred_internal.predecessors.iter().next().unwrap();
+                            if halluc_edge.state_id == hallucinated_state_id && halluc_preds_by_depth.len() == 1 {
+                                let (_depth, halluc_pred_vec) = halluc_preds_by_depth.iter().next().unwrap();
+                                if halluc_pred_vec.len() == 1 {
+                                    let leaf = &halluc_pred_vec[0];
+                                    if let GSSNode::Root(leaf_root) = leaf.as_ref() {
+                                        // This is the valid pattern.
+                                        let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
+                                        if !stored_nodes.is_empty() {
+                                            return Some((state_id_x, stored_nodes));
                                         }
                                     }
                                 }
