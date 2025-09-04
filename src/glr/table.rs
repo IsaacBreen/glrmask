@@ -1,6 +1,7 @@
 use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
+use crate::constraint::StateIDBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -855,6 +856,28 @@ pub fn stage_9(
     substring_gotos
 }
 
+/// Pre-computes a map from (reduce non-terminal, goto state) to the set of states
+/// that perform that goto. This is an inverted index of the GOTO table.
+pub fn stage_10(
+    table: &Table,
+) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
+    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> = BTreeMap::new();
+
+    for (&source_state_id, row) in table {
+        for (&nt_id, goto) in &row.gotos {
+            if let Some(goto_state_id) = goto.state_id {
+                reduce_goto_map
+                    .entry(nt_id)
+                    .or_default()
+                    .entry(goto_state_id)
+                    .or_default()
+                    .insert(source_state_id.0);
+            }
+        }
+    }
+    reduce_goto_map
+}
+
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
 fn compute_unit_reduction_chain<'a, F>(
     table: &'a Table,
@@ -1004,7 +1027,7 @@ fn merge_compatible_states(
 }
 
 #[time_it]
-pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, crate::glr::parser::ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
     let original_productions = productions.to_vec();
     let start_production_id = 0;
@@ -1076,6 +1099,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 9: Precomputing substring gotos");
     let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
 
+    crate::debug!(2, "Stage 10: Precomputing reduce goto map");
+    let reduce_goto_map = stage_10(&stage_8_table);
+
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
 
@@ -1086,7 +1112,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
