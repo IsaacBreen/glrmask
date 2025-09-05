@@ -613,8 +613,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // Read it
     let file = File::open(&constraint_cache_path)?;
     let reader = BufReader::new(file);
-    let mut decoder = flate2::read::GzDecoder::new(reader);
-    let grammar_constraint: GrammarConstraint = JSONConvertible::from_reader(&mut decoder)?;
+    // let mut decoder = flate2::read::GzDecoder::new(reader);
+    // let grammar_constraint: GrammarConstraint = JSONConvertible::from_reader(&mut decoder)?;
+    let grammar_constraint: GrammarConstraint = JSONConvertible::from_reader(reader)?;
     println!("GrammarConstraint loaded back successfully from {}", constraint_cache_path.display());
 
     return Ok(());
