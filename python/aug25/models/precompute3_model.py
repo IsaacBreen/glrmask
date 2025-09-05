@@ -1,5 +1,6 @@
 import json
 from typing import Dict, List, Tuple, Optional
+import time
 from collections import defaultdict
 from ..common_interface import GraphProvider
 import _sep1 as ffi  # the compiled module
@@ -59,6 +60,9 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+        t0 = time.time()
+        print(f"[{time.time() - t0:.4f}] get_mask: start")
+
         # Final mask to return
         final_mask = ffi.Bitset.zeros()
 
@@ -68,8 +72,10 @@ class Model(GraphProvider):
         stopped: set[int] = set()
         # depth scheduler: depth -> set(node_idx)
         todo: Dict[int, set[int]] = defaultdict(set)
+        print(f"[{time.time() - t0:.4f}] get_mask: after init")
 
         # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+        t_seed_start = time.time()
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(int(sid))
             if root_idx is None:
@@ -84,25 +90,48 @@ class Model(GraphProvider):
                 values[root_idx] = gss.clone_node()
             depth = self.max_depth[root_idx]
             todo[depth].add(root_idx)
+        t_seed_end = time.time()
+        print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
 
         # Main scheduler loop (depth-ascending)
+        t_loop_start = time.time()
+
+        # Timing accumulators
+        time_pop_bucket = 0.0
+        time_node_setup = 0.0
+        time_end_check = 0.0
+        time_popn_collect = 0.0
+        time_filter_peeks = 0.0
+        time_merge_matched = 0.0
+        time_prune = 0.0
+        time_merge_values = 0.0
+
+        loop_count = 0
         while todo:
+            loop_count += 1
+
             # Pop the smallest depth bucket
+            t1 = time.time()
             current_depth = min(todo.keys())
             node_indices = todo.pop(current_depth)
+            time_pop_bucket += time.time() - t1
 
             for node_idx in list(node_indices):
+                t1 = time.time()
                 if node_idx in stopped:
                     continue
 
                 agg: Optional[int] = values.pop(node_idx, None)
                 if agg is None:
                     continue
+                time_node_setup += time.time() - t1
 
                 # Process callback (end-node handling + stop condition)
+                t1 = time.time()
                 if self.is_end(node_idx):
                     final_mask = final_mask.union(agg.allowed_llm_tokens())
                 keep_going = agg.is_ok()
+                time_end_check += time.time() - t1
                 if not keep_going:
                     stopped.add(node_idx)
                     continue
@@ -111,29 +140,39 @@ class Model(GraphProvider):
                 node = self.arena.get(node_idx, {})
                 children = node.get("children") or []
                 for (pop, llm_bv), dests in children:
+                    t1 = time.time()
                     peeks = ffi.gss_popn_collect(agg, int(pop))
+                    time_popn_collect += time.time() - t1
                     if not peeks:
                         continue
 
                     for dest_idx, state_bv in dests:
                         # Filter popped parents by state bitset
+                        t1 = time.time()
                         matched = []
                         if not state_bv.is_empty():
                             for (sid_val, parent_node) in peeks:
                                 if state_bv.contains(sid_val):
                                     matched.append(parent_node)
+                        time_filter_peeks += time.time() - t1
                         if not matched:
                             continue
 
                         # Merge matched parents
+                        t1 = time.time()
                         child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
+                        time_merge_matched += time.time() - t1
+
                         # Restrict by this edge's LLM token BV
+                        t1 = time.time()
                         if not llm_bv.is_empty():
                             ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+                        time_prune += time.time() - t1
                         if not child_gss.is_ok():
                             continue
 
                         d = int(dest_idx)
+                        t1 = time.time()
                         if d in values:
                             combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
                             # Only re-enqueue if effectively changed
@@ -142,8 +181,21 @@ class Model(GraphProvider):
                             values[d] = combined
                         else:
                             values[d] = child_gss
+                        time_merge_values += time.time() - t1
 
                         child_depth = self.max_depth[d]
                         todo[child_depth].add(d)
 
+        t_loop_end = time.time()
+        print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
+        print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
+        print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
+        print(f"    - 3. End check:         {time_end_check:.4f}s")
+        print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
+        print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
+        print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
+        print(f"    - 7. Prune:             {time_prune:.4f}s")
+        print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+
+        print(f"[{time.time() - t0:.4f}] get_mask: returning")
         return final_mask

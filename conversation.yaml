@@ -1,1646 +1,9 @@
 local_system:
   attached_files:
-    - python/src/lib.rs
     - python/aug25/models/precompute3_model.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/src/lib.rs: |-
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict, PyTuple};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::{GLRParser, GLRParserState};
-      use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-      use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
-      use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      use sep1::datastructures::u8set::U8Set;
-      use sep1::interface::IncrementalParser;
-      use sep1::json_serialization::{JSONConvertible, JSONNode};
-      use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-      use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats};
-
-      #[pyclass(name = "GrammarExpr")]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
-
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
-
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn literal(bytes: Vec<u8>) -> Self {
-              Self {
-                  inner: grammar_literal(bytes),
-              }
-          }
-      }
-
-      #[pyclass(name = "RegexExpr")]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_seq(s: &[u8]) -> Self {
-              Self { inner: eat_u8_seq(s.to_vec()) }
-          }
-
-          #[staticmethod]
-          pub fn eat_u8_set(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set(u8set) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_set_negation(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set_negation(u8set) }
-          }
-
-          #[staticmethod]
-          pub fn eat_any() -> Self {
-              Self { inner: eat_any_fast() }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "RegexGroup")]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass(name = "RegexGroups")]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "Regex")]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-          // Python methods for PyRegex if needed
-      }
-
-      #[pyclass(name = "GrammarDefinition")]
-      #[derive(Clone)]
-      pub struct PyGrammarDefinition {
-          inner: GrammarDefinition,
-      }
-
-      #[pymethods]
-      impl PyGrammarDefinition {
-          #[new]
-          fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
-              let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
-              let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
-
-              let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
-                   .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          #[staticmethod]
-          fn from_ebnf_file(path: &str) -> PyResult<Self> {
-              let grammar_def = GrammarDefinition::from_ebnf_file(path)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
-                      format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          fn simplify(&mut self) {
-              self.inner.simplify();
-          }
-
-          fn compile(&self) -> PyResult<PyCompiledGrammar> {
-              let compiled_grammar = CompiledGrammar::from_definition(Arc::new(self.inner.clone()));
-              Ok(PyCompiledGrammar { inner: compiled_grammar })
-          }
-
-          fn print(&self) {
-              // The Debug impl for GrammarDefinition is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = GrammarDefinition::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarDefinition from JSONNode: {}", e)))?;
-              Ok(PyGrammarDefinition { inner: grammar })
-          }
-      }
-
-
-      #[pyclass(name = "CompiledGrammar")]
-      #[derive(Clone)]
-      pub struct PyCompiledGrammar {
-          inner: CompiledGrammar,
-      }
-
-      #[pymethods]
-      impl PyCompiledGrammar {
-          // If direct access to GLRParser is needed in Python, expose it.
-          // fn glr_parser(&self) -> PyGLRParser {
-          //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
-          // }
-
-          fn print(&self) {
-              // The Debug impl for CompiledGrammar is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = CompiledGrammar::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
-              Ok(PyCompiledGrammar { inner: grammar })
-          }
-      }
-
-      // PyGLRParser might not be needed if not directly manipulated from Python,
-      // as it's part of CompiledGrammar.
-      // #[pyclass]
-      // #[derive(Clone)]
-      // pub struct PyGLRParser {
-      //     inner: GLRParser,
-      // }
-      // #[pymethods]
-      // impl PyGLRParser {
-      //     fn print(&self) {
-      //         println!("{}", self.inner)
-      //     }
-      // }
-
-      #[pyclass(name = "GrammarConstraint")]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-              // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
-              // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
-              // but it's part of the conceptual model for token ranges.
-              // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
-              // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
-              // The old from_grammar took it, but new from_compiled_grammar doesn't.
-              // Let's assume eof handling is implicit or managed by GrammarConstraintState.
-              let constraint = GrammarConstraint::from_compiled_grammar(
-                  grammar.inner.clone(), // Clone the CompiledGrammar
-                  llm_token_map,
-                  LLMTokenID(0),
-                  max_llm_token_id,
-              );
-
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Printing GrammarConstraint can be complex.
-              // Consider what information is useful to expose.
-              println!("PyGrammarConstraint (details not implemented for print)");
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let constraint = GrammarConstraint::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn precompute2_json_string(&self) -> PyResult<String> {
-              // Build [roots_map, arena] JSON array
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed2.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie2_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn precompute3_json_string(&self) -> PyResult<String> {
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed3.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie3_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
-              let dict = PyDict::new_bound(py);
-              for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
-                  dict.set_item(token_id.0, token_bytes.as_slice())?;
-              }
-              Ok(dict.into())
-          }
-
-          fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*orig, *intl);
-              }
-              Ok(m)
-          }
-
-          fn internal_to_original_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*intl, *orig);
-              }
-              Ok(m)
-          }
-
-          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.internal_bv_to_original(&bv.inner))
-          }
-
-          fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
-          }
-      }
-
-      #[pyclass(name = "Bitset")]
-      #[derive(Clone)]
-      pub struct PyHybridBitset {
-          inner: RustHybridBitset,
-      }
-
-      #[pymethods]
-      impl PyHybridBitset {
-          #[new]
-          fn new() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn zeros() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn ones(len: usize) -> Self {
-              Self { inner: RustHybridBitset::ones(len) }
-          }
-
-          #[staticmethod]
-          fn from_indices(indices: Vec<usize>) -> Self {
-              Self { inner: RustHybridBitset::from_iter(indices) }
-          }
-
-          #[staticmethod]
-          fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-              let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
-              let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-                  json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
-              )).expect("Bitset::from_ranges JSON");
-              Self { inner }
-          }
-
-          fn to_indices(&self) -> Vec<usize> {
-              self.inner.iter().collect()
-          }
-
-          fn to_ranges(&self) -> Vec<(usize, usize)> {
-              // reuse JSON conversion for simplicity
-              let json = self.inner.to_json();
-              let arr = match json {
-                  sep1::json_serialization::JSONNode::Array(arr) => arr,
-                  _ => vec![],
-              };
-              let mut out = Vec::new();
-              for pair in arr {
-                  if let sep1::json_serialization::JSONNode::Array(v) = pair {
-                      if v.len() == 2 {
-                          let s = usize::from_json(v[0].clone()).unwrap();
-                          let e = usize::from_json(v[1].clone()).unwrap();
-                          out.push((s,e));
-                      }
-                  }
-              }
-              out
-          }
-
-          fn contains(&self, idx: usize) -> bool {
-              self.inner.contains(idx)
-          }
-
-          fn insert(&mut self, idx: usize) {
-              let _ = self.inner.insert(idx);
-          }
-
-          fn remove(&mut self, idx: usize) {
-              let _ = self.inner.remove(idx);
-          }
-
-          fn set(&mut self, idx: usize, value: bool) {
-              self.inner.set(idx, value);
-          }
-
-          fn is_empty(&self) -> bool {
-              self.inner.is_empty()
-          }
-
-          fn len(&self) -> usize {
-              self.inner.len()
-          }
-
-          fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner | &other.inner }
-          }
-
-          fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner & &other.inner }
-          }
-
-          fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner - &other.inner }
-          }
-
-          fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner ^ &other.inner }
-          }
-
-          fn to_json_string(&self) -> String {
-              self.inner.to_json().to_json_string()
-          }
-
-          #[staticmethod]
-          fn from_json_string(s: &str) -> PyResult<Self> {
-              let node = sep1::json_serialization::JSONNode::from_json_string(s)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
-              let inner = RustHybridBitset::from_json(node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
-              Ok(Self { inner })
-          }
-      }
-
-      impl From<RustHybridBitset> for PyHybridBitset {
-          fn from(inner: RustHybridBitset) -> Self { Self { inner } }
-      }
-      impl From<PyHybridBitset> for RustHybridBitset {
-          fn from(p: PyHybridBitset) -> Self { p.inner }
-      }
-
-      #[pyclass(name = "GSSNode")]
-      #[derive(Clone)]
-      pub struct PyGSSNode {
-          inner: std::sync::Arc<RustGSSNode>,
-      }
-
-      #[pymethods]
-      impl PyGSSNode {
-          #[new]
-          fn new() -> Self {
-              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-          }
-
-          fn ptr(&self) -> usize {
-              // Stable identity for the inner Arc<GSSNode>; useful for change detection
-              let raw = std::sync::Arc::as_ptr(&self.inner);
-              raw as usize
-          }
-
-          fn is_alive(&self) -> bool {
-              self.inner.is_alive()
-          }
-
-          fn is_ok(&self) -> bool {
-              self.inner.is_ok()
-          }
-
-          fn allowed_llm_tokens(&self) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.allowed_llm_tokens())
-          }
-
-          fn clone_node(&self) -> PyGSSNode {
-              self.clone()
-          }
-
-          fn print_stats(&self) {
-              let stats = gather_gss_stats(&[self.inner.as_ref()]);
-              println!("{:#?}", stats);
-          }
-      }
-
-      #[pyfunction]
-      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-          PyGSSNode { inner: merged }
-      }
-
-      #[pyfunction]
-      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-          let mut arc = node.inner.clone();
-          rust_allow_only(&mut arc, &bv.inner);
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-          let pairs = rust_popn_collect(&node.inner, n);
-          pairs.into_iter()
-              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-              .collect()
-      }
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-          #[borrows(constraint)]
-          #[covariant]
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass(name = "GrammarConstraintState")]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |c: &PyGrammarConstraint| {
-                          let state = c.inner.init();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter_bits().collect();
-              Ok(bools.into_pyarray_bound(py))
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-              });
-          }
-
-          fn print_stats(&self) {
-              self.inner.with_inner(|state| state.print_gss_stats());
-          }
-
-          fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
-              let mut out = std::collections::BTreeMap::new();
-              self.inner.with_inner(|state| {
-                  for (tokenizer_state_id, glr_state) in &state.state {
-                  if glr_state.active_state.stack.is_empty() {
-                      continue;
-                  }
-                  let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
-                  let mut forbidden = RustHybridBitset::zeros();
-
-                  for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
-                      if disallowed_terminals_for_range.is_empty() { continue; }
-                      let possible_matches = &state.parent.possible_matches;
-                      let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
-                      for (_sid, per_state) in slice {
-                          for (terminal_id, llm_bv) in per_state {
-                              if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                  forbidden |= llm_bv.clone();
-                              }
-                          }
-                      }
-                      }
-
-                  let mut gss_arc = glr_state.active_state.stack.clone();
-                  if !forbidden.is_empty() {
-                      let allowed = &RustHybridBitset::max_ones() - &forbidden;
-                      rust_allow_only(&mut gss_arc, &allowed);
-                  }
-                  out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
-              }
-              });
-              Ok(out)
-          }
-      }
-
-      #[self_referencing]
-      struct PyIncrementalParserWrapper {
-          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-          #[borrows(grammar)]
-          #[covariant]
-          parser: IncrementalParser<'this>,
-      }
-
-      #[pyclass(name = "IncrementalParser")]
-      pub struct PyIncrementalParser {
-          inner: PyIncrementalParserWrapper,
-      }
-
-      #[pymethods]
-      impl PyIncrementalParser {
-          #[new]
-          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-              Ok(PyIncrementalParser {
-                  inner: PyIncrementalParserWrapperTryBuilder {
-                      grammar, // PyCompiledGrammar is moved in
-                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-                  }.try_build()?
-              })
-          }
-
-          fn feed(&mut self, bytes: &[u8]) {
-              self.inner.with_parser_mut(|p| p.feed(bytes));
-          }
-
-          fn is_valid(&self) -> bool {
-              self.inner.with_parser(|p| p.is_valid())
-          }
-      }
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyRegex>()?;
-          m.add_class::<PyGrammarDefinition>()?;
-          m.add_class::<PyCompiledGrammar>()?;
-          // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          m.add_class::<PyHybridBitset>()?;
-          m.add_class::<PyGSSNode>()?;
-          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-          m.add_class::<PyIncrementalParser>()?;
-          Ok(())
-      }
-    python/aug25/models/precompute3_model.py: |-
-      import json
-      from typing import Dict, List, Tuple, Optional
-      from collections import defaultdict
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi  # the compiled module
-      from tqdm.auto import tqdm
-
-      class Model(GraphProvider):
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-              self.arena = arena
-              self.max_depth: Dict[int, int] = {}
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
-              for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
-                  # Record node max_depth (if absent, assume 0)
-                  try:
-                      self.max_depth[int(uid)] = int(node.get("max_depth", 0))
-                  except Exception:
-                      self.max_depth[int(uid)] = 0
-
-                  ch = node.get("children") or []
-                  newch = []
-                  for edge_key, dest_map in ch:
-                      pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      newdm = []
-                      for dest_idx, state_bv_json in dest_map:
-                          newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
-                      newch.append(((int(pop), llm_rs), newdm))
-                  node["children"] = newch
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data['precomputed3']
-              arena_json = data['trie3_god']
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              return Model(roots_map, arena)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
-
-          def iter_edges(self, node: int, token: int):
-              # For equivalence checking, we must "explode" the state_bv into individual
-              # state IDs to match the GraphProvider interface expected by the checker.
-              # This is not used by the performance-critical get_mask() method.
-              for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-                  if llm_rs.contains(token):
-                      for dest_idx, state_rs in dests:
-                          if not state_rs: # Epsilon transition on GSS stack
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_rs.intervals:
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              for sid, gss in state_to_gss.items():
-                  gss.print_stats()
-              # Final mask to return
-              final_mask = ffi.Bitset.zeros()
-
-              # values: pending value per trie node (accumulated GSS after merges)
-              values: Dict[int, ffi.GSSNode] = {}
-              # nodes that decided to stop (GSS not ok)
-              stopped: set[int] = set()
-              # depth scheduler: depth -> set(node_idx)
-              todo: Dict[int, set[int]] = defaultdict(set)
-
-              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
-              for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-                  if root_idx in values:
-                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 9999999)
-                      # Re-enqueue only if the merge structurally changes the node
-                      if merged.ptr() != values[root_idx].ptr():
-                          values[root_idx] = merged
-                  else:
-                      values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
-                  todo[depth].add(root_idx)
-
-              # Main scheduler loop (depth-ascending)
-              while todo:
-                  # Pop the smallest depth bucket
-                  current_depth = min(todo.keys())
-                  node_indices = todo.pop(current_depth)
-
-                  for node_idx in list(node_indices):
-                      if node_idx in stopped:
-                          continue
-
-                      agg: Optional[int] = values.pop(node_idx, None)
-                      if agg is None:
-                          continue
-
-                      # Process callback (end-node handling + stop condition)
-                      if self.is_end(node_idx):
-                          final_mask = final_mask.union(agg.allowed_llm_tokens())
-                      keep_going = agg.is_ok()
-                      if not keep_going:
-                          stopped.add(node_idx)
-                          continue
-
-                      # Grouped step over (pop, llm_rs)
-                      node = self.arena.get(node_idx, {})
-                      children = node.get("children") or []
-                      for (pop, llm_rs), dests in children:
-                          peeks = ffi.gss_popn_collect(agg, int(pop))
-                          if not peeks:
-                              continue
-
-                          for dest_idx, state_bv in dests:
-                              # Filter popped parents by state bitset
-                              matched = []
-                              if state_bv:
-                                  for (sid_val, parent_node) in peeks:
-                                      if state_bv.contains(sid_val):
-                                          matched.append(parent_node)
-                              if not matched:
-                                  continue
-
-                              # Merge matched parents
-                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
-                              # Restrict by this edge's LLM token BV
-                              if llm_rs.intervals:
-                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
-                              if not child_gss.is_ok():
-                                  continue
-
-                              d = int(dest_idx)
-                              if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
-                                  # Only re-enqueue if effectively changed
-                                  if combined.ptr() == values[d].ptr():
-                                      continue
-                                  values[d] = combined
-                              else:
-                                  values[d] = child_gss
-
-                              child_depth = self.max_depth.get(d, 0)
-                              todo[child_depth].add(d)
-
-              return final_mask
-  prev_file_contents:
-    python/src/lib.rs: |-
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict, PyTuple};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::{GLRParser, GLRParserState};
-      use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-      use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
-      use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      use sep1::datastructures::u8set::U8Set;
-      use sep1::interface::IncrementalParser;
-      use sep1::json_serialization::{JSONConvertible, JSONNode};
-      use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-      use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats};
-
-      #[pyclass(name = "GrammarExpr")]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
-
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
-
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn literal(bytes: Vec<u8>) -> Self {
-              Self {
-                  inner: grammar_literal(bytes),
-              }
-          }
-      }
-
-      #[pyclass(name = "RegexExpr")]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_seq(s: &[u8]) -> Self {
-              Self { inner: eat_u8_seq(s.to_vec()) }
-          }
-
-          #[staticmethod]
-          pub fn eat_u8_set(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set(u8set) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_set_negation(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set_negation(u8set) }
-          }
-
-          #[staticmethod]
-          pub fn eat_any() -> Self {
-              Self { inner: eat_any_fast() }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "RegexGroup")]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass(name = "RegexGroups")]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "Regex")]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-          // Python methods for PyRegex if needed
-      }
-
-      #[pyclass(name = "GrammarDefinition")]
-      #[derive(Clone)]
-      pub struct PyGrammarDefinition {
-          inner: GrammarDefinition,
-      }
-
-      #[pymethods]
-      impl PyGrammarDefinition {
-          #[new]
-          fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
-              let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
-              let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
-
-              let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
-                   .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          #[staticmethod]
-          fn from_ebnf_file(path: &str) -> PyResult<Self> {
-              let grammar_def = GrammarDefinition::from_ebnf_file(path)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
-                      format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          fn simplify(&mut self) {
-              self.inner.simplify();
-          }
-
-          fn compile(&self) -> PyResult<PyCompiledGrammar> {
-              let compiled_grammar = CompiledGrammar::from_definition(Arc::new(self.inner.clone()));
-              Ok(PyCompiledGrammar { inner: compiled_grammar })
-          }
-
-          fn print(&self) {
-              // The Debug impl for GrammarDefinition is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = GrammarDefinition::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarDefinition from JSONNode: {}", e)))?;
-              Ok(PyGrammarDefinition { inner: grammar })
-          }
-      }
-
-
-      #[pyclass(name = "CompiledGrammar")]
-      #[derive(Clone)]
-      pub struct PyCompiledGrammar {
-          inner: CompiledGrammar,
-      }
-
-      #[pymethods]
-      impl PyCompiledGrammar {
-          // If direct access to GLRParser is needed in Python, expose it.
-          // fn glr_parser(&self) -> PyGLRParser {
-          //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
-          // }
-
-          fn print(&self) {
-              // The Debug impl for CompiledGrammar is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = CompiledGrammar::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
-              Ok(PyCompiledGrammar { inner: grammar })
-          }
-      }
-
-      // PyGLRParser might not be needed if not directly manipulated from Python,
-      // as it's part of CompiledGrammar.
-      // #[pyclass]
-      // #[derive(Clone)]
-      // pub struct PyGLRParser {
-      //     inner: GLRParser,
-      // }
-      // #[pymethods]
-      // impl PyGLRParser {
-      //     fn print(&self) {
-      //         println!("{}", self.inner)
-      //     }
-      // }
-
-      #[pyclass(name = "GrammarConstraint")]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-              // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
-              // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
-              // but it's part of the conceptual model for token ranges.
-              // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
-              // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
-              // The old from_grammar took it, but new from_compiled_grammar doesn't.
-              // Let's assume eof handling is implicit or managed by GrammarConstraintState.
-              let constraint = GrammarConstraint::from_compiled_grammar(
-                  grammar.inner.clone(), // Clone the CompiledGrammar
-                  llm_token_map,
-                  LLMTokenID(0),
-                  max_llm_token_id,
-              );
-
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Printing GrammarConstraint can be complex.
-              // Consider what information is useful to expose.
-              println!("PyGrammarConstraint (details not implemented for print)");
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let constraint = GrammarConstraint::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn precompute2_json_string(&self) -> PyResult<String> {
-              // Build [roots_map, arena] JSON array
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed2.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie2_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn precompute3_json_string(&self) -> PyResult<String> {
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed3.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie3_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
-              let dict = PyDict::new_bound(py);
-              for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
-                  dict.set_item(token_id.0, token_bytes.as_slice())?;
-              }
-              Ok(dict.into())
-          }
-
-          fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*orig, *intl);
-              }
-              Ok(m)
-          }
-
-          fn internal_to_original_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*intl, *orig);
-              }
-              Ok(m)
-          }
-
-          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.internal_bv_to_original(&bv.inner))
-          }
-
-          fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
-          }
-      }
-
-      #[pyclass(name = "Bitset")]
-      #[derive(Clone)]
-      pub struct PyHybridBitset {
-          inner: RustHybridBitset,
-      }
-
-      #[pymethods]
-      impl PyHybridBitset {
-          #[new]
-          fn new() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn zeros() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn ones(len: usize) -> Self {
-              Self { inner: RustHybridBitset::ones(len) }
-          }
-
-          #[staticmethod]
-          fn from_indices(indices: Vec<usize>) -> Self {
-              Self { inner: RustHybridBitset::from_iter(indices) }
-          }
-
-          #[staticmethod]
-          fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-              let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
-              let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-                  json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
-              )).expect("Bitset::from_ranges JSON");
-              Self { inner }
-          }
-
-          fn to_indices(&self) -> Vec<usize> {
-              self.inner.iter().collect()
-          }
-
-          fn to_ranges(&self) -> Vec<(usize, usize)> {
-              // reuse JSON conversion for simplicity
-              let json = self.inner.to_json();
-              let arr = match json {
-                  sep1::json_serialization::JSONNode::Array(arr) => arr,
-                  _ => vec![],
-              };
-              let mut out = Vec::new();
-              for pair in arr {
-                  if let sep1::json_serialization::JSONNode::Array(v) = pair {
-                      if v.len() == 2 {
-                          let s = usize::from_json(v[0].clone()).unwrap();
-                          let e = usize::from_json(v[1].clone()).unwrap();
-                          out.push((s,e));
-                      }
-                  }
-              }
-              out
-          }
-
-          fn contains(&self, idx: usize) -> bool {
-              self.inner.contains(idx)
-          }
-
-          fn insert(&mut self, idx: usize) {
-              let _ = self.inner.insert(idx);
-          }
-
-          fn remove(&mut self, idx: usize) {
-              let _ = self.inner.remove(idx);
-          }
-
-          fn set(&mut self, idx: usize, value: bool) {
-              self.inner.set(idx, value);
-          }
-
-          fn is_empty(&self) -> bool {
-              self.inner.is_empty()
-          }
-
-          fn len(&self) -> usize {
-              self.inner.len()
-          }
-
-          fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner | &other.inner }
-          }
-
-          fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner & &other.inner }
-          }
-
-          fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner - &other.inner }
-          }
-
-          fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner ^ &other.inner }
-          }
-
-          fn to_json_string(&self) -> String {
-              self.inner.to_json().to_json_string()
-          }
-
-          #[staticmethod]
-          fn from_json_string(s: &str) -> PyResult<Self> {
-              let node = sep1::json_serialization::JSONNode::from_json_string(s)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
-              let inner = RustHybridBitset::from_json(node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
-              Ok(Self { inner })
-          }
-      }
-
-      impl From<RustHybridBitset> for PyHybridBitset {
-          fn from(inner: RustHybridBitset) -> Self { Self { inner } }
-      }
-      impl From<PyHybridBitset> for RustHybridBitset {
-          fn from(p: PyHybridBitset) -> Self { p.inner }
-      }
-
-      #[pyclass(name = "GSSNode")]
-      #[derive(Clone)]
-      pub struct PyGSSNode {
-          inner: std::sync::Arc<RustGSSNode>,
-      }
-
-      #[pymethods]
-      impl PyGSSNode {
-          #[new]
-          fn new() -> Self {
-              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-          }
-
-          fn ptr(&self) -> usize {
-              // Stable identity for the inner Arc<GSSNode>; useful for change detection
-              let raw = std::sync::Arc::as_ptr(&self.inner);
-              raw as usize
-          }
-
-          fn is_alive(&self) -> bool {
-              self.inner.is_alive()
-          }
-
-          fn is_ok(&self) -> bool {
-              self.inner.is_ok()
-          }
-
-          fn allowed_llm_tokens(&self) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.allowed_llm_tokens())
-          }
-
-          fn clone_node(&self) -> PyGSSNode {
-              self.clone()
-          }
-
-          fn print_stats(&self) {
-              let stats = gather_gss_stats(&[self.inner.as_ref()]);
-              println!("{:#?}", stats);
-          }
-      }
-
-      #[pyfunction]
-      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-          PyGSSNode { inner: merged }
-      }
-
-      #[pyfunction]
-      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-          let mut arc = node.inner.clone();
-          rust_allow_only(&mut arc, &bv.inner);
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-          let pairs = rust_popn_collect(&node.inner, n);
-          pairs.into_iter()
-              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-              .collect()
-      }
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-          #[borrows(constraint)]
-          #[covariant]
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass(name = "GrammarConstraintState")]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |c: &PyGrammarConstraint| {
-                          let state = c.inner.init();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter_bits().collect();
-              Ok(bools.into_pyarray_bound(py))
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-              });
-          }
-
-          fn print_stats(&self) {
-              self.inner.with_inner(|state| state.print_gss_stats());
-          }
-
-          fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
-              let mut out = std::collections::BTreeMap::new();
-              self.inner.with_inner(|state| {
-                  for (tokenizer_state_id, glr_state) in &state.state {
-                  if glr_state.active_state.stack.is_empty() {
-                      continue;
-                  }
-                  let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
-                  let mut forbidden = RustHybridBitset::zeros();
-
-                  for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
-                      if disallowed_terminals_for_range.is_empty() { continue; }
-                      let possible_matches = &state.parent.possible_matches;
-                      let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
-                      for (_sid, per_state) in slice {
-                          for (terminal_id, llm_bv) in per_state {
-                              if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                  forbidden |= llm_bv.clone();
-                              }
-                          }
-                      }
-                      }
-
-                  let mut gss_arc = glr_state.active_state.stack.clone();
-                  if !forbidden.is_empty() {
-                      let allowed = &RustHybridBitset::max_ones() - &forbidden;
-                      rust_allow_only(&mut gss_arc, &allowed);
-                  }
-                  out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
-              }
-              });
-              Ok(out)
-          }
-      }
-
-      #[self_referencing]
-      struct PyIncrementalParserWrapper {
-          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-          #[borrows(grammar)]
-          #[covariant]
-          parser: IncrementalParser<'this>,
-      }
-
-      #[pyclass(name = "IncrementalParser")]
-      pub struct PyIncrementalParser {
-          inner: PyIncrementalParserWrapper,
-      }
-
-      #[pymethods]
-      impl PyIncrementalParser {
-          #[new]
-          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-              Ok(PyIncrementalParser {
-                  inner: PyIncrementalParserWrapperTryBuilder {
-                      grammar, // PyCompiledGrammar is moved in
-                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-                  }.try_build()?
-              })
-          }
-
-          fn feed(&mut self, bytes: &[u8]) {
-              self.inner.with_parser_mut(|p| p.feed(bytes));
-          }
-
-          fn is_valid(&self) -> bool {
-              self.inner.with_parser(|p| p.is_valid())
-          }
-      }
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyRegex>()?;
-          m.add_class::<PyGrammarDefinition>()?;
-          m.add_class::<PyCompiledGrammar>()?;
-          // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          m.add_class::<PyHybridBitset>()?;
-          m.add_class::<PyGSSNode>()?;
-          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-          m.add_class::<PyIncrementalParser>()?;
-          Ok(())
-      }
     python/aug25/models/precompute3_model.py: |-
       import json
       from typing import Dict, List, Tuple, Optional
@@ -1676,7 +39,9 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              roots_map, arena_json = json.loads(s)
+              data = json.loads(s)
+              roots_map = data['precomputed3']
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -1701,8 +66,6 @@ local_system:
                                       yield (int(pop), sid, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              for sid, gss in state_to_gss.items():
-                  gss.print_stats()
               # Final mask to return
               final_mask = ffi.Bitset.zeros()
 
@@ -1726,7 +89,7 @@ local_system:
                           values[root_idx] = merged
                   else:
                       values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
+                  depth = self.max_depth[root_idx]
                   todo[depth].add(root_idx)
 
               # Main scheduler loop (depth-ascending)
@@ -1770,7 +133,7 @@ local_system:
                                   continue
 
                               # Merge matched parents
-                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
                               # Restrict by this edge's LLM token BV
                               if not llm_bv.is_empty():
                                   ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
@@ -1779,7 +142,7 @@ local_system:
 
                               d = int(dest_idx)
                               if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
                                   # Only re-enqueue if effectively changed
                                   if combined.ptr() == values[d].ptr():
                                       continue
@@ -1787,9 +150,212 @@ local_system:
                               else:
                                   values[d] = child_gss
 
-                              child_depth = self.max_depth.get(d, 0)
+                              child_depth = self.max_depth[d]
                               todo[child_depth].add(d)
 
+              return final_mask
+  prev_file_contents:
+    python/aug25/models/precompute3_model.py: |
+      import json
+      from typing import Dict, List, Tuple, Optional
+      import time
+      from collections import defaultdict
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # the compiled module
+      from tqdm.auto import tqdm
+
+      class Model(GraphProvider):
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
+              self.arena = arena
+              self.max_depth: Dict[int, int] = {}
+              # Normalize BVs to ffi.Bitset; store stateIDBV as list of (s,e). Record max_depth.
+              for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
+                  # Record node max_depth (if absent, assume 0)
+                  try:
+                      self.max_depth[int(uid)] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[int(uid)] = 0
+
+                  ch = node.get("children") or []
+                  newch = []
+                  for edge_key, dest_map in ch:
+                      pop, llm_bv_json = edge_key
+                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                      newdm = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          newdm.append((int(dest_idx), state_bv))
+                      newch.append(((int(pop), llm_bv), newdm))
+                  node["children"] = newch
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data['precomputed3']
+              arena_json = data['trie3_god']
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int):
+              # For equivalence checking, we must "explode" the state_bv into individual
+              # state IDs to match the GraphProvider interface expected by the checker.
+              # This is not used by the performance-critical get_mask() method.
+              for (pop, llm_bv), dests in self.arena.get(node, {}).get("children") or []:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty(): # Epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              t0 = time.time()
+              print(f"[{time.time() - t0:.4f}] get_mask: start")
+
+              # Final mask to return
+              final_mask = ffi.Bitset.zeros()
+
+              # values: pending value per trie node (accumulated GSS after merges)
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (GSS not ok)
+              stopped: set[int] = set()
+              # depth scheduler: depth -> set(node_idx)
+              todo: Dict[int, set[int]] = defaultdict(set)
+              print(f"[{time.time() - t0:.4f}] get_mask: after init")
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+              t_seed_start = time.time()
+              for sid, gss in state_to_gss.items():
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  if root_idx in values:
+                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 9999999)
+                      # Re-enqueue only if the merge structurally changes the node
+                      if merged.ptr() != values[root_idx].ptr():
+                          values[root_idx] = merged
+                  else:
+                      values[root_idx] = gss.clone_node()
+                  depth = self.max_depth[root_idx]
+                  todo[depth].add(root_idx)
+              t_seed_end = time.time()
+              print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
+
+              # Main scheduler loop (depth-ascending)
+              t_loop_start = time.time()
+
+              # Timing accumulators
+              time_pop_bucket = 0.0
+              time_node_setup = 0.0
+              time_end_check = 0.0
+              time_popn_collect = 0.0
+              time_filter_peeks = 0.0
+              time_merge_matched = 0.0
+              time_prune = 0.0
+              time_merge_values = 0.0
+
+              loop_count = 0
+              while todo:
+                  loop_count += 1
+
+                  # Pop the smallest depth bucket
+                  t1 = time.time()
+                  current_depth = min(todo.keys())
+                  node_indices = todo.pop(current_depth)
+                  time_pop_bucket += time.time() - t1
+
+                  for node_idx in list(node_indices):
+                      t1 = time.time()
+                      if node_idx in stopped:
+                          continue
+
+                      agg: Optional[int] = values.pop(node_idx, None)
+                      if agg is None:
+                          continue
+                      time_node_setup += time.time() - t1
+
+                      # Process callback (end-node handling + stop condition)
+                      t1 = time.time()
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+                      keep_going = agg.is_ok()
+                      time_end_check += time.time() - t1
+                      if not keep_going:
+                          stopped.add(node_idx)
+                          continue
+
+                      # Grouped step over (pop, llm_bv)
+                      node = self.arena.get(node_idx, {})
+                      children = node.get("children") or []
+                      for (pop, llm_bv), dests in children:
+                          t1 = time.time()
+                          peeks = ffi.gss_popn_collect(agg, int(pop))
+                          time_popn_collect += time.time() - t1
+                          if not peeks:
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              # Filter popped parents by state bitset
+                              t1 = time.time()
+                              matched = []
+                              if not state_bv.is_empty():
+                                  for (sid_val, parent_node) in peeks:
+                                      if state_bv.contains(sid_val):
+                                          matched.append(parent_node)
+                              time_filter_peeks += time.time() - t1
+                              if not matched:
+                                  continue
+
+                              # Merge matched parents
+                              t1 = time.time()
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
+                              time_merge_matched += time.time() - t1
+
+                              # Restrict by this edge's LLM token BV
+                              t1 = time.time()
+                              if not llm_bv.is_empty():
+                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+                              time_prune += time.time() - t1
+                              if not child_gss.is_ok():
+                                  continue
+
+                              d = int(dest_idx)
+                              t1 = time.time()
+                              if d in values:
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
+                                  # Only re-enqueue if effectively changed
+                                  if combined.ptr() == values[d].ptr():
+                                      continue
+                                  values[d] = combined
+                              else:
+                                  values[d] = child_gss
+                              time_merge_values += time.time() - t1
+
+                              child_depth = self.max_depth[d]
+                              todo[child_depth].add(d)
+
+              t_loop_end = time.time()
+              print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
+              print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
+              print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
+              print(f"    - 3. End check:         {time_end_check:.4f}s")
+              print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
+              print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
+              print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
+              print(f"    - 7. Prune:             {time_prune:.4f}s")
+              print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+
+              print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -1827,756 +393,11 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```rust 'python/src/lib.rs'
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict, PyTuple};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::{GLRParser, GLRParserState};
-      use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-      use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
-      use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      use sep1::datastructures::u8set::U8Set;
-      use sep1::interface::IncrementalParser;
-      use sep1::json_serialization::{JSONConvertible, JSONNode};
-      use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-      use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats};
-
-      #[pyclass(name = "GrammarExpr")]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
-
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
-
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn literal(bytes: Vec<u8>) -> Self {
-              Self {
-                  inner: grammar_literal(bytes),
-              }
-          }
-      }
-
-      #[pyclass(name = "RegexExpr")]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_seq(s: &[u8]) -> Self {
-              Self { inner: eat_u8_seq(s.to_vec()) }
-          }
-
-          #[staticmethod]
-          pub fn eat_u8_set(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set(u8set) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_set_negation(set: Vec<u8>) -> Self {
-              let u8set = U8Set::from_bytes(&set);
-              Self { inner: eat_u8_set_negation(u8set) }
-          }
-
-          #[staticmethod]
-          pub fn eat_any() -> Self {
-              Self { inner: eat_any_fast() }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "RegexGroup")]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass(name = "RegexGroups")]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass(name = "Regex")]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-          // Python methods for PyRegex if needed
-      }
-
-      #[pyclass(name = "GrammarDefinition")]
-      #[derive(Clone)]
-      pub struct PyGrammarDefinition {
-          inner: GrammarDefinition,
-      }
-
-      #[pymethods]
-      impl PyGrammarDefinition {
-          #[new]
-          fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
-              let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
-              let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
-
-              let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
-                   .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          #[staticmethod]
-          fn from_ebnf_file(path: &str) -> PyResult<Self> {
-              let grammar_def = GrammarDefinition::from_ebnf_file(path)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(
-                      format!("Failed to load or parse EBNF file '{}': {}", path, e)))?;
-              Ok(PyGrammarDefinition { inner: grammar_def })
-          }
-
-          fn simplify(&mut self) {
-              self.inner.simplify();
-          }
-
-          fn compile(&self) -> PyResult<PyCompiledGrammar> {
-              let compiled_grammar = CompiledGrammar::from_definition(Arc::new(self.inner.clone()));
-              Ok(PyCompiledGrammar { inner: compiled_grammar })
-          }
-
-          fn print(&self) {
-              // The Debug impl for GrammarDefinition is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = GrammarDefinition::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarDefinition from JSONNode: {}", e)))?;
-              Ok(PyGrammarDefinition { inner: grammar })
-          }
-      }
-
-
-      #[pyclass(name = "CompiledGrammar")]
-      #[derive(Clone)]
-      pub struct PyCompiledGrammar {
-          inner: CompiledGrammar,
-      }
-
-      #[pymethods]
-      impl PyCompiledGrammar {
-          // If direct access to GLRParser is needed in Python, expose it.
-          // fn glr_parser(&self) -> PyGLRParser {
-          //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
-          // }
-
-          fn print(&self) {
-              // The Debug impl for CompiledGrammar is quite verbose.
-              // Consider a more Python-friendly summary or selective printing.
-              println!("{}", self.inner);
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let grammar = CompiledGrammar::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
-              Ok(PyCompiledGrammar { inner: grammar })
-          }
-      }
-
-      // PyGLRParser might not be needed if not directly manipulated from Python,
-      // as it's part of CompiledGrammar.
-      // #[pyclass]
-      // #[derive(Clone)]
-      // pub struct PyGLRParser {
-      //     inner: GLRParser,
-      // }
-      // #[pymethods]
-      // impl PyGLRParser {
-      //     fn print(&self) {
-      //         println!("{}", self.inner)
-      //     }
-      // }
-
-      #[pyclass(name = "GrammarConstraint")]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-              // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
-              // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
-              // but it's part of the conceptual model for token ranges.
-              // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
-              // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
-              // The old from_grammar took it, but new from_compiled_grammar doesn't.
-              // Let's assume eof handling is implicit or managed by GrammarConstraintState.
-              let constraint = GrammarConstraint::from_compiled_grammar(
-                  grammar.inner.clone(), // Clone the CompiledGrammar
-                  llm_token_map,
-                  LLMTokenID(0),
-                  max_llm_token_id,
-              );
-
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Printing GrammarConstraint can be complex.
-              // Consider what information is useful to expose.
-              println!("PyGrammarConstraint (details not implemented for print)");
-          }
-
-          fn to_json_string(&self) -> PyResult<String> {
-              Ok(self.inner.to_json().to_json_string())
-          }
-
-          #[staticmethod]
-          fn from_json_string(json_str: &str) -> PyResult<Self> {
-              let json_node = JSONNode::from_json_string(json_str)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
-              let constraint = GrammarConstraint::from_json(json_node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn precompute2_json_string(&self) -> PyResult<String> {
-              // Build [roots_map, arena] JSON array
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed2.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie2_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn precompute3_json_string(&self) -> PyResult<String> {
-              let roots_arr = sep1::json_serialization::JSONNode::Array(
-                  self.inner.precomputed3.iter()
-                      .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
-                          sid.0.to_json(), idx.to_json()
-                      ]))
-                      .collect()
-              );
-              let arena_json = self.inner.trie3_god.to_json();
-              let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
-              Ok(top.to_json_string())
-          }
-
-          fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
-              let dict = PyDict::new_bound(py);
-              for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
-                  dict.set_item(token_id.0, token_bytes.as_slice())?;
-              }
-              Ok(dict.into())
-          }
-
-          fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*orig, *intl);
-              }
-              Ok(m)
-          }
-
-          fn internal_to_original_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-              let mut m = std::collections::BTreeMap::new();
-              for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-                  m.insert(*intl, *orig);
-              }
-              Ok(m)
-          }
-
-          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.internal_bv_to_original(&bv.inner))
-          }
-
-          fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
-          }
-      }
-
-      #[pyclass(name = "Bitset")]
-      #[derive(Clone)]
-      pub struct PyHybridBitset {
-          inner: RustHybridBitset,
-      }
-
-      #[pymethods]
-      impl PyHybridBitset {
-          #[new]
-          fn new() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn zeros() -> Self {
-              Self { inner: RustHybridBitset::zeros() }
-          }
-
-          #[staticmethod]
-          fn ones(len: usize) -> Self {
-              Self { inner: RustHybridBitset::ones(len) }
-          }
-
-          #[staticmethod]
-          fn from_indices(indices: Vec<usize>) -> Self {
-              Self { inner: RustHybridBitset::from_iter(indices) }
-          }
-
-          #[staticmethod]
-          fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-              let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
-              let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-                  json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
-              )).expect("Bitset::from_ranges JSON");
-              Self { inner }
-          }
-
-          fn to_indices(&self) -> Vec<usize> {
-              self.inner.iter().collect()
-          }
-
-          fn to_ranges(&self) -> Vec<(usize, usize)> {
-              // reuse JSON conversion for simplicity
-              let json = self.inner.to_json();
-              let arr = match json {
-                  sep1::json_serialization::JSONNode::Array(arr) => arr,
-                  _ => vec![],
-              };
-              let mut out = Vec::new();
-              for pair in arr {
-                  if let sep1::json_serialization::JSONNode::Array(v) = pair {
-                      if v.len() == 2 {
-                          let s = usize::from_json(v[0].clone()).unwrap();
-                          let e = usize::from_json(v[1].clone()).unwrap();
-                          out.push((s,e));
-                      }
-                  }
-              }
-              out
-          }
-
-          fn contains(&self, idx: usize) -> bool {
-              self.inner.contains(idx)
-          }
-
-          fn insert(&mut self, idx: usize) {
-              let _ = self.inner.insert(idx);
-          }
-
-          fn remove(&mut self, idx: usize) {
-              let _ = self.inner.remove(idx);
-          }
-
-          fn set(&mut self, idx: usize, value: bool) {
-              self.inner.set(idx, value);
-          }
-
-          fn is_empty(&self) -> bool {
-              self.inner.is_empty()
-          }
-
-          fn len(&self) -> usize {
-              self.inner.len()
-          }
-
-          fn union(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner | &other.inner }
-          }
-
-          fn intersection(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner & &other.inner }
-          }
-
-          fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner - &other.inner }
-          }
-
-          fn symmetric_difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
-              PyHybridBitset { inner: &self.inner ^ &other.inner }
-          }
-
-          fn to_json_string(&self) -> String {
-              self.inner.to_json().to_json_string()
-          }
-
-          #[staticmethod]
-          fn from_json_string(s: &str) -> PyResult<Self> {
-              let node = sep1::json_serialization::JSONNode::from_json_string(s)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
-              let inner = RustHybridBitset::from_json(node)
-                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
-              Ok(Self { inner })
-          }
-      }
-
-      impl From<RustHybridBitset> for PyHybridBitset {
-          fn from(inner: RustHybridBitset) -> Self { Self { inner } }
-      }
-      impl From<PyHybridBitset> for RustHybridBitset {
-          fn from(p: PyHybridBitset) -> Self { p.inner }
-      }
-
-      #[pyclass(name = "GSSNode")]
-      #[derive(Clone)]
-      pub struct PyGSSNode {
-          inner: std::sync::Arc<RustGSSNode>,
-      }
-
-      #[pymethods]
-      impl PyGSSNode {
-          #[new]
-          fn new() -> Self {
-              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-          }
-
-          fn ptr(&self) -> usize {
-              // Stable identity for the inner Arc<GSSNode>; useful for change detection
-              let raw = std::sync::Arc::as_ptr(&self.inner);
-              raw as usize
-          }
-
-          fn is_alive(&self) -> bool {
-              self.inner.is_alive()
-          }
-
-          fn is_ok(&self) -> bool {
-              self.inner.is_ok()
-          }
-
-          fn allowed_llm_tokens(&self) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.allowed_llm_tokens())
-          }
-
-          fn clone_node(&self) -> PyGSSNode {
-              self.clone()
-          }
-
-          fn print_stats(&self) {
-              let stats = gather_gss_stats(&[self.inner.as_ref()]);
-              println!("{:#?}", stats);
-          }
-      }
-
-      #[pyfunction]
-      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-          PyGSSNode { inner: merged }
-      }
-
-      #[pyfunction]
-      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-          let mut arc = node.inner.clone();
-          rust_allow_only(&mut arc, &bv.inner);
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-          let pairs = rust_popn_collect(&node.inner, n);
-          pairs.into_iter()
-              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-              .collect()
-      }
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-          #[borrows(constraint)]
-          #[covariant]
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass(name = "GrammarConstraintState")]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |c: &PyGrammarConstraint| {
-                          let state = c.inner.init();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter_bits().collect();
-              Ok(bools.into_pyarray_bound(py))
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-              });
-          }
-
-          fn print_stats(&self) {
-              self.inner.with_inner(|state| state.print_gss_stats());
-          }
-
-          fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
-              let mut out = std::collections::BTreeMap::new();
-              self.inner.with_inner(|state| {
-                  for (tokenizer_state_id, glr_state) in &state.state {
-                  if glr_state.active_state.stack.is_empty() {
-                      continue;
-                  }
-                  let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
-                  let mut forbidden = RustHybridBitset::zeros();
-
-                  for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
-                      if disallowed_terminals_for_range.is_empty() { continue; }
-                      let possible_matches = &state.parent.possible_matches;
-                      let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
-                      for (_sid, per_state) in slice {
-                          for (terminal_id, llm_bv) in per_state {
-                              if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                  forbidden |= llm_bv.clone();
-                              }
-                          }
-                      }
-                      }
-
-                  let mut gss_arc = glr_state.active_state.stack.clone();
-                  if !forbidden.is_empty() {
-                      let allowed = &RustHybridBitset::max_ones() - &forbidden;
-                      rust_allow_only(&mut gss_arc, &allowed);
-                  }
-                  out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
-              }
-              });
-              Ok(out)
-          }
-      }
-
-      #[self_referencing]
-      struct PyIncrementalParserWrapper {
-          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-          #[borrows(grammar)]
-          #[covariant]
-          parser: IncrementalParser<'this>,
-      }
-
-      #[pyclass(name = "IncrementalParser")]
-      pub struct PyIncrementalParser {
-          inner: PyIncrementalParserWrapper,
-      }
-
-      #[pymethods]
-      impl PyIncrementalParser {
-          #[new]
-          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-              Ok(PyIncrementalParser {
-                  inner: PyIncrementalParserWrapperTryBuilder {
-                      grammar, // PyCompiledGrammar is moved in
-                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-                  }.try_build()?
-              })
-          }
-
-          fn feed(&mut self, bytes: &[u8]) {
-              self.inner.with_parser_mut(|p| p.feed(bytes));
-          }
-
-          fn is_valid(&self) -> bool {
-              self.inner.with_parser(|p| p.is_valid())
-          }
-      }
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyRegex>()?;
-          m.add_class::<PyGrammarDefinition>()?;
-          m.add_class::<PyCompiledGrammar>()?;
-          // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          m.add_class::<PyHybridBitset>()?;
-          m.add_class::<PyGSSNode>()?;
-          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-          m.add_class::<PyIncrementalParser>()?;
-          Ok(())
-      }
-      ```
-    metadata:
-      filename: python/src/lib.rs
-  - user: |-
       ```python 'python/aug25/models/precompute3_model.py'
       import json
       from typing import Dict, List, Tuple, Optional
       from collections import defaultdict
-      from ..common_interface import GraphProvider, RangeSet
+      from ..common_interface import GraphProvider
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
 
@@ -2585,7 +406,7 @@ messages:
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
               self.max_depth: Dict[int, int] = {}
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
+              # Normalize BVs to ffi.Bitset; store stateIDBV as list of (s,e). Record max_depth.
               for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
                   # Record node max_depth (if absent, assume 0)
                   try:
@@ -2597,11 +418,12 @@ messages:
                   newch = []
                   for edge_key, dest_map in ch:
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
                       newdm = []
                       for dest_idx, state_bv_json in dest_map:
-                          newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
-                      newch.append(((int(pop), llm_rs), newdm))
+                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          newdm.append((int(dest_idx), state_bv))
+                      newch.append(((int(pop), llm_bv), newdm))
                   node["children"] = newch
 
           @staticmethod
@@ -2612,7 +434,6 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
-
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
 
@@ -2623,19 +444,17 @@ messages:
               # For equivalence checking, we must "explode" the state_bv into individual
               # state IDs to match the GraphProvider interface expected by the checker.
               # This is not used by the performance-critical get_mask() method.
-              for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-                  if llm_rs.contains(token):
-                      for dest_idx, state_rs in dests:
-                          if not state_rs: # Epsilon transition on GSS stack
+              for (pop, llm_bv), dests in self.arena.get(node, {}).get("children") or []:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty(): # Epsilon transition on GSS stack
                               yield (int(pop), None, int(dest_idx))
                           else:
-                              for start, end in state_rs.intervals:
-                                  for sid in range(start, end + 1):
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end):
                                       yield (int(pop), sid, int(dest_idx))
 
           def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              for sid, gss in state_to_gss.items():
-                  gss.print_stats()
               # Final mask to return
               final_mask = ffi.Bitset.zeros()
 
@@ -2659,7 +478,7 @@ messages:
                           values[root_idx] = merged
                   else:
                       values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
+                  depth = self.max_depth[root_idx]
                   todo[depth].add(root_idx)
 
               # Main scheduler loop (depth-ascending)
@@ -2684,10 +503,10 @@ messages:
                           stopped.add(node_idx)
                           continue
 
-                      # Grouped step over (pop, llm_rs)
+                      # Grouped step over (pop, llm_bv)
                       node = self.arena.get(node_idx, {})
                       children = node.get("children") or []
-                      for (pop, llm_rs), dests in children:
+                      for (pop, llm_bv), dests in children:
                           peeks = ffi.gss_popn_collect(agg, int(pop))
                           if not peeks:
                               continue
@@ -2695,7 +514,7 @@ messages:
                           for dest_idx, state_bv in dests:
                               # Filter popped parents by state bitset
                               matched = []
-                              if state_bv:
+                              if not state_bv.is_empty():
                                   for (sid_val, parent_node) in peeks:
                                       if state_bv.contains(sid_val):
                                           matched.append(parent_node)
@@ -2703,17 +522,16 @@ messages:
                                   continue
 
                               # Merge matched parents
-                              child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                              child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
                               # Restrict by this edge's LLM token BV
-                              if llm_rs.intervals:
-                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
+                              if not llm_bv.is_empty():
+                                  ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
                               if not child_gss.is_ok():
                                   continue
 
                               d = int(dest_idx)
                               if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                                  combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
                                   # Only re-enqueue if effectively changed
                                   if combined.ptr() == values[d].ptr():
                                       continue
@@ -2721,14 +539,15 @@ messages:
                               else:
                                   values[d] = child_gss
 
-                              child_depth = self.max_depth.get(d, 0)
+                              child_depth = self.max_depth[d]
                               todo[child_depth].add(d)
 
               return final_mask
       ```
     metadata:
       filename: python/aug25/models/precompute3_model.py
-  - user: use ffi.Bitset instead of RangeSet.
+  - user: Add a bunch of prints inside `get_mask` so I can see how long each section
+      takes. Break it up into maybe 10 sections to time.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2747,288 +566,180 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      This is a great request. Switching from a custom `RangeSet` to the native `ffi.Bitset` will likely improve performance and maintainability. Here are the step-by-step instructions to make that change, followed by the corresponding git diff.
+      Of course. I'll add detailed timing prints to the `get_mask` method to help you analyze its performance. Here are the step-by-step instructions and the corresponding git diff.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      Here are the edits for `python/aug25/models/precompute3_model.py`:
+      I will modify the file `python/aug25/models/precompute3_model.py` to add performance instrumentation.
 
-      1.  **Update Imports**:
-          In `python/aug25/models/precompute3_model.py`, `RangeSet` is no longer needed. Modify the import statement at the top of the file.
+      1.  **Import `time` module**: At the top of the file, I'll add `import time`.
+      2.  **Instrument `get_mask` method**:
+          *   I'll add a timestamp `t0` at the very beginning of the method.
+          *   I'll add `print` statements to mark the start, the point after variable initialization, and after the initial seeding loop. The seeding loop itself will also be timed.
+          *   To measure the performance of the main scheduler loop, I will introduce several accumulator variables to track the total time spent in different sections of the loop:
+              *   Popping a bucket of nodes from the `todo` dictionary.
+              *   Setting up the node to be processed.
+              *   Checking if a node is an "end" node.
+              *   Popping from the GSS stack (`gss_popn_collect`).
+              *   Filtering parent nodes.
+              *   Merging matched parent nodes.
+              *   Pruning the resulting GSS node.
+              *   Merging the new GSS node into the main `values` dictionary.
+          *   After the main loop concludes, I will print a summary showing the total time spent in the loop, the number of iterations, and a breakdown of the time spent in each of the sections listed above.
+          *   Finally, a print statement will be added just before the method returns.
 
-          *   Change this line:
-              ```python
-              from ..common_interface import GraphProvider, RangeSet
-              ```
-          *   To this:
-              ```python
-              from ..common_interface import GraphProvider
-              ```
+      This will give you a clear picture of where the time is being spent within the `get_mask` function.
 
-      2.  **Modify `__init__` Method**:
-          The `__init__` method normalizes the bit-vector data from JSON. This needs to be updated to create `ffi.Bitset` objects instead of `RangeSet` objects.
+      ### Git Diff
 
-          *   Find the loop `for uid, node in tqdm(...)` within the `__init__` method.
-          *   Replace the block that processes `node["children"]`:
-              ```python
-              # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
-              ...
-              ch = node.get("children") or []
-              newch = []
-              for edge_key, dest_map in ch:
-                  pop, llm_bv_json = edge_key
-                  llm_rs = RangeSet.from_json(llm_bv_json)
-                  newdm = []
-                  for dest_idx, state_bv_json in dest_map:
-                      newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
-                  newch.append(((int(pop), llm_rs), newdm))
-              node["children"] = newch
-              ```
-          *   With this updated version that uses `ffi.Bitset`:
-              ```python
-              # Normalize BVs to ffi.Bitset; store stateIDBV as list of (s,e). Record max_depth.
-              ...
-              ch = node.get("children") or []
-              newch = []
-              for edge_key, dest_map in ch:
-                  pop, llm_bv_json = edge_key
-                  llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
-                  newdm = []
-                  for dest_idx, state_bv_json in dest_map:
-                      state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
-                      newdm.append((int(dest_idx), state_bv))
-                  newch.append(((int(pop), llm_bv), newdm))
-              node["children"] = newch
-              ```
-
-      3.  **Correct `from_json_string` Static Method**:
-          The existing `from_json_string` method expects a dictionary structure that doesn't match the array structure produced by the Rust `precompute3_json_string` function. Replace it to correctly parse the JSON array.
-
-          *   Replace the entire `from_json_string` method:
-              ```python
-              @staticmethod
-              def from_json_string(s: str) -> 'Model':
-                  data = json.loads(s)
-                  roots_map = data['precomputed3']
-                  arena_json = data['trie3_god']
-                  arena_values = arena_json.get("values", [])
-                  arena = {int(k): v for k, v in arena_values}
-                  return Model(roots_map, arena)
-              ```
-          *   With this corrected implementation:
-              ```python
-              @staticmethod
-              def from_json_string(s: str) -> 'Model':
-                  roots_map, arena_json = json.loads(s)
-                  arena_values = arena_json.get("values", [])
-                  arena = {int(k): v for k, v in arena_values}
-                  return Model(roots_map, arena)
-              ```
-
-      4.  **Update `iter_edges` Method**:
-          This method needs to be adapted to use the `ffi.Bitset` API. The emptiness check and range iteration are different. Note that `to_ranges()` returns ranges with an exclusive upper bound.
-
-          *   Replace the body of the `iter_edges` method:
-              ```python
-              # ... (method signature)
-              for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-                  if llm_rs.contains(token):
-                      for dest_idx, state_rs in dests:
-                          if not state_rs: # Epsilon transition on GSS stack
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_rs.intervals:
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-              ```
-          *   With this version:
-              ```python
-              # ... (method signature)
-              for (pop, llm_bv), dests in self.arena.get(node, {}).get("children") or []:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty(): # Epsilon transition on GSS stack
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end):
-                                      yield (int(pop), sid, int(dest_idx))
-              ```
-
-      5.  **Update `get_mask` Method**:
-          This is the core of the model's logic. Update it to use `ffi.Bitset` methods for checking emptiness and applying token restrictions.
-
-          *   Inside the `while todo:` loop, find the block that begins with `# Grouped step over (pop, llm_rs)`.
-          *   Replace this entire block:
-              ```python
-              # Grouped step over (pop, llm_rs)
-              node = self.arena.get(node_idx, {})
-              children = node.get("children") or []
-              for (pop, llm_rs), dests in children:
-                  peeks = ffi.gss_popn_collect(agg, int(pop))
-                  if not peeks:
-                      continue
-
-                  for dest_idx, state_bv in dests:
-                      # Filter popped parents by state bitset
-                      matched = []
-                      if state_bv:
-                          for (sid_val, parent_node) in peeks:
-                              if state_bv.contains(sid_val):
-                                  matched.append(parent_node)
-                      if not matched:
-                          continue
-
-                      # Merge matched parents
-                      child_gss = ffi.gss_merge_many_with_depth(matched, 1)
-                      # Restrict by this edge's LLM token BV
-                      if llm_rs.intervals:
-                          edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                          ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
-                      if not child_gss.is_ok():
-                          continue
-              ```
-          *   With the updated logic using `ffi.Bitset`:
-              ```python
-              # Grouped step over (pop, llm_bv)
-              node = self.arena.get(node_idx, {})
-              children = node.get("children") or []
-              for (pop, llm_bv), dests in children:
-                  peeks = ffi.gss_popn_collect(agg, int(pop))
-                  if not peeks:
-                      continue
-
-                  for dest_idx, state_bv in dests:
-                      # Filter popped parents by state bitset
-                      matched = []
-                      if not state_bv.is_empty():
-                          for (sid_val, parent_node) in peeks:
-                              if state_bv.contains(sid_val):
-                                  matched.append(parent_node)
-                      if not matched:
-                          continue
-
-                      # Merge matched parents
-                      child_gss = ffi.gss_merge_many_with_depth(matched, 1)
-                      # Restrict by this edge's LLM token BV
-                      if not llm_bv.is_empty():
-                          ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
-                      if not child_gss.is_ok():
-                          continue
-              ```
-
-      ### Git Diffs
-
-      Here is the git patch that applies the changes described above.
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
-      index 32c451b..5028c11 100644
+      index 45582f3..18797f2 100644
       --- a/python/aug25/models/precompute3_model.py
       +++ b/python/aug25/models/precompute3_model.py
-      @@ -1,7 +1,7 @@
+      @@ -1,5 +1,6 @@
        import json
        from typing import Dict, List, Tuple, Optional
+      +import time
        from collections import defaultdict
-      -from ..common_interface import GraphProvider, RangeSet
-      +from ..common_interface import GraphProvider
+       from ..common_interface import GraphProvider
        import _sep1 as ffi  # the compiled module
-       from tqdm.auto import tqdm
-       
-      @@ -10,7 +10,7 @@
-               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-               self.arena = arena
-               self.max_depth: Dict[int, int] = {}
-      -        # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
-      +        # Normalize BVs to ffi.Bitset; store stateIDBV as list of (s,e). Record max_depth.
-               for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
-                   # Record node max_depth (if absent, assume 0)
-                   try:
-      @@ -22,23 +22,20 @@
-                   newch = []
-                   for edge_key, dest_map in ch:
-                       pop, llm_bv_json = edge_key
-      -                llm_rs = RangeSet.from_json(llm_bv_json)
-      +                llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
-                       newdm = []
-                       for dest_idx, state_bv_json in dest_map:
-      -                    newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
-      -                newch.append(((int(pop), llm_rs), newdm))
-      +                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
-      +                    newdm.append((int(dest_idx), state_bv))
-      +                newch.append(((int(pop), llm_bv), newdm))
-                   node["children"] = newch
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      -        data = json.loads(s)
-      -        roots_map = data['precomputed3']
-      -        arena_json = data['trie3_god']
-      +        roots_map, arena_json = json.loads(s)
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               return Model(roots_map, arena)
-      -
-           def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
-       
-      @@ -49,15 +46,15 @@
-               # For equivalence checking, we must "explode" the state_bv into individual
-               # state IDs to match the GraphProvider interface expected by the checker.
-               # This is not used by the performance-critical get_mask() method.
-      -        for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-      -            if llm_rs.contains(token):
-      -                for dest_idx, state_rs in dests:
-      -                    if not state_rs: # Epsilon transition on GSS stack
-      +        for (pop, llm_bv), dests in self.arena.get(node, {}).get("children") or []:
-      +            if llm_bv.contains(token):
-      +                for dest_idx, state_bv in dests:
-      +                    if state_bv.is_empty(): # Epsilon transition on GSS stack
-                               yield (int(pop), None, int(dest_idx))
-                           else:
-      -                        for start, end in state_rs.intervals:
-      -                            for sid in range(start, end + 1):
-      +                        for start, end in state_bv.to_ranges():
-      +                            for sid in range(start, end):
+      @@ -62,6 +63,9 @@
                                        yield (int(pop), sid, int(dest_idx))
        
            def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-      @@ -113,32 +110,30 @@
+      +        t0 = time.time()
+      +        print(f"[{time.time() - t0:.4f}] get_mask: start")
+      +
+               # Final mask to return
+               final_mask = ffi.Bitset.zeros()
+       
+      @@ -72,8 +76,11 @@
+               stopped: set[int] = set()
+               # depth scheduler: depth -> set(node_idx)
+               todo: Dict[int, set[int]] = defaultdict(set)
+      +        print(f"[{time.time() - t0:.4f}] get_mask: after init")
+       
+               # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+      +        t_seed_start = time.time()
+               for sid, gss in state_to_gss.items():
+                   root_idx = self.roots_map.get(int(sid))
+                   if root_idx is None:
+      @@ -88,58 +95,108 @@
+                       values[root_idx] = gss.clone_node()
+                   depth = self.max_depth[root_idx]
+                   todo[depth].add(root_idx)
+      +        t_seed_end = time.time()
+      +        print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
+       
+               # Main scheduler loop (depth-ascending)
+      +        t_loop_start = time.time()
+      +
+      +        # Timing accumulators
+      +        time_pop_bucket = 0.0
+      +        time_node_setup = 0.0
+      +        time_end_check = 0.0
+      +        time_popn_collect = 0.0
+      +        time_filter_peeks = 0.0
+      +        time_merge_matched = 0.0
+      +        time_prune = 0.0
+      +        time_merge_values = 0.0
+      +
+      +        loop_count = 0
+               while todo:
+      +            loop_count += 1
+      +
+                   # Pop the smallest depth bucket
+      +            t1 = time.time()
+                   current_depth = min(todo.keys())
+                   node_indices = todo.pop(current_depth)
+      +            time_pop_bucket += time.time() - t1
+       
+                   for node_idx in list(node_indices):
+      +                t1 = time.time()
+                       if node_idx in stopped:
+                           continue
+       
+                       agg: Optional[int] = values.pop(node_idx, None)
+                       if agg is None:
+                           continue
+      +                time_node_setup += time.time() - t1
+       
+                       # Process callback (end-node handling + stop condition)
+      +                t1 = time.time()
+                       if self.is_end(node_idx):
+                           final_mask = final_mask.union(agg.allowed_llm_tokens())
+                       keep_going = agg.is_ok()
+      +                time_end_check += time.time() - t1
+                       if not keep_going:
                            stopped.add(node_idx)
                            continue
        
-      -                # Grouped step over (pop, llm_rs)
-      +                # Grouped step over (pop, llm_bv)
+                       # Grouped step over (pop, llm_bv)
                        node = self.arena.get(node_idx, {})
                        children = node.get("children") or []
-      -                for (pop, llm_rs), dests in children:
-      +                for (pop, llm_bv), dests in children:
+                       for (pop, llm_bv), dests in children:
+      +                    t1 = time.time()
                            peeks = ffi.gss_popn_collect(agg, int(pop))
+      +                    time_popn_collect += time.time() - t1
                            if not peeks:
                                continue
        
                            for dest_idx, state_bv in dests:
                                # Filter popped parents by state bitset
+      +                        t1 = time.time()
                                matched = []
-      -                        if state_bv:
-      +                        if not state_bv.is_empty():
+                               if not state_bv.is_empty():
                                    for (sid_val, parent_node) in peeks:
                                        if state_bv.contains(sid_val):
                                            matched.append(parent_node)
+      +                        time_filter_peeks += time.time() - t1
                                if not matched:
                                    continue
        
                                # Merge matched parents
-                               child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+      +                        t1 = time.time()
+                               child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
+      +                        time_merge_matched += time.time() - t1
+      +
                                # Restrict by this edge's LLM token BV
-      -                        if llm_rs.intervals:
-      -                            edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-      -                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
-      +                        if not llm_bv.is_empty():
-      +                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+      +                        t1 = time.time()
+                               if not llm_bv.is_empty():
+                                   ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+      +                        time_prune += time.time() - t1
                                if not child_gss.is_ok():
                                    continue
        
+                               d = int(dest_idx)
+      +                        t1 = time.time()
+                               if d in values:
+                                   combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
+                                   # Only re-enqueue if effectively changed
+                                   if combined.ptr() == values[d].ptr():
+                                       continue
+                                   values[d] = combined
+                               else:
+                                   values[d] = child_gss
+      +                        time_merge_values += time.time() - t1
+       
+                               child_depth = self.max_depth[d]
+                               todo[child_depth].add(d)
+       
+      +        t_loop_end = time.time()
+      +        print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
+      +        print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
+      +        print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
+      +        print(f"    - 3. End check:         {time_end_check:.4f}s")
+      +        print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
+      +        print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
+      +        print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
+      +        print(f"    - 7. Prune:             {time_prune:.4f}s")
+      +        print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+      +
+      +        print(f"[{time.time() - t0:.4f}] get_mask: returning")
+               return final_mask
 
       ```
     metadata:
@@ -3041,7 +752,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Use ffi.Bitset instead of RangeSet
-      in precompute3_model"'
+  - user: 'Changes committed with message: "feat: Add performance timing prints to
+      get_mask method"'
     metadata:
 ...
