@@ -1598,7 +1598,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         final_out.push(new_gss_arc);
                     } else {
                         crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
-                        hit!("GLRParserState::reduce_and_goto::CacheHit"
+                        hit!("GLRParserState::reduce_and_goto::CacheHit");
                     }
                     // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                 } else {
