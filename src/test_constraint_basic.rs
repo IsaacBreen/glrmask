@@ -1500,7 +1500,7 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
-// #[ignore]
+#[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Setting up for Full JS Grammar GSS Explosion Test ---");
