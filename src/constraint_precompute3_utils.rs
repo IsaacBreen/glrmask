@@ -401,7 +401,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                     // Eligible V: compose through all pop-0 edges
                     let mut contributed_any = false;
                     for (llm2, list) in zero_pop_edges {
-                        let new_llm = &llm1 & &llm2;
+                        let new_llm = llm1.clone() & &llm2;
                         if new_llm.is_empty() { continue; }
                         for (c, s2) in list {
                             let new_sids = sids1 & &s2;
