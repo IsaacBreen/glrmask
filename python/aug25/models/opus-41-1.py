@@ -176,7 +176,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(llm_mask)
 
                 # Filter GSS nodes
-                ok_gss = [g for g in gss_list if g.is_ok()]
+                ok_gss = [g for g in gss_list if g]
                 if not ok_gss:
                     node_stopped[idx] = True
                     continue
@@ -204,7 +204,7 @@ class Model(GraphProvider):
                         # Filter peeks by state bitset
                         matched_parents = []
                         for sid_val, parent_node in all_peeks:
-                            if state_bv.contains(sid_val) and parent_node.is_ok():
+                            if state_bv.contains(sid_val) and parent_node:
                                 matched_parents.append(parent_node)
 
                         if not matched_parents:

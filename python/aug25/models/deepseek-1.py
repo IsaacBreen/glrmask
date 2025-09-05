@@ -93,7 +93,7 @@ class OptimizedModel(GraphProvider):
                 # Check end condition and filter OK states
                 if self.is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
-                gss_set = {g for g in gss_set if g.is_ok()}
+                gss_set = {g for g in gss_set if g}
                 if not gss_set:
                     stopped.add(node_idx)
                     continue
@@ -126,7 +126,7 @@ class OptimizedModel(GraphProvider):
                                 matched = [p for s, p in peeks if state_bv.contains(s)]
                             if not matched:
                                 continue
-                            child_gss = {p for p in matched if p.is_ok()}
+                            child_gss = {p for p in matched if p}
                             if not child_gss:
                                 continue
 
