@@ -2444,11 +2444,17 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
-    pub fn print_gss_stats(&self) {
+    pub fn print_stats(&self) {
+        println!("GrammarConstraintState Stats:");
+        println!("  - Active tokenizer states: {}", self.state.len());
+        if self.state.is_empty() {
+            println!("  - GSS is empty.");
+            return;
+        }
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(2, "GSS stats: {:#?}", stats);
+        println!("  - GSS Stats: {:#?}", stats);
     }
 
     pub fn print_gss(&self) {

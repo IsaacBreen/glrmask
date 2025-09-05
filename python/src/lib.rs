@@ -640,6 +640,10 @@ impl PyGrammarConstraintState {
         });
     }
 
+    fn print_stats(&self) {
+        self.inner.with_inner(|state| state.print_stats());
+    }
+
     fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
         let mut out = std::collections::BTreeMap::new();
         self.inner.with_inner(|state| {
