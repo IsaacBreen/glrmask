@@ -2,8 +2,6 @@ local_system:
   attached_files:
     - src/constraint.rs
     - src/test_constraint_js.rs
-    - src/precompute2_schema.json
-    - src/constraint_precompute3_utils.rs
     - python/aug25/__init__.py
     - python/aug25/benchmark_analyzer.py
     - python/aug25/benchmark_runner.py
@@ -4296,796 +4294,6 @@ local_system:
 
           Ok(())
       }
-    src/precompute2_schema.json: |-
-      {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Grammar Constraint Precomputed2 Data",
-        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
-        "type": "array",
-        "items": [
-          {
-            "$ref": "#/$defs/Precomputed2Map",
-            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
-          },
-          {
-            "$ref": "#/$defs/TrieArena",
-            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
-          }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "Precomputed2Entry": {
-            "type": "array",
-            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
-            "items": [
-              {
-                "type": "integer",
-                "description": "TokenizerStateID"
-              },
-              {
-                "type": "integer",
-                "description": "TrieNodeIndex (index into the arena's values)"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "Precomputed2Map": {
-            "type": "array",
-            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
-            "items": {
-              "$ref": "#/$defs/Precomputed2Entry"
-            }
-          },
-          "HybridBitset": {
-            "type": "array",
-            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Start of range (inclusive)"
-                },
-                {
-                  "type": "integer",
-                  "description": "End of range (inclusive)"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "TrieNodeValue": {
-            "type": "object",
-            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
-            "properties": {
-              "end": {
-                "type": "boolean",
-                "description": "True if this node can be a terminal state in the precomputed trie."
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/HybridBitset",
-                "description": "A bitset of LLM tokens that can pass through or end at this node."
-              }
-            },
-            "required": [
-              "end",
-              "live_tokens"
-            ]
-          },
-          "EdgeKey": {
-            "type": "array",
-            "description": "An edge key of type (usize, Option<StateID>).",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Number of items to pop from the GLR stack."
-                },
-                {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "description": "An optional GLR StateID to check after popping."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestination": {
-            "type": "array",
-            "description": "A pair of [TrieNodeIndex, EdgeValue].",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Destination TrieNodeIndex."
-                },
-                {
-                  "$ref": "#/$defs/HybridBitset",
-                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestinationMap": {
-            "type": "array",
-            "description": "A map from destination node index to the edge value (LLMTokenBV).",
-            "items": {
-              "$ref": "#/$defs/EdgeDestination"
-            }
-          },
-          "TrieChildrenMapEntry": {
-            "type": "array",
-            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
-            "items": [
-              {
-                "$ref": "#/$defs/EdgeKey"
-              },
-              {
-                "$ref": "#/$defs/EdgeDestinationMap"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "TrieChildrenMap": {
-            "type": "array",
-            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
-            "items": {
-              "$ref": "#/$defs/TrieChildrenMapEntry"
-            }
-          },
-          "TrieNode": {
-            "type": "object",
-            "description": "A single node in the Precompute2 Trie.",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/TrieChildrenMap"
-              },
-              "max_depth": {
-                "type": "integer",
-                "description": "The longest path from a root to this node."
-              },
-              "value": {
-                "$ref": "#/$defs/TrieNodeValue"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          },
-          "TrieArena": {
-            "type": "object",
-            "description": "An arena storing all Trie nodes for Precompute2.",
-            "properties": {
-              "counter": {
-                "type": "integer",
-                "description": "The next available index in the arena."
-              },
-              "values": {
-                "type": "array",
-                "description": "A sparse array of [index, TrieNode] pairs.",
-                "items": {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer",
-                      "description": "The index of the node in the arena."
-                    },
-                    {
-                      "$ref": "#/$defs/TrieNode"
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                }
-              }
-            },
-            "required": [
-              "counter",
-              "values"
-            ]
-          }
-        }
-      }
-    src/constraint_precompute3_utils.rs: |
-      use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
-      use ordered_hash_map::OrderedHashMap;
-      use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      use crate::datastructures::EntryApi;
-      use crate::datastructures::gss::LLMTokenBV;
-      use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
-      use crate::tokenizer::TokenizerStateID;
-
-      pub fn optimize_trie3_size(
-          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          config: &GrammarConstraintConfig,
-      ) {
-          crate::debug!(2, "Optimizing Trie 3 size...");
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-
-          if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_prune_dead_paths {
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_gc {
-              Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          }
-          Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-      }
-
-      pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
-
-          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          if all_nodes.is_empty() { return; }
-
-          let mut predecessors: HashMap<PrecomputeNode3Index, Vec<(PrecomputeNode3Index, (usize, LLMTokenBV))>> = HashMap::new();
-          let mut worklist = VecDeque::new();
-          let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
-
-          // 1. Initialize live sets and build predecessor map.
-          for node_arc in &all_nodes {
-              let node_ptr = *node_arc;
-              live.insert(node_ptr, LLMTokenBV::zeros());
-
-              let guard = node_arc.read(trie3_god).unwrap();
-              if guard.value.end {
-                  let initial_live = guard.value.live_tokens.clone();
-                  if !initial_live.is_empty() {
-                      live.insert(node_ptr, initial_live);
-                      worklist.push_back(node_ptr);
-                  }
-              }
-
-              for (edge_key, dest_map) in guard.children() {
-                  for child_wrap in dest_map.keys() {
-                      let child_arc = child_wrap.as_arc().clone();
-                      let child_ptr = child_arc;
-                      predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone()));
-                  }
-              }
-          }
-
-          // 2. Propagate liveness until a fixed point is reached.
-          while let Some(node_ptr) = worklist.pop_front() {
-              let live_at_node = live.get(&node_ptr).unwrap().clone();
-              if let Some(preds) = predecessors.get(&node_ptr) {
-                  for (pred_ptr, edge_key) in preds {
-                      let live_from_edge = &live_at_node & &edge_key.1;
-                      if live_from_edge.is_empty() {
-                          continue;
-                      }
-
-                      let pred_live = live.get_mut(pred_ptr).unwrap();
-                      let old_len = pred_live.len();
-                      *pred_live |= &live_from_edge;
-                      if pred_live.len() > old_len {
-                          worklist.push_back(*pred_ptr);
-                      }
-                  }
-              }
-          }
-
-          // 3. Prune the graph based on the computed live sets.
-          for node_arc in &all_nodes {
-              let mut guard = node_arc.write(trie3_god).unwrap();
-              let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-
-              for (edge_key, dest_map) in guard.children() {
-                  for (child_wrapper, edge_value_sids) in dest_map {
-                      let child_arc = child_wrapper.as_arc().clone();
-                      let child_ptr = child_arc;
-                      let live_from_child = live.get(&child_ptr).unwrap();
-
-                      let live_on_edge = &edge_key.1 & live_from_child;
-
-                      if !live_on_edge.is_empty() {
-                          let new_edge_key = (edge_key.0, live_on_edge);
-                          let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
-                          new_dest_map_for_key.entry(*child_wrapper)
-                              .and_modify(|v| *v |= edge_value_sids)
-                              .or_insert_with(|| edge_value_sids.clone());
-                      }
-                  }
-              }
-              *guard.children_mut() = new_children;
-
-              // Update the node's own live_tokens field with the final computed value.
-              let node_ptr = *node_arc;
-              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
-          }
-          crate::debug!(2, "Finished pruning dead paths from trie 3.");
-      }
-
-      pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Merging identical subtrees in precomputed trie 3.");
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-
-          let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
-          let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
-          for (i, node_idx) in all_nodes.iter().enumerate() {
-              dense_of.insert(*node_idx, i);
-              old_of.push(*node_idx);
-          }
-          let n = all_nodes.len();
-
-          let mut ends: Vec<bool> = vec![false; n];
-          type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
-          let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
-
-          for (u_dense, u_idx) in old_of.iter().enumerate() {
-              let guard = u_idx.read(trie3_god).unwrap();
-              ends[u_dense] = guard.value.end;
-              for (ek, dest_map) in guard.children() {
-                  for (v_idx, bv) in dest_map {
-                      if let Some(&v_dense) = dense_of.get(v_idx) {
-                          raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
-                      }
-                  }
-              }
-          }
-
-          let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-          const MAX_ITERS: usize = 40;
-          for it in 0..MAX_ITERS {
-              type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
-              type Signature3 = (bool, Vec<AggregatedEdge3>);
-
-              let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
-              let mut new_class = vec![0; n];
-              let mut next_id = 0;
-              let mut changes = 0;
-
-              for u in 0..n {
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u] {
-                      let dest_class = prev_class[*v_dense];
-                      let key = (*p, bv_key.clone(), dest_class);
-                      aggr.entry(key).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-                  let agg_edges: Vec<AggregatedEdge3> = aggr.into_iter().collect();
-
-                  let sig: Signature3 = (ends[u], agg_edges);
-
-                  let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                      let id = next_id;
-                      next_id += 1;
-                      id
-                  });
-
-                  new_class[u] = cid;
-                  if new_class[u] != prev_class[u] {
-                      changes += 1;
-                  }
-              }
-
-              crate::debug!(3, "Trie3 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
-              prev_class = new_class;
-              if changes == 0 { break; }
-          }
-
-          let final_partition = prev_class;
-          let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-          let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              if representatives[class_id].is_none() {
-                  representatives[class_id] = Some(old_of[u_dense]);
-              }
-          }
-
-          let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-          }
-
-          for class_id in 0..num_classes {
-              if let Some(rep_idx) = representatives[class_id] {
-                  let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
-                      let dest_class = final_partition[*v_dense];
-                      aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-
-                  let mut new_children = BTreeMap::new();
-                  let mut new_live_tokens = LLMTokenBV::zeros();
-                  for ((p, bv_key, dest_class), sids) in aggr {
-                      if let Some(dest_rep_idx) = representatives[dest_class] {
-                          new_children.entry((p, bv_key.clone())).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, sids);
-                          new_live_tokens |= &bv_key;
-                      }
-                  }
-
-                  for (i, &c) in final_partition.iter().enumerate() {
-                      if c == class_id {
-                          new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
-                      }
-                  }
-
-                  let mut guard = rep_idx.write(trie3_god).unwrap();
-                  *guard.children_mut() = new_children;
-                  guard.value.live_tokens = new_live_tokens;
-              }
-          }
-
-          for root_idx in roots.values_mut() {
-              *root_idx = *node_to_rep.get(root_idx).unwrap();
-          }
-
-          let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-          Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
-      }
-
-      pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
-
-          // Helper: is the LLM-token BV "all tokens"?
-          fn is_all_llm(bv: &LLMTokenBV) -> bool {
-              bv == &LLMTokenBV::max_ones()
-          }
-          // Helper: is the StateIDBV "all states"?
-          fn is_all_sids(bv: &StateIDBV) -> bool {
-              bv == &StateIDBV::max_ones()
-          }
-
-          // Pass 1: local coalesce within each node
-          fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-              let mut changed_any = false;
-
-              for node_idx in nodes {
-                  // Snapshot current children
-                  let old_children = {
-                      let g = node_idx.read(trie3_god).expect("read");
-                      g.children().clone() // BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
-                  };
-                  if old_children.is_empty() { continue; }
-
-                  // Aggregate per (pop, child, sids): union LLM-token BVs
-                  let mut by_pop: HashMap<usize, Vec<(Trie2Index, StateIDBV, LLMTokenBV)>> = HashMap::new();
-                  for ((pop, llm_bv), dest_map) in &old_children {
-                      for (child_idx, sids) in dest_map.iter() {
-                          let items = by_pop.entry(*pop).or_default();
-                          let mut found = false;
-                          for (c, c_sids, llm_union) in items.iter_mut() {
-                              if c == child_idx && c_sids == sids {
-                                  *llm_union |= llm_bv;
-                                  found = true;
-                                  break;
-                              }
-                          }
-                          if !found {
-                              items.push((*child_idx, sids.clone(), llm_bv.clone()));
-                          }
-                      }
-                  }
-
-                  // Rebuild children from aggregates
-                  let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-                  for (pop, vec_items) in by_pop {
-                      for (child, sids, llm_union) in vec_items {
-                          if llm_union.is_empty() || sids.is_empty() {
-                              continue;
-                          }
-                          new_children.entry((pop, llm_union)).or_default().insert(child, sids);
-                      }
-                  }
-
-                  if new_children != old_children {
-                      let mut w = node_idx.write(trie3_god).expect("write");
-                      *w.children_mut() = new_children;
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 2: shortcut zero-pop chains.
-          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
-          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
-          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
-          fn shortcut_zero_pop_chains(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Snapshot summaries for quick lookups
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Memoization for zero-pop chain results
-              #[derive(Clone)]
-              struct ChainRes {
-                  last: Trie2Index,
-                  llm: LLMTokenBV,
-                  sids: StateIDBV,
-              }
-              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
-
-              fn follow_zero_chain(
-                  v: Trie2Index,
-                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
-                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
-              ) -> Option<ChainRes> {
-                  if let Some(cached) = memo.get(&v) {
-                      return cached.clone();
-                  }
-                  let (_is_end, edges) = match summary.get(&v) {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
-                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
-                  let next = match pop0_edges.next() {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Ensure it is the only outgoing edge and has a single destination.
-                  if edges.len() != 1 || next.2.len() != 1 {
-                      memo.insert(v, None);
-                      return None;
-                  }
-                  let (_p0, llm2, dests) = next;
-                  let (w, sids2) = &dests[0];
-
-                  // Recurse forward
-                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
-                      Some(ChainRes {
-                          last: tail.last,
-                          llm: llm2 & &tail.llm,
-                          sids: sids2 & &tail.sids,
-                      })
-                  } else {
-                      Some(ChainRes {
-                          last: *w,
-                          llm: llm2.clone(),
-                          sids: sids2.clone(),
-                      })
-                  };
-                  memo.insert(v, res.clone());
-                  res
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children (stable during this node's rewrite)
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // We will remove/replace individual destinations for this key.
-                      for (v, sids1) in dests {
-                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
-                              // Compose new filters
-                              let new_llm = llm1 & &chain.llm;
-                              let new_sids = sids1 & &chain.sids;
-
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-
-                              // If empty, nothing to add; drop the path.
-                              if new_llm.is_empty() || new_sids.is_empty() {
-                                  continue;
-                              }
-
-                              // Insert U --(p1, new_llm)--> chain.last with new_sids
-                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
-                              dest_map.entry(chain.last)
-                                  .and_modify(|s| *s |= &new_sids)
-                                  .or_insert(new_sids);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
-          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
-          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-          fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Summaries
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
-              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
-              for n in &nodes {
-                  let (is_end, edges) = summary.get(n).unwrap();
-                  if *is_end { continue; }
-                  if edges.len() != 1 { continue; }
-                  let (p2, llm2, dests) = &edges[0];
-                  if *p2 == 0 { continue; } // leave to zero-pop pass
-                  if dests.len() != 1 { continue; }
-                  let (c, sids2) = &dests[0];
-                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // Only when the first edge is universal in both LLM and SIDs.
-                      if !is_all_llm(llm1) {
-                          continue;
-                      }
-                      for (v, sids1) in dests {
-                          if !is_all_sids(sids1) {
-                              continue;
-                          }
-                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-                              // Insert U --(p1+p2, llm2)--> C with sids2
-                              let key_new = (p1 + p2, llm2);
-                              let dest_map = w.children_mut().entry(key_new).or_default();
-                              dest_map.entry(c)
-                                  .and_modify(|s| *s |= &sids2)
-                                  .or_insert(sids2);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
-              return;
-          }
-
-          // Iterate to a (small) fixpoint so that local changes enable further opportunities.
-          const MAX_PASSES: usize = 4;
-          let mut any_changed = false;
-          for pass in 0..MAX_PASSES {
-              let mut pass_changed = false;
-              // 1) Coalesce within nodes (cheap win)
-              if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 2) Shortcut pop=0 chains (safe, non-expanding)
-              if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
-              if shortcut_universal_pop_step(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              if pass_changed {
-                  any_changed = true;
-                  crate::debug!(3, "compress_trie3_edges: pass {} applied changes", pass + 1);
-              } else {
-                  break;
-              }
-          }
-
-          if any_changed {
-              crate::debug!(2, "compress_trie3_edges: changes applied; prune/merge/gc will follow in optimize_trie3_size");
-          } else {
-              crate::debug!(2, "compress_trie3_edges: no changes");
-          }
-      }
     python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
@@ -5401,7 +4609,6 @@ local_system:
           # 3. Construct GrammarConstraint and export reference precompute2 model
           print("Constructing GrammarConstraint...")
           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-          pre2_json_str = grammar_constraint.precompute2_json_string()
           pre3_json_str = grammar_constraint.precompute3_json_string()
 
           # 4. Load competitor model
@@ -5409,12 +4616,7 @@ local_system:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          if 'precompute3' in args.competitor.name:
-              print("-> Using precompute3 JSON for competitor model.")
-              competitor_json_str = pre3_json_str
-          else:
-              print("-> Using precompute2 JSON for competitor model.")
-              competitor_json_str = pre2_json_str
+          competitor_json_str = pre3_json_str
           competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
@@ -5425,8 +4627,8 @@ local_system:
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre2_json_str)
+          # All models are loaded from precompute3 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(pre3_json_str)
 
           if args.print_stats:
               print_model_statistics(reference_model, args.reference.name)
@@ -6029,31 +5231,41 @@ local_system:
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
               self.max_depth: Dict[int, int] = {}
-              # Convert BVs in-place to RangeSet
+              # Convert precompute3 graph structure to precompute2-like structure
               for uid, n in self.arena.items():
                   try:
                       self.max_depth[int(uid)] = int(n.get("max_depth", 0))
                   except Exception:
                       self.max_depth[int(uid)] = 0
 
-                  val = n.get("value") or {}
-                  if "live_tokens" in val and val["live_tokens"] is not None:
-                      val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
-                  else:
-                      val["live_tokens"] = RangeSet.empty()
-                  n["value"] = val
+                  p3_children = n.get("children") or []
+                  
+                  # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
+                  p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
 
-                  ch = n.get("children") or []
-                  newch = []
-                  for edge_key, dest_map in ch:
-                      newdm = []
-                      for di, bv in dest_map:
-                          rs = RangeSet.from_json(bv)
-                          newdm.append((int(di), rs))
-                      pk, sid = edge_key
-                      sidp = None if sid is None else int(sid)
-                      newch.append(((int(pk), sidp), newdm))
-                  n["children"] = newch
+                  for edge_key, dest_map in p3_children:
+                      pop, llm_bv_json = edge_key
+                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      if llm_rs.is_empty():
+                          continue
+
+                      for dest_idx, state_bv_ranges in dest_map:
+                          if not state_bv_ranges: # Corresponds to Option<StateID> == None
+                              p2_key = (int(pop), None)
+                              p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+                          else:
+                              for start, end in state_bv_ranges:
+                                  for sid in range(int(start), int(end) + 1):
+                                      p2_key = (int(pop), sid)
+                                      p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+                  
+                  # Convert aggregated map to final list format
+                  new_children = []
+                  for (pop, sid), dests in p2_children_agg.items():
+                      dest_list = list(dests.items())
+                      new_children.append(((pop, sid), dest_list))
+                  
+                  n["children"] = new_children
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -9829,13 +9041,13 @@ local_system:
           grammar_constraint.dump_precomputed3_stats();
           println!("GrammarConstraint constructed successfully.");
 
-          let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-          let file = File::create(&precomputed2_cache_path)?;
+          let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+          let file = File::create(&constraint_cache_path)?;
           let writer = BufWriter::new(file);
           let mut encoder = GzEncoder::new(writer, Compression::default());
 
-          (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
-
+          grammar_constraint.to_writer(&mut encoder)?;
+          println!("GrammarConstraint saved to {}", constraint_cache_path.display());
           return Ok(());
 
           // --- Tokenization Phase ---
@@ -10597,796 +9809,6 @@ local_system:
 
           Ok(())
       }
-    src/precompute2_schema.json: |-
-      {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Grammar Constraint Precomputed2 Data",
-        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
-        "type": "array",
-        "items": [
-          {
-            "$ref": "#/$defs/Precomputed2Map",
-            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
-          },
-          {
-            "$ref": "#/$defs/TrieArena",
-            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
-          }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "Precomputed2Entry": {
-            "type": "array",
-            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
-            "items": [
-              {
-                "type": "integer",
-                "description": "TokenizerStateID"
-              },
-              {
-                "type": "integer",
-                "description": "TrieNodeIndex (index into the arena's values)"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "Precomputed2Map": {
-            "type": "array",
-            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
-            "items": {
-              "$ref": "#/$defs/Precomputed2Entry"
-            }
-          },
-          "HybridBitset": {
-            "type": "array",
-            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Start of range (inclusive)"
-                },
-                {
-                  "type": "integer",
-                  "description": "End of range (inclusive)"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "TrieNodeValue": {
-            "type": "object",
-            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
-            "properties": {
-              "end": {
-                "type": "boolean",
-                "description": "True if this node can be a terminal state in the precomputed trie."
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/HybridBitset",
-                "description": "A bitset of LLM tokens that can pass through or end at this node."
-              }
-            },
-            "required": [
-              "end",
-              "live_tokens"
-            ]
-          },
-          "EdgeKey": {
-            "type": "array",
-            "description": "An edge key of type (usize, Option<StateID>).",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Number of items to pop from the GLR stack."
-                },
-                {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "description": "An optional GLR StateID to check after popping."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestination": {
-            "type": "array",
-            "description": "A pair of [TrieNodeIndex, EdgeValue].",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Destination TrieNodeIndex."
-                },
-                {
-                  "$ref": "#/$defs/HybridBitset",
-                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestinationMap": {
-            "type": "array",
-            "description": "A map from destination node index to the edge value (LLMTokenBV).",
-            "items": {
-              "$ref": "#/$defs/EdgeDestination"
-            }
-          },
-          "TrieChildrenMapEntry": {
-            "type": "array",
-            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
-            "items": [
-              {
-                "$ref": "#/$defs/EdgeKey"
-              },
-              {
-                "$ref": "#/$defs/EdgeDestinationMap"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "TrieChildrenMap": {
-            "type": "array",
-            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
-            "items": {
-              "$ref": "#/$defs/TrieChildrenMapEntry"
-            }
-          },
-          "TrieNode": {
-            "type": "object",
-            "description": "A single node in the Precompute2 Trie.",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/TrieChildrenMap"
-              },
-              "max_depth": {
-                "type": "integer",
-                "description": "The longest path from a root to this node."
-              },
-              "value": {
-                "$ref": "#/$defs/TrieNodeValue"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          },
-          "TrieArena": {
-            "type": "object",
-            "description": "An arena storing all Trie nodes for Precompute2.",
-            "properties": {
-              "counter": {
-                "type": "integer",
-                "description": "The next available index in the arena."
-              },
-              "values": {
-                "type": "array",
-                "description": "A sparse array of [index, TrieNode] pairs.",
-                "items": {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer",
-                      "description": "The index of the node in the arena."
-                    },
-                    {
-                      "$ref": "#/$defs/TrieNode"
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                }
-              }
-            },
-            "required": [
-              "counter",
-              "values"
-            ]
-          }
-        }
-      }
-    src/constraint_precompute3_utils.rs: |
-      use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
-      use ordered_hash_map::OrderedHashMap;
-      use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      use crate::datastructures::EntryApi;
-      use crate::datastructures::gss::LLMTokenBV;
-      use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
-      use crate::tokenizer::TokenizerStateID;
-
-      pub fn optimize_trie3_size(
-          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          config: &GrammarConstraintConfig,
-      ) {
-          crate::debug!(2, "Optimizing Trie 3 size...");
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-
-          if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_prune_dead_paths {
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_gc {
-              Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          }
-          Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-      }
-
-      pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
-
-          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          if all_nodes.is_empty() { return; }
-
-          let mut predecessors: HashMap<PrecomputeNode3Index, Vec<(PrecomputeNode3Index, (usize, LLMTokenBV))>> = HashMap::new();
-          let mut worklist = VecDeque::new();
-          let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
-
-          // 1. Initialize live sets and build predecessor map.
-          for node_arc in &all_nodes {
-              let node_ptr = *node_arc;
-              live.insert(node_ptr, LLMTokenBV::zeros());
-
-              let guard = node_arc.read(trie3_god).unwrap();
-              if guard.value.end {
-                  let initial_live = guard.value.live_tokens.clone();
-                  if !initial_live.is_empty() {
-                      live.insert(node_ptr, initial_live);
-                      worklist.push_back(node_ptr);
-                  }
-              }
-
-              for (edge_key, dest_map) in guard.children() {
-                  for child_wrap in dest_map.keys() {
-                      let child_arc = child_wrap.as_arc().clone();
-                      let child_ptr = child_arc;
-                      predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone()));
-                  }
-              }
-          }
-
-          // 2. Propagate liveness until a fixed point is reached.
-          while let Some(node_ptr) = worklist.pop_front() {
-              let live_at_node = live.get(&node_ptr).unwrap().clone();
-              if let Some(preds) = predecessors.get(&node_ptr) {
-                  for (pred_ptr, edge_key) in preds {
-                      let live_from_edge = &live_at_node & &edge_key.1;
-                      if live_from_edge.is_empty() {
-                          continue;
-                      }
-
-                      let pred_live = live.get_mut(pred_ptr).unwrap();
-                      let old_len = pred_live.len();
-                      *pred_live |= &live_from_edge;
-                      if pred_live.len() > old_len {
-                          worklist.push_back(*pred_ptr);
-                      }
-                  }
-              }
-          }
-
-          // 3. Prune the graph based on the computed live sets.
-          for node_arc in &all_nodes {
-              let mut guard = node_arc.write(trie3_god).unwrap();
-              let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-
-              for (edge_key, dest_map) in guard.children() {
-                  for (child_wrapper, edge_value_sids) in dest_map {
-                      let child_arc = child_wrapper.as_arc().clone();
-                      let child_ptr = child_arc;
-                      let live_from_child = live.get(&child_ptr).unwrap();
-
-                      let live_on_edge = &edge_key.1 & live_from_child;
-
-                      if !live_on_edge.is_empty() {
-                          let new_edge_key = (edge_key.0, live_on_edge);
-                          let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
-                          new_dest_map_for_key.entry(*child_wrapper)
-                              .and_modify(|v| *v |= edge_value_sids)
-                              .or_insert_with(|| edge_value_sids.clone());
-                      }
-                  }
-              }
-              *guard.children_mut() = new_children;
-
-              // Update the node's own live_tokens field with the final computed value.
-              let node_ptr = *node_arc;
-              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
-          }
-          crate::debug!(2, "Finished pruning dead paths from trie 3.");
-      }
-
-      pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Merging identical subtrees in precomputed trie 3.");
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-
-          let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
-          let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
-          for (i, node_idx) in all_nodes.iter().enumerate() {
-              dense_of.insert(*node_idx, i);
-              old_of.push(*node_idx);
-          }
-          let n = all_nodes.len();
-
-          let mut ends: Vec<bool> = vec![false; n];
-          type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
-          let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
-
-          for (u_dense, u_idx) in old_of.iter().enumerate() {
-              let guard = u_idx.read(trie3_god).unwrap();
-              ends[u_dense] = guard.value.end;
-              for (ek, dest_map) in guard.children() {
-                  for (v_idx, bv) in dest_map {
-                      if let Some(&v_dense) = dense_of.get(v_idx) {
-                          raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
-                      }
-                  }
-              }
-          }
-
-          let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-          const MAX_ITERS: usize = 40;
-          for it in 0..MAX_ITERS {
-              type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
-              type Signature3 = (bool, Vec<AggregatedEdge3>);
-
-              let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
-              let mut new_class = vec![0; n];
-              let mut next_id = 0;
-              let mut changes = 0;
-
-              for u in 0..n {
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u] {
-                      let dest_class = prev_class[*v_dense];
-                      let key = (*p, bv_key.clone(), dest_class);
-                      aggr.entry(key).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-                  let agg_edges: Vec<AggregatedEdge3> = aggr.into_iter().collect();
-
-                  let sig: Signature3 = (ends[u], agg_edges);
-
-                  let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                      let id = next_id;
-                      next_id += 1;
-                      id
-                  });
-
-                  new_class[u] = cid;
-                  if new_class[u] != prev_class[u] {
-                      changes += 1;
-                  }
-              }
-
-              crate::debug!(3, "Trie3 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
-              prev_class = new_class;
-              if changes == 0 { break; }
-          }
-
-          let final_partition = prev_class;
-          let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-          let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              if representatives[class_id].is_none() {
-                  representatives[class_id] = Some(old_of[u_dense]);
-              }
-          }
-
-          let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-          }
-
-          for class_id in 0..num_classes {
-              if let Some(rep_idx) = representatives[class_id] {
-                  let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
-                      let dest_class = final_partition[*v_dense];
-                      aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-
-                  let mut new_children = BTreeMap::new();
-                  let mut new_live_tokens = LLMTokenBV::zeros();
-                  for ((p, bv_key, dest_class), sids) in aggr {
-                      if let Some(dest_rep_idx) = representatives[dest_class] {
-                          new_children.entry((p, bv_key.clone())).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, sids);
-                          new_live_tokens |= &bv_key;
-                      }
-                  }
-
-                  for (i, &c) in final_partition.iter().enumerate() {
-                      if c == class_id {
-                          new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
-                      }
-                  }
-
-                  let mut guard = rep_idx.write(trie3_god).unwrap();
-                  *guard.children_mut() = new_children;
-                  guard.value.live_tokens = new_live_tokens;
-              }
-          }
-
-          for root_idx in roots.values_mut() {
-              *root_idx = *node_to_rep.get(root_idx).unwrap();
-          }
-
-          let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-          Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
-      }
-
-      pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
-
-          // Helper: is the LLM-token BV "all tokens"?
-          fn is_all_llm(bv: &LLMTokenBV) -> bool {
-              bv == &LLMTokenBV::max_ones()
-          }
-          // Helper: is the StateIDBV "all states"?
-          fn is_all_sids(bv: &StateIDBV) -> bool {
-              bv == &StateIDBV::max_ones()
-          }
-
-          // Pass 1: local coalesce within each node
-          fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-              let mut changed_any = false;
-
-              for node_idx in nodes {
-                  // Snapshot current children
-                  let old_children = {
-                      let g = node_idx.read(trie3_god).expect("read");
-                      g.children().clone() // BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
-                  };
-                  if old_children.is_empty() { continue; }
-
-                  // Aggregate per (pop, child, sids): union LLM-token BVs
-                  let mut by_pop: HashMap<usize, Vec<(Trie2Index, StateIDBV, LLMTokenBV)>> = HashMap::new();
-                  for ((pop, llm_bv), dest_map) in &old_children {
-                      for (child_idx, sids) in dest_map.iter() {
-                          let items = by_pop.entry(*pop).or_default();
-                          let mut found = false;
-                          for (c, c_sids, llm_union) in items.iter_mut() {
-                              if c == child_idx && c_sids == sids {
-                                  *llm_union |= llm_bv;
-                                  found = true;
-                                  break;
-                              }
-                          }
-                          if !found {
-                              items.push((*child_idx, sids.clone(), llm_bv.clone()));
-                          }
-                      }
-                  }
-
-                  // Rebuild children from aggregates
-                  let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-                  for (pop, vec_items) in by_pop {
-                      for (child, sids, llm_union) in vec_items {
-                          if llm_union.is_empty() || sids.is_empty() {
-                              continue;
-                          }
-                          new_children.entry((pop, llm_union)).or_default().insert(child, sids);
-                      }
-                  }
-
-                  if new_children != old_children {
-                      let mut w = node_idx.write(trie3_god).expect("write");
-                      *w.children_mut() = new_children;
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 2: shortcut zero-pop chains.
-          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
-          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
-          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
-          fn shortcut_zero_pop_chains(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Snapshot summaries for quick lookups
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Memoization for zero-pop chain results
-              #[derive(Clone)]
-              struct ChainRes {
-                  last: Trie2Index,
-                  llm: LLMTokenBV,
-                  sids: StateIDBV,
-              }
-              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
-
-              fn follow_zero_chain(
-                  v: Trie2Index,
-                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
-                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
-              ) -> Option<ChainRes> {
-                  if let Some(cached) = memo.get(&v) {
-                      return cached.clone();
-                  }
-                  let (_is_end, edges) = match summary.get(&v) {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
-                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
-                  let next = match pop0_edges.next() {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Ensure it is the only outgoing edge and has a single destination.
-                  if edges.len() != 1 || next.2.len() != 1 {
-                      memo.insert(v, None);
-                      return None;
-                  }
-                  let (_p0, llm2, dests) = next;
-                  let (w, sids2) = &dests[0];
-
-                  // Recurse forward
-                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
-                      Some(ChainRes {
-                          last: tail.last,
-                          llm: llm2 & &tail.llm,
-                          sids: sids2 & &tail.sids,
-                      })
-                  } else {
-                      Some(ChainRes {
-                          last: *w,
-                          llm: llm2.clone(),
-                          sids: sids2.clone(),
-                      })
-                  };
-                  memo.insert(v, res.clone());
-                  res
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children (stable during this node's rewrite)
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // We will remove/replace individual destinations for this key.
-                      for (v, sids1) in dests {
-                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
-                              // Compose new filters
-                              let new_llm = llm1 & &chain.llm;
-                              let new_sids = sids1 & &chain.sids;
-
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-
-                              // If empty, nothing to add; drop the path.
-                              if new_llm.is_empty() || new_sids.is_empty() {
-                                  continue;
-                              }
-
-                              // Insert U --(p1, new_llm)--> chain.last with new_sids
-                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
-                              dest_map.entry(chain.last)
-                                  .and_modify(|s| *s |= &new_sids)
-                                  .or_insert(new_sids);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
-          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
-          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-          fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Summaries
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
-              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
-              for n in &nodes {
-                  let (is_end, edges) = summary.get(n).unwrap();
-                  if *is_end { continue; }
-                  if edges.len() != 1 { continue; }
-                  let (p2, llm2, dests) = &edges[0];
-                  if *p2 == 0 { continue; } // leave to zero-pop pass
-                  if dests.len() != 1 { continue; }
-                  let (c, sids2) = &dests[0];
-                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // Only when the first edge is universal in both LLM and SIDs.
-                      if !is_all_llm(llm1) {
-                          continue;
-                      }
-                      for (v, sids1) in dests {
-                          if !is_all_sids(sids1) {
-                              continue;
-                          }
-                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-                              // Insert U --(p1+p2, llm2)--> C with sids2
-                              let key_new = (p1 + p2, llm2);
-                              let dest_map = w.children_mut().entry(key_new).or_default();
-                              dest_map.entry(c)
-                                  .and_modify(|s| *s |= &sids2)
-                                  .or_insert(sids2);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
-              return;
-          }
-
-          // Iterate to a (small) fixpoint so that local changes enable further opportunities.
-          const MAX_PASSES: usize = 4;
-          let mut any_changed = false;
-          for pass in 0..MAX_PASSES {
-              let mut pass_changed = false;
-              // 1) Coalesce within nodes (cheap win)
-              if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 2) Shortcut pop=0 chains (safe, non-expanding)
-              if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
-              if shortcut_universal_pop_step(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              if pass_changed {
-                  any_changed = true;
-                  crate::debug!(3, "compress_trie3_edges: pass {} applied changes", pass + 1);
-              } else {
-                  break;
-              }
-          }
-
-          if any_changed {
-              crate::debug!(2, "compress_trie3_edges: changes applied; prune/merge/gc will follow in optimize_trie3_size");
-          } else {
-              crate::debug!(2, "compress_trie3_edges: no changes");
-          }
-      }
     python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
@@ -11679,38 +10101,20 @@ local_system:
           """Main benchmark logic."""
           print("--- Setting up benchmark environment ---")
 
-          # 1. Load and compile grammar
-          print(f"Loading grammar from: {args.grammar}")
-          grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
-          compiled_grammar = grammar_def.compile()
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
 
-          # 2. Load vocabulary
-          print("Loading GPT-2 vocabulary...")
-          vocab_map = load_or_download_gpt2_vocab(
-              ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
-              "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-          )
-          token_to_id = {}
-          id_to_token = {}
-          max_token_id = 0
-          for token_str, token_id in vocab_map.items():
-              token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
-              token_to_id[token_bytes] = token_id
-              id_to_token[token_id] = token_bytes
-              max_token_id = max(max_token_id, token_id)
-
-          # 3. Construct GrammarConstraint and export reference precompute2 model
-          print("Constructing GrammarConstraint...")
-          grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-          pre3_json_str = grammar_constraint.precompute3_json_string()
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
           # 4. Load competitor model
           print(f"Loading competitor model from: {args.competitor}")
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          competitor_json_str = pre3_json_str
-          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
@@ -11721,7 +10125,7 @@ local_system:
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
           # All models are loaded from precompute3 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre3_json_str)
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
           if args.print_stats:
               print_model_statistics(reference_model, args.reference.name)
@@ -11871,7 +10275,7 @@ local_system:
 
       def main():
           parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-          parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
           parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
@@ -11885,7 +10289,7 @@ local_system:
 
           args = parser.parse_args()
 
-          for p in [args.grammar, args.code, args.competitor, args.reference]:
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
               if not p.exists():
                   parser.error(f"File not found: {p}")
 
@@ -12362,8 +10766,10 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              # This model uses the precompute3 graph, as it's the most detailed representation
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -12502,8 +10908,9 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -16947,805 +15354,6 @@ messages:
     metadata:
       filename: src/test_constraint_js.rs
   - user: |-
-      ```text 'src/precompute2_schema.json'
-      {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Grammar Constraint Precomputed2 Data",
-        "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
-        "type": "array",
-        "items": [
-          {
-            "$ref": "#/$defs/Precomputed2Map",
-            "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
-          },
-          {
-            "$ref": "#/$defs/TrieArena",
-            "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
-          }
-        ],
-        "minItems": 2,
-        "maxItems": 2,
-        "$defs": {
-          "Precomputed2Entry": {
-            "type": "array",
-            "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
-            "items": [
-              {
-                "type": "integer",
-                "description": "TokenizerStateID"
-              },
-              {
-                "type": "integer",
-                "description": "TrieNodeIndex (index into the arena's values)"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "Precomputed2Map": {
-            "type": "array",
-            "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
-            "items": {
-              "$ref": "#/$defs/Precomputed2Entry"
-            }
-          },
-          "HybridBitset": {
-            "type": "array",
-            "description": "A compact representation of a set of integers, as an array of [start, end] inclusive ranges.",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Start of range (inclusive)"
-                },
-                {
-                  "type": "integer",
-                  "description": "End of range (inclusive)"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "TrieNodeValue": {
-            "type": "object",
-            "description": "The value stored within a Trie node (PrecomputedNodeContents).",
-            "properties": {
-              "end": {
-                "type": "boolean",
-                "description": "True if this node can be a terminal state in the precomputed trie."
-              },
-              "live_tokens": {
-                "$ref": "#/$defs/HybridBitset",
-                "description": "A bitset of LLM tokens that can pass through or end at this node."
-              }
-            },
-            "required": [
-              "end",
-              "live_tokens"
-            ]
-          },
-          "EdgeKey": {
-            "type": "array",
-            "description": "An edge key of type (usize, Option<StateID>).",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Number of items to pop from the GLR stack."
-                },
-                {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "description": "An optional GLR StateID to check after popping."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestination": {
-            "type": "array",
-            "description": "A pair of [TrieNodeIndex, EdgeValue].",
-            "items": {
-              "type": "array",
-              "items": [
-                {
-                  "type": "integer",
-                  "description": "Destination TrieNodeIndex."
-                },
-                {
-                  "$ref": "#/$defs/HybridBitset",
-                  "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          },
-          "EdgeDestinationMap": {
-            "type": "array",
-            "description": "A map from destination node index to the edge value (LLMTokenBV).",
-            "items": {
-              "$ref": "#/$defs/EdgeDestination"
-            }
-          },
-          "TrieChildrenMapEntry": {
-            "type": "array",
-            "description": "A [EdgeKey, EdgeDestinationMap] pair.",
-            "items": [
-              {
-                "$ref": "#/$defs/EdgeKey"
-              },
-              {
-                "$ref": "#/$defs/EdgeDestinationMap"
-              }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-          },
-          "TrieChildrenMap": {
-            "type": "array",
-            "description": "The children of a Trie node, mapping from an EdgeKey to a map of destinations.",
-            "items": {
-              "$ref": "#/$defs/TrieChildrenMapEntry"
-            }
-          },
-          "TrieNode": {
-            "type": "object",
-            "description": "A single node in the Precompute2 Trie.",
-            "properties": {
-              "children": {
-                "$ref": "#/$defs/TrieChildrenMap"
-              },
-              "max_depth": {
-                "type": "integer",
-                "description": "The longest path from a root to this node."
-              },
-              "value": {
-                "$ref": "#/$defs/TrieNodeValue"
-              }
-            },
-            "required": [
-              "children",
-              "max_depth",
-              "value"
-            ]
-          },
-          "TrieArena": {
-            "type": "object",
-            "description": "An arena storing all Trie nodes for Precompute2.",
-            "properties": {
-              "counter": {
-                "type": "integer",
-                "description": "The next available index in the arena."
-              },
-              "values": {
-                "type": "array",
-                "description": "A sparse array of [index, TrieNode] pairs.",
-                "items": {
-                  "type": "array",
-                  "items": [
-                    {
-                      "type": "integer",
-                      "description": "The index of the node in the arena."
-                    },
-                    {
-                      "$ref": "#/$defs/TrieNode"
-                    }
-                  ],
-                  "minItems": 2,
-                  "maxItems": 2
-                }
-              }
-            },
-            "required": [
-              "counter",
-              "values"
-            ]
-          }
-        }
-      }
-      ```
-    metadata:
-      filename: src/precompute2_schema.json
-  - user: |-
-      ```rust 'src/constraint_precompute3_utils.rs'
-      use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
-      use ordered_hash_map::OrderedHashMap;
-      use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
-      use crate::datastructures::EntryApi;
-      use crate::datastructures::gss::LLMTokenBV;
-      use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
-      use crate::tokenizer::TokenizerStateID;
-
-      pub fn optimize_trie3_size(
-          roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-          trie3_god: &Trie3GodWrapper,
-          config: &GrammarConstraintConfig,
-      ) {
-          crate::debug!(2, "Optimizing Trie 3 size...");
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-
-          if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_prune_dead_paths {
-              prune_dead_paths_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_compress_edges {
-              compress_trie3_edges(roots, &trie3_god);
-          }
-          if config.optimize_trie2_merge_nodes {
-              merge_nodes_trie3(roots, &trie3_god);
-          }
-          if config.optimize_trie2_gc {
-              Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          }
-          Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-      }
-
-      pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Pruning dead paths from precomputed trie 3.");
-
-          let all_nodes = Trie::all_nodes(trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-          if all_nodes.is_empty() { return; }
-
-          let mut predecessors: HashMap<PrecomputeNode3Index, Vec<(PrecomputeNode3Index, (usize, LLMTokenBV))>> = HashMap::new();
-          let mut worklist = VecDeque::new();
-          let mut live: HashMap<PrecomputeNode3Index, LLMTokenBV> = HashMap::new();
-
-          // 1. Initialize live sets and build predecessor map.
-          for node_arc in &all_nodes {
-              let node_ptr = *node_arc;
-              live.insert(node_ptr, LLMTokenBV::zeros());
-
-              let guard = node_arc.read(trie3_god).unwrap();
-              if guard.value.end {
-                  let initial_live = guard.value.live_tokens.clone();
-                  if !initial_live.is_empty() {
-                      live.insert(node_ptr, initial_live);
-                      worklist.push_back(node_ptr);
-                  }
-              }
-
-              for (edge_key, dest_map) in guard.children() {
-                  for child_wrap in dest_map.keys() {
-                      let child_arc = child_wrap.as_arc().clone();
-                      let child_ptr = child_arc;
-                      predecessors.entry(child_ptr).or_default().push((node_ptr, edge_key.clone()));
-                  }
-              }
-          }
-
-          // 2. Propagate liveness until a fixed point is reached.
-          while let Some(node_ptr) = worklist.pop_front() {
-              let live_at_node = live.get(&node_ptr).unwrap().clone();
-              if let Some(preds) = predecessors.get(&node_ptr) {
-                  for (pred_ptr, edge_key) in preds {
-                      let live_from_edge = &live_at_node & &edge_key.1;
-                      if live_from_edge.is_empty() {
-                          continue;
-                      }
-
-                      let pred_live = live.get_mut(pred_ptr).unwrap();
-                      let old_len = pred_live.len();
-                      *pred_live |= &live_from_edge;
-                      if pred_live.len() > old_len {
-                          worklist.push_back(*pred_ptr);
-                      }
-                  }
-              }
-          }
-
-          // 3. Prune the graph based on the computed live sets.
-          for node_arc in &all_nodes {
-              let mut guard = node_arc.write(trie3_god).unwrap();
-              let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-
-              for (edge_key, dest_map) in guard.children() {
-                  for (child_wrapper, edge_value_sids) in dest_map {
-                      let child_arc = child_wrapper.as_arc().clone();
-                      let child_ptr = child_arc;
-                      let live_from_child = live.get(&child_ptr).unwrap();
-
-                      let live_on_edge = &edge_key.1 & live_from_child;
-
-                      if !live_on_edge.is_empty() {
-                          let new_edge_key = (edge_key.0, live_on_edge);
-                          let new_dest_map_for_key = new_children.entry(new_edge_key).or_default();
-                          new_dest_map_for_key.entry(*child_wrapper)
-                              .and_modify(|v| *v |= edge_value_sids)
-                              .or_insert_with(|| edge_value_sids.clone());
-                      }
-                  }
-              }
-              *guard.children_mut() = new_children;
-
-              // Update the node's own live_tokens field with the final computed value.
-              let node_ptr = *node_arc;
-              guard.value.live_tokens = live.get(&node_ptr).unwrap().clone();
-          }
-          crate::debug!(2, "Finished pruning dead paths from trie 3.");
-      }
-
-      pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Merging identical subtrees in precomputed trie 3.");
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-
-          let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
-          let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
-          for (i, node_idx) in all_nodes.iter().enumerate() {
-              dense_of.insert(*node_idx, i);
-              old_of.push(*node_idx);
-          }
-          let n = all_nodes.len();
-
-          let mut ends: Vec<bool> = vec![false; n];
-          type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
-          let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
-
-          for (u_dense, u_idx) in old_of.iter().enumerate() {
-              let guard = u_idx.read(trie3_god).unwrap();
-              ends[u_dense] = guard.value.end;
-              for (ek, dest_map) in guard.children() {
-                  for (v_idx, bv) in dest_map {
-                      if let Some(&v_dense) = dense_of.get(v_idx) {
-                          raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
-                      }
-                  }
-              }
-          }
-
-          let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-          const MAX_ITERS: usize = 40;
-          for it in 0..MAX_ITERS {
-              type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
-              type Signature3 = (bool, Vec<AggregatedEdge3>);
-
-              let mut sig_to_id: HashMap<Signature3, usize> = HashMap::new();
-              let mut new_class = vec![0; n];
-              let mut next_id = 0;
-              let mut changes = 0;
-
-              for u in 0..n {
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u] {
-                      let dest_class = prev_class[*v_dense];
-                      let key = (*p, bv_key.clone(), dest_class);
-                      aggr.entry(key).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-                  let agg_edges: Vec<AggregatedEdge3> = aggr.into_iter().collect();
-
-                  let sig: Signature3 = (ends[u], agg_edges);
-
-                  let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                      let id = next_id;
-                      next_id += 1;
-                      id
-                  });
-
-                  new_class[u] = cid;
-                  if new_class[u] != prev_class[u] {
-                      changes += 1;
-                  }
-              }
-
-              crate::debug!(3, "Trie3 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
-              prev_class = new_class;
-              if changes == 0 { break; }
-          }
-
-          let final_partition = prev_class;
-          let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-          let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              if representatives[class_id].is_none() {
-                  representatives[class_id] = Some(old_of[u_dense]);
-              }
-          }
-
-          let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-          }
-
-          for class_id in 0..num_classes {
-              if let Some(rep_idx) = representatives[class_id] {
-                  let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
-
-                  let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-                  for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
-                      let dest_class = final_partition[*v_dense];
-                      aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                  }
-
-                  let mut new_children = BTreeMap::new();
-                  let mut new_live_tokens = LLMTokenBV::zeros();
-                  for ((p, bv_key, dest_class), sids) in aggr {
-                      if let Some(dest_rep_idx) = representatives[dest_class] {
-                          new_children.entry((p, bv_key.clone())).or_insert_with(OrderedHashMap::new).insert(dest_rep_idx, sids);
-                          new_live_tokens |= &bv_key;
-                      }
-                  }
-
-                  for (i, &c) in final_partition.iter().enumerate() {
-                      if c == class_id {
-                          new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
-                      }
-                  }
-
-                  let mut guard = rep_idx.write(trie3_god).unwrap();
-                  *guard.children_mut() = new_children;
-                  guard.value.live_tokens = new_live_tokens;
-              }
-          }
-
-          for root_idx in roots.values_mut() {
-              *root_idx = *node_to_rep.get(root_idx).unwrap();
-          }
-
-          let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-          Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
-      }
-
-      pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
-
-          // Helper: is the LLM-token BV "all tokens"?
-          fn is_all_llm(bv: &LLMTokenBV) -> bool {
-              bv == &LLMTokenBV::max_ones()
-          }
-          // Helper: is the StateIDBV "all states"?
-          fn is_all_sids(bv: &StateIDBV) -> bool {
-              bv == &StateIDBV::max_ones()
-          }
-
-          // Pass 1: local coalesce within each node
-          fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-              let mut changed_any = false;
-
-              for node_idx in nodes {
-                  // Snapshot current children
-                  let old_children = {
-                      let g = node_idx.read(trie3_god).expect("read");
-                      g.children().clone() // BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>>
-                  };
-                  if old_children.is_empty() { continue; }
-
-                  // Aggregate per (pop, child, sids): union LLM-token BVs
-                  let mut by_pop: HashMap<usize, Vec<(Trie2Index, StateIDBV, LLMTokenBV)>> = HashMap::new();
-                  for ((pop, llm_bv), dest_map) in &old_children {
-                      for (child_idx, sids) in dest_map.iter() {
-                          let items = by_pop.entry(*pop).or_default();
-                          let mut found = false;
-                          for (c, c_sids, llm_union) in items.iter_mut() {
-                              if c == child_idx && c_sids == sids {
-                                  *llm_union |= llm_bv;
-                                  found = true;
-                                  break;
-                              }
-                          }
-                          if !found {
-                              items.push((*child_idx, sids.clone(), llm_bv.clone()));
-                          }
-                      }
-                  }
-
-                  // Rebuild children from aggregates
-                  let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-                  for (pop, vec_items) in by_pop {
-                      for (child, sids, llm_union) in vec_items {
-                          if llm_union.is_empty() || sids.is_empty() {
-                              continue;
-                          }
-                          new_children.entry((pop, llm_union)).or_default().insert(child, sids);
-                      }
-                  }
-
-                  if new_children != old_children {
-                      let mut w = node_idx.write(trie3_god).expect("write");
-                      *w.children_mut() = new_children;
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 2: shortcut zero-pop chains.
-          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
-          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
-          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
-          fn shortcut_zero_pop_chains(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Snapshot summaries for quick lookups
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Memoization for zero-pop chain results
-              #[derive(Clone)]
-              struct ChainRes {
-                  last: Trie2Index,
-                  llm: LLMTokenBV,
-                  sids: StateIDBV,
-              }
-              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
-
-              fn follow_zero_chain(
-                  v: Trie2Index,
-                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
-                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
-              ) -> Option<ChainRes> {
-                  if let Some(cached) = memo.get(&v) {
-                      return cached.clone();
-                  }
-                  let (_is_end, edges) = match summary.get(&v) {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
-                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
-                  let next = match pop0_edges.next() {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Ensure it is the only outgoing edge and has a single destination.
-                  if edges.len() != 1 || next.2.len() != 1 {
-                      memo.insert(v, None);
-                      return None;
-                  }
-                  let (_p0, llm2, dests) = next;
-                  let (w, sids2) = &dests[0];
-
-                  // Recurse forward
-                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
-                      Some(ChainRes {
-                          last: tail.last,
-                          llm: llm2 & &tail.llm,
-                          sids: sids2 & &tail.sids,
-                      })
-                  } else {
-                      Some(ChainRes {
-                          last: *w,
-                          llm: llm2.clone(),
-                          sids: sids2.clone(),
-                      })
-                  };
-                  memo.insert(v, res.clone());
-                  res
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children (stable during this node's rewrite)
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // We will remove/replace individual destinations for this key.
-                      for (v, sids1) in dests {
-                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
-                              // Compose new filters
-                              let new_llm = llm1 & &chain.llm;
-                              let new_sids = sids1 & &chain.sids;
-
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-
-                              // If empty, nothing to add; drop the path.
-                              if new_llm.is_empty() || new_sids.is_empty() {
-                                  continue;
-                              }
-
-                              // Insert U --(p1, new_llm)--> chain.last with new_sids
-                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
-                              dest_map.entry(chain.last)
-                                  .and_modify(|s| *s |= &new_sids)
-                                  .or_insert(new_sids);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
-          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
-          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-          fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Summaries
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
-              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
-              for n in &nodes {
-                  let (is_end, edges) = summary.get(n).unwrap();
-                  if *is_end { continue; }
-                  if edges.len() != 1 { continue; }
-                  let (p2, llm2, dests) = &edges[0];
-                  if *p2 == 0 { continue; } // leave to zero-pop pass
-                  if dests.len() != 1 { continue; }
-                  let (c, sids2) = &dests[0];
-                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
-              }
-
-              let mut changed_any = false;
-
-              for u in &nodes {
-                  // Snapshot children
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // Only when the first edge is universal in both LLM and SIDs.
-                      if !is_all_llm(llm1) {
-                          continue;
-                      }
-                      for (v, sids1) in dests {
-                          if !is_all_sids(sids1) {
-                              continue;
-                          }
-                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-                              // Insert U --(p1+p2, llm2)--> C with sids2
-                              let key_new = (p1 + p2, llm2);
-                              let dest_map = w.children_mut().entry(key_new).or_default();
-                              dest_map.entry(c)
-                                  .and_modify(|s| *s |= &sids2)
-                                  .or_insert(sids2);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      changed_any = true;
-                  }
-              }
-
-              changed_any
-          }
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
-              return;
-          }
-
-          // Iterate to a (small) fixpoint so that local changes enable further opportunities.
-          const MAX_PASSES: usize = 4;
-          let mut any_changed = false;
-          for pass in 0..MAX_PASSES {
-              let mut pass_changed = false;
-              // 1) Coalesce within nodes (cheap win)
-              if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 2) Shortcut pop=0 chains (safe, non-expanding)
-              if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
-              if shortcut_universal_pop_step(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              if pass_changed {
-                  any_changed = true;
-                  crate::debug!(3, "compress_trie3_edges: pass {} applied changes", pass + 1);
-              } else {
-                  break;
-              }
-          }
-
-          if any_changed {
-              crate::debug!(2, "compress_trie3_edges: changes applied; prune/merge/gc will follow in optimize_trie3_size");
-          } else {
-              crate::debug!(2, "compress_trie3_edges: no changes");
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/constraint_precompute3_utils.rs
-  - user: |-
       ```python 'python/aug25/__init__.py'
 
       ```
@@ -18071,7 +15679,6 @@ messages:
           # 3. Construct GrammarConstraint and export reference precompute2 model
           print("Constructing GrammarConstraint...")
           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-          pre2_json_str = grammar_constraint.precompute2_json_string()
           pre3_json_str = grammar_constraint.precompute3_json_string()
 
           # 4. Load competitor model
@@ -18079,12 +15686,7 @@ messages:
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          if 'precompute3' in args.competitor.name:
-              print("-> Using precompute3 JSON for competitor model.")
-              competitor_json_str = pre3_json_str
-          else:
-              print("-> Using precompute2 JSON for competitor model.")
-              competitor_json_str = pre2_json_str
+          competitor_json_str = pre3_json_str
           competitor_model = CompetitorModel.from_json_string(competitor_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
@@ -18095,8 +15697,8 @@ messages:
           # 5. Equivalence Check
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
-          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre2_json_str)
+          # All models are loaded from precompute3 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(pre3_json_str)
 
           if args.print_stats:
               print_model_statistics(reference_model, args.reference.name)
@@ -18719,31 +16321,41 @@ messages:
               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
               self.arena = arena
               self.max_depth: Dict[int, int] = {}
-              # Convert BVs in-place to RangeSet
+              # Convert precompute3 graph structure to precompute2-like structure
               for uid, n in self.arena.items():
                   try:
                       self.max_depth[int(uid)] = int(n.get("max_depth", 0))
                   except Exception:
                       self.max_depth[int(uid)] = 0
 
-                  val = n.get("value") or {}
-                  if "live_tokens" in val and val["live_tokens"] is not None:
-                      val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
-                  else:
-                      val["live_tokens"] = RangeSet.empty()
-                  n["value"] = val
+                  p3_children = n.get("children") or []
+                  
+                  # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
+                  p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
 
-                  ch = n.get("children") or []
-                  newch = []
-                  for edge_key, dest_map in ch:
-                      newdm = []
-                      for di, bv in dest_map:
-                          rs = RangeSet.from_json(bv)
-                          newdm.append((int(di), rs))
-                      pk, sid = edge_key
-                      sidp = None if sid is None else int(sid)
-                      newch.append(((int(pk), sidp), newdm))
-                  n["children"] = newch
+                  for edge_key, dest_map in p3_children:
+                      pop, llm_bv_json = edge_key
+                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      if llm_rs.is_empty():
+                          continue
+
+                      for dest_idx, state_bv_ranges in dest_map:
+                          if not state_bv_ranges: # Corresponds to Option<StateID> == None
+                              p2_key = (int(pop), None)
+                              p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+                          else:
+                              for start, end in state_bv_ranges:
+                                  for sid in range(int(start), int(end) + 1):
+                                      p2_key = (int(pop), sid)
+                                      p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+                  
+                  # Convert aggregated map to final list format
+                  new_children = []
+                  for (pop, sid), dests in p2_children_agg.items():
+                      dest_list = list(dests.items())
+                      new_children.append(((pop, sid), dest_list))
+                  
+                  n["children"] = new_children
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -19013,9 +16625,10 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: Modify the Python code so that *all* models take precompute3 as input, none
-      take precompute2. The precompute2 model can build itself from the precompute3
-      input.
+  - user: Modify this code so that `test_js_constraint_integration` dumps the whole
+      grammar constraint, not just the precompute3 tree, and python/aug25/benchmark_runner.py
+      reads the grammar constraint rather than reading the grammar and constructing
+      the grammar constraint as it does right now.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -19034,253 +16647,251 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify your Python code, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions and corresponding git diffs to implement the requested changes.
 
       ### Step-by-Step Instructions
 
-      **1. Modify the Benchmark Runner**
+      **1. Modify the Rust test to dump the entire `GrammarConstraint`**
 
-      In the file `python/aug25/benchmark_runner.py`, you will make three changes to ensure it always uses the `precompute3` data for all models.
+      In the file `src/test_constraint_js.rs`, you will adjust the `test_js_constraint_integration` function to serialize the whole `grammar_constraint` object instead of just a part of it.
 
-      -   **First**, in the `run_benchmark` function, find and delete the line that generates the `precompute2` JSON string.
-          ```python
-          # In python/aug25/benchmark_runner.py, inside run_benchmark()
-          
-          # DELETE this line:
-          pre2_json_str = grammar_constraint.precompute2_json_string() 
+      -   **Open `src/test_constraint_js.rs`**.
+      -   **Navigate to the `test_js_constraint_integration` function.**
+      -   **Find the serialization block at the end of the setup phase.** It currently looks like this:
+          ```rust
+          let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
+          let file = File::create(&precomputed2_cache_path)?;
+          let writer = BufWriter::new(file);
+          let mut encoder = GzEncoder::new(writer, Compression::default());
+
+          (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
+
+          return Ok(());
+          ```
+      -   **Replace this block** with the following code to change the output filename and serialize the entire `grammar_constraint` object:
+          ```rust
+          let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+          let file = File::create(&constraint_cache_path)?;
+          let writer = BufWriter::new(file);
+          let mut encoder = GzEncoder::new(writer, Compression::default());
+
+          grammar_constraint.to_writer(&mut encoder)?;
+          println!("GrammarConstraint saved to {}", constraint_cache_path.display());
+          return Ok(());
           ```
 
-      -   **Second**, locate the conditional block that loads the competitor model. Replace the entire `if/else` block with a single line that unconditionally assigns `pre3_json_str`.
-          ```python
-          # In python/aug25/benchmark_runner.py, inside run_benchmark()
+      **2. Update the Python benchmark runner to load the full `GrammarConstraint`**
 
-          # REPLACE this block:
-          if 'precompute3' in args.competitor.name:
-              print("-> Using precompute3 JSON for competitor model.")
-              competitor_json_str = pre3_json_str
-          else:
-              print("-> Using precompute2 JSON for competitor model.")
-              competitor_json_str = pre2_json_str
-          
-          # WITH this line:
-          competitor_json_str = pre3_json_str
-          ```
+      In `python/aug25/benchmark_runner.py`, you'll change the script to load the pre-compiled constraint file instead of building it from an EBNF grammar.
 
-      -   **Third**, update the line that loads the reference model to use `pre3_json_str` instead of `pre2_json_str`.
-          ```python
-          # In python/aug25/benchmark_runner.py, inside run_benchmark()
+      -   **Open `python/aug25/benchmark_runner.py`**.
+      -   **Modify the `main` function's argument parser:**
+          -   Remove the line that adds the `--grammar` argument.
+          -   Add a new argument `--constraint-file` for the serialized object.
+          -   Update the file existence check to use `args.constraint_file`.
+      -   **Modify the `run_benchmark` function:**
+          -   **Delete** the sections that load the EBNF grammar, load the vocabulary, and construct the `GrammarConstraint` from scratch.
+          -   **Insert** new code to load the `GrammarConstraint` from the provided file and extract the vocabulary from it.
+          -   **Update** the model loading logic to pass the full JSON string of the loaded constraint to the competitor models.
 
-          # FIND this line and the comment above it:
-          # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre2_json_str)
+      **3. Update Python models to parse the full `GrammarConstraint` JSON**
 
-          # REPLACE it with:
-          # All models are loaded from precompute3 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre3_json_str)
-          ```
+      The `from_json_string` method in both `precompute2_model.py` and `precompute3_model.py` needs to be updated to handle the new, larger JSON structure.
 
-      **2. Adapt the Precompute2 Model**
-
-      In the file `python/aug25/precompute2_model.py`, you will replace the logic in the `__init__` method to convert the incoming `precompute3` data into the `precompute2`-like structure that the rest of the class expects.
-
-      -   In the `Model` class, replace the entire `for` loop that iterates over `self.arena.items()` with the new conversion logic.
-
-          ```python
-          # In python/aug25/precompute2_model.py, inside Model.__init__()
-
-          # REPLACE this entire for loop:
-          # Convert BVs in-place to RangeSet
-          for uid, n in self.arena.items():
-              try:
-                  self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-              except Exception:
-                  self.max_depth[int(uid)] = 0
-
-              val = n.get("value") or {}
-              if "live_tokens" in val and val["live_tokens"] is not None:
-                  val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
-              else:
-                  val["live_tokens"] = RangeSet.empty()
-              n["value"] = val
-
-              ch = n.get("children") or []
-              newch = []
-              for edge_key, dest_map in ch:
-                  newdm = []
-                  for di, bv in dest_map:
-                      rs = RangeSet.from_json(bv)
-                      newdm.append((int(di), rs))
-                  pk, sid = edge_key
-                  sidp = None if sid is None else int(sid)
-                  newch.append(((int(pk), sidp), newdm))
-              n["children"] = newch
-
-          # WITH this new implementation:
-          # Convert precompute3 graph structure to precompute2-like structure
-          for uid, n in self.arena.items():
-              try:
-                  self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-              except Exception:
-                  self.max_depth[int(uid)] = 0
-
-              p3_children = n.get("children") or []
-              
-              # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-              p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
-
-              for edge_key, dest_map in p3_children:
-                  pop, llm_bv_json = edge_key
-                  llm_rs = RangeSet.from_json(llm_bv_json)
-                  if llm_rs.is_empty():
-                      continue
-
-                  for dest_idx, state_bv_ranges in dest_map:
-                      if not state_bv_ranges: # Corresponds to Option<StateID> == None
-                          p2_key = (int(pop), None)
-                          p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                      else:
-                          for start, end in state_bv_ranges:
-                              for sid in range(int(start), int(end) + 1):
-                                  p2_key = (int(pop), sid)
-                                  p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-              
-              # Convert aggregated map to final list format
-              new_children = []
-              for (pop, sid), dests in p2_children_agg.items():
-                  dest_list = list(dests.items())
-                  new_children.append(((pop, sid), dest_list))
-              
-              n["children"] = new_children
-          ```
+      -   **Open `python/aug25/precompute2_model.py`**.
+      -   **In the `Model` class, replace the `from_json_string` method** with a new version that parses the full object and extracts the `precomputed3` and `trie3_god` fields.
+      -   **Open `python/aug25/precompute3_model.py`**.
+      -   **Do the same for this file:** replace the `from_json_string` method with the updated implementation. The logic is identical for both files.
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes automatically.
+      Here are the git diffs that apply the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_js.rs b/src/test_constraint_js.rs
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -610,13 +610,13 @@
+           grammar_constraint.dump_precomputed3_stats();
+           println!("GrammarConstraint constructed successfully.");
+       
+      -    let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
+      -    let file = File::create(&precomputed2_cache_path)?;
+      +    let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+      +    let file = File::create(&constraint_cache_path)?;
+           let writer = BufWriter::new(file);
+           let mut encoder = GzEncoder::new(writer, Compression::default());
+       
+      -    (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
+      -
+      +    grammar_constraint.to_writer(&mut encoder)?;
+      +    println!("GrammarConstraint saved to {}", constraint_cache_path.display());
+           return Ok(());
+       
+           // --- Tokenization Phase ---
+
+      ```
 
       ```diff
       diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      index 941111c..1111111 100644
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -100,22 +100,15 @@
-           # 3. Construct GrammarConstraint and export reference precompute2 model
-           print("Constructing GrammarConstraint...")
-           grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-      -    pre2_json_str = grammar_constraint.precompute2_json_string()
-           pre3_json_str = grammar_constraint.precompute3_json_string()
+      @@ -143,36 +143,16 @@
+           print("-" * 20)
+       
+       def run_benchmark(args):
+           """Main benchmark logic."""
+           print("--- Setting up benchmark environment ---")
+       
+      -    # 1. Load and compile grammar
+      -    print(f"Loading grammar from: {args.grammar}")
+      -    grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
+      -    compiled_grammar = grammar_def.compile()
+      -
+      -    # 2. Load vocabulary
+      -    print("Loading GPT-2 vocabulary...")
+      -    vocab_map = load_or_download_gpt2_vocab(
+      -        ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
+      -        "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+      -    )
+      -    token_to_id = {}
+      -    id_to_token = {}
+      -    max_token_id = 0
+      -    for token_str, token_id in vocab_map.items():
+      -        token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
+      -        token_to_id[token_bytes] = token_id
+      -        id_to_token[token_id] = token_bytes
+      -        max_token_id = max(max_token_id, token_id)
+      -
+      -    # 3. Construct GrammarConstraint and export reference precompute2 model
+      -    print("Constructing GrammarConstraint...")
+      -    grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
+      -    pre3_json_str = grammar_constraint.precompute3_json_string()
+      +    # 1. Load pre-compiled GrammarConstraint
+      +    print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+      +    grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
+      +
+      +    # 2. Extract vocabulary for tokenizer
+      +    id_to_token = grammar_constraint.get_id_to_token_map()
        
            # 4. Load competitor model
            print(f"Loading competitor model from: {args.competitor}")
            CompetitorModel = load_competitor_model(args.competitor)
            
            t_start_load = time.perf_counter()
-      -    if 'precompute3' in args.competitor.name:
-      -        print("-> Using precompute3 JSON for competitor model.")
-      -        competitor_json_str = pre3_json_str
-      -    else:
-      -        print("-> Using precompute2 JSON for competitor model.")
-      -        competitor_json_str = pre2_json_str
-      +    competitor_json_str = pre3_json_str
-           competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+      -    competitor_json_str = pre3_json_str
+      -    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+      +    full_constraint_json_str = grammar_constraint.to_json_string()
+      +    competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
            load_time = time.perf_counter() - t_start_load
            print(f"Competitor model loaded in {load_time:.4f} seconds.")
-      @@ -126,8 +119,8 @@
-           # 5. Equivalence Check
+       
+      @@ -182,7 +162,7 @@
            print(f"Loading reference model from: {args.reference}")
            ReferenceModel = load_competitor_model(args.reference)
-      -    # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-      -    reference_model = ReferenceModel.from_json_string(pre2_json_str)
-      +    # All models are loaded from precompute3 JSON for this benchmark suite.
-      +    reference_model = ReferenceModel.from_json_string(pre3_json_str)
+           # All models are loaded from precompute3 JSON for this benchmark suite.
+      -    reference_model = ReferenceModel.from_json_string(pre3_json_str)
+      +    reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
        
            if args.print_stats:
                print_model_statistics(reference_model, args.reference.name)
+      @@ -311,18 +291,18 @@
+       
+       def main():
+           parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+      -    parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+      +    parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+           parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+           parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+           
+           parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                               help="Disable correctness verification of masks at each step (improves benchmark purity).")
+           parser.add_argument('--print-stats', action='store_true',
+                               help="Print detailed statistics about the loaded models before running the benchmark.")
+           parser.set_defaults(verify_masks=True)
+       
+           args = parser.parse_args()
+       
+      -    for p in [args.grammar, args.code, args.competitor, args.reference]:
+      +    for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+               if not p.exists():
+                   parser.error(f"File not found: {p}")
+       
 
       ```
 
       ```diff
       diff --git a/python/aug25/precompute2_model.py b/python/aug25/precompute2_model.py
-      index 1111111..2222222 100644
       --- a/python/aug25/precompute2_model.py
       +++ b/python/aug25/precompute2_model.py
-      @@ -8,33 +8,41 @@
-               self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-               self.arena = arena
-               self.max_depth: Dict[int, int] = {}
-      -        # Convert BVs in-place to RangeSet
-      +        # Convert precompute3 graph structure to precompute2-like structure
-               for uid, n in self.arena.items():
-                   try:
-                       self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-                   except Exception:
-                       self.max_depth[int(uid)] = 0
-       
-      -            val = n.get("value") or {}
-      -            if "live_tokens" in val and val["live_tokens"] is not None:
-      -                val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
-      -            else:
-      -                val["live_tokens"] = RangeSet.empty()
-      -            n["value"] = val
-      +            p3_children = n.get("children") or []
-      +            
-      +            # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-      +            p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
-       
-      -            ch = n.get("children") or []
-      -            newch = []
-      -            for edge_key, dest_map in ch:
-      -                newdm = []
-      -                for di, bv in dest_map:
-      -                    rs = RangeSet.from_json(bv)
-      -                    newdm.append((int(di), rs))
-      -                pk, sid = edge_key
-      -                sidp = None if sid is None else int(sid)
-      -                newch.append(((int(pk), sidp), newdm))
-      -            n["children"] = newch
-      +            for edge_key, dest_map in p3_children:
-      +                pop, llm_bv_json = edge_key
-      +                llm_rs = RangeSet.from_json(llm_bv_json)
-      +                if llm_rs.is_empty():
-      +                    continue
-      +
-      +                for dest_idx, state_bv_ranges in dest_map:
-      +                    if not state_bv_ranges: # Corresponds to Option<StateID> == None
-      +                        p2_key = (int(pop), None)
-      +                        p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-      +                    else:
-      +                        for start, end in state_bv_ranges:
-      +                            for sid in range(int(start), int(end) + 1):
-      +                                p2_key = (int(pop), sid)
-      +                                p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-      +            
-      +            # Convert aggregated map to final list format
-      +            new_children = []
-      +            for (pop, sid), dests in p2_children_agg.items():
-      +                dest_list = list(dests.items())
-      +                new_children.append(((pop, sid), dest_list))
-      +            
-      +            n["children"] = new_children
+      @@ -45,11 +45,13 @@
        
            @staticmethod
            def from_json_string(s: str) -> 'Model':
+      -        arr = json.loads(s)
+      -        roots_map, arena_json = arr
+      +        data = json.loads(s)
+      +        # This model uses the precompute3 graph, as it's the most detailed representation
+      +        roots_map = list(data['precomputed3'].items())
+      +        arena_json = data['trie3_god']
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               return Model(roots_map, arena)
+       
+           def get_root(self, state_id: int) -> int:
+               return self.roots_map[int(state_id)]
+
+      ```
+
+      ```diff
+      diff --git a/python/aug25/precompute3_model.py b/python/aug25/precompute3_model.py
+      --- a/python/aug25/precompute3_model.py
+      +++ b/python/aug25/precompute3_model.py
+      @@ -30,11 +30,12 @@
+       
+           @staticmethod
+           def from_json_string(s: str) -> 'Model':
+      -        arr = json.loads(s)
+      -        roots_map, arena_json = arr
+      +        data = json.loads(s)
+      +        roots_map = list(data['precomputed3'].items())
+      +        arena_json = data['trie3_god']
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               return Model(roots_map, arena)
+       
+           def get_root(self, state_id: int) -> int:
+               return self.roots_map[int(state_id)]
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 4 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_js.rs
+      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_js.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/benchmark_runner.py
       Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
 
-      --- Processing Diff Block 2 ---
+      --- Processing Diff Block 3 ---
       Identified target file: python/aug25/precompute2_model.py
       Applying patch to 'python/aug25/precompute2_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/precompute2_model.py.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: python/aug25/precompute3_model.py
+      Applying patch to 'python/aug25/precompute3_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor benchmark runner and precompute2
-      model to use precompute3 data"'
+  - user: 'Changes committed with message: "feat: Benchmark runner loads full GrammarConstraint
+      from file"'
     metadata:
 ...

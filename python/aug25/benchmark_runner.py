@@ -156,38 +156,20 @@ def run_benchmark(args):
     """Main benchmark logic."""
     print("--- Setting up benchmark environment ---")
 
-    # 1. Load and compile grammar
-    print(f"Loading grammar from: {args.grammar}")
-    grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
-    compiled_grammar = grammar_def.compile()
+    # 1. Load pre-compiled GrammarConstraint
+    print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+    grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
 
-    # 2. Load vocabulary
-    print("Loading GPT-2 vocabulary...")
-    vocab_map = load_or_download_gpt2_vocab(
-        ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
-        "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-    )
-    token_to_id = {}
-    id_to_token = {}
-    max_token_id = 0
-    for token_str, token_id in vocab_map.items():
-        token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
-        token_to_id[token_bytes] = token_id
-        id_to_token[token_id] = token_bytes
-        max_token_id = max(max_token_id, token_id)
-
-    # 3. Construct GrammarConstraint and export reference precompute2 model
-    print("Constructing GrammarConstraint...")
-    grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-    pre3_json_str = grammar_constraint.precompute3_json_string()
+    # 2. Extract vocabulary for tokenizer
+    id_to_token = grammar_constraint.get_id_to_token_map()
 
     # 4. Load competitor model
     print(f"Loading competitor model from: {args.competitor}")
     CompetitorModel = load_competitor_model(args.competitor)
     
     t_start_load = time.perf_counter()
-    competitor_json_str = pre3_json_str
-    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+    full_constraint_json_str = grammar_constraint.to_json_string()
+    competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
     load_time = time.perf_counter() - t_start_load
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
@@ -198,7 +180,7 @@ def run_benchmark(args):
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
     # All models are loaded from precompute3 JSON for this benchmark suite.
-    reference_model = ReferenceModel.from_json_string(pre3_json_str)
+    reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
     if args.print_stats:
         print_model_statistics(reference_model, args.reference.name)
@@ -348,7 +330,7 @@ def run_benchmark(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-    parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+    parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
     parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
     parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
     parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
@@ -362,7 +344,7 @@ def main():
 
     args = parser.parse_args()
 
-    for p in [args.grammar, args.code, args.competitor, args.reference]:
+    for p in [args.constraint_file, args.code, args.competitor, args.reference]:
         if not p.exists():
             parser.error(f"File not found: {p}")
 

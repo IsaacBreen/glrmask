@@ -601,13 +601,13 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     grammar_constraint.dump_precomputed3_stats();
     println!("GrammarConstraint constructed successfully.");
 
-    let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-    let file = File::create(&precomputed2_cache_path)?;
+    let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+    let file = File::create(&constraint_cache_path)?;
     let writer = BufWriter::new(file);
     let mut encoder = GzEncoder::new(writer, Compression::default());
 
-    (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
-
+    grammar_constraint.to_writer(&mut encoder)?;
+    println!("GrammarConstraint saved to {}", constraint_cache_path.display());
     return Ok(());
 
     // --- Tokenization Phase ---
