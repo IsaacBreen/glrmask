@@ -16,15 +16,15 @@ set -euo pipefail
 #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
 #
 # Environment Variables:
-#   GRAMMAR_FILE: Path to the .ebnf grammar file.
-#                 (Default: ../src/js_simplified3.ebnf)
+#   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+#                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
 #   CODE_FILE:    Path to the code file to use as input.
 #                 (Default: ../src/example_code.js)
 # ==============================================================================
 
 # --- Configuration ---
 # Use environment variables if set, otherwise use defaults.
-: "${GRAMMAR_FILE:="../src/js.ebnf"}"
+: "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="../src/example_code.js"}"
 
 # --- Argument Validation ---
@@ -45,8 +45,8 @@ for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
         exit 1
     fi
 done
-if [ ! -f "$GRAMMAR_FILE" ]; then
-    echo "Error: Grammar file not found: $GRAMMAR_FILE"
+if [ ! -f "$CONSTRAINT_FILE" ]; then
+    echo "Error: Constraint file not found: $CONSTRAINT_FILE"
     exit 1
 fi
 if [ ! -f "$CODE_FILE" ]; then
@@ -63,7 +63,7 @@ echo "Benchmark results will be saved in: $RESULTS_DIR"
 echo "---"
 echo "Reference Model: $REFERENCE_MODEL"
 echo "Competitors: ${COMPETITORS[*]}"
-echo "Grammar: $GRAMMAR_FILE"
+echo "Constraint File: $CONSTRAINT_FILE"
 echo "Code: $CODE_FILE"
 echo "---"
 
@@ -74,8 +74,8 @@ for competitor in "${COMPETITORS[@]}"; do
     echo
     echo ">>> Running benchmark for: $(basename "$competitor")"
     python -m aug25.benchmark_runner \
-        --grammar "$GRAMMAR_FILE" \
         --code "$CODE_FILE" \
+        --constraint-file "$CONSTRAINT_FILE" \
         --reference "$REFERENCE_MODEL" \
         --competitor "$competitor" \
         --output "$RESULTS_DIR"

@@ -10,6 +10,7 @@ local_system:
     - python/aug25/optimizer_general.py
     - python/aug25/precompute2_model.py
     - python/aug25/precompute3_model.py
+    - python/run_benchmarks.sh
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -3438,7 +3439,7 @@ local_system:
           println!("--- Setting up for JS Constraint Integration Test ---");
 
           // 1. Load and compile the JavaScript grammar.
-          let grammar_path = "src/js.ebnf";
+          let grammar_path = "src/js_simplified.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
           println!("Compiling GrammarDefinition into CompiledGrammar...");
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -3526,13 +3527,14 @@ local_system:
           grammar_constraint.dump_precomputed3_stats();
           println!("GrammarConstraint constructed successfully.");
 
-          let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-          let file = File::create(&precomputed2_cache_path)?;
+          let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+          let file = File::create(&constraint_cache_path)?;
           let writer = BufWriter::new(file);
           let mut encoder = GzEncoder::new(writer, Compression::default());
 
-          (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
-
+          println!("\nSaving GrammarConstraint to {}", constraint_cache_path.display());
+          grammar_constraint.to_writer(&mut encoder)?;
+          println!("GrammarConstraint saved to {}", constraint_cache_path.display());
           return Ok(());
 
           // --- Tokenization Phase ---
@@ -4586,38 +4588,20 @@ local_system:
           """Main benchmark logic."""
           print("--- Setting up benchmark environment ---")
 
-          # 1. Load and compile grammar
-          print(f"Loading grammar from: {args.grammar}")
-          grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
-          compiled_grammar = grammar_def.compile()
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
 
-          # 2. Load vocabulary
-          print("Loading GPT-2 vocabulary...")
-          vocab_map = load_or_download_gpt2_vocab(
-              ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
-              "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-          )
-          token_to_id = {}
-          id_to_token = {}
-          max_token_id = 0
-          for token_str, token_id in vocab_map.items():
-              token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
-              token_to_id[token_bytes] = token_id
-              id_to_token[token_id] = token_bytes
-              max_token_id = max(max_token_id, token_id)
-
-          # 3. Construct GrammarConstraint and export reference precompute2 model
-          print("Constructing GrammarConstraint...")
-          grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-          pre3_json_str = grammar_constraint.precompute3_json_string()
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
           # 4. Load competitor model
           print(f"Loading competitor model from: {args.competitor}")
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          competitor_json_str = pre3_json_str
-          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
@@ -4628,7 +4612,7 @@ local_system:
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
           # All models are loaded from precompute3 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre3_json_str)
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
           if args.print_stats:
               print_model_statistics(reference_model, args.reference.name)
@@ -4778,7 +4762,7 @@ local_system:
 
       def main():
           parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-          parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
           parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
@@ -4792,7 +4776,7 @@ local_system:
 
           args = parser.parse_args()
 
-          for p in [args.grammar, args.code, args.competitor, args.reference]:
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
               if not p.exists():
                   parser.error(f"File not found: {p}")
 
@@ -5269,8 +5253,10 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              # This model uses the precompute3 graph, as it's the most detailed representation
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -5409,8 +5395,9 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -5527,6 +5514,107 @@ local_system:
                               todo[child_depth].add(d)
 
               return final_mask
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # comparing them against a reference implementation, and generating analysis plots.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   GRAMMAR_FILE: Path to the .ebnf grammar file.
+      #                 (Default: ../src/js_simplified3.ebnf)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ../src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${GRAMMAR_FILE:="../src/js.ebnf"}"
+      : "${CODE_FILE:="../src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 2 ]; then
+          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
+          echo "Error: At least two arguments are required: a reference model and one competitor model."
+          exit 1
+      fi
+
+      REFERENCE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      # Check that all provided files exist
+      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$GRAMMAR_FILE" ]; then
+          echo "Error: Grammar file not found: $GRAMMAR_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Model: $REFERENCE_MODEL"
+      echo "Competitors: ${COMPETITORS[*]}"
+      echo "Grammar: $GRAMMAR_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for competitor in "${COMPETITORS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$competitor")"
+          python -m aug25.benchmark_runner \
+              --grammar "$GRAMMAR_FILE" \
+              --code "$CODE_FILE" \
+              --reference "$REFERENCE_MODEL" \
+              --competitor "$competitor" \
+              --output "$RESULTS_DIR"
+          echo ">>> Finished benchmark for: $(basename "$competitor")"
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      python -m aug25.benchmark_analyzer \
+          "${RESULTS_DIR}"/*.json \
+          --output-dir "$PLOTS_DIR"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
   prev_file_contents:
     src/constraint.rs: |
       // src/constraint.rs
@@ -8953,7 +9041,7 @@ local_system:
           println!("--- Setting up for JS Constraint Integration Test ---");
 
           // 1. Load and compile the JavaScript grammar.
-          let grammar_path = "src/js.ebnf";
+          let grammar_path = "src/js_simplified.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
           println!("Compiling GrammarDefinition into CompiledGrammar...");
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -9046,6 +9134,7 @@ local_system:
           let writer = BufWriter::new(file);
           let mut encoder = GzEncoder::new(writer, Compression::default());
 
+          println!("\nSaving GrammarConstraint to {}", constraint_cache_path.display());
           grammar_constraint.to_writer(&mut encoder)?;
           println!("GrammarConstraint saved to {}", constraint_cache_path.display());
           return Ok(());
@@ -11027,6 +11116,107 @@ local_system:
                               todo[child_depth].add(d)
 
               return final_mask
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # comparing them against a reference implementation, and generating analysis plots.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: /Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ../src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="../src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 2 ]; then
+          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
+          echo "Error: At least two arguments are required: a reference model and one competitor model."
+          exit 1
+      fi
+
+      REFERENCE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      # Check that all provided files exist
+      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Model: $REFERENCE_MODEL"
+      echo "Competitors: ${COMPETITORS[*]}"
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for competitor in "${COMPETITORS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$competitor")"
+          python -m aug25.benchmark_runner \
+              --code "$CODE_FILE" \
+              --constraint-file "$CONSTRAINT_FILE" \
+              --reference "$REFERENCE_MODEL" \
+              --competitor "$competitor" \
+              --output "$RESULTS_DIR"
+          echo ">>> Finished benchmark for: $(basename "$competitor")"
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      python -m aug25.benchmark_analyzer \
+          "${RESULTS_DIR}"/*.json \
+          --output-dir "$PLOTS_DIR"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -14493,7 +14683,7 @@ messages:
           println!("--- Setting up for JS Constraint Integration Test ---");
 
           // 1. Load and compile the JavaScript grammar.
-          let grammar_path = "src/js.ebnf";
+          let grammar_path = "src/js_simplified.ebnf";
           let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
           println!("Compiling GrammarDefinition into CompiledGrammar...");
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -14581,13 +14771,14 @@ messages:
           grammar_constraint.dump_precomputed3_stats();
           println!("GrammarConstraint constructed successfully.");
 
-          let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-          let file = File::create(&precomputed2_cache_path)?;
+          let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
+          let file = File::create(&constraint_cache_path)?;
           let writer = BufWriter::new(file);
           let mut encoder = GzEncoder::new(writer, Compression::default());
 
-          (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
-
+          println!("\nSaving GrammarConstraint to {}", constraint_cache_path.display());
+          grammar_constraint.to_writer(&mut encoder)?;
+          println!("GrammarConstraint saved to {}", constraint_cache_path.display());
           return Ok(());
 
           // --- Tokenization Phase ---
@@ -15656,38 +15847,20 @@ messages:
           """Main benchmark logic."""
           print("--- Setting up benchmark environment ---")
 
-          # 1. Load and compile grammar
-          print(f"Loading grammar from: {args.grammar}")
-          grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
-          compiled_grammar = grammar_def.compile()
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
 
-          # 2. Load vocabulary
-          print("Loading GPT-2 vocabulary...")
-          vocab_map = load_or_download_gpt2_vocab(
-              ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
-              "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-          )
-          token_to_id = {}
-          id_to_token = {}
-          max_token_id = 0
-          for token_str, token_id in vocab_map.items():
-              token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
-              token_to_id[token_bytes] = token_id
-              id_to_token[token_id] = token_bytes
-              max_token_id = max(max_token_id, token_id)
-
-          # 3. Construct GrammarConstraint and export reference precompute2 model
-          print("Constructing GrammarConstraint...")
-          grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-          pre3_json_str = grammar_constraint.precompute3_json_string()
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
           # 4. Load competitor model
           print(f"Loading competitor model from: {args.competitor}")
           CompetitorModel = load_competitor_model(args.competitor)
           
           t_start_load = time.perf_counter()
-          competitor_json_str = pre3_json_str
-          competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
@@ -15698,7 +15871,7 @@ messages:
           print(f"Loading reference model from: {args.reference}")
           ReferenceModel = load_competitor_model(args.reference)
           # All models are loaded from precompute3 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(pre3_json_str)
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
           if args.print_stats:
               print_model_statistics(reference_model, args.reference.name)
@@ -15848,7 +16021,7 @@ messages:
 
       def main():
           parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-          parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
           parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
@@ -15862,7 +16035,7 @@ messages:
 
           args = parser.parse_args()
 
-          for p in [args.grammar, args.code, args.competitor, args.reference]:
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
               if not p.exists():
                   parser.error(f"File not found: {p}")
 
@@ -16359,8 +16532,10 @@ messages:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              # This model uses the precompute3 graph, as it's the most detailed representation
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -16504,8 +16679,9 @@ messages:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              arr = json.loads(s)
-              roots_map, arena_json = arr
+              data = json.loads(s)
+              roots_map = list(data['precomputed3'].items())
+              arena_json = data['trie3_god']
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               return Model(roots_map, arena)
@@ -16625,10 +16801,115 @@ messages:
       ```
     metadata:
       filename: python/aug25/precompute3_model.py
-  - user: Modify this code so that `test_js_constraint_integration` dumps the whole
-      grammar constraint, not just the precompute3 tree, and python/aug25/benchmark_runner.py
-      reads the grammar constraint rather than reading the grammar and constructing
-      the grammar constraint as it does right now.
+  - user: |-
+      ```shell 'python/run_benchmarks.sh'
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # comparing them against a reference implementation, and generating analysis plots.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   GRAMMAR_FILE: Path to the .ebnf grammar file.
+      #                 (Default: ../src/js_simplified3.ebnf)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ../src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${GRAMMAR_FILE:="../src/js.ebnf"}"
+      : "${CODE_FILE:="../src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 2 ]; then
+          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
+          echo "Error: At least two arguments are required: a reference model and one competitor model."
+          exit 1
+      fi
+
+      REFERENCE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      # Check that all provided files exist
+      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$GRAMMAR_FILE" ]; then
+          echo "Error: Grammar file not found: $GRAMMAR_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Model: $REFERENCE_MODEL"
+      echo "Competitors: ${COMPETITORS[*]}"
+      echo "Grammar: $GRAMMAR_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for competitor in "${COMPETITORS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$competitor")"
+          python -m aug25.benchmark_runner \
+              --grammar "$GRAMMAR_FILE" \
+              --code "$CODE_FILE" \
+              --reference "$REFERENCE_MODEL" \
+              --competitor "$competitor" \
+              --output "$RESULTS_DIR"
+          echo ">>> Finished benchmark for: $(basename "$competitor")"
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      python -m aug25.benchmark_analyzer \
+          "${RESULTS_DIR}"/*.json \
+          --output-dir "$PLOTS_DIR"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
+
+      ```
+    metadata:
+      filename: python/run_benchmarks.sh
+  - user: Fix the bash script. It should pass constraint file, not grammar. Use 
+      /Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz
+      by default.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -16647,251 +16928,101 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and corresponding git diffs to implement the requested changes.
+      Of course. Here are the step-by-step instructions to fix the script, followed by the corresponding git diff.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      **1. Modify the Rust test to dump the entire `GrammarConstraint`**
+      1.  **Open the file `python/run_benchmarks.sh`**.
 
-      In the file `src/test_constraint_js.rs`, you will adjust the `test_js_constraint_integration` function to serialize the whole `grammar_constraint` object instead of just a part of it.
+      2.  **Update the Configuration and Comments**:
+          -   Locate the comments describing the environment variables at the top of the script.
+          -   Change `GRAMMAR_FILE` to `CONSTRAINT_FILE` and update its description and default path.
+          -   Modify the line that sets the default value from `: "${GRAMMAR_FILE:="../src/js.ebnf"}"` to `: "${CONSTRAINT_FILE:="/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz"}"`.
 
-      -   **Open `src/test_constraint_js.rs`**.
-      -   **Navigate to the `test_js_constraint_integration` function.**
-      -   **Find the serialization block at the end of the setup phase.** It currently looks like this:
-          ```rust
-          let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-          let file = File::create(&precomputed2_cache_path)?;
-          let writer = BufWriter::new(file);
-          let mut encoder = GzEncoder::new(writer, Compression::default());
+      3.  **Update the File Existence Check**:
+          -   In the "Argument Validation" section, find the `if` block that checks for `$GRAMMAR_FILE`.
+          -   Change `if [ ! -f "$GRAMMAR_FILE" ]` to `if [ ! -f "$CONSTRAINT_FILE" ]`.
+          -   Update the error message inside from `echo "Error: Grammar file not found: $GRAMMAR_FILE"` to `echo "Error: Constraint file not found: $CONSTRAINT_FILE"`.
 
-          (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
+      4.  **Update the Setup Logging**:
+          -   In the "Setup" section, find the line `echo "Grammar: $GRAMMAR_FILE"`.
+          -   Change it to `echo "Constraint File: $CONSTRAINT_FILE"`.
 
-          return Ok(());
-          ```
-      -   **Replace this block** with the following code to change the output filename and serialize the entire `grammar_constraint` object:
-          ```rust
-          let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
-          let file = File::create(&constraint_cache_path)?;
-          let writer = BufWriter::new(file);
-          let mut encoder = GzEncoder::new(writer, Compression::default());
+      5.  **Update the Benchmark Command**:
+          -   Inside the `for` loop in the "Run Benchmarks" section, locate the `python -m aug25.benchmark_runner` command.
+          -   Remove the line `--grammar "$GRAMMAR_FILE" \`.
+          -   Add a new line `--constraint-file "$CONSTRAINT_FILE" \` to correctly pass the path to the pre-compiled constraint file.
 
-          grammar_constraint.to_writer(&mut encoder)?;
-          println!("GrammarConstraint saved to {}", constraint_cache_path.display());
-          return Ok(());
-          ```
+      ### Git Diff
 
-      **2. Update the Python benchmark runner to load the full `GrammarConstraint`**
-
-      In `python/aug25/benchmark_runner.py`, you'll change the script to load the pre-compiled constraint file instead of building it from an EBNF grammar.
-
-      -   **Open `python/aug25/benchmark_runner.py`**.
-      -   **Modify the `main` function's argument parser:**
-          -   Remove the line that adds the `--grammar` argument.
-          -   Add a new argument `--constraint-file` for the serialized object.
-          -   Update the file existence check to use `args.constraint_file`.
-      -   **Modify the `run_benchmark` function:**
-          -   **Delete** the sections that load the EBNF grammar, load the vocabulary, and construct the `GrammarConstraint` from scratch.
-          -   **Insert** new code to load the `GrammarConstraint` from the provided file and extract the vocabulary from it.
-          -   **Update** the model loading logic to pass the full JSON string of the loaded constraint to the competitor models.
-
-      **3. Update Python models to parse the full `GrammarConstraint` JSON**
-
-      The `from_json_string` method in both `precompute2_model.py` and `precompute3_model.py` needs to be updated to handle the new, larger JSON structure.
-
-      -   **Open `python/aug25/precompute2_model.py`**.
-      -   **In the `Model` class, replace the `from_json_string` method** with a new version that parses the full object and extracts the `precomputed3` and `trie3_god` fields.
-      -   **Open `python/aug25/precompute3_model.py`**.
-      -   **Do the same for this file:** replace the `from_json_string` method with the updated implementation. The logic is identical for both files.
-
-      ### Git Diffs
-
-      Here are the git diffs that apply the changes described above.
+      Here is the git patch that applies the changes described above.
 
       ```diff
-      diff --git a/src/test_constraint_js.rs b/src/test_constraint_js.rs
-      --- a/src/test_constraint_js.rs
-      +++ b/src/test_constraint_js.rs
-      @@ -610,13 +610,13 @@
-           grammar_constraint.dump_precomputed3_stats();
-           println!("GrammarConstraint constructed successfully.");
+      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -11,13 +11,13 @@
+       #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+       #
+       # Environment Variables:
+      -#   GRAMMAR_FILE: Path to the .ebnf grammar file.
+      -#                 (Default: ../src/js_simplified3.ebnf)
+      +#   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      +#                    (Default: /Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz)
+       #   CODE_FILE:    Path to the code file to use as input.
+       #                 (Default: ../src/example_code.js)
+       # ==============================================================================
        
-      -    let precomputed2_cache_path = cache_dir.join("js_grammar_precomputed2_cache.json.gz");
-      -    let file = File::create(&precomputed2_cache_path)?;
-      +    let constraint_cache_path = cache_dir.join("js_grammar_constraint.json.gz");
-      +    let file = File::create(&constraint_cache_path)?;
-           let writer = BufWriter::new(file);
-           let mut encoder = GzEncoder::new(writer, Compression::default());
+       # --- Configuration ---
+       # Use environment variables if set, otherwise use defaults.
+      -: "${GRAMMAR_FILE:="../src/js.ebnf"}"
+      +: "${CONSTRAINT_FILE:="/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+       : "${CODE_FILE:="../src/example_code.js"}"
        
-      -    (grammar_constraint.precomputed3.clone(), grammar_constraint.trie3_god.clone()).to_writer(&mut encoder)?;
-      -
-      +    grammar_constraint.to_writer(&mut encoder)?;
-      +    println!("GrammarConstraint saved to {}", constraint_cache_path.display());
-           return Ok(());
+       # --- Argument Validation ---
+      @@ -36,9 +36,9 @@
+               exit 1
+           fi
+       done
+      -if [ ! -f "$GRAMMAR_FILE" ]; then
+      -    echo "Error: Grammar file not found: $GRAMMAR_FILE"
+      +if [ ! -f "$CONSTRAINT_FILE" ]; then
+      +    echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+           exit 1
+       fi
+       if [ ! -f "$CODE_FILE" ]; then
+      @@ -53,7 +53,7 @@
+       echo "---"
+       echo "Reference Model: $REFERENCE_MODEL"
+       echo "Competitors: ${COMPETITORS[*]}"
+      -echo "Grammar: $GRAMMAR_FILE"
+      +echo "Constraint File: $CONSTRAINT_FILE"
+       echo "Code: $CODE_FILE"
+       echo "---"
        
-           // --- Tokenization Phase ---
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      --- a/python/aug25/benchmark_runner.py
-      +++ b/python/aug25/benchmark_runner.py
-      @@ -143,36 +143,16 @@
-           print("-" * 20)
-       
-       def run_benchmark(args):
-           """Main benchmark logic."""
-           print("--- Setting up benchmark environment ---")
-       
-      -    # 1. Load and compile grammar
-      -    print(f"Loading grammar from: {args.grammar}")
-      -    grammar_def = _sep1.GrammarDefinition.from_ebnf_file(str(args.grammar))
-      -    compiled_grammar = grammar_def.compile()
-      -
-      -    # 2. Load vocabulary
-      -    print("Loading GPT-2 vocabulary...")
-      -    vocab_map = load_or_download_gpt2_vocab(
-      -        ".cache/py_benchmark_vocabs", "gpt2_vocab.json",
-      -        "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-      -    )
-      -    token_to_id = {}
-      -    id_to_token = {}
-      -    max_token_id = 0
-      -    for token_str, token_id in vocab_map.items():
-      -        token_bytes = token_str.replace("Ġ", " ").replace("Ċ", "\n").encode('utf-8')
-      -        token_to_id[token_bytes] = token_id
-      -        id_to_token[token_id] = token_bytes
-      -        max_token_id = max(max_token_id, token_id)
-      -
-      -    # 3. Construct GrammarConstraint and export reference precompute2 model
-      -    print("Constructing GrammarConstraint...")
-      -    grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-      -    pre3_json_str = grammar_constraint.precompute3_json_string()
-      +    # 1. Load pre-compiled GrammarConstraint
-      +    print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
-      +    grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
-      +
-      +    # 2. Extract vocabulary for tokenizer
-      +    id_to_token = grammar_constraint.get_id_to_token_map()
-       
-           # 4. Load competitor model
-           print(f"Loading competitor model from: {args.competitor}")
-           CompetitorModel = load_competitor_model(args.competitor)
-           
-           t_start_load = time.perf_counter()
-      -    competitor_json_str = pre3_json_str
-      -    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
-      +    full_constraint_json_str = grammar_constraint.to_json_string()
-      +    competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
-           load_time = time.perf_counter() - t_start_load
-           print(f"Competitor model loaded in {load_time:.4f} seconds.")
-       
-      @@ -182,7 +162,7 @@
-           print(f"Loading reference model from: {args.reference}")
-           ReferenceModel = load_competitor_model(args.reference)
-           # All models are loaded from precompute3 JSON for this benchmark suite.
-      -    reference_model = ReferenceModel.from_json_string(pre3_json_str)
-      +    reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
-       
-           if args.print_stats:
-               print_model_statistics(reference_model, args.reference.name)
-      @@ -311,18 +291,18 @@
-       
-       def main():
-           parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-      -    parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the .ebnf grammar file.")
-      +    parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
-           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
-           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
-           parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
-           parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
-           
-           parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
-                               help="Disable correctness verification of masks at each step (improves benchmark purity).")
-           parser.add_argument('--print-stats', action='store_true',
-                               help="Print detailed statistics about the loaded models before running the benchmark.")
-           parser.set_defaults(verify_masks=True)
-       
-           args = parser.parse_args()
-       
-      -    for p in [args.grammar, args.code, args.competitor, args.reference]:
-      +    for p in [args.constraint_file, args.code, args.competitor, args.reference]:
-               if not p.exists():
-                   parser.error(f"File not found: {p}")
-       
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/precompute2_model.py b/python/aug25/precompute2_model.py
-      --- a/python/aug25/precompute2_model.py
-      +++ b/python/aug25/precompute2_model.py
-      @@ -45,11 +45,13 @@
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      -        arr = json.loads(s)
-      -        roots_map, arena_json = arr
-      +        data = json.loads(s)
-      +        # This model uses the precompute3 graph, as it's the most detailed representation
-      +        roots_map = list(data['precomputed3'].items())
-      +        arena_json = data['trie3_god']
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               return Model(roots_map, arena)
-       
-           def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/precompute3_model.py b/python/aug25/precompute3_model.py
-      --- a/python/aug25/precompute3_model.py
-      +++ b/python/aug25/precompute3_model.py
-      @@ -30,11 +30,12 @@
-       
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      -        arr = json.loads(s)
-      -        roots_map, arena_json = arr
-      +        data = json.loads(s)
-      +        roots_map = list(data['precomputed3'].items())
-      +        arena_json = data['trie3_god']
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               return Model(roots_map, arena)
-       
-           def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
+      @@ -64,8 +64,8 @@
+           echo
+           echo ">>> Running benchmark for: $(basename "$competitor")"
+           python -m aug25.benchmark_runner \
+      -        --grammar "$GRAMMAR_FILE" \
+               --code "$CODE_FILE" \
+      +        --constraint-file "$CONSTRAINT_FILE" \
+               --reference "$REFERENCE_MODEL" \
+               --competitor "$competitor" \
+               --output "$RESULTS_DIR"
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_js.rs
-      Applying patch to 'src/test_constraint_js.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_js.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/benchmark_runner.py
-      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/aug25/precompute2_model.py
-      Applying patch to 'python/aug25/precompute2_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/precompute2_model.py.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: python/aug25/precompute3_model.py
-      Applying patch to 'python/aug25/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/precompute3_model.py.
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
     metadata:
-  - user: 'Changes committed with message: "feat: Benchmark runner loads full GrammarConstraint
-      from file"'
+  - user: 'Changes committed with message: "Fix: Update benchmark script to use constraint
+      file path and default"'
     metadata:
 ...
