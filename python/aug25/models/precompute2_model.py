@@ -6,7 +6,7 @@ import _sep1 as ffi
 from tqdm.auto import tqdm
 
 class Model(GraphProvider):
-    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
@@ -34,7 +34,8 @@ class Model(GraphProvider):
                         p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
                     else:
                         for start, end in tqdm(state_bv_ranges, desc="Aggregating ranges", leave=False):
-                            for sid in tqdm(list(range(int(start), int(end) + 1)), desc="Aggregating ranges", leave=False):
+                            end = max(int(end), start)
+                            for sid in tqdm(list(range(int(start), end + 1)), desc="Aggregating ranges", leave=False):
                                 p2_key = (int(pop), sid)
                                 p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
             
@@ -54,7 +55,8 @@ class Model(GraphProvider):
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        max_state_id = max(data['parser']['stage_7_table'].keys())
+        return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
