@@ -1,330 +1,761 @@
 local_system:
   attached_files:
-    - python/aug25/models/precompute2_model.py
+    - python/aug25/benchmark_runner.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/models/precompute2_model.py: |
+    python/aug25/benchmark_runner.py: |
+      import argparse
       import json
-      from typing import Dict, List, Tuple
-      from collections import defaultdict
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from tqdm.auto import tqdm
+      import gzip
+      import os
+      import requests
+      import time
+      import sys
+      import importlib.util
+      from pathlib import Path
+      from datetime import datetime, timezone
+      import numpy as np
+      from collections import Counter
+      from tqdm import tqdm
 
-      class Model(GraphProvider):
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-              self.arena = arena
-              self.max_depth: Dict[int, int] = {}
-              # Convert precompute3 graph structure to precompute2-like structure
-              for uid, n in tqdm(self.arena.items(), desc="Converting precompute3->precompute2", total=len(self.arena)):
-                  try:
-                      self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-                  except Exception:
-                      self.max_depth[int(uid)] = 0
+      import _sep1
+      from aug25.equality import are_equivalent_for_state
+      from aug25.common_interface import RangeSet
 
-                  p3_children = n.get("children") or []
-                  
-                  # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-                  p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
+      # --- Helper Functions (from former example_js.py) ---
 
-                  for edge_key, dest_map in p3_children:
-                      pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      if llm_rs.is_empty():
-                          continue
+      def load_or_download_gpt2_vocab(cache_dir, file_name, url):
+          cache_dir = Path(cache_dir)
+          cache_dir.mkdir(parents=True, exist_ok=True)
+          cache_path = cache_dir / file_name
+          if not cache_path.exists():
+              print(f"Downloading GPT-2 vocab from: {url}")
+              response = requests.get(url)
+              response.raise_for_status()
+              with open(cache_path, 'w', encoding='utf-8') as f:
+                  f.write(response.text)
 
-                      for dest_idx, state_bv_ranges in dest_map:
-                          if not state_bv_ranges: # Corresponds to Option<StateID> == None
-                              p2_key = (int(pop), None)
-                              p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(int(start), int(end) + 1):
-                                      p2_key = (int(pop), sid)
-                                      p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                  
-                  # Convert aggregated map to final list format
-                  new_children = []
-                  for (pop, sid), dests in p2_children_agg.items():
-                      dest_list = list(dests.items())
-                      new_children.append(((pop, sid), dest_list))
-                  
-                  n["children"] = new_children
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
 
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              # This model uses the precompute3 graph, as it's the most detailed representation
-              roots_map = data['precomputed3']
-              arena_json = data['trie3_god']
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              return Model(roots_map, arena)
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
 
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
+          return vocab_map
 
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+      def greedy_tokenizer(text_bytes, id_to_token):
+          token_to_id = {v: k for k, v in id_to_token.items()}
+          sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+          token_ids = []
+          pos = 0
+          while pos < len(text_bytes):
+              match_found = False
+              for token_bytes in sorted_tokens:
+                  if text_bytes[pos:].startswith(token_bytes):
+                      token_ids.append(token_to_id[token_bytes])
+                      pos += len(token_bytes)
+                      match_found = True
+                      break
+              if not match_found:
+                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+          return token_ids
 
-          def iter_edges(self, node: int, token: int):
-              # Reference edges are token-gated on their BVs. This provider yields only matching edges.
-              for (pop, sid), dests in self.arena.get(node, {}).get("children") or []:
-                  for dest, rs in dests:
-                      if rs.contains(token):
-                          yield (int(pop), sid, int(dest))
+      def load_competitor_model(competitor_path: Path):
+          """Dynamically loads the 'Model' class from a Python file."""
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
+          spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+          if spec is None or spec.loader is None:
+              raise ImportError(f"Could not load spec for module at {competitor_path}")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[module_name] = module
+          spec.loader.exec_module(module)
+          
+          if not hasattr(module, 'Model'):
+              raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
+          
+          return getattr(module, 'Model')
 
-          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              final_mask = ffi.Bitset.zeros()
-              values: Dict[int, ffi.GSSNode] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = defaultdict(set)
+      def print_model_statistics(model, model_name: str):
+          """Analyzes and prints statistics about the loaded graph model."""
+          print(f"\n--- Statistics for {model_name} ---")
 
-              # Seed
-              for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-                  if root_idx in values:
-                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
-                      if merged.ptr() != values[root_idx].ptr():
-                          values[root_idx] = merged
-                  else:
-                      values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
-                  todo[depth].add(root_idx)
+          if not hasattr(model, 'arena') or not model.arena:
+              print("  - Model has no arena or is empty. Cannot compute stats.")
+              return
 
-              # Main loop
-              while todo:
-                  current_depth = min(todo.keys())
-                  node_indices = todo.pop(current_depth)
+          num_nodes = len(model.arena)
+          num_roots = len(model.roots_map)
+          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
 
-                  for node_idx in list(node_indices):
-                      if node_idx in stopped:
-                          continue
+          print(f"  - Roots: {num_roots}")
+          print(f"  - Nodes: {num_nodes}")
+          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
 
-                      agg = values.pop(node_idx, None)
-                      if agg is None:
-                          continue
+          # Detect model type by inspecting the first child edge of the first node with children
+          is_precompute3 = False
+          for node_data in model.arena.values():
+              children = node_data.get("children")
+              if children:
+                  edge_key, _ = children[0]
+                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+                  if isinstance(edge_key[1], RangeSet):
+                       is_precompute3 = True
+                  break
+          
+          model_type = "Precompute3" if is_precompute3 else "Precompute2"
+          print(f"  - Detected Model Type: {model_type}")
 
-                      # Process
-                      if self.is_end(node_idx):
-                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+          pops = []
+          fan_outs = []
+          llm_rs_sizes = []
+          state_rs_sizes = [] # precompute3 only
 
-                      if not agg.is_ok():
-                          stopped.add(node_idx)
-                          continue
+          if is_precompute3:
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, llm_rs), dests in children:
+                      pops.append(pop)
+                      if llm_rs.intervals:
+                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                      total_dest_edges += len(dests)
+                      for _, state_bv in dests:
+                          if state_bv:
+                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
 
-                      # Step
-                      node = self.arena.get(node_idx, {})
-                      children = node.get("children") or []
-                      for (pop, sid_opt), dests in children:
-                          peeks = ffi.gss_popn_collect(agg, int(pop))
-                          if not peeks:
-                              continue
+          else: # Precompute2
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, _), dests in children:
+                      pops.append(pop)
+                      total_dest_edges += len(dests)
+                      for _, llm_rs in dests:
+                          if llm_rs.intervals:
+                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
 
-                          # Filter peeks by state_id
-                          matched_parents = []
-                          if sid_opt is None:
-                              matched_parents = [p for _, p in peeks]
-                          else:
-                              sid_val = int(sid_opt)
-                              matched_parents = [p for sid, p in peeks if sid == sid_val]
+          def print_dist(name, data):
+              if not data:
+                  print(f"  - {name} Distribution: N/A (no data)")
+                  return
+              arr = np.array(data)
+              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
 
-                          if not matched_parents:
-                              continue
+          print_dist("Pop counts", pops)
+          print_dist("Node fan-out", fan_outs)
+          print_dist("LLM RangeSet sizes", llm_rs_sizes)
+          if is_precompute3:
+              print_dist("State RangeSet sizes", state_rs_sizes)
+          print("-" * 20)
 
-                          child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
-                          if not child_gss.is_ok():
-                              continue
+      def run_benchmark(args):
+          """Main benchmark logic."""
+          print("--- Setting up benchmark environment ---")
 
-                          for dest_idx, llm_rs in dests:
-                              gss_for_dest = child_gss.clone_node()
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          # Read the gzipped JSON into a string and construct the GrammarConstraint using the
+          # available from_json_string(...) API.
+          p = str(args.constraint_file)
+          if p.endswith('.gz'):
+              with gzip.open(p, 'rt', encoding='utf-8') as f:
+                  constraint_json_str = f.read()
+          else:
+              # Fallback: if the file is plain JSON, read it directly.
+              constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+          grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
-                              if llm_rs.intervals:
-                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                                  ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
-                              if not gss_for_dest.is_ok():
-                                  continue
+          # 4. Load competitor model
+          print(f"Loading competitor model from: {args.competitor}")
+          CompetitorModel = load_competitor_model(args.competitor)
+          
+          t_start_load = time.perf_counter()
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
+          load_time = time.perf_counter() - t_start_load
+          print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
-                              d = int(dest_idx)
-                              if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
-                                  if combined.ptr() == values[d].ptr():
-                                      continue
-                                  values[d] = combined
-                              else:
-                                  values[d] = gss_for_dest
+          if args.print_stats:
+              print_model_statistics(competitor_model, args.competitor.name)
 
-                              child_depth = self.max_depth.get(d, 0)
-                              todo[child_depth].add(d)
+          # 5. Equivalence Check
+          print(f"Loading reference model from: {args.reference}")
+          ReferenceModel = load_competitor_model(args.reference)
+          # All models are loaded from precompute3 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
-              return final_mask
+          if args.print_stats:
+              print_model_statistics(reference_model, args.reference.name)
+
+          print(f"Running equivalence check against reference model: {args.reference.name}")
+          
+          equivalence_passed = True
+          equivalence_details = "All tested states are equivalent."
+
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
+              if equivalence_passed:
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          # 6. Prepare for benchmarking loop
+          print(f"Loading and tokenizing code from: {args.code}")
+          code_bytes = args.code.read_bytes()
+          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          print(f"Tokenized into {len(token_ids)} tokens.")
+
+          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+          timings = []
+          mask_correctness_passed = True
+          mask_correctness_details = "All masks matched the reference implementation."
+
+          # 7. Run benchmark loop
+          print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+              # Get the reference mask to check correctness (if enabled)
+              if args.verify_masks:
+                  reference_mask_np = constraint_state.get_mask()
+                  if not reference_mask_np[token_id]:
+                      # This indicates an issue with the grammar or tokenizer, not the competitor.
+                      print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+                      sys.exit(1)
+
+              # Get the state map for the competitor
+              state_to_gss = constraint_state.filtered_state_gss_map()
+
+              # --- TIMED SECTION ---
+              t_start_mask = time.perf_counter()
+              competitor_mask = competitor_model.get_mask(state_to_gss)
+              t_end_mask = time.perf_counter()
+              timings.append(t_end_mask - t_start_mask)
+              # --- END TIMED SECTION ---
+
+              # Verify the competitor's mask (if enabled)
+              if args.verify_masks:
+                  # This check is expensive but crucial for validation
+                  ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+                  comp_indices = set(competitor_mask.to_indices())
+                  if ref_indices != comp_indices:
+                      mask_correctness_passed = False
+                      mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
+                      print(f"❌ {mask_correctness_details}")
+                      # Stop verifying after first failure to avoid spamming output
+                      args.verify_masks = False
+
+              # Advance the state
+              constraint_state.commit(token_id)
+
+          print("--- Benchmark finished ---")
+
+          # 8. Compile and save results
+          if timings:
+              p = np.percentile(timings, [50, 90, 99])
+              summary_stats = {
+                  "count": len(timings),
+                  "mean": float(np.mean(timings)),
+                  "stddev": float(np.std(timings)),
+                  "min": float(np.min(timings)),
+                  "max": float(np.max(timings)),
+                  "p50": float(p[0]),
+                  "p90": float(p[1]),
+                  "p99": float(p[2]),
+              }
+          else:
+              summary_stats = {}
+
+          output_data = {
+              "competitor_script": str(args.competitor),
+              "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "inputs": {
+                  "grammar_file": str(args.constraint_file),
+                  "code_file": str(args.code),
+              },
+              "results": {
+                  "load_time_seconds": load_time,
+                  "equivalence_check": {
+                      "passed": equivalence_passed,
+                      "details": equivalence_details,
+                  },
+                  "mask_correctness_check": {
+                      "enabled": args.verify_masks,
+                      "passed": mask_correctness_passed,
+                      "details": mask_correctness_details,
+                  },
+                  "get_mask_timings_seconds": timings,
+                  "summary_stats": summary_stats,
+              }
+          }
+
+          # Determine output path
+          if args.output:
+              output_path = Path(args.output)
+              if output_path.is_dir():
+                  output_path = output_path / f"{args.competitor.stem}_results.json"
+          else:
+              output_path = Path(f"{args.competitor.stem}_results.json")
+          
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          with open(output_path, 'w') as f:
+              json.dump(output_data, f, indent=2)
+          
+          print(f"\nBenchmark results saved to: {output_path}")
+
+
+      def main():
+          parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+          parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+          parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+          parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+          parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+          
+          parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                              help="Disable correctness verification of masks at each step (improves benchmark purity).")
+          parser.add_argument('--print-stats', action='store_true',
+                              help="Print detailed statistics about the loaded models before running the benchmark.")
+          parser.set_defaults(verify_masks=True)
+
+          args = parser.parse_args()
+
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+              if not p.exists():
+                  parser.error(f"File not found: {p}")
+
+          run_benchmark(args)
+
+      if __name__ == "__main__":
+          main()
   prev_file_contents:
-    python/aug25/models/precompute2_model.py: |
+    python/aug25/benchmark_runner.py: |
+      import argparse
       import json
-      from typing import Dict, List, Tuple
-      from collections import defaultdict
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from tqdm.auto import tqdm
+      import gzip
+      import os
+      import requests
+      import time
+      import sys
+      import importlib.util
+      from pathlib import Path
+      from datetime import datetime, timezone
+      import numpy as np
+      from collections import Counter
+      from tqdm import tqdm
 
-      class Model(GraphProvider):
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-              self.arena = arena
-              self.max_depth: Dict[int, int] = {}
-              # Convert precompute3 graph structure to precompute2-like structure
-              for uid, n in tqdm(self.arena.items(), desc="Converting precompute3->precompute2", total=len(self.arena)):
-                  try:
-                      self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-                  except Exception:
-                      self.max_depth[int(uid)] = 0
+      import _sep1
+      from aug25.equality import are_equivalent_for_state
+      from aug25.common_interface import RangeSet
 
-                  p3_children = n.get("children") or []
-                  
-                  # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-                  p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
+      # --- Helper Functions (from former example_js.py) ---
 
-                  for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False):
-                      pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      if llm_rs.is_empty():
-                          continue
+      def load_or_download_gpt2_vocab(cache_dir, file_name, url):
+          cache_dir = Path(cache_dir)
+          cache_dir.mkdir(parents=True, exist_ok=True)
+          cache_path = cache_dir / file_name
+          if not cache_path.exists():
+              print(f"Downloading GPT-2 vocab from: {url}")
+              response = requests.get(url)
+              response.raise_for_status()
+              with open(cache_path, 'w', encoding='utf-8') as f:
+                  f.write(response.text)
 
-                      for dest_idx, state_bv_ranges in dest_map:
-                          if not state_bv_ranges: # Corresponds to Option<StateID> == None
-                              p2_key = (int(pop), None)
-                              p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(int(start), int(end) + 1):
-                                      p2_key = (int(pop), sid)
-                                      p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                  
-                  # Convert aggregated map to final list format
-                  new_children = []
-                  for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False):
-                      dest_list = list(dests.items())
-                      new_children.append(((pop, sid), dest_list))
-                  
-                  n["children"] = new_children
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
 
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              # This model uses the precompute3 graph, as it's the most detailed representation
-              roots_map = data['precomputed3']
-              arena_json = data['trie3_god']
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              return Model(roots_map, arena)
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
 
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
+          return vocab_map
 
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+      def greedy_tokenizer(text_bytes, id_to_token):
+          # Build a Trie for fast prefix matching.
+          # The key '<ID>' stores the token ID for a complete token.
+          trie_root = {}
+          for token_id, token_bytes in id_to_token.items():
+              node = trie_root
+              for byte_val in token_bytes:
+                  node = node.setdefault(byte_val, {})
+              node['<ID>'] = token_id
 
-          def iter_edges(self, node: int, token: int):
-              # Reference edges are token-gated on their BVs. This provider yields only matching edges.
-              for (pop, sid), dests in self.arena.get(node, {}).get("children") or []:
-                  for dest, rs in dests:
-                      if rs.contains(token):
-                          yield (int(pop), sid, int(dest))
-
-          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              final_mask = ffi.Bitset.zeros()
-              values: Dict[int, ffi.GSSNode] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = defaultdict(set)
-
-              # Seed
-              for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-                  if root_idx in values:
-                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
-                      if merged.ptr() != values[root_idx].ptr():
-                          values[root_idx] = merged
+          token_ids = []
+          pos = 0
+          while pos < len(text_bytes):
+              # Find the longest possible token match starting at the current position.
+              node = trie_root
+              longest_match_id = -1
+              longest_match_len = 0
+              
+              # Traverse the Trie with bytes from the current position.
+              for i in range(len(text_bytes) - pos):
+                  current_byte = text_bytes[pos + i]
+                  if current_byte in node:
+                      node = node[current_byte]
+                      if '<ID>' in node:
+                          # Found a valid token, record it and keep searching for a longer one.
+                          longest_match_id = node['<ID>']
+                          longest_match_len = i + 1
                   else:
-                      values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
-                  todo[depth].add(root_idx)
+                      # No further matches possible from this prefix.
+                      break
+              
+              if longest_match_len > 0:
+                  token_ids.append(longest_match_id)
+                  pos += longest_match_len
+              else:
+                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+          return token_ids
 
-              # Main loop
-              while todo:
-                  current_depth = min(todo.keys())
-                  node_indices = todo.pop(current_depth)
+      def load_competitor_model(competitor_path: Path):
+          """Dynamically loads the 'Model' class from a Python file."""
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
+          spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+          if spec is None or spec.loader is None:
+              raise ImportError(f"Could not load spec for module at {competitor_path}")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[module_name] = module
+          spec.loader.exec_module(module)
+          
+          if not hasattr(module, 'Model'):
+              raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
+          
+          return getattr(module, 'Model')
 
-                  for node_idx in list(node_indices):
-                      if node_idx in stopped:
-                          continue
+      def print_model_statistics(model, model_name: str):
+          """Analyzes and prints statistics about the loaded graph model."""
+          print(f"\n--- Statistics for {model_name} ---")
 
-                      agg = values.pop(node_idx, None)
-                      if agg is None:
-                          continue
+          if not hasattr(model, 'arena') or not model.arena:
+              print("  - Model has no arena or is empty. Cannot compute stats.")
+              return
 
-                      # Process
-                      if self.is_end(node_idx):
-                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+          num_nodes = len(model.arena)
+          num_roots = len(model.roots_map)
+          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
 
-                      if not agg.is_ok():
-                          stopped.add(node_idx)
-                          continue
+          print(f"  - Roots: {num_roots}")
+          print(f"  - Nodes: {num_nodes}")
+          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
 
-                      # Step
-                      node = self.arena.get(node_idx, {})
-                      children = node.get("children") or []
-                      for (pop, sid_opt), dests in children:
-                          peeks = ffi.gss_popn_collect(agg, int(pop))
-                          if not peeks:
-                              continue
+          # Detect model type by inspecting the first child edge of the first node with children
+          is_precompute3 = False
+          for node_data in model.arena.values():
+              children = node_data.get("children")
+              if children:
+                  edge_key, _ = children[0]
+                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+                  if isinstance(edge_key[1], RangeSet):
+                       is_precompute3 = True
+                  break
+          
+          model_type = "Precompute3" if is_precompute3 else "Precompute2"
+          print(f"  - Detected Model Type: {model_type}")
 
-                          # Filter peeks by state_id
-                          matched_parents = []
-                          if sid_opt is None:
-                              matched_parents = [p for _, p in peeks]
-                          else:
-                              sid_val = int(sid_opt)
-                              matched_parents = [p for sid, p in peeks if sid == sid_val]
+          pops = []
+          fan_outs = []
+          llm_rs_sizes = []
+          state_rs_sizes = [] # precompute3 only
 
-                          if not matched_parents:
-                              continue
+          if is_precompute3:
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, llm_rs), dests in children:
+                      pops.append(pop)
+                      if llm_rs.intervals:
+                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                      total_dest_edges += len(dests)
+                      for _, state_bv in dests:
+                          if state_bv:
+                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
 
-                          child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
-                          if not child_gss.is_ok():
-                              continue
+          else: # Precompute2
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, _), dests in children:
+                      pops.append(pop)
+                      total_dest_edges += len(dests)
+                      for _, llm_rs in dests:
+                          if llm_rs.intervals:
+                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
 
-                          for dest_idx, llm_rs in dests:
-                              gss_for_dest = child_gss.clone_node()
+          def print_dist(name, data):
+              if not data:
+                  print(f"  - {name} Distribution: N/A (no data)")
+                  return
+              arr = np.array(data)
+              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
 
-                              if llm_rs.intervals:
-                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                                  ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+          print_dist("Pop counts", pops)
+          print_dist("Node fan-out", fan_outs)
+          print_dist("LLM RangeSet sizes", llm_rs_sizes)
+          if is_precompute3:
+              print_dist("State RangeSet sizes", state_rs_sizes)
+          print("-" * 20)
 
-                              if not gss_for_dest.is_ok():
-                                  continue
+      def run_benchmark(args):
+          """Main benchmark logic."""
+          print("--- Setting up benchmark environment ---")
 
-                              d = int(dest_idx)
-                              if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
-                                  if combined.ptr() == values[d].ptr():
-                                      continue
-                                  values[d] = combined
-                              else:
-                                  values[d] = gss_for_dest
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          # Read the gzipped JSON into a string and construct the GrammarConstraint using the
+          # available from_json_string(...) API.
+          p = str(args.constraint_file)
+          if p.endswith('.gz'):
+              with gzip.open(p, 'rt', encoding='utf-8') as f:
+                  constraint_json_str = f.read()
+          else:
+              # Fallback: if the file is plain JSON, read it directly.
+              constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+          grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
-                              child_depth = self.max_depth.get(d, 0)
-                              todo[child_depth].add(d)
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
-              return final_mask
+          # 4. Load competitor model
+          print(f"Loading competitor model from: {args.competitor}")
+          CompetitorModel = load_competitor_model(args.competitor)
+          
+          t_start_load = time.perf_counter()
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
+          load_time = time.perf_counter() - t_start_load
+          print(f"Competitor model loaded in {load_time:.4f} seconds.")
+
+          if args.print_stats:
+              print_model_statistics(competitor_model, args.competitor.name)
+
+          # 5. Equivalence Check
+          print(f"Loading reference model from: {args.reference}")
+          ReferenceModel = load_competitor_model(args.reference)
+          # All models are loaded from precompute3 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+
+          if args.print_stats:
+              print_model_statistics(reference_model, args.reference.name)
+
+          print(f"Running equivalence check against reference model: {args.reference.name}")
+          
+          equivalence_passed = True
+          equivalence_details = "All tested states are equivalent."
+
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
+              if equivalence_passed:
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          # 6. Prepare for benchmarking loop
+          print(f"Loading and tokenizing code from: {args.code}")
+          code_bytes = args.code.read_bytes()
+          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          print(f"Tokenized into {len(token_ids)} tokens.")
+
+          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+          timings = []
+          mask_correctness_passed = True
+          mask_correctness_details = "All masks matched the reference implementation."
+
+          # 7. Run benchmark loop
+          print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+              # Get the reference mask to check correctness (if enabled)
+              if args.verify_masks:
+                  reference_mask_np = constraint_state.get_mask()
+                  if not reference_mask_np[token_id]:
+                      # This indicates an issue with the grammar or tokenizer, not the competitor.
+                      print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+                      sys.exit(1)
+
+              # Get the state map for the competitor
+              state_to_gss = constraint_state.filtered_state_gss_map()
+
+              # --- TIMED SECTION ---
+              t_start_mask = time.perf_counter()
+              competitor_mask = competitor_model.get_mask(state_to_gss)
+              t_end_mask = time.perf_counter()
+              timings.append(t_end_mask - t_start_mask)
+              # --- END TIMED SECTION ---
+
+              # Verify the competitor's mask (if enabled)
+              if args.verify_masks:
+                  # This check is expensive but crucial for validation
+                  ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+                  comp_indices = set(competitor_mask.to_indices())
+                  if ref_indices != comp_indices:
+                      mask_correctness_passed = False
+                      mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
+                      print(f"❌ {mask_correctness_details}")
+                      # Stop verifying after first failure to avoid spamming output
+                      args.verify_masks = False
+
+              # Advance the state
+              constraint_state.commit(token_id)
+
+          print("--- Benchmark finished ---")
+
+          # 8. Compile and save results
+          if timings:
+              p = np.percentile(timings, [50, 90, 99])
+              summary_stats = {
+                  "count": len(timings),
+                  "mean": float(np.mean(timings)),
+                  "stddev": float(np.std(timings)),
+                  "min": float(np.min(timings)),
+                  "max": float(np.max(timings)),
+                  "p50": float(p[0]),
+                  "p90": float(p[1]),
+                  "p99": float(p[2]),
+              }
+          else:
+              summary_stats = {}
+
+          output_data = {
+              "competitor_script": str(args.competitor),
+              "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "inputs": {
+                  "grammar_file": str(args.constraint_file),
+                  "code_file": str(args.code),
+              },
+              "results": {
+                  "load_time_seconds": load_time,
+                  "equivalence_check": {
+                      "passed": equivalence_passed,
+                      "details": equivalence_details,
+                  },
+                  "mask_correctness_check": {
+                      "enabled": args.verify_masks,
+                      "passed": mask_correctness_passed,
+                      "details": mask_correctness_details,
+                  },
+                  "get_mask_timings_seconds": timings,
+                  "summary_stats": summary_stats,
+              }
+          }
+
+          # Determine output path
+          if args.output:
+              output_path = Path(args.output)
+              if output_path.is_dir():
+                  output_path = output_path / f"{args.competitor.stem}_results.json"
+          else:
+              output_path = Path(f"{args.competitor.stem}_results.json")
+          
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          with open(output_path, 'w') as f:
+              json.dump(output_data, f, indent=2)
+          
+          print(f"\nBenchmark results saved to: {output_path}")
+
+
+      def main():
+          parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+          parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+          parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+          parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+          parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+          
+          parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                              help="Disable correctness verification of masks at each step (improves benchmark purity).")
+          parser.add_argument('--print-stats', action='store_true',
+                              help="Print detailed statistics about the loaded models before running the benchmark.")
+          parser.set_defaults(verify_masks=True)
+
+          args = parser.parse_args()
+
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+              if not p.exists():
+                  parser.error(f"File not found: {p}")
+
+          run_benchmark(args)
+
+      if __name__ == "__main__":
+          main()
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -361,172 +792,377 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```python 'python/aug25/models/precompute2_model.py'
+      ```python 'python/aug25/benchmark_runner.py'
+      import argparse
       import json
-      from typing import Dict, List, Tuple
-      from collections import defaultdict
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from tqdm.auto import tqdm
+      import gzip
+      import os
+      import requests
+      import time
+      import sys
+      import importlib.util
+      from pathlib import Path
+      from datetime import datetime, timezone
+      import numpy as np
+      from collections import Counter
+      from tqdm import tqdm
 
-      class Model(GraphProvider):
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
-              self.arena = arena
-              self.max_depth: Dict[int, int] = {}
-              # Convert precompute3 graph structure to precompute2-like structure
-              for uid, n in tqdm(self.arena.items(), desc="Converting precompute3->precompute2", total=len(self.arena)):
-                  try:
-                      self.max_depth[int(uid)] = int(n.get("max_depth", 0))
-                  except Exception:
-                      self.max_depth[int(uid)] = 0
+      import _sep1
+      from aug25.equality import are_equivalent_for_state
+      from aug25.common_interface import RangeSet
 
-                  p3_children = n.get("children") or []
-                  
-                  # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-                  p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
+      # --- Helper Functions (from former example_js.py) ---
 
-                  for edge_key, dest_map in p3_children:
-                      pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
-                      if llm_rs.is_empty():
-                          continue
+      def load_or_download_gpt2_vocab(cache_dir, file_name, url):
+          cache_dir = Path(cache_dir)
+          cache_dir.mkdir(parents=True, exist_ok=True)
+          cache_path = cache_dir / file_name
+          if not cache_path.exists():
+              print(f"Downloading GPT-2 vocab from: {url}")
+              response = requests.get(url)
+              response.raise_for_status()
+              with open(cache_path, 'w', encoding='utf-8') as f:
+                  f.write(response.text)
 
-                      for dest_idx, state_bv_ranges in dest_map:
-                          if not state_bv_ranges: # Corresponds to Option<StateID> == None
-                              p2_key = (int(pop), None)
-                              p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                          else:
-                              for start, end in state_bv_ranges:
-                                  for sid in range(int(start), int(end) + 1):
-                                      p2_key = (int(pop), sid)
-                                      p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
-                  
-                  # Convert aggregated map to final list format
-                  new_children = []
-                  for (pop, sid), dests in p2_children_agg.items():
-                      dest_list = list(dests.items())
-                      new_children.append(((pop, sid), dest_list))
-                  
-                  n["children"] = new_children
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
 
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              # This model uses the precompute3 graph, as it's the most detailed representation
-              roots_map = data['precomputed3']
-              arena_json = data['trie3_god']
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              return Model(roots_map, arena)
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
 
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
+          return vocab_map
 
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+      def greedy_tokenizer(text_bytes, id_to_token):
+          token_to_id = {v: k for k, v in id_to_token.items()}
+          sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+          token_ids = []
+          pos = 0
+          while pos < len(text_bytes):
+              match_found = False
+              for token_bytes in sorted_tokens:
+                  if text_bytes[pos:].startswith(token_bytes):
+                      token_ids.append(token_to_id[token_bytes])
+                      pos += len(token_bytes)
+                      match_found = True
+                      break
+              if not match_found:
+                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+          return token_ids
 
-          def iter_edges(self, node: int, token: int):
-              # Reference edges are token-gated on their BVs. This provider yields only matching edges.
-              for (pop, sid), dests in self.arena.get(node, {}).get("children") or []:
-                  for dest, rs in dests:
-                      if rs.contains(token):
-                          yield (int(pop), sid, int(dest))
+      def load_competitor_model(competitor_path: Path):
+          """Dynamically loads the 'Model' class from a Python file."""
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
+          spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+          if spec is None or spec.loader is None:
+              raise ImportError(f"Could not load spec for module at {competitor_path}")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[module_name] = module
+          spec.loader.exec_module(module)
+          
+          if not hasattr(module, 'Model'):
+              raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
+          
+          return getattr(module, 'Model')
 
-          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              final_mask = ffi.Bitset.zeros()
-              values: Dict[int, ffi.GSSNode] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = defaultdict(set)
+      def print_model_statistics(model, model_name: str):
+          """Analyzes and prints statistics about the loaded graph model."""
+          print(f"\n--- Statistics for {model_name} ---")
 
-              # Seed
-              for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-                  if root_idx in values:
-                      merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
-                      if merged.ptr() != values[root_idx].ptr():
-                          values[root_idx] = merged
-                  else:
-                      values[root_idx] = gss.clone_node()
-                  depth = self.max_depth.get(root_idx, 0)
-                  todo[depth].add(root_idx)
+          if not hasattr(model, 'arena') or not model.arena:
+              print("  - Model has no arena or is empty. Cannot compute stats.")
+              return
 
-              # Main loop
-              while todo:
-                  current_depth = min(todo.keys())
-                  node_indices = todo.pop(current_depth)
+          num_nodes = len(model.arena)
+          num_roots = len(model.roots_map)
+          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
 
-                  for node_idx in list(node_indices):
-                      if node_idx in stopped:
-                          continue
+          print(f"  - Roots: {num_roots}")
+          print(f"  - Nodes: {num_nodes}")
+          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
 
-                      agg = values.pop(node_idx, None)
-                      if agg is None:
-                          continue
+          # Detect model type by inspecting the first child edge of the first node with children
+          is_precompute3 = False
+          for node_data in model.arena.values():
+              children = node_data.get("children")
+              if children:
+                  edge_key, _ = children[0]
+                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+                  if isinstance(edge_key[1], RangeSet):
+                       is_precompute3 = True
+                  break
+          
+          model_type = "Precompute3" if is_precompute3 else "Precompute2"
+          print(f"  - Detected Model Type: {model_type}")
 
-                      # Process
-                      if self.is_end(node_idx):
-                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+          pops = []
+          fan_outs = []
+          llm_rs_sizes = []
+          state_rs_sizes = [] # precompute3 only
 
-                      if not agg.is_ok():
-                          stopped.add(node_idx)
-                          continue
+          if is_precompute3:
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, llm_rs), dests in children:
+                      pops.append(pop)
+                      if llm_rs.intervals:
+                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                      total_dest_edges += len(dests)
+                      for _, state_bv in dests:
+                          if state_bv:
+                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
 
-                      # Step
-                      node = self.arena.get(node_idx, {})
-                      children = node.get("children") or []
-                      for (pop, sid_opt), dests in children:
-                          peeks = ffi.gss_popn_collect(agg, int(pop))
-                          if not peeks:
-                              continue
+          else: # Precompute2
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, _), dests in children:
+                      pops.append(pop)
+                      total_dest_edges += len(dests)
+                      for _, llm_rs in dests:
+                          if llm_rs.intervals:
+                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
 
-                          # Filter peeks by state_id
-                          matched_parents = []
-                          if sid_opt is None:
-                              matched_parents = [p for _, p in peeks]
-                          else:
-                              sid_val = int(sid_opt)
-                              matched_parents = [p for sid, p in peeks if sid == sid_val]
+          def print_dist(name, data):
+              if not data:
+                  print(f"  - {name} Distribution: N/A (no data)")
+                  return
+              arr = np.array(data)
+              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
 
-                          if not matched_parents:
-                              continue
+          print_dist("Pop counts", pops)
+          print_dist("Node fan-out", fan_outs)
+          print_dist("LLM RangeSet sizes", llm_rs_sizes)
+          if is_precompute3:
+              print_dist("State RangeSet sizes", state_rs_sizes)
+          print("-" * 20)
 
-                          child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
-                          if not child_gss.is_ok():
-                              continue
+      def run_benchmark(args):
+          """Main benchmark logic."""
+          print("--- Setting up benchmark environment ---")
 
-                          for dest_idx, llm_rs in dests:
-                              gss_for_dest = child_gss.clone_node()
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          # Read the gzipped JSON into a string and construct the GrammarConstraint using the
+          # available from_json_string(...) API.
+          p = str(args.constraint_file)
+          if p.endswith('.gz'):
+              with gzip.open(p, 'rt', encoding='utf-8') as f:
+                  constraint_json_str = f.read()
+          else:
+              # Fallback: if the file is plain JSON, read it directly.
+              constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+          grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
-                              if llm_rs.intervals:
-                                  edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                                  ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
 
-                              if not gss_for_dest.is_ok():
-                                  continue
+          # 4. Load competitor model
+          print(f"Loading competitor model from: {args.competitor}")
+          CompetitorModel = load_competitor_model(args.competitor)
+          
+          t_start_load = time.perf_counter()
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
+          load_time = time.perf_counter() - t_start_load
+          print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
-                              d = int(dest_idx)
-                              if d in values:
-                                  combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
-                                  if combined.ptr() == values[d].ptr():
-                                      continue
-                                  values[d] = combined
-                              else:
-                                  values[d] = gss_for_dest
+          if args.print_stats:
+              print_model_statistics(competitor_model, args.competitor.name)
 
-                              child_depth = self.max_depth.get(d, 0)
-                              todo[child_depth].add(d)
+          # 5. Equivalence Check
+          print(f"Loading reference model from: {args.reference}")
+          ReferenceModel = load_competitor_model(args.reference)
+          # All models are loaded from precompute3 JSON for this benchmark suite.
+          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
-              return final_mask
+          if args.print_stats:
+              print_model_statistics(reference_model, args.reference.name)
+
+          print(f"Running equivalence check against reference model: {args.reference.name}")
+          
+          equivalence_passed = True
+          equivalence_details = "All tested states are equivalent."
+
+          ENABLE_EQUIVALENCE_TEST = False
+          if ENABLE_EQUIVALENCE_TEST:
+              # Check that root sets are the same before proceeding
+              ref_roots = set(reference_model.roots_map.keys())
+              comp_roots = set(competitor_model.roots_map.keys())
+              if ref_roots != comp_roots:
+                  equivalence_passed = False
+                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+              else:
+                  sorted_roots = sorted(list(ref_roots))
+                  total_roots = len(sorted_roots)
+                  print(f"Checking equivalence across {total_roots} tokenizer states...")
+                  for i, sid in enumerate(sorted_roots):
+                      # Progress indicator
+                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                      passed, details = are_equivalent_for_state(
+                          reference_model, reference_model.get_root(sid),
+                          competitor_model, competitor_model.get_root(sid),
+                          verbose=False
+                      )
+                      if not passed:
+                          print() # Newline to clear the progress indicator
+                          equivalence_passed = False
+                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                          break
+                  if equivalence_passed:
+                      print() # Final newline after progress indicator
+
+              if equivalence_passed:
+                  print("✅ Equivalence check passed.")
+              else:
+                  print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          # 6. Prepare for benchmarking loop
+          print(f"Loading and tokenizing code from: {args.code}")
+          code_bytes = args.code.read_bytes()
+          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          print(f"Tokenized into {len(token_ids)} tokens.")
+
+          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+          timings = []
+          mask_correctness_passed = True
+          mask_correctness_details = "All masks matched the reference implementation."
+
+          # 7. Run benchmark loop
+          print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+              # Get the reference mask to check correctness (if enabled)
+              if args.verify_masks:
+                  reference_mask_np = constraint_state.get_mask()
+                  if not reference_mask_np[token_id]:
+                      # This indicates an issue with the grammar or tokenizer, not the competitor.
+                      print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+                      sys.exit(1)
+
+              # Get the state map for the competitor
+              state_to_gss = constraint_state.filtered_state_gss_map()
+
+              # --- TIMED SECTION ---
+              t_start_mask = time.perf_counter()
+              competitor_mask = competitor_model.get_mask(state_to_gss)
+              t_end_mask = time.perf_counter()
+              timings.append(t_end_mask - t_start_mask)
+              # --- END TIMED SECTION ---
+
+              # Verify the competitor's mask (if enabled)
+              if args.verify_masks:
+                  # This check is expensive but crucial for validation
+                  ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+                  comp_indices = set(competitor_mask.to_indices())
+                  if ref_indices != comp_indices:
+                      mask_correctness_passed = False
+                      mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
+                      print(f"❌ {mask_correctness_details}")
+                      # Stop verifying after first failure to avoid spamming output
+                      args.verify_masks = False
+
+              # Advance the state
+              constraint_state.commit(token_id)
+
+          print("--- Benchmark finished ---")
+
+          # 8. Compile and save results
+          if timings:
+              p = np.percentile(timings, [50, 90, 99])
+              summary_stats = {
+                  "count": len(timings),
+                  "mean": float(np.mean(timings)),
+                  "stddev": float(np.std(timings)),
+                  "min": float(np.min(timings)),
+                  "max": float(np.max(timings)),
+                  "p50": float(p[0]),
+                  "p90": float(p[1]),
+                  "p99": float(p[2]),
+              }
+          else:
+              summary_stats = {}
+
+          output_data = {
+              "competitor_script": str(args.competitor),
+              "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "inputs": {
+                  "grammar_file": str(args.constraint_file),
+                  "code_file": str(args.code),
+              },
+              "results": {
+                  "load_time_seconds": load_time,
+                  "equivalence_check": {
+                      "passed": equivalence_passed,
+                      "details": equivalence_details,
+                  },
+                  "mask_correctness_check": {
+                      "enabled": args.verify_masks,
+                      "passed": mask_correctness_passed,
+                      "details": mask_correctness_details,
+                  },
+                  "get_mask_timings_seconds": timings,
+                  "summary_stats": summary_stats,
+              }
+          }
+
+          # Determine output path
+          if args.output:
+              output_path = Path(args.output)
+              if output_path.is_dir():
+                  output_path = output_path / f"{args.competitor.stem}_results.json"
+          else:
+              output_path = Path(f"{args.competitor.stem}_results.json")
+          
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          with open(output_path, 'w') as f:
+              json.dump(output_data, f, indent=2)
+          
+          print(f"\nBenchmark results saved to: {output_path}")
+
+
+      def main():
+          parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+          parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+          parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+          parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+          parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+          
+          parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                              help="Disable correctness verification of masks at each step (improves benchmark purity).")
+          parser.add_argument('--print-stats', action='store_true',
+                              help="Print detailed statistics about the loaded models before running the benchmark.")
+          parser.set_defaults(verify_masks=True)
+
+          args = parser.parse_args()
+
+          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+              if not p.exists():
+                  parser.error(f"File not found: {p}")
+
+          run_benchmark(args)
+
+      if __name__ == "__main__":
+          main()
 
       ```
     metadata:
-      filename: python/aug25/models/precompute2_model.py
-  - user: Add tqdm for the inner loops inside `for uid, n in tqdm(self.arena.items(),
-      desc="Converting precompute3->precompute2", total=len(self.arena)):` as well.
+      filename: python/aug25/benchmark_runner.py
+  - user: Make `greedy_tokenizer` much faster. (Note that the number of tokens in
+      the vocab can be large.)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -545,62 +1181,115 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add `tqdm` progress bars to the inner loops, followed by the corresponding git diff.
+      Of course. The current implementation of `greedy_tokenizer` is slow because it iterates through the entire vocabulary for each position in the input text. We can significantly speed this up by using a Trie (prefix tree) to find the longest matching token at each position.
+
+      Here are the step-by-step instructions to update the file:
 
       ### Step-by-step Instructions
 
-      I will make two modifications to the `__init__` method in `python/aug25/models/precompute2_model.py` to wrap the inner loops with `tqdm` for progress visualization.
+      1.  **Open the file `python/aug25/benchmark_runner.py`.**
+      2.  **Locate the `greedy_tokenizer` function.** It starts around line 47.
+      3.  **Replace the entire function** with the following optimized version. This new version builds a Trie from the vocabulary for efficient prefix matching, which avoids repeatedly scanning the full list of tokens.
 
-      1.  **File:** `python/aug25/models/precompute2_model.py`
-      2.  **First loop modification (child aggregation):**
-          -   In the `Model.__init__` method, locate the following line:
-              ```python
-              for edge_key, dest_map in p3_children:
-              ```
-          -   Modify it to wrap the iterable with `tqdm`:
-              ```python
-              for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False):
-              ```
-      3.  **Second loop modification (list conversion):**
-          -   Further down in the same method, find this line:
-              ```python
-              for (pop, sid), dests in p2_children_agg.items():
-              ```
-          -   Modify it to also use `tqdm`:
-              ```python
-              for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False):
-              ```
+      ```python
+      def greedy_tokenizer(text_bytes, id_to_token):
+          # Build a Trie for fast prefix matching.
+          # The key '<ID>' stores the token ID for a complete token.
+          trie_root = {}
+          for token_id, token_bytes in id_to_token.items():
+              node = trie_root
+              for byte_val in token_bytes:
+                  node = node.setdefault(byte_val, {})
+              node['<ID>'] = token_id
 
-      These changes will add nested progress bars that appear for each item processed by the main `tqdm` loop, and they will be removed upon completion to keep the console output clean.
+          token_ids = []
+          pos = 0
+          while pos < len(text_bytes):
+              # Find the longest possible token match starting at the current position.
+              node = trie_root
+              longest_match_id = -1
+              longest_match_len = 0
+              
+              # Traverse the Trie with bytes from the current position.
+              for i in range(len(text_bytes) - pos):
+                  current_byte = text_bytes[pos + i]
+                  if current_byte in node:
+                      node = node[current_byte]
+                      if '<ID>' in node:
+                          # Found a valid token, record it and keep searching for a longer one.
+                          longest_match_id = node['<ID>']
+                          longest_match_len = i + 1
+                  else:
+                      # No further matches possible from this prefix.
+                      break
+              
+              if longest_match_len > 0:
+                  token_ids.append(longest_match_id)
+                  pos += longest_match_len
+              else:
+                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+          return token_ids
+      ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git diff to apply this change directly:
 
       ```diff
-      diff --git a/python/aug25/models/precompute2_model.py b/python/aug25/models/precompute2_model.py
-      index 45542b5..11059f2 100644
-      --- a/python/aug25/models/precompute2_model.py
-      +++ b/python/aug25/models/precompute2_model.py
-      @@ -23,7 +23,7 @@
-                   # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
-                   p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
+      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
+      index 9234857..64757c2 100644
+      --- a/python/aug25/benchmark_runner.py
+      +++ b/python/aug25/benchmark_runner.py
+      @@ -47,21 +47,39 @@
+           return vocab_map
        
-      -            for edge_key, dest_map in p3_children:
-      +            for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False):
-                       pop, llm_bv_json = edge_key
-                       llm_rs = RangeSet.from_json(llm_bv_json)
-                       if llm_rs.is_empty():
-      @@ -41,7 +41,7 @@
-                   
-                   # Convert aggregated map to final list format
-                   new_children = []
-      -            for (pop, sid), dests in p2_children_agg.items():
-      +            for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False):
-                       dest_list = list(dests.items())
-                       new_children.append(((pop, sid), dest_list))
-                   
-
+       def greedy_tokenizer(text_bytes, id_to_token):
+      -    token_to_id = {v: k for k, v in id_to_token.items()}
+      -    sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+      +    # Build a Trie for fast prefix matching.
+      +    # The key '<ID>' stores the token ID for a complete token.
+      +    trie_root = {}
+      +    for token_id, token_bytes in id_to_token.items():
+      +        node = trie_root
+      +        for byte_val in token_bytes:
+      +            node = node.setdefault(byte_val, {})
+      +        node['<ID>'] = token_id
+      +
+           token_ids = []
+           pos = 0
+           while pos < len(text_bytes):
+      -        match_found = False
+      -        for token_bytes in sorted_tokens:
+      -            if text_bytes[pos:].startswith(token_bytes):
+      -                token_ids.append(token_to_id[token_bytes])
+      -                pos += len(token_bytes)
+      -                match_found = True
+      +        # Find the longest possible token match starting at the current position.
+      +        node = trie_root
+      +        longest_match_id = -1
+      +        longest_match_len = 0
+      +        
+      +        # Traverse the Trie with bytes from the current position.
+      +        for i in range(len(text_bytes) - pos):
+      +            current_byte = text_bytes[pos + i]
+      +            if current_byte in node:
+      +                node = node[current_byte]
+      +                if '<ID>' in node:
+      +                    # Found a valid token, record it and keep searching for a longer one.
+      +                    longest_match_id = node['<ID>']
+      +                    longest_match_len = i + 1
+      +            else:
+      +                # No further matches possible from this prefix.
+                       break
+      -        if not match_found:
+      +        
+      +        if longest_match_len > 0:
+      +            token_ids.append(longest_match_id)
+      +            pos += longest_match_len
+      +        else:
+                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+           return token_ids
+       
       ```
     metadata:
   - user: |
@@ -608,10 +1297,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute2_model.py
-      Applying patch to 'python/aug25/models/precompute2_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute2_model.py.
+      Identified target file: python/aug25/benchmark_runner.py
+      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
     metadata:
-  - user: 'Changes committed with message: "No changes to commit"'
+  - user: 'Changes committed with message: "Optimize greedy_tokenizer using a Trie
+      for faster tokenization"'
     metadata:
 ...

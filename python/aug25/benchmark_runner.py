@@ -37,19 +37,40 @@ def load_or_download_gpt2_vocab(cache_dir, file_name, url):
     return vocab_map
 
 def greedy_tokenizer(text_bytes, id_to_token):
-    token_to_id = {v: k for k, v in id_to_token.items()}
-    sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+    # Build a Trie for fast prefix matching.
+    # The key '<ID>' stores the token ID for a complete token.
+    trie_root = {}
+    for token_id, token_bytes in id_to_token.items():
+        node = trie_root
+        for byte_val in token_bytes:
+            node = node.setdefault(byte_val, {})
+        node['<ID>'] = token_id
+
     token_ids = []
     pos = 0
     while pos < len(text_bytes):
-        match_found = False
-        for token_bytes in sorted_tokens:
-            if text_bytes[pos:].startswith(token_bytes):
-                token_ids.append(token_to_id[token_bytes])
-                pos += len(token_bytes)
-                match_found = True
+        # Find the longest possible token match starting at the current position.
+        node = trie_root
+        longest_match_id = -1
+        longest_match_len = 0
+        
+        # Traverse the Trie with bytes from the current position.
+        for i in range(len(text_bytes) - pos):
+            current_byte = text_bytes[pos + i]
+            if current_byte in node:
+                node = node[current_byte]
+                if '<ID>' in node:
+                    # Found a valid token, record it and keep searching for a longer one.
+                    longest_match_id = node['<ID>']
+                    longest_match_len = i + 1
+            else:
+                # No further matches possible from this prefix.
                 break
-        if not match_found:
+        
+        if longest_match_len > 0:
+            token_ids.append(longest_match_id)
+            pos += longest_match_len
+        else:
             raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
     return token_ids
 
