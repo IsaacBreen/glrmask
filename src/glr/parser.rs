@@ -1407,7 +1407,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 _ => {
                     let below_accs = self.build_below_bottom_accs(&popper);
                     let below_todo = self.handle_below_bottom(nt, below_accs, config);
-                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths: {:?}", below_todo.len(), below_todo.iter().map(|(sid, _)| sid.0).collect::<Vec<_>>());
+                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
                     todo.extend(below_todo);
                 }
             }
