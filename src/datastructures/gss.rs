@@ -1694,7 +1694,10 @@ pub(crate) fn is_simple_gss(
                                     if let GSSNode::Root(leaf_root) = leaf.as_ref() {
                                         // This is the valid pattern.
                                         if !leaf_root.acc.stored_trie_nodes().is_empty() {
-                                            return Some((state_id_x, leaf_root.acc.clone()));
+                                            // The returned Acc must be the result of narrowing down the path.
+                                            let path_acc1 = Acc::narrow(&internal.acc, &pred_internal.acc);
+                                            let final_acc = Acc::narrow(&path_acc1, &leaf_root.acc);
+                                            return Some((state_id_x, Arc::new(final_acc)));
                                         }
                                     }
                                 }
