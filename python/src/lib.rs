@@ -17,7 +17,7 @@ use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode};
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -574,6 +574,11 @@ impl PyGSSNode {
     fn clone_node(&self) -> PyGSSNode {
         self.clone()
     }
+
+    fn print_stats(&self) {
+        let stats = gather_gss_stats(&[self.inner.as_ref()]);
+        println!("{:#?}", stats);
+    }
 }
 
 #[pyfunction]
@@ -641,7 +646,7 @@ impl PyGrammarConstraintState {
     }
 
     fn print_stats(&self) {
-        self.inner.with_inner(|state| state.print_stats());
+        self.inner.with_inner(|state| state.print_gss_stats());
     }
 
     fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
