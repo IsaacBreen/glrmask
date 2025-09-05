@@ -686,8 +686,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         current_text_byte_offset = token_end_byte;
 
         // profiler::print_summary_flat();
-        // profiler::print_summary();
-        // profiler::reset()
+        profiler::print_summary();
+        profiler::reset()
     }
 
     println!("\nFinished processing token sequence.");
