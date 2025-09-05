@@ -78,7 +78,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
             if root_idx in values:
-                merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 1)
+                merged = ffi.gss_merge_many_with_depth([values[root_idx], gss.clone_node()], 9999999)
                 # Re-enqueue only if the merge structurally changes the node
                 if merged.ptr() != values[root_idx].ptr():
                     values[root_idx] = merged
