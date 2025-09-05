@@ -44,19 +44,40 @@ local_system:
           return vocab_map
 
       def greedy_tokenizer(text_bytes, id_to_token):
-          token_to_id = {v: k for k, v in id_to_token.items()}
-          sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+          # Build a Trie for fast prefix matching.
+          # The key '<ID>' stores the token ID for a complete token.
+          trie_root = {}
+          for token_id, token_bytes in id_to_token.items():
+              node = trie_root
+              for byte_val in token_bytes:
+                  node = node.setdefault(byte_val, {})
+              node['<ID>'] = token_id
+
           token_ids = []
           pos = 0
           while pos < len(text_bytes):
-              match_found = False
-              for token_bytes in sorted_tokens:
-                  if text_bytes[pos:].startswith(token_bytes):
-                      token_ids.append(token_to_id[token_bytes])
-                      pos += len(token_bytes)
-                      match_found = True
+              # Find the longest possible token match starting at the current position.
+              node = trie_root
+              longest_match_id = -1
+              longest_match_len = 0
+              
+              # Traverse the Trie with bytes from the current position.
+              for i in range(len(text_bytes) - pos):
+                  current_byte = text_bytes[pos + i]
+                  if current_byte in node:
+                      node = node[current_byte]
+                      if '<ID>' in node:
+                          # Found a valid token, record it and keep searching for a longer one.
+                          longest_match_id = node['<ID>']
+                          longest_match_len = i + 1
+                  else:
+                      # No further matches possible from this prefix.
                       break
-              if not match_found:
+              
+              if longest_match_len > 0:
+                  token_ids.append(longest_match_id)
+                  pos += longest_match_len
+              else:
                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
           return token_ids
 
@@ -642,9 +663,11 @@ local_system:
 
           # 7. Run benchmark loop
           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-          for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+          progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+          for i, token_id in progress_bar:
               # Get the reference mask to check correctness (if enabled)
               if args.verify_masks:
+                  progress_bar.set_postfix_str("get_mask (ref)")
                   reference_mask_np = constraint_state.get_mask()
                   if not reference_mask_np[token_id]:
                       # This indicates an issue with the grammar or tokenizer, not the competitor.
@@ -652,9 +675,11 @@ local_system:
                       sys.exit(1)
 
               # Get the state map for the competitor
+              progress_bar.set_postfix_str("filtered_state_gss_map")
               state_to_gss = constraint_state.filtered_state_gss_map()
 
               # --- TIMED SECTION ---
+              progress_bar.set_postfix_str("get_mask (competitor)")
               t_start_mask = time.perf_counter()
               competitor_mask = competitor_model.get_mask(state_to_gss)
               t_end_mask = time.perf_counter()
@@ -663,6 +688,7 @@ local_system:
 
               # Verify the competitor's mask (if enabled)
               if args.verify_masks:
+                  progress_bar.set_postfix_str("Verifying mask")
                   # This check is expensive but crucial for validation
                   ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
                   comp_indices = set(competitor_mask.to_indices())
@@ -674,6 +700,7 @@ local_system:
                       args.verify_masks = False
 
               # Advance the state
+              progress_bar.set_postfix_str("commit")
               constraint_state.commit(token_id)
 
           print("--- Benchmark finished ---")
@@ -832,19 +859,40 @@ messages:
           return vocab_map
 
       def greedy_tokenizer(text_bytes, id_to_token):
-          token_to_id = {v: k for k, v in id_to_token.items()}
-          sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
+          # Build a Trie for fast prefix matching.
+          # The key '<ID>' stores the token ID for a complete token.
+          trie_root = {}
+          for token_id, token_bytes in id_to_token.items():
+              node = trie_root
+              for byte_val in token_bytes:
+                  node = node.setdefault(byte_val, {})
+              node['<ID>'] = token_id
+
           token_ids = []
           pos = 0
           while pos < len(text_bytes):
-              match_found = False
-              for token_bytes in sorted_tokens:
-                  if text_bytes[pos:].startswith(token_bytes):
-                      token_ids.append(token_to_id[token_bytes])
-                      pos += len(token_bytes)
-                      match_found = True
+              # Find the longest possible token match starting at the current position.
+              node = trie_root
+              longest_match_id = -1
+              longest_match_len = 0
+              
+              # Traverse the Trie with bytes from the current position.
+              for i in range(len(text_bytes) - pos):
+                  current_byte = text_bytes[pos + i]
+                  if current_byte in node:
+                      node = node[current_byte]
+                      if '<ID>' in node:
+                          # Found a valid token, record it and keep searching for a longer one.
+                          longest_match_id = node['<ID>']
+                          longest_match_len = i + 1
+                  else:
+                      # No further matches possible from this prefix.
                       break
-              if not match_found:
+              
+              if longest_match_len > 0:
+                  token_ids.append(longest_match_id)
+                  pos += longest_match_len
+              else:
                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
           return token_ids
 
@@ -1161,8 +1209,12 @@ messages:
       ```
     metadata:
       filename: python/aug25/benchmark_runner.py
-  - user: Make `greedy_tokenizer` much faster. (Note that the number of tokens in
-      the vocab can be large.)
+  - user: |-
+      Make benchmark progress more informative. Right now we just get something like
+      ```
+      Benchmarking steps:   6%|████████▋                                                                                                                                             | 373/6446 [02:09<4:53:31,  2.90s/it]
+      ```
+      This doesn't tell us much. We'd like to know *what* is running at the given moment. Is it `get_mask`? Is it committing?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1181,115 +1233,84 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The current implementation of `greedy_tokenizer` is slow because it iterates through the entire vocabulary for each position in the input text. We can significantly speed this up by using a Trie (prefix tree) to find the longest matching token at each position.
+      Of course. To make the benchmark progress more informative, we'll modify the main loop to update the `tqdm` progress bar with the current operation being performed.
 
-      Here are the step-by-step instructions to update the file:
+      Here are the step-by-step instructions:
 
-      ### Step-by-step Instructions
+      ### File: `python/aug25/benchmark_runner.py`
 
-      1.  **Open the file `python/aug25/benchmark_runner.py`.**
-      2.  **Locate the `greedy_tokenizer` function.** It starts around line 47.
-      3.  **Replace the entire function** with the following optimized version. This new version builds a Trie from the vocabulary for efficient prefix matching, which avoids repeatedly scanning the full list of tokens.
+      1.  **Locate the benchmark loop:** Find the section marked with the comment `# 7. Run benchmark loop`.
+      2.  **Modify the loop initialization:** Change the `for` loop to assign the `tqdm` iterator to a variable named `progress_bar`. This will allow us to call methods on it from within the loop.
+          -   Change: `for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):`
+          -   To: `progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")` followed by `for i, token_id in progress_bar:`.
+      3.  **Add status updates:** Inside the loop, before each significant operation, call `progress_bar.set_postfix_str("...")` with a descriptive string for the current task. We'll add updates for:
+          -   Getting the reference mask (`get_mask (ref)`)
+          -   Getting the state map (`filtered_state_gss_map`)
+          -   Getting the competitor's mask (`get_mask (competitor)`)
+          -   Verifying the mask (`Verifying mask`)
+          -   Committing the state (`commit`)
 
-      ```python
-      def greedy_tokenizer(text_bytes, id_to_token):
-          # Build a Trie for fast prefix matching.
-          # The key '<ID>' stores the token ID for a complete token.
-          trie_root = {}
-          for token_id, token_bytes in id_to_token.items():
-              node = trie_root
-              for byte_val in token_bytes:
-                  node = node.setdefault(byte_val, {})
-              node['<ID>'] = token_id
+      This will result in a progress bar that looks something like this, updating the text on the right as it proceeds through each step:
 
-          token_ids = []
-          pos = 0
-          while pos < len(text_bytes):
-              # Find the longest possible token match starting at the current position.
-              node = trie_root
-              longest_match_id = -1
-              longest_match_len = 0
-              
-              # Traverse the Trie with bytes from the current position.
-              for i in range(len(text_bytes) - pos):
-                  current_byte = text_bytes[pos + i]
-                  if current_byte in node:
-                      node = node[current_byte]
-                      if '<ID>' in node:
-                          # Found a valid token, record it and keep searching for a longer one.
-                          longest_match_id = node['<ID>']
-                          longest_match_len = i + 1
-                  else:
-                      # No further matches possible from this prefix.
-                      break
-              
-              if longest_match_len > 0:
-                  token_ids.append(longest_match_id)
-                  pos += longest_match_len
-              else:
-                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-          return token_ids
+      ```
+      Benchmarking steps:   6%|█▋  | 373/6446 [02:09<4:53:31, 2.90s/it, get_mask (competitor)]
       ```
 
-      ### Git Diff
-
-      Here is the git diff to apply this change directly:
+      Here is the git diff to apply these changes:
 
       ```diff
       diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      index 9234857..64757c2 100644
+      index 455427d..3f57279 100644
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -47,21 +47,39 @@
-           return vocab_map
+      @@ -308,44 +308,52 @@
        
-       def greedy_tokenizer(text_bytes, id_to_token):
-      -    token_to_id = {v: k for k, v in id_to_token.items()}
-      -    sorted_tokens = sorted(token_to_id.keys(), key=len, reverse=True)
-      +    # Build a Trie for fast prefix matching.
-      +    # The key '<ID>' stores the token ID for a complete token.
-      +    trie_root = {}
-      +    for token_id, token_bytes in id_to_token.items():
-      +        node = trie_root
-      +        for byte_val in token_bytes:
-      +            node = node.setdefault(byte_val, {})
-      +        node['<ID>'] = token_id
-      +
-           token_ids = []
-           pos = 0
-           while pos < len(text_bytes):
-      -        match_found = False
-      -        for token_bytes in sorted_tokens:
-      -            if text_bytes[pos:].startswith(token_bytes):
-      -                token_ids.append(token_to_id[token_bytes])
-      -                pos += len(token_bytes)
-      -                match_found = True
-      +        # Find the longest possible token match starting at the current position.
-      +        node = trie_root
-      +        longest_match_id = -1
-      +        longest_match_len = 0
-      +        
-      +        # Traverse the Trie with bytes from the current position.
-      +        for i in range(len(text_bytes) - pos):
-      +            current_byte = text_bytes[pos + i]
-      +            if current_byte in node:
-      +                node = node[current_byte]
-      +                if '<ID>' in node:
-      +                    # Found a valid token, record it and keep searching for a longer one.
-      +                    longest_match_id = node['<ID>']
-      +                    longest_match_len = i + 1
-      +            else:
-      +                # No further matches possible from this prefix.
-                       break
-      -        if not match_found:
-      +        
-      +        if longest_match_len > 0:
-      +            token_ids.append(longest_match_id)
-      +            pos += longest_match_len
-      +        else:
-                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-           return token_ids
+           # 7. Run benchmark loop
+           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+      -    for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+      +    progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+      +    for i, token_id in progress_bar:
+               # Get the reference mask to check correctness (if enabled)
+               if args.verify_masks:
+      +            progress_bar.set_postfix_str("get_mask (ref)")
+                   reference_mask_np = constraint_state.get_mask()
+                   if not reference_mask_np[token_id]:
+                       # This indicates an issue with the grammar or tokenizer, not the competitor.
+                       print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+                       sys.exit(1)
        
+               # Get the state map for the competitor
+      +        progress_bar.set_postfix_str("filtered_state_gss_map")
+               state_to_gss = constraint_state.filtered_state_gss_map()
+       
+               # --- TIMED SECTION ---
+      +        progress_bar.set_postfix_str("get_mask (competitor)")
+               t_start_mask = time.perf_counter()
+               competitor_mask = competitor_model.get_mask(state_to_gss)
+               t_end_mask = time.perf_counter()
+               timings.append(t_end_mask - t_start_mask)
+               # --- END TIMED SECTION ---
+       
+               # Verify the competitor's mask (if enabled)
+               if args.verify_masks:
+      +            progress_bar.set_postfix_str("Verifying mask")
+                   # This check is expensive but crucial for validation
+                   ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+                   comp_indices = set(competitor_mask.to_indices())
+                   if ref_indices != comp_indices:
+                       mask_correctness_passed = False
+                       mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
+                       print(f"❌ {mask_correctness_details}")
+                       # Stop verifying after first failure to avoid spamming output
+                       args.verify_masks = False
+       
+               # Advance the state
+      +        progress_bar.set_postfix_str("commit")
+               constraint_state.commit(token_id)
+       
+           print("--- Benchmark finished ---")
+       
+
       ```
     metadata:
   - user: |
@@ -1301,7 +1322,7 @@ messages:
       Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
     metadata:
-  - user: 'Changes committed with message: "Optimize greedy_tokenizer using a Trie
-      for faster tokenization"'
+  - user: 'Changes committed with message: "feat: Enhance benchmark progress reporting
+      with operation details"'
     metadata:
 ...

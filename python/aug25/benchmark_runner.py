@@ -269,9 +269,11 @@ def run_benchmark(args):
 
     # 7. Run benchmark loop
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-    for i, token_id in tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps"):
+    progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+    for i, token_id in progress_bar:
         # Get the reference mask to check correctness (if enabled)
         if args.verify_masks:
+            progress_bar.set_postfix_str("get_mask (ref)")
             reference_mask_np = constraint_state.get_mask()
             if not reference_mask_np[token_id]:
                 # This indicates an issue with the grammar or tokenizer, not the competitor.
@@ -279,9 +281,11 @@ def run_benchmark(args):
                 sys.exit(1)
 
         # Get the state map for the competitor
+        progress_bar.set_postfix_str("filtered_state_gss_map")
         state_to_gss = constraint_state.filtered_state_gss_map()
 
         # --- TIMED SECTION ---
+        progress_bar.set_postfix_str("get_mask (competitor)")
         t_start_mask = time.perf_counter()
         competitor_mask = competitor_model.get_mask(state_to_gss)
         t_end_mask = time.perf_counter()
@@ -290,6 +294,7 @@ def run_benchmark(args):
 
         # Verify the competitor's mask (if enabled)
         if args.verify_masks:
+            progress_bar.set_postfix_str("Verifying mask")
             # This check is expensive but crucial for validation
             ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
             comp_indices = set(competitor_mask.to_indices())
@@ -301,6 +306,7 @@ def run_benchmark(args):
                 args.verify_masks = False
 
         # Advance the state
+        progress_bar.set_postfix_str("commit")
         constraint_state.commit(token_id)
 
     print("--- Benchmark finished ---")
