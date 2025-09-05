@@ -1552,6 +1552,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", {
             for gss_arc in out {
+                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
@@ -1616,6 +1617,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
                     final_out.push(gss_arc);
                 }
+                });
             }
             });
         } else {

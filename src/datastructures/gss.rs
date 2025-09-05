@@ -94,6 +94,7 @@ impl JSONConvertible for PrecomputedNodeContents {
 ///
 /// This is used to apply shared constraints (like a StateID bitvector) across an entire GSS branch
 /// by adding a filtered edge to the underlying precomputation trie.
+#[time_it]
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
