@@ -826,7 +826,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode3Index, LLMTokenBV)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1549,12 +1549,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         k: usize::MAX,                             // Dummy value
                     };
 
-                    let add_to_out = !self.below_bottom_cache.contains_key(&cache_key);
-                    let cached_dest = self.below_bottom_cache.entry(cache_key)
-                        .or_insert_with(|| {
-                            PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
-                        })
-                        .clone();
+                    let (cached_dest, add_to_out) = {
+                        let entry = self.below_bottom_cache.entry(cache_key);
+                        match entry {
+                            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                                let (dest, cached_tokens) = occupied.get_mut();
+                                let current_tokens = &acc.llm_tokens_union;
+                                if current_tokens.is_subset(cached_tokens) {
+                                    (dest.clone(), false)
+                                } else {
+                                    *cached_tokens |= current_tokens;
+                                    (dest.clone(), true)
+                                }
+                            }
+                            std::collections::hash_map::Entry::Vacant(vacant) => {
+                                let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                                let new_tokens = acc.llm_tokens_union.clone();
+                                vacant.insert((new_dest.clone(), new_tokens));
+                                (new_dest, true)
+                            }
+                        }
+                    };
 
                     // Link all stored nodes from the simple GSS to the canonical cached destination.
                     let edge_key = (0, LLMTokenBV::max_ones());
@@ -1575,11 +1590,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
                     }
                     if add_to_out {
-                        // On a cache miss, this is the first time we see this simple GSS structure.
+                        // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure
                         // We add it to the output to serve as the canonical GSS representation.
                         final_out.push(gss_arc);
                     }
-                    // On a cache hit, the GSS is redundant. We've added the trie links, so we can discard it.
+                    // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                 } else {
                     // Not a simple GSS, keep it for merging.
                     final_out.push(gss_arc);
