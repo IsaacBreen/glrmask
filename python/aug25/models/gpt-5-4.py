@@ -292,7 +292,7 @@ class Model(GraphProvider):
                             # Merge matched parents (once per state_bv per pop)
                             child_gss = merged_cache.get(state_key)
                             if child_gss is None:
-                                child_gss = ffi.gss_merge_many_with_depth(matched, 999999999)
+                                child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                                 merged_cache[state_key] = child_gss
 
                             if not child_gss.is_ok():
@@ -306,7 +306,7 @@ class Model(GraphProvider):
                                     values[d] = (child_gss, new_allowed_bv)
                                 else:
                                     prev_gss, prev_allowed = prev
-                                    combined = ffi.gss_merge_many_with_depth([prev_gss, child_gss], 999999999)
+                                    combined = ffi.gss_merge_many_with_depth([prev_gss, child_gss], 1)
                                     combined_allowed = self._bv_union(prev_allowed, new_allowed_bv)
                                     values[d] = (combined, combined_allowed)
 
