@@ -348,8 +348,9 @@ fn test_constraint_expression() {
         token_name_map,
         7, // max_llm_token_id should be 7 for IDs 0-6
     );
-    constraint.dump_precomputed(); // Commented out dump for cleaner test output
-    constraint.dump_precomputed2(); // Commented out dump for cleaner test output
+    // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+    // constraint.dump_precomputed2(); // Commented out dump for cleaner test output
+    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1499,7 +1500,7 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
-#[ignore]
+// #[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Setting up for Full JS Grammar GSS Explosion Test ---");
@@ -1533,6 +1534,7 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
         &config,
     );
     println!("GrammarConstraint constructed successfully.");
+    constraint.dump_precomputed3();
 
     let mut constraint_state = constraint.init();
 
