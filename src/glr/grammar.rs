@@ -38,7 +38,7 @@ impl JSONConvertible for Terminal {
             Terminal::Literal(bytes) => JSONNode::Object({
                 let mut obj = StdMap::new();
                 obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
-                obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                obj.insert("value".to_string(), bytes.to_json());
                 obj
             }),
         }
@@ -51,7 +51,7 @@ impl JSONConvertible for Terminal {
 
                 match String::from_json(type_field)?.as_str() {
                     "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
-                    "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                    "Literal" => Vec::<u8>::from_json(value_field).map(Terminal::Literal),
                     _ => Err("Unknown type for Terminal".to_string()),
                 }
             }
