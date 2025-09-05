@@ -176,7 +176,7 @@ class Model(GraphProvider):
 
                         # Merge matched parents
                         t1 = time.time()
-                        child_gss_nodes = [g for g in matched if g.is_ok()]
+                        child_gss_nodes = [g for g in matched]
                         time_merge_matched += time.time() - t1
                         hits_merge_matched += 1
                         if not child_gss_nodes:
