@@ -50,7 +50,7 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
-use crate::constraint_precompute_utils::optimize_trie2_size;
+use crate::constraint_precompute_utils::{optimize_trie2_size, optimize_trie3_size};
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::datastructures::trie::{God, GodWrapper};
 
@@ -733,7 +733,8 @@ impl GrammarConstraint {
         );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
-        // TODO: Add optimizations from precompute2 if needed.
+        optimize_trie3_size(&mut precomputed3, &trie3_god, config);
+
         (precomputed3, trie3_god)
     }
 
