@@ -26,12 +26,13 @@ class Model(GraphProvider):
             ch = n.get("children") or []
             newch = []
             for edge_key, dest_map in ch:
-                pop, llm_bv_json = edge_key
-                llm_rs = RangeSet.from_json(llm_bv_json)
                 newdm = []
-                for dest_idx, state_bv in dest_map:
-                    newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
-                newch.append(((int(pop), llm_rs), newdm))
+                for di, bv in dest_map:
+                    rs = RangeSet.from_json(bv)
+                    newdm.append((int(di), rs))
+                pk, sid = edge_key
+                sidp = None if sid is None else int(sid)
+                newch.append(((int(pk), sidp), newdm))
             n["children"] = newch
 
     @staticmethod
@@ -49,15 +50,11 @@ class Model(GraphProvider):
         return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
 
     def iter_edges(self, node: int, token: int):
-        for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-            if llm_rs.contains(token):
-                for dest_idx, state_bv_ranges in dests:
-                    if not state_bv_ranges:
-                        yield (int(pop), None, int(dest_idx))
-                    else:
-                        for start, end in state_bv_ranges:
-                            for sid in range(start, end + 1):
-                                yield (int(pop), sid, int(dest_idx))
+        # Reference edges are token-gated on their BVs. This provider yields only matching edges.
+        for (pop, sid), dests in self.arena.get(node, {}).get("children") or []:
+            for dest, rs in dests:
+                if rs.contains(token):
+                    yield (int(pop), sid, int(dest))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         final_mask = ffi.Bitset.zeros()
@@ -65,6 +62,7 @@ class Model(GraphProvider):
         stopped: set[int] = set()
         todo: Dict[int, set[int]] = defaultdict(set)
 
+        # Seed
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(int(sid))
             if root_idx is None:
@@ -79,6 +77,7 @@ class Model(GraphProvider):
             depth = self.max_depth.get(root_idx, 0)
             todo[depth].add(root_idx)
 
+        # Main loop
         while todo:
             current_depth = min(todo.keys())
             node_indices = todo.pop(current_depth)
@@ -91,6 +90,7 @@ class Model(GraphProvider):
                 if agg is None:
                     continue
 
+                # Process
                 if self.is_end(node_idx):
                     final_mask = final_mask.union(agg.allowed_llm_tokens())
 
@@ -98,42 +98,47 @@ class Model(GraphProvider):
                     stopped.add(node_idx)
                     continue
 
+                # Step
                 node = self.arena.get(node_idx, {})
                 children = node.get("children") or []
-                for (pop, llm_rs), dests in children:
+                for (pop, sid_opt), dests in children:
                     peeks = ffi.gss_popn_collect(agg, int(pop))
                     if not peeks:
                         continue
 
-                    for dest_idx, state_bv in dests:
-                        matched = []
-                        if not state_bv: # Empty state_bv means match all (like Option<StateID>::None)
-                            matched = [p for _, p in peeks]
-                        else:
-                            for (sid_val, parent_node) in peeks:
-                                for (a, b) in state_bv:
-                                    if a <= sid_val <= b:
-                                        matched.append(parent_node)
-                                        break
-                        if not matched:
-                            continue
+                    # Filter peeks by state_id
+                    matched_parents = []
+                    if sid_opt is None:
+                        matched_parents = [p for _, p in peeks]
+                    else:
+                        sid_val = int(sid_opt)
+                        matched_parents = [p for sid, p in peeks if sid == sid_val]
 
-                        child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                    if not matched_parents:
+                        continue
+
+                    child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
+                    if not child_gss.is_ok():
+                        continue
+
+                    for dest_idx, llm_rs in dests:
+                        gss_for_dest = child_gss.clone_node()
 
                         if llm_rs.intervals:
                             edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
-                        if not child_gss.is_ok():
+                            ffi.gss_allow_only_llm_tokens_and_prune(gss_for_dest, edge_bv)
+
+                        if not gss_for_dest.is_ok():
                             continue
 
                         d = int(dest_idx)
                         if d in values:
-                            combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                            combined = ffi.gss_merge_many_with_depth([values[d], gss_for_dest], 1)
                             if combined.ptr() == values[d].ptr():
                                 continue
                             values[d] = combined
                         else:
-                            values[d] = child_gss
+                            values[d] = gss_for_dest
 
                         child_depth = self.max_depth.get(d, 0)
                         todo[child_depth].add(d)

@@ -2,12 +2,12 @@ from typing import Any, Dict, List, Tuple, Optional, Iterable
 from .common_interface import GraphProvider, RangeSet
 
 class CompEdge:
-    __slots__ = ("pop", "dest", "llm_bv", "state_bv")
-    def __init__(self, pop: int, dest: int, llm_bv: RangeSet, state_bv: RangeSet):
+    __slots__ = ("pop", "sid", "dest", "bv")
+    def __init__(self, pop: int, sid: Optional[int], dest: int, bv: RangeSet):
         self.pop = pop
+        self.sid = sid
         self.dest = dest
-        self.llm_bv = llm_bv
-        self.state_bv = state_bv
+        self.bv = bv
 
 class CompressedTrie:
     def __init__(self, roots: Dict[int,int], ends: List[bool], edges: List[List[CompEdge]]):
@@ -39,33 +39,31 @@ def optimize(provider: GraphProvider, roots_map: Dict[int, int]) -> CompressedTr
     N: int = len(node_ids_sorted)
 
     ends: List[bool] = [False] * N
-    raw_edges: List[List[Tuple[int, Tuple[Tuple[int, int], ...], int, Tuple[Tuple[int, int], ...]]]] = [[] for _ in range(N)]
+    raw_edges: List[List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]] = [[] for _ in range(N)]
 
     for old_idx, node in arena.items():
         u = dense_of[int(old_idx)]
         ends[u] = bool((node.get("value", {}) or {}).get("end", False))
-        for (p, llm_rs), dest_map in node.get("children", []):
-            for v_old, state_bv_ranges in dest_map:
+        for (p, s), dest_map in node.get("children", []):
+            for v_old, edge_bv in dest_map:
                 if int(v_old) not in dense_of: continue
                 v = dense_of[int(v_old)]
-                raw_edges[u].append((p, llm_rs.intervals, v, tuple(state_bv_ranges)))
+                raw_edges[u].append((p, s, v, edge_bv.intervals))
 
     prev_class: List[int] = [1 if e else 0 for e in ends]
 
-    def aggregate_edges_for_node(u: int, cls: List[int]) -> List[Tuple[int, int, Tuple[Tuple[int, int], ...], Tuple[Tuple[int, int], ...]]]:
-        aggr: Dict[Tuple[int, int], Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]] = {}
-        for (p, llm_intervals, v, state_intervals) in raw_edges[u]:
+    def aggregate_edges_for_node(u: int, cls: List[int]) -> List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]:
+        aggr: Dict[Tuple[int, Optional[int], int], List[Tuple[int, int]]] = {}
+        for (p, s, v, intervals) in raw_edges[u]:
             dcls = cls[v]
-            key = (p, dcls)
-            if key not in aggr: aggr[key] = ([], [])
-            aggr[key][0].extend(llm_intervals)
-            aggr[key][1].extend(state_intervals)
+            key = (p, s, dcls)
+            if key not in aggr: aggr[key] = []
+            aggr[key].extend(intervals)
 
-        items: List[Tuple[int, int, Tuple[Tuple[int, int], ...], Tuple[Tuple[int, int], ...]]] = []
-        for (p, dcls), (llm_ranges, state_ranges) in aggr.items():
-            merged_llm = RangeSet._merge_unsorted(llm_ranges)
-            merged_state = RangeSet._merge_unsorted(state_ranges)
-            items.append((p, dcls, tuple(merged_llm), tuple(merged_state)))
+        items: List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]] = []
+        for (p, s, dcls), ranges in aggr.items():
+            merged = RangeSet._merge_unsorted(ranges)
+            items.append((p, s, dcls, tuple(merged)))
         items.sort()
         return items
 
@@ -110,10 +108,9 @@ def optimize(provider: GraphProvider, roots_map: Dict[int, int]) -> CompressedTr
 
         items = aggregate_edges_for_node(u, prev_class)
         out: List[CompEdge] = []
-        for (p, dcls, llm_intervals, state_intervals) in items:
-            llm_rs = RangeSet(tuple(llm_intervals))
-            state_rs = RangeSet(tuple(state_intervals))
-            out.append(CompEdge(pop=p, dest=dcls, llm_bv=llm_rs, state_bv=state_rs))
+        for (p, s, dcls, intervals) in items:
+            rs = RangeSet(tuple(intervals))
+            out.append(CompEdge(pop=p, sid=s, dest=dcls, bv=rs))
         q_edges[cid] = out
 
     return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
