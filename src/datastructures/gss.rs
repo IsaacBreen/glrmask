@@ -1665,13 +1665,19 @@ pub(crate) fn fuse_predecessors_recursive(
 
 /// Checks if a GSS has a simple structure that can be cached.
 /// The simple structures are:
-/// `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
-/// Returns `Some((state_id, acc))` if it matches.
+///   Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)
+/// Returns:
+///   Some((state_id, final_acc, leaf_stored_trie_nodes, leaf_root_arc)) on match,
+/// where:
+///   - state_id is the first internal's edge state,
+///   - final_acc is the narrowed Acc along the path,
+///   - leaf_stored_trie_nodes are the stored trie nodes on the leaf root,
+///   - leaf_root_arc is the leaf root node.
 #[time_it]
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,
-) -> Option<(StateID, Arc<Acc>)> {
+) -> Option<(StateID, Arc<Acc>, BTreeSet<PrecomputeNode3Index>, Arc<GSSNode>)> {
     if let GSSNode::Internal(internal) = node.as_ref() {
         // Must have exactly one predecessor edge group.
         if internal.predecessors.len() == 1 {
@@ -1699,7 +1705,9 @@ pub(crate) fn is_simple_gss(
                                             // The returned Acc must be the result of narrowing down the path.
                                             let path_acc1 = Acc::narrow(&internal.acc, &pred_internal.acc);
                                             let final_acc = Acc::narrow(&path_acc1, &leaf_root.acc);
-                                            return Some((state_id_x, Arc::new(final_acc)));
+                                            let leaf_stored = leaf_root.acc.stored_trie_nodes().clone();
+                                            // Return the leaf arc so callers can optionally rebuild with a replaced leaf if they want.
+                                            return Some((state_id_x, Arc::new(final_acc), leaf_stored, leaf.clone()));
                                         }
                                     }
                                 }
