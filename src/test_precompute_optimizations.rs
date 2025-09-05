@@ -226,7 +226,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
         let file = File::open(&precomputed2_cache_path)?;
         let decompressor = GzDecoder::new(BufReader::new(file));
-        (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_json_reader(decompressor)?;
+        (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
         // This path is problematic as the cached version is likely optimized.
         // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
         let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);

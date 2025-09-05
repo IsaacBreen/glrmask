@@ -180,7 +180,7 @@ impl JSONNode {
     }
 
     // New method to read JSONNode directly from a reader
-    pub fn from_json_reader<R: Read>(reader: R) -> Result<JSONNode, String> {
+    pub fn from_reader<R: Read>(reader: R) -> Result<JSONNode, String> {
         let serde_value: SerdeValue = serde_json::from_reader(reader)
             .map_err(|e| format!("Failed to read JSONNode from reader: {}", e))?;
         Self::from_serde_value(serde_value)
@@ -208,8 +208,8 @@ pub trait JSONConvertible: Sized {
     }
 
     // Default implementation for streaming deserialization
-    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
-        JSONNode::from_json_reader(reader).and_then(Self::from_json)
+    fn from_reader<R: Read>(reader: R) -> Result<Self, String> {
+        JSONNode::from_reader(reader).and_then(Self::from_json)
     }
 }
 
@@ -274,11 +274,11 @@ macro_rules! impl_json_for_tuple {
                 Ok(())
             }
 
-            // Implement from_json_reader for tuples
-            fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
+            // Implement from_reader for tuples
+            fn from_reader<R: Read>(reader: R) -> Result<Self, String> {
                 // This is more complex for tuples directly from reader without an intermediate JSONNode.
                 // For now, use the default that goes via JSONNode.
-                JSONNode::from_json_reader(reader).and_then(Self::from_json)
+                JSONNode::from_reader(reader).and_then(Self::from_json)
             }
         }
     };
@@ -485,8 +485,8 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
         Ok(())
     }
 
-    fn from_json_reader<R: Read>(reader: R) -> Result<Self, String> {
-        JSONNode::from_json_reader(reader).and_then(Self::from_json)
+    fn from_reader<R: Read>(reader: R) -> Result<Self, String> {
+        JSONNode::from_reader(reader).and_then(Self::from_json)
     }
 }
 
@@ -645,7 +645,7 @@ where
         Ok(())
     }
 
-    fn from_json_reader<R: Read>(mut reader: R) -> Result<Self, String> {
+    fn from_reader<R: Read>(mut reader: R) -> Result<Self, String> {
         // This is a simplified streaming reader for BTreeMap assuming it's an array of [key, value] pairs.
         // It's not a full JSON parser, but sufficient for the expected format.
         let mut buf = Vec::new();
@@ -1097,7 +1097,7 @@ mod tests {
         let mut buffer = Vec::new();
         original.to_writer(&mut buffer).unwrap();
 
-        let deserialized = MyStruct::from_json_reader(Cursor::new(buffer)).unwrap();
+        let deserialized = MyStruct::from_reader(Cursor::new(buffer)).unwrap();
         assert_eq!(original, deserialized);
     }
 
@@ -1110,7 +1110,7 @@ mod tests {
         let mut buffer = Vec::new();
         original_map.to_writer(&mut buffer).unwrap();
 
-        let deserialized_map: BTreeMap<String, i32> = BTreeMap::from_json_reader(Cursor::new(buffer)).unwrap();
+        let deserialized_map: BTreeMap<String, i32> = BTreeMap::from_reader(Cursor::new(buffer)).unwrap();
         assert_eq!(original_map, deserialized_map);
     }
 
@@ -1120,7 +1120,7 @@ mod tests {
         let mut buffer = Vec::new();
         original_vec.to_writer(&mut buffer).unwrap();
 
-        let deserialized_vec: Vec<i32> = Vec::from_json_reader(Cursor::new(buffer)).unwrap();
+        let deserialized_vec: Vec<i32> = Vec::from_reader(Cursor::new(buffer)).unwrap();
         assert_eq!(original_vec, deserialized_vec);
     }
 }
