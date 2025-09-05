@@ -633,12 +633,7 @@ impl GrammarConstraint {
 
             let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
 
-            let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
-            glr_state.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig {
-                fuel: None,
-                per_state_fuel: None,
-                below_bottom_mode: BelowBottomReductionMode::ContinueFromAll,
-            });
+            let glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
             initial_values_for_map.push((trie1_root.clone(), glr_state));
         }
