@@ -16,12 +16,18 @@ def analyze_results(result_files: list[Path], output_dir: Path):
             data = json.load(f)
             competitor_name = Path(data["competitor_script"]).stem
             timings = data["results"]["get_mask_timings_seconds"]
+            mismatch_indices = set(
+                data["results"]
+                .get("mask_correctness_check", {})
+                .get("mismatch_indices", [])
+            )
             for i, timing in enumerate(timings):
                 all_data.append({
                     "competitor": competitor_name,
                     "token_index": i,
                     "time_sec": timing,
-                    "equivalence_passed": data["results"]["equivalence_check"]["passed"]
+                    "equivalence_passed": data["results"]["equivalence_check"]["passed"],
+                    "mask_mismatch": i in mismatch_indices
                 })
 
     if not all_data:
@@ -61,22 +67,49 @@ def analyze_results(result_files: list[Path], output_dir: Path):
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
-    plt.title('get_mask() Performance per Token')
-    plt.xlabel('Token Index in Sequence')
-    plt.ylabel('Time (seconds)')
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.legend(title='Competitor')
+    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
+
+    mismatch_df = df[df['mask_mismatch']]
+    plot_title = 'get_mask() Performance per Token'
+
+    if not mismatch_df.empty:
+        plot_title += ' (X marks mask mismatches)'
+        
+        # Get hue order from the lineplot's legend to ensure colors match
+        handles, labels = ax.get_legend_handles_labels()
+        # The first entry is the title of the legend, so we skip it.
+        competitor_labels = labels[1:1+len(df['competitor'].unique())]
+
+        sns.scatterplot(
+            data=mismatch_df,
+            x='token_index',
+            y='time_sec',
+            hue='competitor',
+            hue_order=competitor_labels,
+            style='mask_mismatch',
+            markers=['X'],
+            s=150,
+            edgecolor='black',
+            linewidth=1,
+            legend=False,
+            ax=ax,
+            zorder=5 # Ensure markers are on top of lines
+        )
+
+    ax.set_xlabel('Token Index in Sequence')
+    ax.set_ylabel('Time (seconds)')
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
     
     # Linear scale
-    plt.yscale('linear')
+    ax.set_yscale('linear')
+    ax.set_title(plot_title)
     linear_path = output_dir / "timings_per_token_linear.png"
     plt.savefig(linear_path, dpi=300, bbox_inches='tight')
     print(f"Saved linear scale plot to {linear_path}")
 
     # Log scale
-    plt.yscale('log')
-    plt.title('get_mask() Performance per Token (Log Scale)')
+    ax.set_yscale('log')
+    ax.set_title(plot_title + ' (Log Scale)')
     log_path = output_dir / "timings_per_token_log.png"
     plt.savefig(log_path, dpi=300, bbox_inches='tight')
     print(f"Saved log scale plot to {log_path}")

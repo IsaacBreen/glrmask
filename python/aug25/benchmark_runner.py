@@ -266,6 +266,7 @@ def run_benchmark(args):
     timings = []
     mask_correctness_passed = True
     mask_correctness_details = "All masks matched the reference implementation."
+    mask_mismatch_indices = []
 
     # 7. Run benchmark loop
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
@@ -300,14 +301,15 @@ def run_benchmark(args):
             comp_indices = set(competitor_mask.to_indices())
             if ref_indices != comp_indices:
                 mask_correctness_passed = False
-                mask_correctness_details = f"Mask mismatch at step {i} (token_id {token_id})."
-                print(f"❌ {mask_correctness_details}")
-                # Stop verifying after first failure to avoid spamming output
-                args.verify_masks = False
+                mask_mismatch_indices.append(i)
 
         # Advance the state
         progress_bar.set_postfix_str("commit")
         constraint_state.commit(token_id)
+
+    if not mask_correctness_passed:
+        mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
+        print(f"\n❌ {mask_correctness_details}")
 
     print("--- Benchmark finished ---")
 
@@ -344,6 +346,7 @@ def run_benchmark(args):
                 "enabled": args.verify_masks,
                 "passed": mask_correctness_passed,
                 "details": mask_correctness_details,
+                "mismatch_indices": mask_mismatch_indices,
             },
             "get_mask_timings_seconds": timings,
             "summary_stats": summary_stats,
