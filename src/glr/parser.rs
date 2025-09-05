@@ -1427,7 +1427,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let mut nt_queue = VecDeque::new();
             nt_queue.push_back(nt);
 
-            'chain: while let Some(current_nt) = nt_queue.pop_front() {
+            while let Some(current_nt) = nt_queue.pop_front() {
                 // GOTO lookup from predecessor_state_id, possibly hallucinated.
                 let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = if predecessor_state_id == self.parser.hallucinated_state_id {
                     // Fetch all possible gotos for this NT with associated state filters.
@@ -1494,7 +1494,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }) => {
                                     // Unit reduce chain: continue
                                     nt_queue.push_back(*next_nt);
-                                    continue 'chain;
                                 }
                                 Action::Default(def) => {
                                     // If the default reduce isn't a unit reduce, we must commit the current goto result.
@@ -1514,7 +1513,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     if let Some(reduce) = &def.reduce {
                                         if reduce.0.len == 1 {
                                             nt_queue.push_back(reduce.0.nonterminal_id);
-                                            continue 'chain;
                                         }
                                     }
                                     // Otherwise, end chain
@@ -1538,9 +1536,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // No goto target -> we're done.
                     }
                 }
-
-                // If we reach here without breaking, end the chain.
-                break 'chain;
             }
         }
 
