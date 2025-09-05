@@ -1,22 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Grammar Constraint Precomputed2 Data",
-  "description": "A schema for the serialized (Precomputed2, Trie2GodWrapper) tuple, which represents the precomputed trie for grammar-based token generation.",
+  "title": "Grammar Constraint Precomputed3 Data",
+  "description": "A schema for the serialized (Precomputed3, Trie3GodWrapper) tuple, which represents the advanced precomputed trie for grammar-based token generation.",
   "type": "array",
   "items": [
     {
-      "$ref": "#/$defs/Precomputed2Map",
-      "description": "The Precomputed2 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
+      "$ref": "#/$defs/Precomputed3Map",
+      "description": "The Precomputed3 map, mapping from TokenizerStateID to the root index of its corresponding trie in the arena."
     },
     {
       "$ref": "#/$defs/TrieArena",
-      "description": "The arena (Trie2GodWrapper) containing all Trie nodes."
+      "description": "The arena (Trie3GodWrapper) containing all Trie nodes."
     }
   ],
   "minItems": 2,
   "maxItems": 2,
   "$defs": {
-    "Precomputed2Entry": {
+    "Precomputed3Entry": {
       "type": "array",
       "description": "A [TokenizerStateID, TrieNodeIndex] pair.",
       "items": [
@@ -32,11 +32,11 @@
       "minItems": 2,
       "maxItems": 2
     },
-    "Precomputed2Map": {
+    "Precomputed3Map": {
       "type": "array",
       "description": "A map from TokenizerStateID to the root index of its corresponding trie.",
       "items": {
-        "$ref": "#/$defs/Precomputed2Entry"
+        "$ref": "#/$defs/Precomputed3Entry"
       }
     },
     "HybridBitset": {
@@ -62,7 +62,7 @@
       "type": "object",
       "description": "The value stored within a Trie node (PrecomputedNodeContents).",
       "properties": {
-        "end": {
+        "clean_end": {
           "type": "boolean",
           "description": "True if this node can be a terminal state in the precomputed trie."
         },
@@ -72,54 +72,45 @@
         }
       },
       "required": [
-        "end",
+        "clean_end",
         "live_tokens"
       ]
     },
     "EdgeKey": {
       "type": "array",
-      "description": "An edge key of type (usize, Option<StateID>).",
-      "items": {
-        "type": "array",
-        "items": [
-          {
-            "type": "integer",
-            "description": "Number of items to pop from the GLR stack."
-          },
-          {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "An optional GLR StateID to check after popping."
-          }
-        ],
-        "minItems": 2,
-        "maxItems": 2
-      }
+      "description": "An edge key of type (usize, LLMTokenBV).",
+      "items": [
+        {
+          "type": "integer",
+          "description": "Number of items to pop from the GLR stack."
+        },
+        {
+          "$ref": "#/$defs/HybridBitset",
+          "description": "A bitset of LLM tokens associated with this edge key."
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
     },
     "EdgeDestination": {
       "type": "array",
       "description": "A pair of [TrieNodeIndex, EdgeValue].",
-      "items": {
-        "type": "array",
-        "items": [
-          {
-            "type": "integer",
-            "description": "Destination TrieNodeIndex."
-          },
-          {
-            "$ref": "#/$defs/HybridBitset",
-            "description": "EdgeValue (LLMTokenBV): a bitset of LLM tokens allowed on this edge."
-          }
-        ],
-        "minItems": 2,
-        "maxItems": 2
-      }
+      "items": [
+        {
+          "type": "integer",
+          "description": "Destination TrieNodeIndex."
+        },
+        {
+          "$ref": "#/$defs/HybridBitset",
+          "description": "EdgeValue (StateIDBV): a bitset of parser State IDs allowed on this edge."
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
     },
     "EdgeDestinationMap": {
       "type": "array",
-      "description": "A map from destination node index to the edge value (LLMTokenBV).",
+      "description": "A map from destination node index to the edge value (StateIDBV).",
       "items": {
         "$ref": "#/$defs/EdgeDestination"
       }
@@ -147,7 +138,7 @@
     },
     "TrieNode": {
       "type": "object",
-      "description": "A single node in the Precompute2 Trie.",
+      "description": "A single node in the Precompute3 Trie.",
       "properties": {
         "children": {
           "$ref": "#/$defs/TrieChildrenMap"
@@ -168,7 +159,7 @@
     },
     "TrieArena": {
       "type": "object",
-      "description": "An arena storing all Trie nodes for Precompute2.",
+      "description": "An arena storing all Trie nodes for Precompute3.",
       "properties": {
         "counter": {
           "type": "integer",
