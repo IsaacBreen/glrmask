@@ -1665,11 +1665,11 @@ pub(crate) fn fuse_predecessors_recursive(
 /// Checks if a GSS has a simple structure that can be cached.
 /// The simple structures are:
 /// `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
-/// Returns `Some((state_id, stored_trie_nodes))` if it matches.
+/// Returns `Some((state_id, acc))` if it matches.
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,
-) -> Option<(StateID, BTreeSet<StoredPrecomputeNodeIndex>)> {
+) -> Option<(StateID, Arc<Acc>)> {
     if let GSSNode::Internal(internal) = node.as_ref() {
         // Must have exactly one predecessor edge group.
         if internal.predecessors.len() == 1 {
@@ -1693,9 +1693,8 @@ pub(crate) fn is_simple_gss(
                                     let leaf = &halluc_pred_vec[0];
                                     if let GSSNode::Root(leaf_root) = leaf.as_ref() {
                                         // This is the valid pattern.
-                                        let stored_nodes = leaf_root.acc.stored_trie_nodes().clone();
-                                        if !stored_nodes.is_empty() {
-                                            return Some((state_id_x, stored_nodes));
+                                        if !leaf_root.acc.stored_trie_nodes().is_empty() {
+                                            return Some((state_id_x, leaf_root.acc.clone()));
                                         }
                                     }
                                 }
