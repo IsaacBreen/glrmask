@@ -929,6 +929,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &mut self,
         action: &Action<'a>,
         filter: Option<&StateIDBV>,
+        state_id: StateID,
         state: &ParseState,
         per_state_fuel: &Option<usize>,
         work_map: &mut WorkMap,
@@ -975,6 +976,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let state = constrained_state_opt.as_ref().unwrap_or(state);
 
         for peek in GSSNode::peek_iter(&state.stack) {
+            assert_eq!(peek.edge_value().state_id, state_id);
             hit!("GLRParserState::handle_action::ForEachPeek");
             match action {
                 Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
@@ -1119,6 +1121,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let (new_found_shift, early_exit) = self.handle_action(
                         &action,
                         filter_opt.as_ref(),
+                        state_id,
                         &state,
                         &per_state_fuel,
                         work_map,
