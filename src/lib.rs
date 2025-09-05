@@ -16,4 +16,5 @@ mod test_constraint_basic;
 mod profiler;
 mod test_constraint_js;
 mod test_precompute_optimizations;
-mod constraint_precompute_utils;
+mod constraint_precompute2_utils;
+mod constraint_precompute3_utils;

@@ -21,7 +21,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::constraint_precompute_utils;
+use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
@@ -50,8 +50,9 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
-use crate::constraint_precompute_utils::{optimize_trie2_size, optimize_trie3_size};
+use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
+use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
@@ -1711,7 +1712,7 @@ pub struct GrammarConstraintState<'a> {
 
 pub(crate) mod constraint_precompute3_utils {
     use super::{PrecomputeNode3, PrecomputeNode3Index, Trie3GodWrapper};
-    use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
+    use crate::datastructures::gss::LLMTokenBV;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use std::collections::{HashMap, VecDeque};
 

@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use bimap::{BiBTreeMap};
 use crate::constraint_extra::PrecomputeStats;
-use crate::constraint_precompute_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
 use crate::json_serialization::JSONConvertible;
 //
 // -------------------------------
