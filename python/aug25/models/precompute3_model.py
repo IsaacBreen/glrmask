@@ -176,7 +176,7 @@ class Model(GraphProvider):
 
                         # Merge matched parents
                         t1 = time.time()
-                        child_gss = ffi.gss_merge_many_with_depth(matched, 999999999)
+                        child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                         time_merge_matched += time.time() - t1
                         hits_merge_matched += 1
 
@@ -190,7 +190,7 @@ class Model(GraphProvider):
                         t1 = time.time()
                         if d in values:
                             existing_gss, existing_mask = values[d]
-                            combined_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 999999999)
+                            combined_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 1)
                             combined_mask = existing_mask.union(child_llm_mask)
                             # Only re-enqueue if effectively changed
                             if combined_gss.ptr() == existing_gss.ptr():
