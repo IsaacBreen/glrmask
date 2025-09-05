@@ -770,6 +770,33 @@ impl GSSNode {
         popper
     }
 
+    pub fn popn_collect_nodes(&self, n: usize) -> Vec<Arc<GSSNode>> {
+        if n == 0 {
+            return vec![Arc::new(self.clone())];
+        }
+
+        let mut current_level: BTreeSet<Arc<GSSNode>> = BTreeSet::new();
+        current_level.insert(Arc::new(self.clone()));
+        
+        let mut next_level = BTreeSet::new();
+
+        for _ in 0..n {
+            if current_level.is_empty() {
+                return vec![];
+            }
+            for node_arc in current_level {
+                for preds_by_depth in node_arc.predecessors().values() {
+                    for pred_vec in preds_by_depth.values() {
+                        next_level.extend(pred_vec.iter().cloned());
+                    }
+                }
+            }
+            current_level = std::mem::take(&mut next_level);
+        }
+
+        current_level.into_iter().collect()
+    }
+
     #[allow(dead_code)] pub(crate) fn merge(&mut self, other: &Self) {
         self._merge(other, 1);
     }
@@ -2080,6 +2107,20 @@ pub fn popn_collect_isolated_parents(
     let mut out = Vec::new();
     for item in popper.iter() {
         for peek in item.peek_iter() {
+            out.push((peek.edge_value().state_id, peek.isolated_parent()));
+        }
+    }
+    out
+}
+
+pub fn popn_collect_fast(
+    node_arc: &Arc<GSSNode>,
+    n: usize,
+) -> Vec<(StateID, Arc<GSSNode>)> {
+    let nodes_at_n = node_arc.popn_collect_nodes(n);
+    let mut out = Vec::new();
+    for node_n in nodes_at_n {
+        for peek in GSSNode::peek_iter(&node_n) {
             out.push((peek.edge_value().state_id, peek.isolated_parent()));
         }
     }

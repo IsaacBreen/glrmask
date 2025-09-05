@@ -155,7 +155,7 @@ class Model(GraphProvider):
                     t1 = time.time()
                     peeks = []
                     for gss_node in gss_set:
-                        peeks.extend(ffi.gss_popn_collect(gss_node, int(pop)))
+                        peeks.extend(gss_node.popn_fast(int(pop)))
                     time_popn_collect += time.time() - t1
                     hits_popn_collect += 1
                     if not peeks:
