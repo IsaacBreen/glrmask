@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
+from tqdm.auto import tqdm
 
 class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
@@ -10,7 +11,7 @@ class Model(GraphProvider):
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
         # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
-        for uid, node in self.arena.items():
+        for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
             # Record node max_depth (if absent, assume 0)
             try:
                 self.max_depth[int(uid)] = int(node.get("max_depth", 0))
