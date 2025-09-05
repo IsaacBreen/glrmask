@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
-from ..common_interface import GraphProvider, RangeSet
+from ..common_interface import GraphProvider
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
@@ -10,7 +10,7 @@ class Model(GraphProvider):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
-        # Normalize BVs to RangeSet; store stateIDBV as list of (s,e). Record max_depth.
+        # Normalize BVs to ffi.Bitset; store stateIDBV as list of (s,e). Record max_depth.
         for uid, node in tqdm(self.arena.items(), desc="Normalizing precompute3 BVs", total=len(self.arena)):
             # Record node max_depth (if absent, assume 0)
             try:
@@ -22,11 +22,12 @@ class Model(GraphProvider):
             newch = []
             for edge_key, dest_map in ch:
                 pop, llm_bv_json = edge_key
-                llm_rs = RangeSet.from_json(llm_bv_json)
+                llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
                 newdm = []
                 for dest_idx, state_bv_json in dest_map:
-                    newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
-                newch.append(((int(pop), llm_rs), newdm))
+                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                    newdm.append((int(dest_idx), state_bv))
+                newch.append(((int(pop), llm_bv), newdm))
             node["children"] = newch
 
     @staticmethod
@@ -37,7 +38,6 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         return Model(roots_map, arena)
-
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
 
@@ -48,14 +48,14 @@ class Model(GraphProvider):
         # For equivalence checking, we must "explode" the state_bv into individual
         # state IDs to match the GraphProvider interface expected by the checker.
         # This is not used by the performance-critical get_mask() method.
-        for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
-            if llm_rs.contains(token):
-                for dest_idx, state_rs in dests:
-                    if not state_rs: # Epsilon transition on GSS stack
+        for (pop, llm_bv), dests in self.arena.get(node, {}).get("children") or []:
+            if llm_bv.contains(token):
+                for dest_idx, state_bv in dests:
+                    if state_bv.is_empty(): # Epsilon transition on GSS stack
                         yield (int(pop), None, int(dest_idx))
                     else:
-                        for start, end in state_rs.intervals:
-                            for sid in range(start, end + 1):
+                        for start, end in state_bv.to_ranges():
+                            for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
@@ -109,10 +109,10 @@ class Model(GraphProvider):
                     stopped.add(node_idx)
                     continue
 
-                # Grouped step over (pop, llm_rs)
+                # Grouped step over (pop, llm_bv)
                 node = self.arena.get(node_idx, {})
                 children = node.get("children") or []
-                for (pop, llm_rs), dests in children:
+                for (pop, llm_bv), dests in children:
                     peeks = ffi.gss_popn_collect(agg, int(pop))
                     if not peeks:
                         continue
@@ -120,7 +120,7 @@ class Model(GraphProvider):
                     for dest_idx, state_bv in dests:
                         # Filter popped parents by state bitset
                         matched = []
-                        if state_bv:
+                        if not state_bv.is_empty():
                             for (sid_val, parent_node) in peeks:
                                 if state_bv.contains(sid_val):
                                     matched.append(parent_node)
@@ -130,9 +130,8 @@ class Model(GraphProvider):
                         # Merge matched parents
                         child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                         # Restrict by this edge's LLM token BV
-                        if llm_rs.intervals:
-                            edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
-                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss, edge_bv)
+                        if not llm_bv.is_empty():
+                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
                         if not child_gss.is_ok():
                             continue
 
