@@ -1321,7 +1321,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it]
     fn handle_below_bottom(
-        &mut self,
+        &self,
         nt: NonTerminalID,
         below: BTreeMap<usize, Acc>,
         _config: &ProcessTokenAdvancedConfig,
@@ -1798,7 +1798,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if !actions_exist {
                                     // Consider default action
                                     actions_exist = self.parser.hallucinated_row.default_reduce.clone_and_merge
-                                        || self.hallucinated_row.default_reduce.reduce.is_some();
+                                        || self.parser.hallucinated_row.default_reduce.reduce.is_some();
                                 }
                             } else {
                                 let row = &self.parser.table[&sid];
