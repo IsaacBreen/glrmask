@@ -141,7 +141,7 @@ class Model(GraphProvider):
                 t1 = time.time()
                 if self.is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
-                gss_set = {g for g in gss_set if g.is_ok()}
+                gss_set = {g for g in gss_set}
                 time_end_check += time.time() - t1
                 hits_end_check += 1
                 if not gss_set:
