@@ -2444,7 +2444,7 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_mapped
     }
 
-    pub fn print_stats(&self) {
+    pub fn print_gss_stats(&self) {
         println!("GrammarConstraintState Stats:");
         println!("  - Active tokenizer states: {}", self.state.len());
         if self.state.is_empty() {
