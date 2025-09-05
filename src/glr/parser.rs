@@ -1308,7 +1308,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut result: BTreeMap<usize, Acc> = BTreeMap::new();
 
         for (k, accs_by_edge) in popper.below_bottom() {
-            let mut final_acc = accs_by_edge
+            let final_acc = accs_by_edge
                 .values()
                 .map(|arc| arc.as_ref())
                 .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
