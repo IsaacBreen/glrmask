@@ -10,6 +10,9 @@ use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, li
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
+use pyo3::basic::CompareOp;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
@@ -578,6 +581,20 @@ impl PyGSSNode {
     fn print_stats(&self) {
         let stats = gather_gss_stats(&[self.inner.as_ref()]);
         println!("{:#?}", stats);
+    }
+
+    fn __hash__(&self) -> PyResult<isize> {
+        let mut hasher = DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        Ok(hasher.finish() as isize)
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(*self.inner == *other.inner),
+            CompareOp::Ne => Ok(*self.inner != *other.inner),
+            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
+        }
     }
 }
 
