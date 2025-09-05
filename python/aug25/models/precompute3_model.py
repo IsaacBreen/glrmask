@@ -2,7 +2,6 @@ import json
 import time
 import heapq
 from typing import Dict, List, Tuple, Optional
-from collections import defaultdict
 
 from ..common_interface import GraphProvider
 import _sep1 as ffi  # the compiled module
@@ -23,6 +22,9 @@ class Model(GraphProvider):
         self.max_depth: Dict[int, int] = {}
 
         # Normalize arena children bitsets and cache max_depth
+        dumps = json.dumps
+        bs_from_json = ffi.Bitset.from_json_string
+
         for uid, node in tqdm(
             self.arena.items(),
             desc="Normalizing precompute3 BVs",
@@ -30,7 +32,8 @@ class Model(GraphProvider):
         ):
             uid_int = int(uid)
             try:
-                self.max_depth[uid_int] = int(node.get("max_depth", 0))
+                md = node.get("max_depth", 0)
+                self.max_depth[uid_int] = int(md)
             except Exception:
                 self.max_depth[uid_int] = 0
 
@@ -42,11 +45,11 @@ class Model(GraphProvider):
             new_children = []
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
-                llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                llm_bv = bs_from_json(dumps(llm_bv_json))
 
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
-                    state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                    state_bv = bs_from_json(dumps(state_bv_json))
                     new_dest_map.append((int(dest_idx), state_bv))
 
                 new_children.append(((int(pop), llm_bv), new_dest_map))
@@ -97,15 +100,19 @@ class Model(GraphProvider):
         values: Dict[int, Tuple[set, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
-        todo: Dict[int, set[int]] = defaultdict(set)  # depth -> set(node_idx)
+        todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
         depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
 
         print(f"[{time.time() - t0:.4f}] get_mask: after init")
 
         # Seed: map tokenizer states and their filtered GSS to trie roots
         t_seed_start = time.time()
+        heappush = heapq.heappush
+        roots_map = self.roots_map
+        max_depth = self.max_depth
+
         for sid, gss in state_to_gss.items():
-            root_idx = self.roots_map.get(int(sid))
+            root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
@@ -113,17 +120,21 @@ class Model(GraphProvider):
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
 
-            if root_idx in values:
-                gss_set, existing_mask = values[root_idx]
+            existing = values.get(root_idx)
+            if existing is not None:
+                gss_set, existing_mask = existing
                 gss_set.add(gss_clone)
                 values[root_idx] = (gss_set, existing_mask.union(new_mask))
             else:
                 values[root_idx] = ({gss_clone}, new_mask)
 
-            depth = self.max_depth[root_idx]
-            if len(todo[depth]) == 0:  # first time this depth is enqueued
-                heapq.heappush(depth_heap, depth)
-            todo[depth].add(root_idx)
+            depth = max_depth[root_idx]
+            bucket = todo.get(depth)
+            if bucket is None:
+                todo[depth] = {root_idx}
+                heappush(depth_heap, depth)
+            else:
+                bucket.add(root_idx)
         t_seed_end = time.time()
         print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
 
@@ -150,16 +161,23 @@ class Model(GraphProvider):
 
         # Helper to enqueue a node at a given depth
         def enqueue(depth: int, node_idx: int) -> None:
-            if len(todo[depth]) == 0:
-                heapq.heappush(depth_heap, depth)
-            todo[depth].add(node_idx)
+            bucket = todo.get(depth)
+            if bucket is None:
+                todo[depth] = {node_idx}
+                heappush(depth_heap, depth)
+            else:
+                bucket.add(node_idx)
+
+        heappop = heapq.heappop
+        arena = self.arena
+        is_end = self.is_end
 
         while True:
             # Pop the smallest depth bucket (skip stale heap entries)
             t1 = time.time()
             node_indices: Optional[set[int]] = None
             while depth_heap:
-                current_depth = heapq.heappop(depth_heap)
+                current_depth = heappop(depth_heap)
                 node_indices = todo.pop(current_depth, None)
                 if node_indices:
                     break
@@ -170,7 +188,7 @@ class Model(GraphProvider):
             loop_count += 1
 
             # Process all nodes in this depth bucket
-            for node_idx in list(node_indices):
+            for node_idx in node_indices:
                 t1 = time.time()
                 if node_idx in stopped:
                     continue
@@ -184,7 +202,7 @@ class Model(GraphProvider):
 
                 # End-node handling
                 t1 = time.time()
-                if self.is_end(node_idx):
+                if is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
                 time_end_check += time.time() - t1
                 hits_end_check += 1
@@ -194,7 +212,8 @@ class Model(GraphProvider):
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
-                children = (self.arena.get(node_idx, {}).get("children")) or []
+                node_data = arena.get(node_idx, {})
+                children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
                     # Collect all pops from GSS parents
                     t1 = time.time()
@@ -205,6 +224,8 @@ class Model(GraphProvider):
                     hits_popn_collect += 1
                     if not peeks:
                         continue
+
+                    llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
                         # Filter peeks by destination state bitset
@@ -225,16 +246,15 @@ class Model(GraphProvider):
                         child_gss_nodes = matched  # already a list of parent nodes
                         time_merge_matched += time.time() - t1
                         hits_merge_matched += 1
-                        if not child_gss_nodes:
-                            continue
 
                         # Compute child mask (intersection with llm_bv when present)
-                        child_llm_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
 
-                        d = int(dest_idx)
+                        d = dest_idx
                         t1 = time.time()
-                        if d in values:
-                            existing_gss_set, existing_mask = values[d]
+                        existing = values.get(d)
+                        if existing is not None:
+                            existing_gss_set, existing_mask = existing
                             old_len = len(existing_gss_set)
                             existing_gss_set.update(child_gss_nodes)
                             # Only re-enqueue if effectively changed
@@ -249,7 +269,7 @@ class Model(GraphProvider):
                         time_merge_values += time.time() - t1
                         hits_merge_values += 1
 
-                        enqueue(self.max_depth[d], d)
+                        enqueue(max_depth[d], d)
 
         t_loop_end = time.time()
         print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
