@@ -230,8 +230,7 @@ def run_benchmark(args):
         equivalence_passed = True
         equivalence_details = "All tested states are equivalent."
 
-        ENABLE_EQUIVALENCE_TEST = False
-        if ENABLE_EQUIVALENCE_TEST:
+        if args.run_equivalence_check:
             # Check that root sets are the same before proceeding
             ref_roots = set(reference_model.roots_map.keys())
             comp_roots = set(competitor_model.roots_map.keys())
@@ -264,6 +263,8 @@ def run_benchmark(args):
                 print("✅ Equivalence check passed.")
             else:
                 print(f"❌ Equivalence check failed: {equivalence_details}")
+        else:
+            equivalence_details = "Equivalence check was skipped."
 
     # 6. Prepare for benchmarking loop
     print(f"Loading and tokenizing code from: {args.code}")
@@ -403,7 +404,9 @@ def main():
                         help="Disable correctness verification of masks at each step (improves benchmark purity).")
     parser.add_argument('--print-stats', action='store_true',
                         help="Print detailed statistics about the loaded models before running the benchmark.")
-    parser.set_defaults(verify_masks=True)
+    parser.add_argument('--skip-equivalence-check', dest='run_equivalence_check', action='store_false',
+                        help="Disable the slow graph equivalence check against the reference model.")
+    parser.set_defaults(verify_masks=True, run_equivalence_check=True)
 
     args = parser.parse_args()
 

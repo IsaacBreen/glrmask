@@ -37,6 +37,7 @@ fi
 REFERENCE_MODEL="$1"
 shift
 COMPETITORS=("$@")
+COMPETITORS=($(printf "%s\n" "${COMPETITORS[@]}" | sort -u | tr '\n' ' '))
 
 # Check that all provided files exist
 for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
