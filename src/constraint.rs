@@ -558,8 +558,7 @@ impl GrammarConstraint {
         helper.simplify_none_edges(); // This can invalidate max_depth.
 
         // Recompute all max_depth values after major graph surgery.
-        let roots_for_recompute: Vec<_> = helper.roots.values().cloned().collect();
-        Trie::recompute_all_max_depths(&helper.trie1_god, &roots_for_recompute);
+        Trie::recompute_all_max_depths(&helper.trie1_god, &helper.roots.values().cloned().collect::<Vec<_>>());
 
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
@@ -571,6 +570,7 @@ impl GrammarConstraint {
         helper.merge_nodes();
         // helper.merge_nodes_basic();
         helper.gc();
+        Trie::recompute_all_max_depths(&helper.trie1_god, &helper.roots.values().cloned().collect::<Vec<_>>());
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
