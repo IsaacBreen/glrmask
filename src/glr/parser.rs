@@ -1452,13 +1452,17 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
 
+        crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
+            crate::debug!(2, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
+                crate::debug!(2, "Processing nonterminal '{}' from predecessor state {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), predecessor_state_id.0);
                 while let Some(current_nt) = nt_queue.pop_front() {
+
                     // GOTO lookup from predecessor_state_id, possibly hallucinated.
                     let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
                     if predecessor_state_id == self.parser.hallucinated_state_id {
@@ -1485,6 +1489,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     });
                     crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
+                    // crate::debug!(2, "Found {} GOTO entries for NT '{}' from state {}:", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0);
+                    // for (goto, maybe_filter) in &gotos_with_filters {
+                    //     crate::debug!(2, "  GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
+                    // }
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
                     for (goto, maybe_filter) in gotos_with_filters {
