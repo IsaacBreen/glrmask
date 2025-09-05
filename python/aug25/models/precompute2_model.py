@@ -122,7 +122,6 @@ class Model(GraphProvider):
                         continue
 
                     # Filter peeks by state_id
-                    matched_parents = []
                     if sid_opt is None:
                         matched_parents = [p for _, p in peeks]
                     else:
