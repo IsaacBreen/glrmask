@@ -1541,7 +1541,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             for gss_arc in out {
-                if let Some((state_id, stored_nodes)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                         source_state_id: StateID(usize::MAX),      // Dummy value
@@ -1561,7 +1561,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let edge_value = StateIDBV::max_ones();
                     let tokens_for_update = LLMTokenBV::max_ones();
 
-                    for source_wrapper in &stored_nodes {
+                    for source_wrapper in acc.stored_trie_nodes() {
                         let source_arc = source_wrapper.as_arc().clone();
                         let inserter = EdgeInserter::new(
                             god,
