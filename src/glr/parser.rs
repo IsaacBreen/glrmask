@@ -28,7 +28,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
 // Added for deep-add of precompute trie edges
-use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss};
+use crate::datastructures::gss::{deep_add_precompute_trie_edges, is_simple_gss, SimpleGSSInfo};
 use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
 // A single combined action for a given (state,row) and token:
@@ -84,7 +84,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -887,6 +887,77 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
+    /// Fast, leaf-only precompute link insertion and tiny-tower rebuild for simple GSS shapes.
+    /// - If filter_opt is Some(bv), insert edge (0, tokens_all) with value=bv from the current leaf sources to a fresh destination,
+    ///   and replace the leaf sources with that destination.
+    /// - If cached_dest_opt is Some(dest), add edges from the current leaf sources to 'dest' and set the leaf stored set to {dest}.
+    /// - Rebuild the simple tower by pushing hallucinated_state_id and top_state_id.
+    fn build_simple_gss_with_precompute(
+        &self,
+        info: &SimpleGSSInfo,
+        cached_dest_opt: Option<&PrecomputeNode3Index>,
+        filter_opt: Option<&StateIDBV>,
+    ) -> Arc<GSSNode> {
+        let god = self.active_state.trie2_god.as_ref().expect("Trie3 god missing");
+        let tokens_all = LLMTokenBV::max_ones();
+
+        // Start from the leaf's stored sources.
+        let mut current_sources = info.leaf_root.local_acc().stored_trie_nodes().clone();
+
+        // Optionally apply the hallucinated filter to the leaf sources.
+        if let Some(bv) = filter_opt {
+            let dest_bv = PrecomputeNode3Index::new(
+                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+            );
+            for source_wrapper in &current_sources {
+                let source_arc = source_wrapper.as_arc().clone();
+                let inserter = EdgeInserter::new(
+                    god,
+                    source_arc,
+                    (0, tokens_all.clone()),
+                    bv.clone(),
+                    |e, n| *e |= n,
+                    |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                    |_, _| {},
+                );
+                inserter.try_destination(dest_bv.clone()).expect("Cycle detected in fast filter insertion");
+            }
+            dest_bv.write(god).expect("poison").value.live_tokens |= &tokens_all;
+            current_sources = BTreeSet::from([dest_bv]);
+        }
+
+        // Optionally link to the cached destination and finalize the leaf's stored set.
+        let final_leaf_acc = {
+            let mut new_leaf_acc = (*info.leaf_root.local_acc()).clone();
+            if let Some(cached_dest) = cached_dest_opt {
+                for source_wrapper in &current_sources {
+                    let source_arc = source_wrapper.as_arc().clone();
+                    let inserter = EdgeInserter::new(
+                        god,
+                        source_arc,
+                        (0, tokens_all.clone()),
+                        StateIDBV::max_ones(),
+                        |e, n| *e |= n,
+                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                        |_, _| {},
+                    );
+                    inserter.try_destination(cached_dest.clone()).expect("Cycle detected in cache-link insertion");
+                }
+                cached_dest.write(god).expect("poison").value.live_tokens |= &tokens_all;
+                new_leaf_acc.stored_trie_nodes = BTreeSet::from([cached_dest.clone()]);
+            } else if let Some(single) = current_sources.iter().next().cloned() {
+                // If only a filter was inserted, make it the current leaf stored node.
+                new_leaf_acc.stored_trie_nodes = BTreeSet::from([single]);
+            }
+            new_leaf_acc
+        };
+
+        // Rebuild a tiny tower: leaf -> hallucinated -> top.
+        let new_leaf = Arc::new(GSSNode::new(final_leaf_acc));
+        let after_h = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: info.hallucinated_state_id }));
+        Arc::new(after_h.push(ParseStateEdgeContent { state_id: info.top_state_id }))
+    }
+
     fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
@@ -1392,8 +1463,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
         crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
 
-        let mut out: Vec<Arc<GSSNode>> = Vec::new();
-        let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
+        let mut out: Vec<(Arc<GSSNode>, Option<StateIDBV>)> = Vec::new();
+        let mut accepted_out: Vec<(Arc<GSSNode>, Option<StateIDBV>)> = Vec::new();
 
         let mut todo = Vec::new();
 
@@ -1460,33 +1531,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
                 for (goto, maybe_filter) in gotos_with_filters {
-                    // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
-                    let mut parent_after_filter = isolated_parent.clone();
-                    if let Some(bv) = maybe_filter {
-                        if let Some(god) = self.active_state.trie2_god.as_ref() {
-                            let tokens_all = LLMTokenBV::max_ones();
-                            let key = (0, tokens_all.clone());
-                            let mut memo = PruneAndTransformRecursiveMemo::default();
-                            let mut dest_provider = || {
-                                PrecomputeNode3Index::new(
-                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                                )
-                            };
-                            deep_add_precompute_trie_edges(
-                                &mut parent_after_filter,
-                                god,
-                                &key,
-                                &bv,
-                                &tokens_all,
-                                &mut dest_provider,
-                                &mut memo,
-                            );
-                        }
-                    }
-
                     // Accept contribution (store isolated parent)
                     if goto.accept {
-                        accepted_out.push(parent_after_filter.clone());
+                        accepted_out.push((isolated_parent.clone(), maybe_filter.clone()));
                     }
 
                     if let Some(goto_state_id) = goto.state_id {
@@ -1509,11 +1556,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             .as_ref()
                                             .map_or(false, |r| r.0.len != 1)
                                     {
-                                        out.push(Arc::new(parent_after_filter.push(
+                                        out.push((Arc::new(isolated_parent.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
                                             },
-                                        )));
+                                        )), maybe_filter.clone()));
                                     }
                                     // If it's a unit reduction, continue chaining.
                                     if let Some(reduce) = &def.reduce {
@@ -1525,18 +1572,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 _ => {
                                     // Not a unit reduction path anymore -> emit a single push to goto_state
-                                    out.push(Arc::new(parent_after_filter.push(
-                                        ParseStateEdgeContent {
-                                            state_id: goto_state_id,
-                                        },
-                                    )));
+                                    out.push((Arc::new(isolated_parent.push(ParseStateEdgeContent {
+                                        state_id: goto_state_id,
+                                    })), maybe_filter.clone()));
                                 }
                             }
                         } else {
                             // Not a unit reduction path anymore -> emit a single push to goto_state
-                            out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
+                            out.push((Arc::new(isolated_parent.push(ParseStateEdgeContent {
                                 state_id: goto_state_id,
-                            })));
+                            })), maybe_filter.clone()));
                         }
                     } else {
                         // No goto target -> we're done.
@@ -1547,13 +1592,48 @@ impl<'a> GLRParserState<'a> { // No longer generic
             });
         }
 
-        // --- NEW CACHING LOGIC ---
+        // --- Structural deduplication (massively reduces downstream work) ---
+        let mut dedup_out: BTreeMap<GSSNode, (Arc<GSSNode>, Option<StateIDBV>)> = BTreeMap::new();
+        for (gss_arc, filt_opt) in out {
+            let key = (*gss_arc).clone();
+            dedup_out
+                .entry(key)
+                .and_modify(|(_existing_arc, existing_filter)| {
+                    match (existing_filter.as_mut(), filt_opt.as_ref()) {
+                        (Some(a), Some(b)) => { *a |= b; }
+                        (None, Some(b)) => { *existing_filter = Some(b.clone()); }
+                        _ => {}
+                    }
+                })
+                .or_insert((gss_arc, filt_opt));
+        }
+        let out: Vec<(Arc<GSSNode>, Option<StateIDBV>)> = dedup_out.into_values().collect();
+
+        let mut dedup_accepted: BTreeMap<GSSNode, (Arc<GSSNode>, Option<StateIDBV>)> = BTreeMap::new();
+        for (gss_arc, filt_opt) in accepted_out {
+            let key = (*gss_arc).clone();
+            dedup_accepted
+                .entry(key)
+                .and_modify(|(_existing_arc, existing_filter)| {
+                    match (existing_filter.as_mut(), filt_opt.as_ref()) {
+                        (Some(a), Some(b)) => { *a |= b; }
+                        (None, Some(b)) => { *existing_filter = Some(b.clone()); }
+                        _ => {}
+                    }
+                })
+                .or_insert((gss_arc, filt_opt));
+        }
+        let accepted_out: Vec<(Arc<GSSNode>, Option<StateIDBV>)> = dedup_accepted.into_values().collect();
+
+        // --- NEW CACHING LOGIC (fast path for simple GSS) ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", {
-            for gss_arc in out {
+            for (gss_arc, pending_filter_opt) in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
-                if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                if let Some(info) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+                    let state_id = info.top_state_id;
+                    let acc = info.path_acc.clone();
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                         source_state_id: StateID(usize::MAX),      // Dummy value
@@ -1577,36 +1657,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
                                 let new_tokens = acc.llm_tokens_union.clone();
-                                vacant.insert((new_dest.clone(), new_tokens));
-                                (new_dest, true)
+                                vacant.insert((new_dest, new_tokens));
+                                (vacant.get().0.clone(), true)
                             }
                         }
                     });
 
-
-                    // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
-                    let mut new_gss_arc = gss_arc;
-                    let edge_key = (0, LLMTokenBV::max_ones());
-                    let edge_value = StateIDBV::max_ones();
-                    let tokens_for_update = LLMTokenBV::max_ones();
-                    let mut memo = PruneAndTransformRecursiveMemo::default();
-
-                    deep_add_precompute_trie_edges(
-                        &mut new_gss_arc,
-                        god,
-                        &edge_key,
-                        &edge_value,
-                        &tokens_for_update,
-                        &mut || cached_dest.clone(),
-                        &mut memo,
-                    );
-
+                    // Always apply pending filter quickly at the leaf (no structural walk).
+                    if pending_filter_opt.is_some() {
+                        let _ = self.build_simple_gss_with_precompute(&info, None, pending_filter_opt.as_ref());
+                    }
+                    // On cache miss or token expansion, also link to the cached destination and emit the rebuilt tower.
                     if add_to_out {
-                        // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
-                        // We add the modified GSS to the output to serve as the canonical representation.
-                        crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
-                        hit!("GLRParserState::reduce_and_goto::CacheMissOrExpand");
-                        final_out.push(new_gss_arc);
+                        let rebuilt = self.build_simple_gss_with_precompute(&info, Some(&cached_dest), pending_filter_opt.as_ref());
+                        final_out.push(rebuilt);
                     } else {
                         crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
                         hit!("GLRParserState::reduce_and_goto::CacheHit");
@@ -1616,6 +1680,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     // Not a simple GSS, keep it for merging.
                     crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
                     hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
+                    let mut gss_arc = gss_arc;
+                    if let Some(bv) = pending_filter_opt {
+                        // Apply the filter only (no cached link) across the graph.
+                        let tokens_all = LLMTokenBV::max_ones();
+                        let key = (0, tokens_all.clone());
+                        let mut memo = PruneAndTransformRecursiveMemo::default();
+                        let mut dest_provider = || {
+                            PrecomputeNode3Index::new(
+                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                            )
+                        };
+                        deep_add_precompute_trie_edges(
+                            &mut gss_arc,
+                            god,
+                            &key,
+                            &bv,
+                            &tokens_all,
+                            &mut dest_provider,
+                            &mut memo,
+                        );
+                    }
                     final_out.push(gss_arc);
                 }
                 });
@@ -1623,12 +1708,41 @@ impl<'a> GLRParserState<'a> { // No longer generic
             });
         } else {
             // No trie god, so no caching is possible.
-            final_out = out;
+            final_out = out.into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+        }
+
+        // Apply filters for accepted_out (rare path). We keep deep_add here for correctness.
+        let mut final_accepted_out: Vec<Arc<GSSNode>> = Vec::new();
+        if let Some(god) = self.active_state.trie2_god.as_ref() {
+            for (mut gss_arc, filt_opt) in accepted_out {
+                if let Some(bv) = filt_opt {
+                    let tokens_all = LLMTokenBV::max_ones();
+                    let key = (0, tokens_all.clone());
+                    let mut memo = PruneAndTransformRecursiveMemo::default();
+                    let mut dest_provider = || {
+                        PrecomputeNode3Index::new(
+                            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                        )
+                    };
+                    deep_add_precompute_trie_edges(
+                        &mut gss_arc,
+                        god,
+                        &key,
+                        &bv,
+                        &tokens_all,
+                        &mut dest_provider,
+                        &mut memo,
+                    );
+                }
+                final_accepted_out.push(gss_arc);
+            }
+        } else {
+            final_accepted_out = accepted_out.into_iter().map(|(a, _)| a).collect();
         }
 
         // Merge results and return
         let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
-        let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
+        let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, final_accepted_out);
         (new_active, new_accepted)
     }
 
