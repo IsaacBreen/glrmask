@@ -975,6 +975,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         let state = constrained_state_opt.as_ref().unwrap_or(state);
 
+        crate::debug!(5, "Handling action for state ID {}. Action: {:?}, Filter: {:?}", state_id.0, action, filter);
         for peek in GSSNode::peek_iter(&state.stack) {
             assert_eq!(peek.edge_value().state_id, state_id);
             hit!("GLRParserState::handle_action::ForEachPeek");
