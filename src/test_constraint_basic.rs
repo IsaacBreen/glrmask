@@ -1861,6 +1861,7 @@ fn test_constraint_indirect_recursion_simplified() {
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1874,6 +1875,7 @@ fn test_constraint_indirect_recursion_simplified() {
         token_name_map,
         2, // max_original_llm_token_id
     );
+    constraint.dump_precomputed3();
 
     // Initial state and step
     let mut state = constraint.init();
