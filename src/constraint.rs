@@ -967,7 +967,7 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
-        crate::debug!(3, "Roots for each tokenizer state:");
+        crate::debug!(6, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
