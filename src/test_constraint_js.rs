@@ -605,16 +605,18 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(&constraint_cache_path)?;
     let writer = BufWriter::new(file);
     let mut encoder = GzEncoder::new(writer, Compression::default());
+    let writer = &mut encoder;
 
     println!("\nSaving GrammarConstraint to {}", constraint_cache_path.display());
-    grammar_constraint.to_writer(&mut encoder)?;
+    grammar_constraint.to_writer(writer)?;
+    encoder.finish()?;
     println!("GrammarConstraint saved to {}", constraint_cache_path.display());
 
     // Read it
-    let file = File::open("/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/js_grammar_constraint 2.json")?;
+    let file = File::open(&constraint_cache_path)?;
     let reader = BufReader::new(file);
-    // let mut decoder = flate2::read::GzDecoder::new(reader);
-    // let grammar_constraint: GrammarConstraint = JSONConvertible::from_reader(&mut decoder)?;
+    let mut decoder = flate2::read::GzDecoder::new(reader);
+    let reader = &mut decoder;
     let grammar_constraint: GrammarConstraint = JSONConvertible::from_reader(reader)?;
     println!("GrammarConstraint loaded back successfully from {}", constraint_cache_path.display());
 
