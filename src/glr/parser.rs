@@ -1457,12 +1457,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
             crate::debug!(2, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
+                let mut seen_nts = HashSet::from_iter(vec![nt]);
+                let mut seen_gotos = HashSet::new();
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
                 crate::debug!(2, "Processing nonterminal '{}' from predecessor state {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), predecessor_state_id.0);
                 while let Some(current_nt) = nt_queue.pop_front() {
-
                     // GOTO lookup from predecessor_state_id, possibly hallucinated.
                     let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
                     if predecessor_state_id == self.parser.hallucinated_state_id {
