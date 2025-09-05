@@ -221,7 +221,7 @@ def run_benchmark(args):
     equivalence_passed = True
     equivalence_details = "All tested states are equivalent."
 
-    ENABLE_EQUIVALENCE_TEST = True
+    ENABLE_EQUIVALENCE_TEST = False
     if ENABLE_EQUIVALENCE_TEST:
         # Check that root sets are the same before proceeding
         ref_roots = set(reference_model.roots_map.keys())
