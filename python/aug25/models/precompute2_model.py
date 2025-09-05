@@ -22,7 +22,7 @@ class Model(GraphProvider):
             # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
             p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
 
-            for edge_key, dest_map in p3_children:
+            for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False):
                 pop, llm_bv_json = edge_key
                 llm_rs = RangeSet.from_json(llm_bv_json)
                 if llm_rs.is_empty():
@@ -40,7 +40,7 @@ class Model(GraphProvider):
             
             # Convert aggregated map to final list format
             new_children = []
-            for (pop, sid), dests in p2_children_agg.items():
+            for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False):
                 dest_list = list(dests.items())
                 new_children.append(((pop, sid), dest_list))
             
