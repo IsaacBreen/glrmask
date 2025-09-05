@@ -1395,7 +1395,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut out: Vec<Arc<GSSNode>> = Vec::new();
         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
 
-        let mut todo = Vec::new();
+        // Shared constants and caches for this call
+        let tokens_all = LLMTokenBV::max_ones();
+        let edge_key_all_tokens_zero_k = (0usize, tokens_all.clone());
+
+        // Memoize deep_add across identical filters and reuse a single destination per filter for this call.
+        // This drastically reduces trie insertions and GSS rewrites.
+        let god_opt = self.active_state.trie2_god.as_ref();
+        let mut filter_ctxs: HashMap<StateIDBV, (PrecomputeNode3Index, PruneAndTransformRecursiveMemo)> = HashMap::new();
+
+        // Also memoize deep_add calls performed during the "simple GSS" caching for each cached destination.
+        let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
+
+        // Collect todo pairs and deduplicate by (predecessor_state_id, isolated_parent pointer).
+        let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
         if !popper.below_bottom().is_empty() {
@@ -1410,7 +1423,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let below_accs = self.build_below_bottom_accs(&popper);
                     let below_todo = self.handle_below_bottom(nt, below_accs, config);
                     crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
-                    todo.extend(below_todo);
+                    for (predecessor_state_id, isolated_parent) in below_todo {
+                        let pred_ptr = Arc::as_ptr(&isolated_parent);
+                        todo_map.entry(predecessor_state_id)
+                            .or_default()
+                            .entry(pred_ptr)
+                            .or_insert(isolated_parent);
+                    }
                 }
             }
         }
@@ -1420,131 +1439,133 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let isolated_parent = peek2.isolated_parent();
-                crate::debug!(5, "Popped to predecessor state ID {}", predecessor_state_id.0);
-                todo.push((predecessor_state_id, isolated_parent));
+                let pred_ptr = Arc::as_ptr(&isolated_parent);
+                todo_map.entry(predecessor_state_id)
+                    .or_default()
+                    .entry(pred_ptr)
+                    .or_insert(isolated_parent);
             }
         }
 
-        for (predecessor_state_id, isolated_parent) in todo {
-            timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
-            let mut nt_queue = VecDeque::new();
-            nt_queue.push_back(nt);
+        for (predecessor_state_id, parents_map) in todo_map {
+            for (_pred_ptr, isolated_parent) in parents_map {
+                timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
+                let mut nt_queue = VecDeque::new();
+                nt_queue.push_back(nt);
 
-            while let Some(current_nt) = nt_queue.pop_front() {
-                // GOTO lookup from predecessor_state_id, possibly hallucinated.
-                let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
-                if predecessor_state_id == self.parser.hallucinated_state_id {
-                    // Fetch all possible gotos for this NT with associated state filters.
-                    if let Some(entries) = self.parser.hallucinated_row.gotos.get(&current_nt) {
-                        entries.iter().map(|(g, bv)| (*g, Some(bv.clone()))).collect()
+                while let Some(current_nt) = nt_queue.pop_front() {
+                    // GOTO lookup from predecessor_state_id, possibly hallucinated.
+                    let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
+                    if predecessor_state_id == self.parser.hallucinated_state_id {
+                        // Fetch all possible gotos for this NT with associated state filters.
+                        if let Some(entries) = self.parser.hallucinated_row.gotos.get(&current_nt) {
+                            entries.iter().map(|(g, bv)| (*g, Some(bv.clone()))).collect()
+                        } else {
+                            Vec::new()
+                        }
                     } else {
-                        Vec::new()
-                    }
-                } else {
-                    let goto: Goto = *self
-                        .parser
-                        .table
-                        .get(&predecessor_state_id)
-                        .and_then(|row| row.gotos.get(&current_nt))
-                        .expect_else(|| {
-                            format!(
-                                "Goto not found for NT '{}' in state {:?}",
-                                self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(),
-                                predecessor_state_id
-                            )
-                        });
-                    vec![(goto, None)]
-                }
-                });
-                crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
-
-                timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
-                for (goto, maybe_filter) in gotos_with_filters {
-                    // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
-                    let mut parent_after_filter = isolated_parent.clone();
-                    if let Some(bv) = maybe_filter {
-                        if let Some(god) = self.active_state.trie2_god.as_ref() {
-                            let tokens_all = LLMTokenBV::max_ones();
-                            let key = (0, tokens_all.clone());
-                            let mut memo = PruneAndTransformRecursiveMemo::default();
-                            let mut dest_provider = || {
-                                PrecomputeNode3Index::new(
-                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                        let goto: Goto = *self
+                            .parser
+                            .table
+                            .get(&predecessor_state_id)
+                            .and_then(|row| row.gotos.get(&current_nt))
+                            .expect_else(|| {
+                                format!(
+                                    "Goto not found for NT '{}' in state {:?}",
+                                    self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(),
+                                    predecessor_state_id
                                 )
-                            };
+                            });
+                        vec![(goto, None)]
+                    }
+                    });
+                    crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
+
+                    timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
+                    for (goto, maybe_filter) in gotos_with_filters {
+                        // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
+                        let mut parent_after_filter = isolated_parent.clone();
+                        if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
+                            // Reuse a single destination per unique state filter BV and memoize the transformation.
+                            let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
+                                let new_dest = PrecomputeNode3Index::new(
+                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                                );
+                                (new_dest, PruneAndTransformRecursiveMemo::default())
+                            });
                             deep_add_precompute_trie_edges(
                                 &mut parent_after_filter,
                                 god,
-                                &key,
-                                &bv,
+                                &edge_key_all_tokens_zero_k,
+                                bv,
                                 &tokens_all,
-                                &mut dest_provider,
-                                &mut memo,
+                                &mut || dest.clone(),
+                                memo,
                             );
                         }
-                    }
 
-                    // Accept contribution (store isolated parent)
-                    if goto.accept {
-                        accepted_out.push(parent_after_filter.clone());
-                    }
+                        // Accept contribution (store isolated parent)
+                        if goto.accept {
+                            accepted_out.push(parent_after_filter.clone());
+                        }
 
-                    if let Some(goto_state_id) = goto.state_id {
-                        let actions = action_selector(goto_state_id);
-                        if actions.len() == 1 {
-                            match &actions[0].0 {
-                                Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                                    nonterminal_id: next_nt,
-                                    len: 1,
-                                    ..
-                                }) => {
-                                    // Unit reduce chain: continue
-                                    nt_queue.push_back(*next_nt);
-                                }
-                                Action::Default(def) => {
-                                    // If the default reduce isn't a unit reduce, we must commit the current goto result.
-                                    if def.clone_and_merge
-                                        || def
-                                            .reduce
-                                            .as_ref()
-                                            .map_or(false, |r| r.0.len != 1)
-                                    {
+                        if let Some(goto_state_id) = goto.state_id {
+                            let actions = action_selector(goto_state_id);
+                            if actions.len() == 1 {
+                                match &actions[0].0 {
+                                    Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                                        nonterminal_id: next_nt,
+                                        len: 1,
+                                        ..
+                                    }) => {
+                                        // Unit reduce chain: continue
+                                        nt_queue.push_back(*next_nt);
+                                    }
+                                    Action::Default(def) => {
+                                        // If the default reduce isn't a unit reduce, we must commit the current goto result.
+                                        if def.clone_and_merge
+                                            || def
+                                                .reduce
+                                                .as_ref()
+                                                .map_or(false, |r| r.0.len != 1)
+                                        {
+                                            out.push(Arc::new(parent_after_filter.push(
+                                                ParseStateEdgeContent {
+                                                    state_id: goto_state_id,
+                                                },
+                                            )));
+                                        }
+                                        // If it's a unit reduction, continue chaining.
+                                        if let Some(reduce) = &def.reduce {
+                                            if reduce.0.len == 1 {
+                                                nt_queue.push_back(reduce.0.nonterminal_id);
+                                            }
+                                        }
+                                        // Otherwise, end chain
+                                    }
+                                    _ => {
+                                        // Not a unit reduction path anymore -> emit a single push to goto_state
                                         out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
                                             },
                                         )));
                                     }
-                                    // If it's a unit reduction, continue chaining.
-                                    if let Some(reduce) = &def.reduce {
-                                        if reduce.0.len == 1 {
-                                            nt_queue.push_back(reduce.0.nonterminal_id);
-                                        }
-                                    }
-                                    // Otherwise, end chain
                                 }
-                                _ => {
-                                    // Not a unit reduction path anymore -> emit a single push to goto_state
-                                    out.push(Arc::new(parent_after_filter.push(
-                                        ParseStateEdgeContent {
-                                            state_id: goto_state_id,
-                                        },
-                                    )));
-                                }
+                            } else {
+                                // Not a unit reduction path anymore -> emit a single push to goto_state
+                                out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
+                                    state_id: goto_state_id,
+                                })));
                             }
                         } else {
-                            // Not a unit reduction path anymore -> emit a single push to goto_state
-                            out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
-                                state_id: goto_state_id,
-                            })));
+                            // No goto target -> we're done.
                         }
-                    } else {
-                        // No goto target -> we're done.
                     }
+                    });
                 }
                 });
             }
-            });
         }
 
         // --- NEW CACHING LOGIC ---
@@ -1586,10 +1607,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
                     let mut new_gss_arc = gss_arc;
-                    let edge_key = (0, LLMTokenBV::max_ones());
+                    let edge_key = (0, tokens_all.clone());
                     let edge_value = StateIDBV::max_ones();
-                    let tokens_for_update = LLMTokenBV::max_ones();
-                    let mut memo = PruneAndTransformRecursiveMemo::default();
+                    let tokens_for_update = tokens_all.clone();
+
+                    // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
+                    let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
+                        .or_insert_with(PruneAndTransformRecursiveMemo::default);
 
                     deep_add_precompute_trie_edges(
                         &mut new_gss_arc,
@@ -1598,7 +1622,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         &edge_value,
                         &tokens_for_update,
                         &mut || cached_dest.clone(),
-                        &mut memo,
+                        memo_for_dest,
                     );
 
                     if add_to_out {
@@ -1774,7 +1798,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if !actions_exist {
                                     // Consider default action
                                     actions_exist = self.parser.hallucinated_row.default_reduce.clone_and_merge
-                                        || self.parser.hallucinated_row.default_reduce.reduce.is_some();
+                                        || self.hallucinated_row.default_reduce.reduce.is_some();
                                 }
                             } else {
                                 let row = &self.parser.table[&sid];
