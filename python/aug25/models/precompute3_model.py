@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
@@ -95,7 +95,7 @@ class Model(GraphProvider):
                 if node_idx in stopped:
                     continue
 
-                agg = values.pop(node_idx, None)
+                agg: Optional[int] = values.pop(node_idx, None)
                 if agg is None:
                     continue
 
