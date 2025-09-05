@@ -1387,6 +1387,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     where
         G: Fn(StateID) -> Vec<FilteredAction<'a>>,
     {
+        timeit!({
+            let stats = gather_gss_stats(&[peek.isolated_parent().as_ref()]);
+            let num_nodes = stats.unique_nodes;
+            format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes", num_nodes)
+        }, {
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -1654,6 +1659,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
         let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
         (new_active, new_accepted)
+        })
     }
 
     pub fn process_token(&mut self, token_id: TerminalID) {
