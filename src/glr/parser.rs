@@ -1571,28 +1571,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                     };
 
-                    // Link all stored nodes from the simple GSS to the canonical cached destination.
+                    // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
+                    let mut new_gss_arc = gss_arc;
                     let edge_key = (0, LLMTokenBV::max_ones());
                     let edge_value = StateIDBV::max_ones();
                     let tokens_for_update = LLMTokenBV::max_ones();
+                    let mut memo = PruneAndTransformRecursiveMemo::default();
 
-                    for source_wrapper in acc.stored_trie_nodes() {
-                        let source_arc = source_wrapper.as_arc().clone();
-                        let inserter = EdgeInserter::new(
-                            god,
-                            source_arc,
-                            edge_key.clone(),
-                            edge_value.clone(),
-                            |e, n| *e |= n,
-                            |node_value, _edge_value| node_value.live_tokens |= &tokens_for_update,
-                            |_, _| {}, // Unconditional insertion
-                        );
-                        inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
-                    }
+                    deep_add_precompute_trie_edges(
+                        &mut new_gss_arc,
+                        god,
+                        &edge_key,
+                        &edge_value,
+                        &tokens_for_update,
+                        &mut || cached_dest.clone(),
+                        &mut memo,
+                    );
+
                     if add_to_out {
-                        // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure
-                        // We add it to the output to serve as the canonical GSS representation.
-                        final_out.push(gss_arc);
+                        // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
+                        // We add the modified GSS to the output to serve as the canonical representation.
+                        final_out.push(new_gss_arc);
                     }
                     // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                 } else {
