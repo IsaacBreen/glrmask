@@ -1407,6 +1407,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 _ => {
                     let below_accs = self.build_below_bottom_accs(&popper);
                     let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths: {:?}", below_todo.len(), below_todo.iter().map(|(sid, _)| sid.0).collect::<Vec<_>>());
                     todo.extend(below_todo);
                 }
             }
@@ -1417,6 +1418,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
                 let isolated_parent = peek2.isolated_parent();
+                crate::debug!(5, "Popped to predecessor state ID {}", predecessor_state_id.0);
                 todo.push((predecessor_state_id, isolated_parent));
             }
         }
