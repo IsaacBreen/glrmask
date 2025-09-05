@@ -52,7 +52,7 @@ class Model(GraphProvider):
     - Significantly reduces the "filter-by-dest" inner loop work.
     """
 
-    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
 
@@ -129,6 +129,7 @@ class Model(GraphProvider):
                     for start, end in to_ranges():
                         # [start, end)
                         # For each SID in the range, union the llm mask into that dest
+                        end = max_state_id
                         for sid_val in range(start, end):
                             by_dest = sid_map.get(sid_val)
                             if by_dest is None:
@@ -174,7 +175,8 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+        return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
