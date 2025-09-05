@@ -84,7 +84,7 @@ class Model(GraphProvider):
                     values[root_idx] = merged
             else:
                 values[root_idx] = gss.clone_node()
-            depth = self.max_depth.get(root_idx, 0)
+            depth = self.max_depth[root_idx]
             todo[depth].add(root_idx)
 
         # Main scheduler loop (depth-ascending)
@@ -128,7 +128,7 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parents
-                        child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss = ffi.gss_merge_many_with_depth(matched, 99999)
                         # Restrict by this edge's LLM token BV
                         if not llm_bv.is_empty():
                             ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
@@ -137,7 +137,7 @@ class Model(GraphProvider):
 
                         d = int(dest_idx)
                         if d in values:
-                            combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                            combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999)
                             # Only re-enqueue if effectively changed
                             if combined.ptr() == values[d].ptr():
                                 continue
@@ -145,7 +145,7 @@ class Model(GraphProvider):
                         else:
                             values[d] = child_gss
 
-                        child_depth = self.max_depth.get(d, 0)
+                        child_depth = self.max_depth[d]
                         todo[child_depth].add(d)
 
         return final_mask
