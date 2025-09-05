@@ -284,7 +284,7 @@ impl JSONConvertible for Row {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Goto {
     pub state_id: Option<StateID>,
     pub accept: bool,

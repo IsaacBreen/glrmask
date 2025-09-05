@@ -1457,7 +1457,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             crate::debug!(2, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
-                let mut seen_nts = HashSet::from_iter(vec![nt]);
+                let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                 let mut seen_gotos = HashSet::new();
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
@@ -1497,6 +1497,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
                     for (goto, maybe_filter) in gotos_with_filters {
+                        if !seen_gotos.insert(goto) {
+                            continue;
+                        }
                         // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
                         let mut parent_after_filter = isolated_parent.clone();
                         if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
@@ -1533,7 +1536,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         ..
                                     }) => {
                                         // Unit reduce chain: continue
-                                        nt_queue.push_back(*next_nt);
+                                        if seen_nts.insert(*next_nt) {
+                                            nt_queue.push_back(*next_nt);
+                                        }
                                     }
                                     Action::Default(def) => {
                                         // If the default reduce isn't a unit reduce, we must commit the current goto result.
@@ -1552,7 +1557,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         // If it's a unit reduction, continue chaining.
                                         if let Some(reduce) = &def.reduce {
                                             if reduce.0.len == 1 {
-                                                nt_queue.push_back(reduce.0.nonterminal_id);
+                                                if seen_nts.insert(reduce.0.nonterminal_id) {
+                                                    nt_queue.push_back(reduce.0.nonterminal_id);
+                                                }
                                             }
                                         }
                                         // Otherwise, end chain
