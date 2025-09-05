@@ -645,6 +645,7 @@ impl GrammarConstraint {
             &trie1_god,
             initial_values_for_map,
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
+                reset();
                 let mut glr_s = current_glr_state.clone();
                 let mut edge_bv = LLMTokenBV::zeros();
                 for bv in destinations_map.values() {
@@ -662,12 +663,19 @@ impl GrammarConstraint {
                     allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
+                print_summary();
+                reset();
                 out
             },
             |glr_s1, glr_s2| {
+                reset();
                 glr_s1.merge_with(glr_s2);
+                print_summary();
+                reset();
             },
             |precomputed_node_data, glr_s| {
+                reset();
+
                 crate::datastructures::gss::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
@@ -716,6 +724,9 @@ impl GrammarConstraint {
                 let mut stack = vec![glr_s.active_state.stack.clone()];
                 simplify_roots_in_place(&mut stack);
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
+
+                print_summary();
+                reset();
 
                 keep_going
             },
