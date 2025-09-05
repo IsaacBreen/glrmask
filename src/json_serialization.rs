@@ -28,6 +28,68 @@ pub enum JSONNode {
 }
 
 impl JSONNode {
+    // Kind name of this node (concise)
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JSONNode::Null => "Null",
+            JSONNode::Bool(_) => "Bool",
+            JSONNode::Int(_) => "Int",
+            JSONNode::UInt(_) => "UInt",
+            JSONNode::Float(_) => "Float",
+            JSONNode::String(_) => "String",
+            JSONNode::Array(_) => "Array",
+            JSONNode::Object(_) => "Object",
+        }
+    }
+
+    // Short preview with a default max length budget for strings/keys
+    pub fn short_preview(&self) -> String {
+        self.short_preview_limit(40)
+    }
+
+    // Short, human-focused preview that avoids dumping large payloads
+    pub fn short_preview_limit(&self, max_len: usize) -> String {
+        match self {
+            JSONNode::Null => "Null".to_string(),
+            JSONNode::Bool(b) => format!("Bool({})", b),
+            JSONNode::Int(i) => format!("Int({})", i),
+            JSONNode::UInt(u) => format!("UInt({})", u),
+            JSONNode::Float(f) => {
+                if f.is_nan() {
+                    "Float(NaN)".to_string()
+                } else if f.is_infinite() {
+                    if f.is_sign_positive() { "Float(+inf)".to_string() } else { "Float(-inf)".to_string() }
+                } else {
+                    format!("Float({})", f)
+                }
+            }
+            JSONNode::String(s) => {
+                let len = s.len();
+                let mut preview: String = s.chars().take(max_len).collect();
+                if s.chars().count() > max_len {
+                    preview.push('…');
+                }
+                format!("String(len={}, \"{}\")", len, preview)
+            }
+            JSONNode::Array(arr) => format!("Array(len={})", arr.len()),
+            JSONNode::Object(obj) => {
+                let len = obj.len();
+                let mut keys = Vec::new();
+                for k in obj.keys().take(3) {
+                    let mut p: String = k.chars().take(max_len).collect();
+                    if k.chars().count() > max_len { p.push('…'); }
+                    keys.push(format!("\"{}\"", p));
+                }
+                if keys.is_empty() {
+                    format!("Object(len={})", len)
+                } else {
+                    let extra = if len > 3 { ", …" } else { "" };
+                    format!("Object(len={}, keys=[{}{}])", len, keys.join(", "), extra)
+                }
+            }
+        }
+    }
+
     // New method to convert JSONNode to serde_json::Value
     pub fn to_serde_value(&self) -> SerdeValue {
         match self {
@@ -127,7 +189,10 @@ impl JSONNode {
     pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
         match self {
             JSONNode::Object(obj) => Ok(obj),
-            _ => Err("Expected JSONNode::Object".to_string()),
+            other => Err(format!(
+                "Expected JSONNode::Object, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -155,7 +220,10 @@ impl JSONConvertible for () {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Null => Ok(()),
-            _ => Err("Expected JSONNode::Null for unit type".to_string()),
+            other => Err(format!(
+                "Expected JSONNode::Null for unit type (), got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -181,10 +249,13 @@ macro_rules! impl_json_for_tuple {
                             ));
                         }
                         Ok(($(
-                            $T::from_json(arr[$idx].clone())?
+                            $T::from_json(arr[$idx].clone())
+                                .map_err(|e| {
+                                    format!("At $[{}]: {}", $idx, e)
+                                })?
                         ,)+))
                     }
-                    _ => Err("Expected JSONNode::Array for tuple".to_string()),
+                    other => Err(format!("Expected JSON array for tuple, got {}", other.short_preview())),
                 }
             }
 
@@ -231,7 +302,10 @@ impl JSONConvertible for bool {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Bool(b) => Ok(b),
-            _ => Err("Expected JSONNode::Bool for bool".to_string()),
+            other => Err(format!(
+                "Expected JSON boolean for bool, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -259,7 +333,10 @@ macro_rules! impl_json_for_signed {
                                 Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
                             }
                         },
-                        other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
+                        other => Err(format!(
+                            "Expected JSON integer (Int/UInt) for {}, got {}",
+                            stringify!($t), other.short_preview()
+                        )),
                     }
                 }
             }
@@ -293,7 +370,10 @@ macro_rules! impl_json_for_unsigned {
                                 Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
                             }
                         },
-                        other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
+                        other => Err(format!(
+                            "Expected JSON unsigned integer (UInt) or non-negative Int for {}, got {}",
+                            stringify!($t), other.short_preview()
+                        )),
                     }
                 }
             }
@@ -311,7 +391,10 @@ macro_rules! impl_json_for_float {
                         JSONNode::Float(f) => Ok(f as $t),
                         JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
                         JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
-                        other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
+                        other => Err(format!(
+                            "Expected JSON number (Float/Int/UInt) for {}, got {}",
+                            stringify!($t), other.short_preview()
+                        )),
                     }
                 }
             }
@@ -332,7 +415,10 @@ impl JSONConvertible for String {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::String(s) => Ok(s),
-            _ => Err("Expected JSONNode::String for String".to_string()),
+            other => Err(format!(
+                "Expected JSON string for String, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -369,11 +455,22 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-            _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
+            JSONNode::Array(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for (i, item) in arr.into_iter().enumerate() {
+                    match T::from_json(item) {
+                        Ok(v) => out.push(v),
+                        Err(e) => return Err(format!("While deserializing Vec<T> at $[{}]: {}", i, e)),
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(format!(
+                "Expected JSON array for Vec<T>, got {}",
+                other.short_preview()
+            )),
         }
     }
-
     fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), String> {
         write!(writer, "[").map_err(|e| e.to_string())?;
         let mut first = true;
@@ -403,11 +500,20 @@ impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Array(arr) => {
-                // First convert each JSONNode into T, collecting into a Vec<T>
-                let vec: Vec<T> = arr
-                    .into_iter()
-                    .map(T::from_json)
-                    .collect::<Result<_, _>>()?;
+                if arr.len() != N {
+                    return Err(format!(
+                        "Expected array of length {} for [T; N], got length {}",
+                        N, arr.len()
+                    ));
+                }
+                // Convert with path-aware errors
+                let mut vec: Vec<T> = Vec::with_capacity(N);
+                for (i, v) in arr.into_iter().enumerate() {
+                    match T::from_json(v) {
+                        Ok(val) => vec.push(val),
+                        Err(e) => return Err(format!("While deserializing [T; {}] at $[{}]: {}", N, i, e)),
+                    }
+                }
                 // Then try to convert Vec<T> into [T; N]; error if length mismatch
                 vec.try_into()
                     .map_err(|v: Vec<T>| {
@@ -418,7 +524,10 @@ impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
                         )
                     })
             }
-            _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
+            other => Err(format!(
+                "Expected JSON array for [T; {}], got {}",
+                N, other.short_preview()
+            )),
         }
     }
 }
@@ -430,8 +539,20 @@ impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-            _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
+            JSONNode::Array(arr) => {
+                let mut set = BTreeSet::new();
+                for (i, item) in arr.into_iter().enumerate() {
+                    match T::from_json(item) {
+                        Ok(v) => { set.insert(v); }
+                        Err(e) => return Err(format!("While deserializing BTreeSet<T> at $[{}]: {}", i, e)),
+                    }
+                }
+                Ok(set)
+            }
+            other => Err(format!(
+                "Expected JSON array for BTreeSet<T>, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -444,8 +565,20 @@ impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-            _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
+            JSONNode::Array(arr) => {
+                let mut set = HashSet::new();
+                for (i, item) in arr.into_iter().enumerate() {
+                    match T::from_json(item) {
+                        Ok(v) => { set.insert(v); }
+                        Err(e) => return Err(format!("While deserializing HashSet<T> at $[{}]: {}", i, e)),
+                    }
+                }
+                Ok(set)
+            }
+            other => Err(format!(
+                "Expected JSON array for HashSet<T>, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -467,19 +600,30 @@ where
         match node {
             JSONNode::Array(arr) => {
                 let mut map = BTreeMap::new();
-                for pair_node in arr {
+                for (i, pair_node) in arr.into_iter().enumerate() {
                     match pair_node {
                         JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
                             let v_node = pair_vec.pop().unwrap();
                             let k_node = pair_vec.pop().unwrap();
-                            map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                            let key = K::from_json(k_node)
+                                .map_err(|e| format!("While deserializing BTreeMap<K, V> at $[{}][0] (key): {}", i, e))?;
+                            let val = V::from_json(v_node)
+                                .map_err(|e| format!("While deserializing BTreeMap<K, V> at $[{}][1] (value): {}", i, e))?;
+                            map.insert(key, val);
                         }
-                        _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
+                        other => return Err(format!(
+                            "Expected 2-element array for BTreeMap entry at $[{}], got {}",
+                            i,
+                            other.short_preview()
+                        )),
                     }
                 }
                 Ok(map)
             }
-            _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
+            other => Err(format!(
+                "Expected JSON array of [key, value] pairs for BTreeMap<K, V>, got {}",
+                other.short_preview()
+            )),
         }
     }
 
@@ -531,19 +675,29 @@ where
         match node {
             JSONNode::Array(arr) => {
                 let mut map = HashMap::new();
-                for pair_node in arr {
+                for (i, pair_node) in arr.into_iter().enumerate() {
                     match pair_node {
                         JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
                             let v_node = pair_vec.pop().unwrap();
                             let k_node = pair_vec.pop().unwrap();
-                            map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
+                            let key = K::from_json(k_node)
+                                .map_err(|e| format!("While deserializing HashMap<K, V> at $[{}][0] (key): {}", i, e))?;
+                            let val = V::from_json(v_node)
+                                .map_err(|e| format!("While deserializing HashMap<K, V> at $[{}][1] (value): {}", i, e))?;
+                            map.insert(key, val);
                         }
-                        _ => return Err("Expected 2-element array for HashMap entry".to_string()),
+                        other => return Err(format!(
+                            "Expected 2-element array for HashMap entry at $[{}], got {}",
+                            i, other.short_preview()
+                        )),
                     }
                 }
                 Ok(map)
             }
-            _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
+            other => Err(format!(
+                "Expected JSON array of [key, value] pairs for HashMap<K, V>, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
@@ -565,19 +719,29 @@ where
         match node {
             JSONNode::Array(arr) => {
                 let mut map = BiBTreeMap::new();
-                for pair_node in arr {
+                for (i, pair_node) in arr.into_iter().enumerate() {
                     match pair_node {
                         JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
                             let r_node = pair_vec.pop().unwrap();
                             let l_node = pair_vec.pop().unwrap();
-                            map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
+                            let l = L::from_json(l_node)
+                                .map_err(|e| format!("While deserializing BiBTreeMap<L, R> at $[{}][0] (left/key): {}", i, e))?;
+                            let r = R::from_json(r_node)
+                                .map_err(|e| format!("While deserializing BiBTreeMap<L, R> at $[{}][1] (right/value): {}", i, e))?;
+                            map.insert(l, r);
                         }
-                        _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
+                        other => return Err(format!(
+                            "Expected 2-element array for BiBTreeMap entry at $[{}], got {}",
+                            i, other.short_preview()
+                        )),
                     }
                 }
                 Ok(map)
             }
-            _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
+            other => Err(format!(
+                "Expected JSON array of [left, right] pairs for BiBTreeMap<L, R>, got {}",
+                other.short_preview()
+            )),
         }
     }
 }
