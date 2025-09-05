@@ -1549,7 +1549,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         k: usize::MAX,                             // Dummy value
                     };
 
-                    let is_miss = !self.below_bottom_cache.contains_key(&cache_key);
+                    let add_to_out = !self.below_bottom_cache.contains_key(&cache_key);
                     let cached_dest = self.below_bottom_cache.entry(cache_key)
                         .or_insert_with(|| {
                             PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())))
@@ -1574,7 +1574,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         );
                         inserter.try_destination(cached_dest.clone()).expect("Cycle detected when linking to reduction cache");
                     }
-                    if is_miss {
+                    if add_to_out {
                         // On a cache miss, this is the first time we see this simple GSS structure.
                         // We add it to the output to serve as the canonical GSS representation.
                         final_out.push(gss_arc);
