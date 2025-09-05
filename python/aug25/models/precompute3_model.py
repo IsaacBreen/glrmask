@@ -105,6 +105,14 @@ class Model(GraphProvider):
         time_merge_matched = 0.0
         time_prune = 0.0
         time_merge_values = 0.0
+        hits_pop_bucket = 0
+        hits_node_setup = 0
+        hits_end_check = 0
+        hits_popn_collect = 0
+        hits_filter_peeks = 0
+        hits_merge_matched = 0
+        hits_prune = 0
+        hits_merge_values = 0
 
         loop_count = 0
         while todo:
@@ -115,6 +123,7 @@ class Model(GraphProvider):
             current_depth = min(todo.keys())
             node_indices = todo.pop(current_depth)
             time_pop_bucket += time.time() - t1
+            hits_pop_bucket += 1
 
             for node_idx in list(node_indices):
                 t1 = time.time()
@@ -125,6 +134,7 @@ class Model(GraphProvider):
                 if agg is None:
                     continue
                 time_node_setup += time.time() - t1
+                hits_node_setup += 1
 
                 # Process callback (end-node handling + stop condition)
                 t1 = time.time()
@@ -132,6 +142,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(agg.allowed_llm_tokens())
                 keep_going = agg.is_ok()
                 time_end_check += time.time() - t1
+                hits_end_check += 1
                 if not keep_going:
                     stopped.add(node_idx)
                     continue
@@ -143,6 +154,7 @@ class Model(GraphProvider):
                     t1 = time.time()
                     peeks = ffi.gss_popn_collect(agg, int(pop))
                     time_popn_collect += time.time() - t1
+                    hits_popn_collect += 1
                     if not peeks:
                         continue
 
@@ -155,6 +167,7 @@ class Model(GraphProvider):
                                 if state_bv.contains(sid_val):
                                     matched.append(parent_node)
                         time_filter_peeks += time.time() - t1
+                        hits_filter_peeks += 1
                         if not matched:
                             continue
 
@@ -162,12 +175,14 @@ class Model(GraphProvider):
                         t1 = time.time()
                         child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                         time_merge_matched += time.time() - t1
+                        hits_merge_matched += 1
 
                         # Restrict by this edge's LLM token BV
                         t1 = time.time()
                         if not llm_bv.is_empty():
                             ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
                         time_prune += time.time() - t1
+                        hits_prune += 1
                         if not child_gss.is_ok():
                             continue
 
@@ -182,20 +197,21 @@ class Model(GraphProvider):
                         else:
                             values[d] = child_gss
                         time_merge_values += time.time() - t1
+                        hits_merge_values += 1
 
                         child_depth = self.max_depth[d]
                         todo[child_depth].add(d)
 
         t_loop_end = time.time()
         print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-        print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
-        print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
-        print(f"    - 3. End check:         {time_end_check:.4f}s")
-        print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
-        print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
-        print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
-        print(f"    - 7. Prune:             {time_prune:.4f}s")
-        print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+        print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
+        print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
+        print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
+        print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
+        print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
+        print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
+        print(f"    - 7. Prune:             {time_prune:9.4f}s ({hits_prune:8d} hits)")
+        print(f"    - 8. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
 
         print(f"[{time.time() - t0:.4f}] get_mask: returning")
         return final_mask
