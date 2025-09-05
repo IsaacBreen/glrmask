@@ -606,6 +606,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     let writer = BufWriter::new(file);
     let mut encoder = GzEncoder::new(writer, Compression::default());
 
+    println!("\nSaving GrammarConstraint to {}", constraint_cache_path.display());
     grammar_constraint.to_writer(&mut encoder)?;
     println!("GrammarConstraint saved to {}", constraint_cache_path.display());
     return Ok(());
