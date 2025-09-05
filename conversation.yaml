@@ -1,6 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model.py
+    - python/aug25/models/gpt-5-3.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -112,6 +113,14 @@ local_system:
               time_merge_matched = 0.0
               time_prune = 0.0
               time_merge_values = 0.0
+              hits_pop_bucket = 0
+              hits_node_setup = 0
+              hits_end_check = 0
+              hits_popn_collect = 0
+              hits_filter_peeks = 0
+              hits_merge_matched = 0
+              hits_prune = 0
+              hits_merge_values = 0
 
               loop_count = 0
               while todo:
@@ -122,6 +131,7 @@ local_system:
                   current_depth = min(todo.keys())
                   node_indices = todo.pop(current_depth)
                   time_pop_bucket += time.time() - t1
+                  hits_pop_bucket += 1
 
                   for node_idx in list(node_indices):
                       t1 = time.time()
@@ -132,6 +142,7 @@ local_system:
                       if agg is None:
                           continue
                       time_node_setup += time.time() - t1
+                      hits_node_setup += 1
 
                       # Process callback (end-node handling + stop condition)
                       t1 = time.time()
@@ -139,6 +150,7 @@ local_system:
                           final_mask = final_mask.union(agg.allowed_llm_tokens())
                       keep_going = agg.is_ok()
                       time_end_check += time.time() - t1
+                      hits_end_check += 1
                       if not keep_going:
                           stopped.add(node_idx)
                           continue
@@ -150,6 +162,7 @@ local_system:
                           t1 = time.time()
                           peeks = ffi.gss_popn_collect(agg, int(pop))
                           time_popn_collect += time.time() - t1
+                          hits_popn_collect += 1
                           if not peeks:
                               continue
 
@@ -162,6 +175,7 @@ local_system:
                                       if state_bv.contains(sid_val):
                                           matched.append(parent_node)
                               time_filter_peeks += time.time() - t1
+                              hits_filter_peeks += 1
                               if not matched:
                                   continue
 
@@ -169,12 +183,14 @@ local_system:
                               t1 = time.time()
                               child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                               time_merge_matched += time.time() - t1
+                              hits_merge_matched += 1
 
                               # Restrict by this edge's LLM token BV
                               t1 = time.time()
                               if not llm_bv.is_empty():
                                   ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
                               time_prune += time.time() - t1
+                              hits_prune += 1
                               if not child_gss.is_ok():
                                   continue
 
@@ -189,22 +205,314 @@ local_system:
                               else:
                                   values[d] = child_gss
                               time_merge_values += time.time() - t1
+                              hits_merge_values += 1
 
                               child_depth = self.max_depth[d]
                               todo[child_depth].add(d)
 
               t_loop_end = time.time()
               print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-              print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
-              print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
-              print(f"    - 3. End check:         {time_end_check:.4f}s")
-              print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
-              print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
-              print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
-              print(f"    - 7. Prune:             {time_prune:.4f}s")
-              print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+              print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
+              print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
+              print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
+              print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
+              print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
+              print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
+              print(f"    - 7. Prune:             {time_prune:9.4f}s ({hits_prune:8d} hits)")
+              print(f"    - 8. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
+              return final_mask
+    python/aug25/models/gpt-5-3.py: |
+      import json
+      import time
+      from collections import defaultdict
+      from typing import Dict, List, Tuple, Optional, Iterable
+
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module
+
+
+      class Model(GraphProvider):
+          """
+          High-performance graph provider optimized for fast get_mask().
+
+          Key optimizations over precompute3_model.Model:
+            - Pre-normalization and grouping of children by pop to minimize gss_popn_collect calls.
+            - Per-node, per-dest aggregation of produced child GSS nodes to reduce the number of merges
+              into the values map (merge once per dest per processed source node).
+            - Micro-optimizations (function/local bindings) to reduce Python attribute lookups.
+            - Single-merge-per-dest-per-source reduces gss_merge_many_with_depth calls and allows the
+              backend to coalesce structures better with small depth bound (fast and robust).
+            - Avoid unnecessary cloning/merging (fast path when matched has length 1).
+
+          Interface maintained:
+            - from_json_string
+            - get_root
+            - is_end
+            - iter_edges
+            - get_mask
+          """
+
+          # Tunables: depth limits for merging. Small numbers tend to keep merges cheap, while
+          # avoiding excessive explosion in popn_collect. 2–4 is often a good compromise in practice.
+          MERGE_DEPTH_SEED = 4
+          MERGE_DEPTH_INTO_VALUES = 2
+          MERGE_DEPTH_MATCHED_PARENTS = 1
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Roots of tries mapped by tokenizer state ID
+              self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
+              self.arena: Dict[int, dict] = arena
+
+              # Per-node max depth
+              self.max_depth: Dict[int, int] = {}
+
+              # Pre-normalize bitsets and group children by 'pop' to minimize pop-collect calls
+              # Node schema stored:
+              #   node["end"] -> bool
+              #   node["children_by_pop"] -> Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]
+              #       i.e., pop -> list of (llm_bv, [(dest_idx, state_bv), ...])
+              # The original node["children"] remains compatible for iter_edges.
+              t0 = time.time()
+              for uid, node in self.arena.items():
+                  nid = int(uid)
+
+                  # Determine end flag and max depth
+                  try:
+                      self.max_depth[nid] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[nid] = 0
+
+                  value_obj = node.get("value") or {}
+                  node["end"] = bool(value_obj.get("end", False))
+
+                  # Children normalization
+                  ch = node.get("children") or []
+                  normalized_children = []
+                  children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = defaultdict(list)
+
+                  for edge_key, dest_map in ch:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+
+                      new_dests: List[Tuple[int, ffi.Bitset]] = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          new_dests.append((dest_idx, state_bv))
+
+                      # Store normalized edge for compat
+                      normalized_children.append(((pop, llm_bv), new_dests))
+                      # Also group by pop to reduce gss_popn_collect calls
+                      children_by_pop[pop].append((llm_bv, new_dests))
+
+                  node["children"] = normalized_children
+                  node["children_by_pop"] = dict(children_by_pop)
+              _ = t0  # silence linter in case debug prints are off
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data['precomputed3']
+              arena_json = data['trie3_god']
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              # Using precomputed end flag for speed
+              return bool(self.arena.get(node, {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
+              """
+              Reference-expanding iterator that 'explodes' state_bv into individual state IDs
+              to match the GraphProvider interface for equivalence checking.
+
+              We do not change the observable behavior here.
+              """
+              node_data = self.arena.get(node, {})
+              children = node_data.get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  # state_bv ranges are [start, end), i.e., end exclusive
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+              """
+              # Aliases to avoid repeated global lookups
+              Bitset = ffi.Bitset
+              gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
+              gss_popn_collect = ffi.gss_popn_collect
+              gss_allow_only_llm_tokens_and_prune = ffi.gss_allow_only_llm_tokens_and_prune
+
+              # Final mask to return
+              final_mask = Bitset.zeros()
+
+              # values: pending aggregate per trie node index
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (agg.is_ok() == False)
+              stopped: set[int] = set()
+
+              # depth scheduler: depth -> set(node_idx)
+              # We'll keep a min-heap of active depths to avoid repeated min() over keys.
+              # Given depths are small and hit count is relatively low, this is a micro-optimization.
+              buckets: Dict[int, set[int]] = defaultdict(set)
+              active_depths_heap: List[int] = []
+              active_depths_in_heap: set[int] = set()
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+              # We accumulate merges per root first to minimize redundant merges.
+              per_root_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+              for sid, gss in state_to_gss.items():
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  per_root_accum[int(root_idx)].append(gss.clone_node())
+
+              # Merge seeds per root just once
+              for root_idx, lst in per_root_accum.items():
+                  if not lst:
+                      continue
+                  if len(lst) == 1:
+                      agg = lst[0]
+                  else:
+                      # Small depth to keep it cheap while still coalescing duplicates
+                      agg = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_SEED)
+                  values[root_idx] = agg
+                  d = self.max_depth.get(root_idx, 0)
+                  b = buckets[d]
+                  if root_idx not in b:
+                      b.add(root_idx)
+                  if d not in active_depths_in_heap:
+                      import heapq
+                      heapq.heappush(active_depths_heap, d)
+                      active_depths_in_heap.add(d)
+
+              # Main scheduler
+              import heapq
+              while active_depths_heap:
+                  current_depth = heapq.heappop(active_depths_heap)
+                  active_depths_in_heap.discard(current_depth)
+                  node_indices = buckets.pop(current_depth, None)
+                  if not node_indices:
+                      continue
+
+                  # Process each node at this depth bucket
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          # Already finalized as not-ok
+                          continue
+
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue  # nothing to do
+
+                      # Handle end nodes: OR allowed tokens into final mask
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+
+                      # If the aggregate is not OK, this node stops expanding permanently
+                      if not agg.is_ok():
+                          stopped.add(node_idx)
+                          continue
+
+                      node = self.arena.get(node_idx, {})
+                      children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = \
+                          node.get("children_by_pop") or {}
+
+                      if not children_by_pop:
+                          # No outgoing edges
+                          continue
+
+                      # We'll aggregate child GSS nodes per destination, then do at most ONE merge into 'values'
+                      # per destination for this source node. This reduces the number of expensive merges.
+                      per_dest_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+
+                      # Pre-collect for each distinct pop exactly once
+                      # gss_popn_collect can be costly; we call it once per unique pop
+                      for pop, groups in children_by_pop.items():
+                          peeks = gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
+
+                          # For each group with same pop but different LLM bitset, handle its destinations
+                          for (llm_bv, dests) in groups:
+                              # For each destination, filter peeks by state bitset and (if non-empty) merge parents
+                              for dest_idx, state_bv in dests:
+                                  # Fast filter: scan peeks once and check state membership
+                                  matched_parents: List[ffi.GSSNode] = []
+                                  if not state_bv.is_empty():
+                                      contains = state_bv.contains  # local alias
+                                      append_mp = matched_parents.append
+                                      for (sid_val, parent_node) in peeks:
+                                          if contains(sid_val):
+                                              append_mp(parent_node)
+                                  else:
+                                      # State-bv empty means epsilon-like in original iter_edges semantics:
+                                      # treat as direct pass; In iter_edges we emitted (pop, None, dest)
+                                      # but here we're working with parents already, so matched == all parents.
+                                      matched_parents = [p for (_, p) in peeks]
+
+                                  if not matched_parents:
+                                      continue
+
+                                  # Merge matched parents. If single parent, clone it to avoid in-place mutation
+                                  if len(matched_parents) == 1:
+                                      child_gss = matched_parents[0].clone_node()
+                                  else:
+                                      child_gss = gss_merge_many_with_depth(
+                                          matched_parents,
+                                          self.MERGE_DEPTH_MATCHED_PARENTS
+                                      )
+
+                                  # Restrict by LLM token BV and prune in place
+                                  if not llm_bv.is_empty():
+                                      gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+                                  if not child_gss.is_ok():
+                                      # Pruned away completely
+                                      continue
+
+                                  per_dest_accum[int(dest_idx)].append(child_gss)
+
+                      # Now, for each destination, merge all accumulated child GSS nodes ONCE and push to values
+                      for d, lst in per_dest_accum.items():
+                          if not lst:
+                              continue
+                          if d in values:
+                              # Merge [existing, new...] at a small depth bound to keep it cheap.
+                              merged = gss_merge_many_with_depth([values[d], *lst], self.MERGE_DEPTH_INTO_VALUES)
+                              # Only re-enqueue if effectively changed
+                              if merged.ptr() == values[d].ptr():
+                                  continue
+                              values[d] = merged
+                          else:
+                              if len(lst) == 1:
+                                  values[d] = lst[0]
+                              else:
+                                  values[d] = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_INTO_VALUES)
+
+                          child_depth = self.max_depth.get(d, 0)
+                          # Insert into depth bucket and heap if needed
+                          bset = buckets[child_depth]
+                          if d not in bset:
+                              bset.add(d)
+                          if child_depth not in active_depths_in_heap:
+                              heapq.heappush(active_depths_heap, child_depth)
+                              active_depths_in_heap.add(child_depth)
+
               return final_mask
   prev_file_contents:
     python/aug25/models/precompute3_model.py: |
@@ -425,9 +733,300 @@ local_system:
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
+    python/aug25/models/gpt-5-3.py: |
+      import json
+      import time
+      from collections import defaultdict
+      from typing import Dict, List, Tuple, Optional, Iterable
+
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module
+
+
+      class Model(GraphProvider):
+          """
+          High-performance graph provider optimized for fast get_mask().
+
+          Key optimizations over precompute3_model.Model:
+            - Pre-normalization and grouping of children by pop to minimize gss_popn_collect calls.
+            - Per-node, per-dest aggregation of produced child GSS nodes to reduce the number of merges
+              into the values map (merge once per dest per processed source node).
+            - Micro-optimizations (function/local bindings) to reduce Python attribute lookups.
+            - Single-merge-per-dest-per-source reduces gss_merge_many_with_depth calls and allows the
+              backend to coalesce structures better with small depth bound (fast and robust).
+            - Avoid unnecessary cloning/merging (fast path when matched has length 1).
+
+          Interface maintained:
+            - from_json_string
+            - get_root
+            - is_end
+            - iter_edges
+            - get_mask
+          """
+
+          # Tunables: depth limits for merging. Small numbers tend to keep merges cheap, while
+          # avoiding excessive explosion in popn_collect. 2–4 is often a good compromise in practice.
+          MERGE_DEPTH_SEED = 4
+          MERGE_DEPTH_INTO_VALUES = 2
+          MERGE_DEPTH_MATCHED_PARENTS = 1
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Roots of tries mapped by tokenizer state ID
+              self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
+              self.arena: Dict[int, dict] = arena
+
+              # Per-node max depth
+              self.max_depth: Dict[int, int] = {}
+
+              # Pre-normalize bitsets and group children by 'pop' to minimize pop-collect calls
+              # Node schema stored:
+              #   node["end"] -> bool
+              #   node["children_by_pop"] -> Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]
+              #       i.e., pop -> list of (llm_bv, [(dest_idx, state_bv), ...])
+              # The original node["children"] remains compatible for iter_edges.
+              t0 = time.time()
+              for uid, node in self.arena.items():
+                  nid = int(uid)
+
+                  # Determine end flag and max depth
+                  try:
+                      self.max_depth[nid] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[nid] = 0
+
+                  value_obj = node.get("value") or {}
+                  node["end"] = bool(value_obj.get("end", False))
+
+                  # Children normalization
+                  ch = node.get("children") or []
+                  normalized_children = []
+                  children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = defaultdict(list)
+
+                  for edge_key, dest_map in ch:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+
+                      new_dests: List[Tuple[int, ffi.Bitset]] = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          new_dests.append((dest_idx, state_bv))
+
+                      # Store normalized edge for compat
+                      normalized_children.append(((pop, llm_bv), new_dests))
+                      # Also group by pop to reduce gss_popn_collect calls
+                      children_by_pop[pop].append((llm_bv, new_dests))
+
+                  node["children"] = normalized_children
+                  node["children_by_pop"] = dict(children_by_pop)
+              _ = t0  # silence linter in case debug prints are off
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data['precomputed3']
+              arena_json = data['trie3_god']
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              # Using precomputed end flag for speed
+              return bool(self.arena.get(node, {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
+              """
+              Reference-expanding iterator that 'explodes' state_bv into individual state IDs
+              to match the GraphProvider interface for equivalence checking.
+
+              We do not change the observable behavior here.
+              """
+              node_data = self.arena.get(node, {})
+              children = node_data.get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  # state_bv ranges are [start, end), i.e., end exclusive
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+              """
+              # Aliases to avoid repeated global lookups
+              Bitset = ffi.Bitset
+              gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
+              gss_popn_collect = ffi.gss_popn_collect
+              gss_allow_only_llm_tokens_and_prune = ffi.gss_allow_only_llm_tokens_and_prune
+
+              # Final mask to return
+              final_mask = Bitset.zeros()
+
+              # values: pending aggregate per trie node index
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (agg.is_ok() == False)
+              stopped: set[int] = set()
+
+              # depth scheduler: depth -> set(node_idx)
+              # We'll keep a min-heap of active depths to avoid repeated min() over keys.
+              # Given depths are small and hit count is relatively low, this is a micro-optimization.
+              buckets: Dict[int, set[int]] = defaultdict(set)
+              active_depths_heap: List[int] = []
+              active_depths_in_heap: set[int] = set()
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+              # We accumulate merges per root first to minimize redundant merges.
+              per_root_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+              for sid, gss in state_to_gss.items():
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  per_root_accum[int(root_idx)].append(gss.clone_node())
+
+              # Merge seeds per root just once
+              for root_idx, lst in per_root_accum.items():
+                  if not lst:
+                      continue
+                  if len(lst) == 1:
+                      agg = lst[0]
+                  else:
+                      # Small depth to keep it cheap while still coalescing duplicates
+                      agg = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_SEED)
+                  values[root_idx] = agg
+                  d = self.max_depth.get(root_idx, 0)
+                  b = buckets[d]
+                  if root_idx not in b:
+                      b.add(root_idx)
+                  if d not in active_depths_in_heap:
+                      import heapq
+                      heapq.heappush(active_depths_heap, d)
+                      active_depths_in_heap.add(d)
+
+              # Main scheduler
+              import heapq
+              while active_depths_heap:
+                  current_depth = heapq.heappop(active_depths_heap)
+                  active_depths_in_heap.discard(current_depth)
+                  node_indices = buckets.pop(current_depth, None)
+                  if not node_indices:
+                      continue
+
+                  # Process each node at this depth bucket
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          # Already finalized as not-ok
+                          continue
+
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue  # nothing to do
+
+                      # Handle end nodes: OR allowed tokens into final mask
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+
+                      # If the aggregate is not OK, this node stops expanding permanently
+                      if not agg.is_ok():
+                          stopped.add(node_idx)
+                          continue
+
+                      node = self.arena.get(node_idx, {})
+                      children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = \
+                          node.get("children_by_pop") or {}
+
+                      if not children_by_pop:
+                          # No outgoing edges
+                          continue
+
+                      # We'll aggregate child GSS nodes per destination, then do at most ONE merge into 'values'
+                      # per destination for this source node. This reduces the number of expensive merges.
+                      per_dest_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+
+                      # Pre-collect for each distinct pop exactly once
+                      # gss_popn_collect can be costly; we call it once per unique pop
+                      for pop, groups in children_by_pop.items():
+                          peeks = gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
+
+                          # For each group with same pop but different LLM bitset, handle its destinations
+                          for (llm_bv, dests) in groups:
+                              # For each destination, filter peeks by state bitset and (if non-empty) merge parents
+                              for dest_idx, state_bv in dests:
+                                  # Fast filter: scan peeks once and check state membership
+                                  matched_parents: List[ffi.GSSNode] = []
+                                  if not state_bv.is_empty():
+                                      contains = state_bv.contains  # local alias
+                                      append_mp = matched_parents.append
+                                      for (sid_val, parent_node) in peeks:
+                                          if contains(sid_val):
+                                              append_mp(parent_node)
+                                  else:
+                                      # State-bv empty means epsilon-like in original iter_edges semantics:
+                                      # treat as direct pass; In iter_edges we emitted (pop, None, dest)
+                                      # but here we're working with parents already, so matched == all parents.
+                                      matched_parents = [p for (_, p) in peeks]
+
+                                  if not matched_parents:
+                                      continue
+
+                                  # Merge matched parents. If single parent, clone it to avoid in-place mutation
+                                  if len(matched_parents) == 1:
+                                      child_gss = matched_parents[0].clone_node()
+                                  else:
+                                      child_gss = gss_merge_many_with_depth(
+                                          matched_parents,
+                                          self.MERGE_DEPTH_MATCHED_PARENTS
+                                      )
+
+                                  # Restrict by LLM token BV and prune in place
+                                  if not llm_bv.is_empty():
+                                      gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+                                  if not child_gss.is_ok():
+                                      # Pruned away completely
+                                      continue
+
+                                  per_dest_accum[int(dest_idx)].append(child_gss)
+
+                      # Now, for each destination, merge all accumulated child GSS nodes ONCE and push to values
+                      for d, lst in per_dest_accum.items():
+                          if not lst:
+                              continue
+                          if d in values:
+                              # Merge [existing, new...] at a small depth bound to keep it cheap.
+                              merged = gss_merge_many_with_depth([values[d], *lst], self.MERGE_DEPTH_INTO_VALUES)
+                              # Only re-enqueue if effectively changed
+                              if merged.ptr() == values[d].ptr():
+                                  continue
+                              values[d] = merged
+                          else:
+                              if len(lst) == 1:
+                                  values[d] = lst[0]
+                              else:
+                                  values[d] = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_INTO_VALUES)
+
+                          child_depth = self.max_depth.get(d, 0)
+                          # Insert into depth bucket and heap if needed
+                          bset = buckets[child_depth]
+                          if d not in bset:
+                              bset.add(d)
+                          if child_depth not in active_depths_in_heap:
+                              heapq.heappush(active_depths_heap, child_depth)
+                              active_depths_in_heap.add(child_depth)
+
+              return final_mask
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: simple
 system:
   message: |-
     You are a helpful assistant.
@@ -435,14 +1034,14 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: simple
 messages:
   - user: |-
       Developer note (core guidance):
@@ -569,6 +1168,14 @@ messages:
               time_merge_matched = 0.0
               time_prune = 0.0
               time_merge_values = 0.0
+              hits_pop_bucket = 0
+              hits_node_setup = 0
+              hits_end_check = 0
+              hits_popn_collect = 0
+              hits_filter_peeks = 0
+              hits_merge_matched = 0
+              hits_prune = 0
+              hits_merge_values = 0
 
               loop_count = 0
               while todo:
@@ -579,6 +1186,7 @@ messages:
                   current_depth = min(todo.keys())
                   node_indices = todo.pop(current_depth)
                   time_pop_bucket += time.time() - t1
+                  hits_pop_bucket += 1
 
                   for node_idx in list(node_indices):
                       t1 = time.time()
@@ -589,6 +1197,7 @@ messages:
                       if agg is None:
                           continue
                       time_node_setup += time.time() - t1
+                      hits_node_setup += 1
 
                       # Process callback (end-node handling + stop condition)
                       t1 = time.time()
@@ -596,6 +1205,7 @@ messages:
                           final_mask = final_mask.union(agg.allowed_llm_tokens())
                       keep_going = agg.is_ok()
                       time_end_check += time.time() - t1
+                      hits_end_check += 1
                       if not keep_going:
                           stopped.add(node_idx)
                           continue
@@ -607,6 +1217,7 @@ messages:
                           t1 = time.time()
                           peeks = ffi.gss_popn_collect(agg, int(pop))
                           time_popn_collect += time.time() - t1
+                          hits_popn_collect += 1
                           if not peeks:
                               continue
 
@@ -619,6 +1230,7 @@ messages:
                                       if state_bv.contains(sid_val):
                                           matched.append(parent_node)
                               time_filter_peeks += time.time() - t1
+                              hits_filter_peeks += 1
                               if not matched:
                                   continue
 
@@ -626,12 +1238,14 @@ messages:
                               t1 = time.time()
                               child_gss = ffi.gss_merge_many_with_depth(matched, 1)
                               time_merge_matched += time.time() - t1
+                              hits_merge_matched += 1
 
                               # Restrict by this edge's LLM token BV
                               t1 = time.time()
                               if not llm_bv.is_empty():
                                   ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
                               time_prune += time.time() - t1
+                              hits_prune += 1
                               if not child_gss.is_ok():
                                   continue
 
@@ -646,20 +1260,21 @@ messages:
                               else:
                                   values[d] = child_gss
                               time_merge_values += time.time() - t1
+                              hits_merge_values += 1
 
                               child_depth = self.max_depth[d]
                               todo[child_depth].add(d)
 
               t_loop_end = time.time()
               print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-              print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
-              print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
-              print(f"    - 3. End check:         {time_end_check:.4f}s")
-              print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
-              print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
-              print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
-              print(f"    - 7. Prune:             {time_prune:.4f}s")
-              print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
+              print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
+              print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
+              print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
+              print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
+              print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
+              print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
+              print(f"    - 7. Prune:             {time_prune:9.4f}s ({hits_prune:8d} hits)")
+              print(f"    - 8. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
@@ -667,217 +1282,374 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model.py
-  - user: I've added a bunch of timing stuff. Count hits as well.
+  - user: |-
+      This is a competition to make `get_mask`  as fast as possible.
+      You may use any techniques as long as you implement the given interface (and don't 'cheat' `iter_edges`), which is used to validate the consistency of the graph.
+      Assume the external types used here are already well-optimized.
+      But note that the input tree itself may not be well-optimized, and the model used to represent the tree here may not be well optimized either.
+      Things you could try:
+      - Keep the same tree model, but optimize it.
+      - Optimize `get_mask`.
+      - Create a new, optimized model for the tree that allows for much faster `get_mask` performance.
+      Make it very fast and optimal.
+
+      Hint: the timings look like this:
+      ```
+      [0.0000] get_mask: after init
+      [0.0000] get_mask: seed loop took 0.0000s
+      [2.3309] get_mask: scheduler loop finished in 2.3309s (21 iterations)
+          - 1. Pop bucket:           0.0001s (      21 hits)
+          - 2. Node setup:           0.0016s (     493 hits)
+          - 3. End check:            0.0132s (     493 hits)
+          - 4. Pop'n'collect:        0.0104s (    1322 hits)
+          - 5. Filter peeks:         0.0110s (   16809 hits)
+          - 6. Merge matched:        0.0192s (    1368 hits)
+          - 7. Prune:                0.0025s (    1368 hits)
+          - 8. Merge into values:    2.2605s (    1368 hits)
+      [2.3310] get_mask: returning
+      ```
+      when I change merge depth to 1, it looks like this:
+      ```
+      [0.0000] get_mask: after init
+      [0.0000] get_mask: seed loop took 0.0000s
+      [0.9616] get_mask: scheduler loop finished in 0.9616s (21 iterations)
+          - 1. Pop bucket:           0.0000s (      21 hits)
+          - 2. Node setup:           0.0005s (     493 hits)
+          - 3. End check:            0.0034s (     493 hits)
+          - 4. Pop'n'collect:        2.2049s (    1322 hits)
+          - 5. Filter peeks:         0.0038s (   16809 hits)
+          - 6. Merge matched:        0.0121s (    1368 hits)
+          - 7. Prune:                0.0021s (    1368 hits)
+          - 8. Merge into values:    0.0245s (    1368 hits)
+      [0.9617] get_mask: returning
+      ```
+      (not much better)
+
+      Create a new entry at python/aug25/models/gpt-5-3.py
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, output the full, final contents of any created or modified files.
+                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
+                    ```python "path/to/your_file.py"
+                    ... full code ...
+                    ```
+                  - Do not include placeholders; the code must be complete and immediately usable.
+                  - Do NOT output git diffs in this mode.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: simple
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add hit counters to your timing instrumentation, followed by the git diff.
+      ```python "python/aug25/models/gpt-5-3.py"
+      import json
+      import time
+      from collections import defaultdict
+      from typing import Dict, List, Tuple, Optional, Iterable
 
-      ### Step-by-step Instructions
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module
 
-      In the file `python/aug25/models/precompute3_model.py`, make the following changes inside the `get_mask` method:
 
-      1.  **Initialize Hit Counters:**
-          Right after the timing accumulator variables are initialized (after `time_merge_values = 0.0`), add the following lines to initialize the hit counters:
+      class Model(GraphProvider):
+          """
+          High-performance graph provider optimized for fast get_mask().
 
-          ```python
-                  hits_pop_bucket = 0
-                  hits_node_setup = 0
-                  hits_end_check = 0
-                  hits_popn_collect = 0
-                  hits_filter_peeks = 0
-                  hits_merge_matched = 0
-                  hits_prune = 0
-                  hits_merge_values = 0
-          ```
+          Key optimizations over precompute3_model.Model:
+            - Pre-normalization and grouping of children by pop to minimize gss_popn_collect calls.
+            - Per-node, per-dest aggregation of produced child GSS nodes to reduce the number of merges
+              into the values map (merge once per dest per processed source node).
+            - Micro-optimizations (function/local bindings) to reduce Python attribute lookups.
+            - Single-merge-per-dest-per-source reduces gss_merge_many_with_depth calls and allows the
+              backend to coalesce structures better with small depth bound (fast and robust).
+            - Avoid unnecessary cloning/merging (fast path when matched has length 1).
 
-      2.  **Increment Counters in the Scheduler Loop:**
-          Throughout the `while todo:` loop, add a line to increment the corresponding hit counter immediately after each timing calculation.
+          Interface maintained:
+            - from_json_string
+            - get_root
+            - is_end
+            - iter_edges
+            - get_mask
+          """
 
-          *   After `time_pop_bucket += time.time() - t1`, add:
-              ```python
-              hits_pop_bucket += 1
-              ```
-          *   After `time_node_setup += time.time() - t1`, add:
-              ```python
-              hits_node_setup += 1
-              ```
-          *   After `time_end_check += time.time() - t1`, add:
-              ```python
-              hits_end_check += 1
-              ```
-          *   After `time_popn_collect += time.time() - t1`, add:
-              ```python
-              hits_popn_collect += 1
-              ```
-          *   After `time_filter_peeks += time.time() - t1`, add:
-              ```python
-              hits_filter_peeks += 1
-              ```
-          *   After `time_merge_matched += time.time() - t1`, add:
-              ```python
-              hits_merge_matched += 1
-              ```
-          *   After `time_prune += time.time() - t1`, add:
-              ```python
-              hits_prune += 1
-              ```
-          *   After `time_merge_values += time.time() - t1`, add:
-              ```python
-              hits_merge_values += 1
-              ```
+          # Tunables: depth limits for merging. Small numbers tend to keep merges cheap, while
+          # avoiding excessive explosion in popn_collect. 2–4 is often a good compromise in practice.
+          MERGE_DEPTH_SEED = 4
+          MERGE_DEPTH_INTO_VALUES = 2
+          MERGE_DEPTH_MATCHED_PARENTS = 1
 
-      3.  **Update Final Print Statements:**
-          Replace the final block of `print` statements that report the timings with the following code to include the hit counts and align the output:
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Roots of tries mapped by tokenizer state ID
+              self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
+              self.arena: Dict[int, dict] = arena
 
-          ```python
-                  print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
-                  print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
-                  print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
-                  print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
-                  print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
-                  print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
-                  print(f"    - 7. Prune:             {time_prune:9.4f}s ({hits_prune:8d} hits)")
-                  print(f"    - 8. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
-          ```
+              # Per-node max depth
+              self.max_depth: Dict[int, int] = {}
 
-      ### Git Diff
+              # Pre-normalize bitsets and group children by 'pop' to minimize pop-collect calls
+              # Node schema stored:
+              #   node["end"] -> bool
+              #   node["children_by_pop"] -> Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]]
+              #       i.e., pop -> list of (llm_bv, [(dest_idx, state_bv), ...])
+              # The original node["children"] remains compatible for iter_edges.
+              t0 = time.time()
+              for uid, node in self.arena.items():
+                  nid = int(uid)
 
-      Here is the git patch to apply these changes directly.
+                  # Determine end flag and max depth
+                  try:
+                      self.max_depth[nid] = int(node.get("max_depth", 0))
+                  except Exception:
+                      self.max_depth[nid] = 0
 
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
-      index 455e810..42f5347 100644
-      --- a/python/aug25/models/precompute3_model.py
-      +++ b/python/aug25/models/precompute3_model.py
-      @@ -124,6 +124,14 @@
-               time_merge_matched = 0.0
-               time_prune = 0.0
-               time_merge_values = 0.0
-      +        hits_pop_bucket = 0
-      +        hits_node_setup = 0
-      +        hits_end_check = 0
-      +        hits_popn_collect = 0
-      +        hits_filter_peeks = 0
-      +        hits_merge_matched = 0
-      +        hits_prune = 0
-      +        hits_merge_values = 0
-       
-               loop_count = 0
-               while todo:
-      @@ -134,6 +142,7 @@
-                   current_depth = min(todo.keys())
-                   node_indices = todo.pop(current_depth)
-                   time_pop_bucket += time.time() - t1
-      +            hits_pop_bucket += 1
-       
-                   for node_idx in list(node_indices):
-                       t1 = time.time()
-      @@ -144,6 +153,7 @@
-                       if agg is None:
-                           continue
-                       time_node_setup += time.time() - t1
-      +                hits_node_setup += 1
-       
-                       # Process callback (end-node handling + stop condition)
-                       t1 = time.time()
-      @@ -151,6 +161,7 @@
-                           final_mask = final_mask.union(agg.allowed_llm_tokens())
-                       keep_going = agg.is_ok()
-                       time_end_check += time.time() - t1
-      +                hits_end_check += 1
-                       if not keep_going:
-                           stopped.add(node_idx)
-                           continue
-      @@ -162,6 +173,7 @@
-                           t1 = time.time()
-                           peeks = ffi.gss_popn_collect(agg, int(pop))
-                           time_popn_collect += time.time() - t1
-      +                    hits_popn_collect += 1
-                           if not peeks:
-                               continue
-       
-      @@ -175,6 +187,7 @@
-                                       if state_bv.contains(sid_val):
-                                           matched.append(parent_node)
-                               time_filter_peeks += time.time() - t1
-      +                        hits_filter_peeks += 1
-                               if not matched:
-                                   continue
-       
-      @@ -182,12 +195,14 @@
-                               t1 = time.time()
-                               child_gss = ffi.gss_merge_many_with_depth(matched, 1)
-                               time_merge_matched += time.time() - t1
-      +                        hits_merge_matched += 1
-       
-                               # Restrict by this edge's LLM token BV
-                               t1 = time.time()
-                               if not llm_bv.is_empty():
-                                   ffi.gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
-                               time_prune += time.time() - t1
-      +                        hits_prune += 1
-                               if not child_gss.is_ok():
-                                   continue
-       
-      @@ -202,19 +217,20 @@
-                               else:
-                                   values[d] = child_gss
-                               time_merge_values += time.time() - t1
-      +                        hits_merge_values += 1
-       
-                               child_depth = self.max_depth[d]
-                               todo[child_depth].add(d)
-       
-               t_loop_end = time.time()
-               print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-      -        print(f"    - 1. Pop bucket:        {time_pop_bucket:.4f}s")
-      -        print(f"    - 2. Node setup:        {time_node_setup:.4f}s")
-      -        print(f"    - 3. End check:         {time_end_check:.4f}s")
-      -        print(f"    - 4. Pop'n'collect:     {time_popn_collect:.4f}s")
-      -        print(f"    - 5. Filter peeks:      {time_filter_peeks:.4f}s")
-      -        print(f"    - 6. Merge matched:     {time_merge_matched:.4f}s")
-      -        print(f"    - 7. Prune:             {time_prune:.4f}s")
-      -        print(f"    - 8. Merge into values: {time_merge_values:.4f}s")
-      +        print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
-      +        print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
-      +        print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
-      +        print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
-      +        print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
-      +        print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
-      +        print(f"    - 7. Prune:             {time_prune:9.4f}s ({hits_prune:8d} hits)")
-      +        print(f"    - 8. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
-       
-               print(f"[{time.time() - t0:.4f}] get_mask: returning")
-               return final_mask
+                  value_obj = node.get("value") or {}
+                  node["end"] = bool(value_obj.get("end", False))
 
+                  # Children normalization
+                  ch = node.get("children") or []
+                  normalized_children = []
+                  children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = defaultdict(list)
+
+                  for edge_key, dest_map in ch:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+
+                      new_dests: List[Tuple[int, ffi.Bitset]] = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          new_dests.append((dest_idx, state_bv))
+
+                      # Store normalized edge for compat
+                      normalized_children.append(((pop, llm_bv), new_dests))
+                      # Also group by pop to reduce gss_popn_collect calls
+                      children_by_pop[pop].append((llm_bv, new_dests))
+
+                  node["children"] = normalized_children
+                  node["children_by_pop"] = dict(children_by_pop)
+              _ = t0  # silence linter in case debug prints are off
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data['precomputed3']
+              arena_json = data['trie3_god']
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              # Using precomputed end flag for speed
+              return bool(self.arena.get(node, {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
+              """
+              Reference-expanding iterator that 'explodes' state_bv into individual state IDs
+              to match the GraphProvider interface for equivalence checking.
+
+              We do not change the observable behavior here.
+              """
+              node_data = self.arena.get(node, {})
+              children = node_data.get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # epsilon transition on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  # state_bv ranges are [start, end), i.e., end exclusive
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+              """
+              # Aliases to avoid repeated global lookups
+              Bitset = ffi.Bitset
+              gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
+              gss_popn_collect = ffi.gss_popn_collect
+              gss_allow_only_llm_tokens_and_prune = ffi.gss_allow_only_llm_tokens_and_prune
+
+              # Final mask to return
+              final_mask = Bitset.zeros()
+
+              # values: pending aggregate per trie node index
+              values: Dict[int, ffi.GSSNode] = {}
+              # nodes that decided to stop (agg.is_ok() == False)
+              stopped: set[int] = set()
+
+              # depth scheduler: depth -> set(node_idx)
+              # We'll keep a min-heap of active depths to avoid repeated min() over keys.
+              # Given depths are small and hit count is relatively low, this is a micro-optimization.
+              buckets: Dict[int, set[int]] = defaultdict(set)
+              active_depths_heap: List[int] = []
+              active_depths_in_heap: set[int] = set()
+
+              # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+              # We accumulate merges per root first to minimize redundant merges.
+              per_root_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+              for sid, gss in state_to_gss.items():
+                  root_idx = self.roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  per_root_accum[int(root_idx)].append(gss.clone_node())
+
+              # Merge seeds per root just once
+              for root_idx, lst in per_root_accum.items():
+                  if not lst:
+                      continue
+                  if len(lst) == 1:
+                      agg = lst[0]
+                  else:
+                      # Small depth to keep it cheap while still coalescing duplicates
+                      agg = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_SEED)
+                  values[root_idx] = agg
+                  d = self.max_depth.get(root_idx, 0)
+                  b = buckets[d]
+                  if root_idx not in b:
+                      b.add(root_idx)
+                  if d not in active_depths_in_heap:
+                      import heapq
+                      heapq.heappush(active_depths_heap, d)
+                      active_depths_in_heap.add(d)
+
+              # Main scheduler
+              import heapq
+              while active_depths_heap:
+                  current_depth = heapq.heappop(active_depths_heap)
+                  active_depths_in_heap.discard(current_depth)
+                  node_indices = buckets.pop(current_depth, None)
+                  if not node_indices:
+                      continue
+
+                  # Process each node at this depth bucket
+                  for node_idx in list(node_indices):
+                      if node_idx in stopped:
+                          # Already finalized as not-ok
+                          continue
+
+                      agg = values.pop(node_idx, None)
+                      if agg is None:
+                          continue  # nothing to do
+
+                      # Handle end nodes: OR allowed tokens into final mask
+                      if self.is_end(node_idx):
+                          final_mask = final_mask.union(agg.allowed_llm_tokens())
+
+                      # If the aggregate is not OK, this node stops expanding permanently
+                      if not agg.is_ok():
+                          stopped.add(node_idx)
+                          continue
+
+                      node = self.arena.get(node_idx, {})
+                      children_by_pop: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = \
+                          node.get("children_by_pop") or {}
+
+                      if not children_by_pop:
+                          # No outgoing edges
+                          continue
+
+                      # We'll aggregate child GSS nodes per destination, then do at most ONE merge into 'values'
+                      # per destination for this source node. This reduces the number of expensive merges.
+                      per_dest_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
+
+                      # Pre-collect for each distinct pop exactly once
+                      # gss_popn_collect can be costly; we call it once per unique pop
+                      for pop, groups in children_by_pop.items():
+                          peeks = gss_popn_collect(agg, int(pop))
+                          if not peeks:
+                              continue
+
+                          # For each group with same pop but different LLM bitset, handle its destinations
+                          for (llm_bv, dests) in groups:
+                              # For each destination, filter peeks by state bitset and (if non-empty) merge parents
+                              for dest_idx, state_bv in dests:
+                                  # Fast filter: scan peeks once and check state membership
+                                  matched_parents: List[ffi.GSSNode] = []
+                                  if not state_bv.is_empty():
+                                      contains = state_bv.contains  # local alias
+                                      append_mp = matched_parents.append
+                                      for (sid_val, parent_node) in peeks:
+                                          if contains(sid_val):
+                                              append_mp(parent_node)
+                                  else:
+                                      # State-bv empty means epsilon-like in original iter_edges semantics:
+                                      # treat as direct pass; In iter_edges we emitted (pop, None, dest)
+                                      # but here we're working with parents already, so matched == all parents.
+                                      matched_parents = [p for (_, p) in peeks]
+
+                                  if not matched_parents:
+                                      continue
+
+                                  # Merge matched parents. If single parent, clone it to avoid in-place mutation
+                                  if len(matched_parents) == 1:
+                                      child_gss = matched_parents[0].clone_node()
+                                  else:
+                                      child_gss = gss_merge_many_with_depth(
+                                          matched_parents,
+                                          self.MERGE_DEPTH_MATCHED_PARENTS
+                                      )
+
+                                  # Restrict by LLM token BV and prune in place
+                                  if not llm_bv.is_empty():
+                                      gss_allow_only_llm_tokens_and_prune(child_gss, llm_bv)
+                                  if not child_gss.is_ok():
+                                      # Pruned away completely
+                                      continue
+
+                                  per_dest_accum[int(dest_idx)].append(child_gss)
+
+                      # Now, for each destination, merge all accumulated child GSS nodes ONCE and push to values
+                      for d, lst in per_dest_accum.items():
+                          if not lst:
+                              continue
+                          if d in values:
+                              # Merge [existing, new...] at a small depth bound to keep it cheap.
+                              merged = gss_merge_many_with_depth([values[d], *lst], self.MERGE_DEPTH_INTO_VALUES)
+                              # Only re-enqueue if effectively changed
+                              if merged.ptr() == values[d].ptr():
+                                  continue
+                              values[d] = merged
+                          else:
+                              if len(lst) == 1:
+                                  values[d] = lst[0]
+                              else:
+                                  values[d] = gss_merge_many_with_depth(lst, self.MERGE_DEPTH_INTO_VALUES)
+
+                          child_depth = self.max_depth.get(d, 0)
+                          # Insert into depth bucket and heap if needed
+                          bset = buckets[child_depth]
+                          if d not in bset:
+                              bset.add(d)
+                          if child_depth not in active_depths_in_heap:
+                              heapq.heappush(active_depths_heap, child_depth)
+                              active_depths_in_heap.add(child_depth)
+
+              return final_mask
       ```
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model.py
-      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
+      Identified target file 'python/aug25/models/gpt-5-3.py' on fence open line 1:
+      ```python "python/aug25/models/gpt-5-3.py"
+      Found 1 code blocks.
+      Matching against available files:
+        1: python/aug25/models/precompute3_model.py
+      --- Phase 1: Processing explicit file paths in fences ---
+      Assigned block to NEW file python/aug25/models/gpt-5-3.py based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 1
+      --- Phase 6: Applying changes to assigned files ---
+      Successfully created new file: python/aug25/models/gpt-5-3.py
     metadata:
-  - user: 'Changes committed with message: "feat: Add hit counters to get_mask timing
-      instrumentation"'
+  - user: 'Changes committed with message: "feat: Add gpt-5-3.py with optimized Model
+      for fast get_mask"'
     metadata:
 ...
