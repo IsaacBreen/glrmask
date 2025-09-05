@@ -124,6 +124,7 @@ class Model(GraphProvider):
                         yield (int(pop), None, int(dest_idx))
                     else:
                         for start, end in state_bv.to_ranges():
+                            end = min(end, len(state_bv))
                             for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 

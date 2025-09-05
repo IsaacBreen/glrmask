@@ -28,7 +28,7 @@ class Model(GraphProvider):
         replacing it with a direct dictionary lookup.
     """
 
-    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
         self.max_depth: Dict[int, int] = {}
@@ -99,6 +99,7 @@ class Model(GraphProvider):
                         epsilon_dests.append(dest_idx)
                     else:
                         for start, end in state_bv.to_ranges():
+                            end = min(end, max_state_id)
                             for sid in range(start, end):
                                 sid_map[sid] = dest_idx
                 final_children[pop].append((llm_bv, (sid_map, epsilon_dests)))
@@ -112,7 +113,8 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+        return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]

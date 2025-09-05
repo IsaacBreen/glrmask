@@ -120,7 +120,7 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        max_state_id = max(row[0] for row in data["parser"]["stage_7_table"])
+        max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
         return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
