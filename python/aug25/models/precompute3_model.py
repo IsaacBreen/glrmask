@@ -24,8 +24,8 @@ class Model(GraphProvider):
                 pop, llm_bv_json = edge_key
                 llm_rs = RangeSet.from_json(llm_bv_json)
                 newdm = []
-                for dest_idx, state_bv in dest_map:
-                    newdm.append((int(dest_idx), [(int(a), int(b)) for a, b in state_bv]))
+                for dest_idx, state_bv_json in dest_map:
+                    newdm.append((int(dest_idx), RangeSet.from_json(state_bv_json)))
                 newch.append(((int(pop), llm_rs), newdm))
             node["children"] = newch
 
@@ -50,11 +50,11 @@ class Model(GraphProvider):
         # This is not used by the performance-critical get_mask() method.
         for (pop, llm_rs), dests in self.arena.get(node, {}).get("children") or []:
             if llm_rs.contains(token):
-                for dest_idx, state_bv_ranges in dests:
-                    if not state_bv_ranges: # Epsilon transition on GSS stack
+                for dest_idx, state_rs in dests:
+                    if not state_rs: # Epsilon transition on GSS stack
                         yield (int(pop), None, int(dest_idx))
                     else:
-                        for start, end in state_bv_ranges:
+                        for start, end in state_rs.intervals:
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
@@ -122,10 +122,8 @@ class Model(GraphProvider):
                         matched = []
                         if state_bv:
                             for (sid_val, parent_node) in peeks:
-                                for (a, b) in state_bv:
-                                    if a <= sid_val <= b:
-                                        matched.append(parent_node)
-                                        break
+                                if state_bv.contains(sid_val):
+                                    matched.append(parent_node)
                         if not matched:
                             continue
 
