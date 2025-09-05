@@ -179,7 +179,6 @@ def run_benchmark(args):
     # 3. Construct GrammarConstraint and export reference precompute2 model
     print("Constructing GrammarConstraint...")
     grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, token_to_id, max_token_id)
-    pre2_json_str = grammar_constraint.precompute2_json_string()
     pre3_json_str = grammar_constraint.precompute3_json_string()
 
     # 4. Load competitor model
@@ -187,13 +186,7 @@ def run_benchmark(args):
     CompetitorModel = load_competitor_model(args.competitor)
     
     t_start_load = time.perf_counter()
-    if 'precompute3' in args.competitor.name:
-        print("-> Using precompute3 JSON for competitor model.")
-        competitor_json_str = pre3_json_str
-    else:
-        print("-> Using precompute2 JSON for competitor model.")
-        competitor_json_str = pre2_json_str
-    competitor_model = CompetitorModel.from_json_string(competitor_json_str)
+    competitor_model = CompetitorModel.from_json_string(pre3_json_str)
     load_time = time.perf_counter() - t_start_load
     print(f"Competitor model loaded in {load_time:.4f} seconds.")
 
@@ -203,8 +196,7 @@ def run_benchmark(args):
     # 5. Equivalence Check
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
-    # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-    reference_model = ReferenceModel.from_json_string(pre2_json_str)
+    reference_model = ReferenceModel.from_json_string(pre3_json_str)
 
     if args.print_stats:
         print_model_statistics(reference_model, args.reference.name)

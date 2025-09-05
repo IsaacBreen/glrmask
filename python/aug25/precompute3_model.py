@@ -116,7 +116,9 @@ class Model(GraphProvider):
                     for dest_idx, state_bv in dests:
                         # Filter popped parents by state bitset
                         matched = []
-                        if state_bv:
+                        if not state_bv: # Empty state_bv means match all (like Option<StateID>::None)
+                            matched = [p for _, p in peeks]
+                        else:
                             for (sid_val, parent_node) in peeks:
                                 for (a, b) in state_bv:
                                     if a <= sid_val <= b:
