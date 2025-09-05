@@ -1424,9 +1424,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         for (predecessor_state_id, isolated_parent) in todo {
-            let mut current_nt = nt;
+            let mut nt_queue = VecDeque::new();
+            nt_queue.push_back(nt);
 
-            'chain: loop {
+            'chain: while let Some(current_nt) = nt_queue.pop_front() {
                 // GOTO lookup from predecessor_state_id, possibly hallucinated.
                 let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = if predecessor_state_id == self.parser.hallucinated_state_id {
                     // Fetch all possible gotos for this NT with associated state filters.
@@ -1492,7 +1493,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     ..
                                 }) => {
                                     // Unit reduce chain: continue
-                                    current_nt = *next_nt;
+                                    nt_queue.push_back(*next_nt);
                                     continue 'chain;
                                 }
                                 Action::Default(def) => {
@@ -1512,12 +1513,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     // If it's a unit reduction, continue chaining.
                                     if let Some(reduce) = &def.reduce {
                                         if reduce.0.len == 1 {
-                                            current_nt = reduce.0.nonterminal_id;
+                                            nt_queue.push_back(reduce.0.nonterminal_id);
                                             continue 'chain;
                                         }
                                     }
                                     // Otherwise, end chain
-                                    break 'chain;
                                 }
                                 _ => {
                                     // Not a unit reduction path anymore -> emit a single push to goto_state
@@ -1526,7 +1526,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             state_id: goto_state_id,
                                         },
                                     )));
-                                    break 'chain;
                                 }
                             }
                         } else {
@@ -1534,11 +1533,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                 state_id: goto_state_id,
                             })));
-                            break 'chain;
                         }
                     } else {
                         // No goto target -> we're done.
-                        break 'chain;
                     }
                 }
 
@@ -1603,6 +1600,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // We add the modified GSS to the output to serve as the canonical representation.
                         crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
                         final_out.push(new_gss_arc);
+                    } else {
+                        crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
                     }
                     // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                 } else {
