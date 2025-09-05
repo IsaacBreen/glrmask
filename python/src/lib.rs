@@ -385,6 +385,14 @@ impl PyGrammarConstraint {
         Ok(top.to_json_string())
     }
 
+    fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
+        let dict = PyDict::new_bound(py);
+        for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
+            dict.set_item(token_id.0, token_bytes.as_slice())?;
+        }
+        Ok(dict.into())
+    }
+
     fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
         let mut m = std::collections::BTreeMap::new();
         for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {

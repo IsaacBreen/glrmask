@@ -304,7 +304,7 @@ def run_benchmark(args):
         "competitor_script": str(args.competitor),
         "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "inputs": {
-            "grammar_file": str(args.grammar),
+            "grammar_file": str(args.constraint_file),
             "code_file": str(args.code),
         },
         "results": {
