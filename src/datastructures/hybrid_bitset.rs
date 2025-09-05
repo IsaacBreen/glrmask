@@ -341,6 +341,18 @@ impl HybridBitset {
     pub fn symmetric_difference(&self, other: &Self) -> Self {
         self ^ other
     }
+
+    /// Constrains the bitset to a maximum value (inclusive).
+    /// Any bits set for indices greater than `max` will be cleared.
+    pub fn constraint(&self, max: usize) -> Self {
+        if max == usize::MAX {
+            return self.clone();
+        }
+        // Create a bitset representing the valid range 0..=max
+        let constraint_set = HybridBitset::ones(max + 1);
+        // The intersection of the current set and the valid range is the result.
+        self & &constraint_set
+    }
 }
 
 // --- Iterator ---
@@ -1237,5 +1249,37 @@ mod tests {
 
         assert_eq!(diff, expected_diff);
         assert_eq!(diff_with_inverted, expected_diff);
+    }
+
+    #[test]
+    fn test_constraint() {
+        let set = HybridBitset::from_iter(vec![1, 10, 100, 1000]);
+
+        // Constraint that includes all elements
+        let constrained1 = set.constraint(2000);
+        assert_eq!(constrained1, set);
+
+        // Constraint that cuts off some elements
+        let constrained2 = set.constraint(500);
+        let expected2 = HybridBitset::from_iter(vec![1, 10, 100]);
+        assert_eq!(constrained2, expected2);
+
+        // Constraint that cuts off all elements
+        let constrained3 = set.constraint(0);
+        assert!(constrained3.is_empty());
+
+        // Constraint at an edge
+        let constrained4 = set.constraint(100);
+        let expected4 = HybridBitset::from_iter(vec![1, 10, 100]);
+        assert_eq!(constrained4, expected4);
+
+        // Constraint on an empty set
+        let empty_set = HybridBitset::zeros();
+        let constrained_empty = empty_set.constraint(100);
+        assert!(constrained_empty.is_empty());
+
+        // Constraint with usize::MAX
+        let constrained_max = set.constraint(usize::MAX);
+        assert_eq!(constrained_max, set);
     }
 }
