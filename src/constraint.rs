@@ -680,8 +680,9 @@ impl GrammarConstraint {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                             for src_wr in gss_root_acc.stored_trie_nodes().iter() {
                                 let src_arc = src_wr.as_arc().clone();
-                                let src_live = { src_arc.read(&trie3_god).expect("poison").value.live_tokens.clone() };
-                                let tokens_to_push = &active_llm_tokens_for_root & &src_live;
+                                // let src_live = { src_arc.read(&trie3_god).expect("poison").value.live_tokens.clone() };
+                                // let tokens_to_push = &active_llm_tokens_for_root & &src_live;
+                                let tokens_to_push = active_llm_tokens_for_root.clone();
                                 if tokens_to_push.is_empty() { continue; }
 
                                 {
