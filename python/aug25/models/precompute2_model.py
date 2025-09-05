@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
+from tqdm.auto import tqdm
 
 class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
@@ -10,7 +11,7 @@ class Model(GraphProvider):
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
         # Convert precompute3 graph structure to precompute2-like structure
-        for uid, n in self.arena.items():
+        for uid, n in tqdm(self.arena.items(), desc="Converting precompute3->precompute2", total=len(self.arena)):
             try:
                 self.max_depth[int(uid)] = int(n.get("max_depth", 0))
             except Exception:
