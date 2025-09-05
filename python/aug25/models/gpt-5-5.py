@@ -180,7 +180,7 @@ class Model(GraphProvider):
 
             # If node has no viable GSS nodes, skip propagation
             # We check viability on the current gss_set.
-            gss_ok_list = [g for g in st.gss_set if g.is_ok()]
+            gss_ok_list = [g for g in st.gss_set if g]
             if not gss_ok_list:
                 continue
 
@@ -229,8 +229,7 @@ class Model(GraphProvider):
                 ok_nodes_set: set = set()
                 for lst in sid_to_parents.values():
                     for pn in lst:
-                        if pn.is_ok():
-                            ok_nodes_set.add(pn)
+                        ok_nodes_set.add(pn)
 
                 if not ok_nodes_set:
                     continue
