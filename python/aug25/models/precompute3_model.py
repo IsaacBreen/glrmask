@@ -59,6 +59,8 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+        for sid, gss in state_to_gss.items():
+            gss.print_stats()
         # Final mask to return
         final_mask = ffi.Bitset.zeros()
 
