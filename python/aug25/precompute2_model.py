@@ -9,31 +9,41 @@ class Model(GraphProvider):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
-        # Convert BVs in-place to RangeSet
+        # Convert precompute3 graph structure to precompute2-like structure
         for uid, n in self.arena.items():
             try:
                 self.max_depth[int(uid)] = int(n.get("max_depth", 0))
             except Exception:
                 self.max_depth[int(uid)] = 0
 
-            val = n.get("value") or {}
-            if "live_tokens" in val and val["live_tokens"] is not None:
-                val["live_tokens"] = RangeSet.from_json(val["live_tokens"])
-            else:
-                val["live_tokens"] = RangeSet.empty()
-            n["value"] = val
+            p3_children = n.get("children") or []
+            
+            # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
+            p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
 
-            ch = n.get("children") or []
-            newch = []
-            for edge_key, dest_map in ch:
-                newdm = []
-                for di, bv in dest_map:
-                    rs = RangeSet.from_json(bv)
-                    newdm.append((int(di), rs))
-                pk, sid = edge_key
-                sidp = None if sid is None else int(sid)
-                newch.append(((int(pk), sidp), newdm))
-            n["children"] = newch
+            for edge_key, dest_map in p3_children:
+                pop, llm_bv_json = edge_key
+                llm_rs = RangeSet.from_json(llm_bv_json)
+                if llm_rs.is_empty():
+                    continue
+
+                for dest_idx, state_bv_ranges in dest_map:
+                    if not state_bv_ranges: # Corresponds to Option<StateID> == None
+                        p2_key = (int(pop), None)
+                        p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+                    else:
+                        for start, end in state_bv_ranges:
+                            for sid in range(int(start), int(end) + 1):
+                                p2_key = (int(pop), sid)
+                                p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
+            
+            # Convert aggregated map to final list format
+            new_children = []
+            for (pop, sid), dests in p2_children_agg.items():
+                dest_list = list(dests.items())
+                new_children.append(((pop, sid), dest_list))
+            
+            n["children"] = new_children
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
