@@ -28,13 +28,13 @@ class Model(GraphProvider):
                 if llm_rs.is_empty():
                     continue
 
-                for dest_idx, state_bv_ranges in dest_map:
+                for dest_idx, state_bv_ranges in tqdm(dest_map, desc="Aggregating dests", leave=False):
                     if not state_bv_ranges: # Corresponds to Option<StateID> == None
                         p2_key = (int(pop), None)
                         p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
                     else:
-                        for start, end in state_bv_ranges:
-                            for sid in range(int(start), int(end) + 1):
+                        for start, end in tqdm(state_bv_ranges, desc="Aggregating ranges", leave=False):
+                            for sid in tqdm(range(int(start), int(end) + 1), desc="Aggregating ranges", leave=False):
                                 p2_key = (int(pop), sid)
                                 p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
             
