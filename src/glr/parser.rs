@@ -1450,6 +1450,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         });
                     vec![(goto, None)]
                 };
+                crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
 
                 for (goto, maybe_filter) in gotos_with_filters {
                     // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
