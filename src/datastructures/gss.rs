@@ -1667,6 +1667,7 @@ pub(crate) fn fuse_predecessors_recursive(
 /// The simple structures are:
 /// `Internal(state_id) -> Internal(hallucinated_id) -> Root(leaf)`
 /// Returns `Some((state_id, acc))` if it matches.
+#[time_it]
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,

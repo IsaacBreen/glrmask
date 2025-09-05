@@ -1561,7 +1561,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         k: usize::MAX,                             // Dummy value
                     };
 
-                    let (cached_dest, add_to_out) = {
+                    let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
                         let entry = self.below_bottom_cache.entry(cache_key);
                         match entry {
                             std::collections::hash_map::Entry::Occupied(mut occupied) => {
@@ -1581,7 +1581,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 (new_dest, true)
                             }
                         }
-                    };
+                    });
+
 
                     // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
                     let mut new_gss_arc = gss_arc;
