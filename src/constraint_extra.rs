@@ -260,6 +260,12 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         );
     }
 
+    pub fn dump_precomputed3_stats(&self) {
+        let mut stats = PrecomputeStats::default();
+        calculate_final_stats3(&self.precomputed3, &mut stats, &self.trie3_god);
+        print_precompute_stats3(&stats, &self.trie3_god);
+    }
+
     pub fn _dump_precomputed3(precomputed3: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie3_god: &Trie3GodWrapper) {
         println!("Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):");
         println!("===================================");
