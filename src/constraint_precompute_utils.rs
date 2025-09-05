@@ -1126,7 +1126,6 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                 let (child_ptr, sids1) = &entries[0];
 
                 if incoming_count.get(child_ptr).cloned().unwrap_or(0) != 1 { continue; }
-                if sids1 != &StateIDBV::max_ones() { continue; }
 
                 let (is_end, child_outgoing): (bool, Vec<(EdgeKey3, Vec<(PrecomputeNode3Index, StateIDBV)>)>) = {
                     let cg = child_ptr.read(trie3_god).expect("poison");
@@ -1138,39 +1137,55 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                 let (ek2, dests2) = &child_outgoing[0];
                 let (grand_ptr, sids2) = &dests2[0];
 
-                let merged_k = ek1.0 + ek2.0;
-                let merged_bv = &ek1.1 & &ek2.1;
-                if merged_bv.is_empty() { continue; }
-                let merged_key: EdgeKey3 = (merged_k, merged_bv);
-                let merged_sids = sids2.clone();
+                let mut merged_key: Option<EdgeKey3> = None;
+                let mut merged_sids: Option<StateIDBV> = None;
 
-                {
-                    let mut src_w = src_arc.write(trie3_god).expect("poison");
-                    if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
-                        dest_map_for_ek1.remove(child_ptr);
-                        if dest_map_for_ek1.is_empty() {
-                            src_w.children_mut().remove(&ek1);
-                        }
+                let is_all_sids1 = sids1 == &StateIDBV::max_ones();
+                let is_all_bv1 = ek1.1 == LLMTokenBV::max_ones();
+                let is_all_sids2 = sids2 == &StateIDBV::max_ones();
+                let is_all_bv2 = ek2.1 == LLMTokenBV::max_ones();
+
+                if is_all_sids1 && is_all_bv1 && is_all_sids2 && is_all_bv2 {
+                    merged_key = Some((ek1.0 + ek2.0, LLMTokenBV::max_ones()));
+                    merged_sids = Some(StateIDBV::max_ones());
+                }
+                else if ek2.0 == 0 {
+                    let new_bv = &ek1.1 & &ek2.1;
+                    if !new_bv.is_empty() {
+                        merged_key = Some((ek1.0, new_bv));
+                        merged_sids = Some(sids1 & sids2);
                     }
                 }
 
-                {
-                    let inserter = EdgeInserter::new(
-                        trie3_god,
-                        *src_arc,
-                        merged_key.clone(),
-                        merged_sids.clone(),
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| {
-                            node_value.live_tokens |= &merged_key.1;
-                        },
-                        |_, _| {},
-                    );
-                    let _ = inserter.try_destination(*grand_ptr).into_option();
-                }
+                if let (Some(merged_key), Some(merged_sids)) = (merged_key, merged_sids) {
+                    {
+                        let mut src_w = src_arc.write(trie3_god).expect("poison");
+                        if let Some(dest_map_for_ek1) = src_w.children_mut().get_mut(&ek1) {
+                            dest_map_for_ek1.remove(child_ptr);
+                            if dest_map_for_ek1.is_empty() {
+                                src_w.children_mut().remove(&ek1);
+                            }
+                        }
+                    }
 
-                changed = true;
-                continue 'src_loop;
+                    {
+                        let inserter = EdgeInserter::new(
+                            trie3_god,
+                            *src_arc,
+                            merged_key.clone(),
+                            merged_sids.clone(),
+                            |e, n| *e |= n,
+                            |node_value, _edge_value| {
+                                node_value.live_tokens |= &merged_key.1;
+                            },
+                            |_, _| {},
+                        );
+                        let _ = inserter.try_destination(*grand_ptr).into_option();
+                    }
+
+                    changed = true;
+                    continue 'src_loop;
+                }
             }
         }
 
