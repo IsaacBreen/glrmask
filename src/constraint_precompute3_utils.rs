@@ -18,14 +18,17 @@ pub fn optimize_trie3_size(
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
         prune_dead_paths_trie3(roots, &trie3_god);
     }
-    if config.optimize_trie2_merge_nodes {
-        merge_nodes_trie3(roots, &trie3_god);
-    }
     if config.optimize_trie2_compress_edges {
         compress_trie3_edges(roots, &trie3_god);
     }
+    if config.optimize_trie2_merge_nodes {
+        merge_nodes_trie3(roots, &trie3_god);
+    }
     if config.optimize_trie2_prune_dead_paths {
         prune_dead_paths_trie3(roots, &trie3_god);
+    }
+    if config.optimize_trie2_compress_edges {
+        compress_trie3_edges(roots, &trie3_god);
     }
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie3(roots, &trie3_god);
