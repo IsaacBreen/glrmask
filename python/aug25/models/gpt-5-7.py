@@ -32,7 +32,7 @@ class Model(GraphProvider):
     #   - llm_bv_or_none is ffi.Bitset if constrained, or None if unconstrained.
     _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]]
 
-    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
@@ -99,6 +99,7 @@ class Model(GraphProvider):
                         for start, end in state_bv.to_ranges():
                             # Note: states are small (~1000); this is a fast loop and allows
                             # direct sid lookup during get_mask without per-dest contains() calls.
+                            end = min(end, max_state_id + 1)
                             for sid in range(start, end):
                                 entries = s_map.get(sid)
                                 if entries is None:
@@ -119,7 +120,8 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        max_state_id = max(row[0] for row in data["parser"]["stage_7_table"])
+        return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
