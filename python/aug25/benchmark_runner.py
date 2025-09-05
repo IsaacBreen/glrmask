@@ -1,5 +1,6 @@
 import argparse
 import json
+import gzip
 import os
 import requests
 import time
@@ -158,7 +159,16 @@ def run_benchmark(args):
 
     # 1. Load pre-compiled GrammarConstraint
     print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
-    grammar_constraint = _sep1.GrammarConstraint.from_json_file_gz(str(args.constraint_file))
+    # Read the gzipped JSON into a string and construct the GrammarConstraint using the
+    # available from_json_string(...) API.
+    p = str(args.constraint_file)
+    if p.endswith('.gz'):
+        with gzip.open(p, 'rt', encoding='utf-8') as f:
+            constraint_json_str = f.read()
+    else:
+        # Fallback: if the file is plain JSON, read it directly.
+        constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+    grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
     # 2. Extract vocabulary for tokenizer
     id_to_token = grammar_constraint.get_id_to_token_map()
