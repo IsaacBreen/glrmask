@@ -251,218 +251,13 @@ pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3I
 pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
     crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
 
-    /// Remove dominated edges within each node.
-    /// For a fixed (pop p) and child C, if there are multiple edges with (LLM_a, SIDs_a) and (LLM_b, SIDs_b)
-    /// such that LLM_a ⊆ LLM_b and SIDs_a ⊆ SIDs_b, then the (LLM_a, SIDs_a) edge is redundant and can be removed.
-    fn remove_dominated_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-        crate::debug!(2, "Removing dominated edges within nodes (Trie 3)...");
-
-        let nodes = Trie::all_nodes(trie3_god, roots_vec);
-        if nodes.is_empty() { return false; }
-        let mut changed_any = false;
-
-        // Helper subset checks via bitwise-and equality
-        fn bv_subset_llm(a: &LLMTokenBV, b: &LLMTokenBV) -> bool {
-            // a ⊆ b  iff (a & b) == a
-            let tmp = a & b;
-            tmp == *a
-        }
-        fn bv_subset_sid(a: &StateIDBV, b: &StateIDBV) -> bool {
-            let tmp = a & b;
-            tmp == *a
-        }
-
-        for u in nodes {
-            let old_children = {
-                let g = u.read(trie3_god).expect("read");
-                g.children().clone()
-            };
-            if old_children.is_empty() { continue; }
-
-            // Group per pop p, then per child
-            // For each pop p: child -> Vec<(llm_bv, sids)>
-            let mut groups: HashMap<usize, HashMap<Trie2Index, Vec<(LLMTokenBV, StateIDBV)>>> = HashMap::new();
-            for ((pop, llm_bv), dest_map) in &old_children {
-                let entry = groups.entry(*pop).or_default();
-                for (child_idx, sids) in dest_map.iter() {
-                    entry.entry(*child_idx).or_default().push((llm_bv.clone(), sids.clone()));
-                }
-            }
-
-            // Build new children by removing dominated entries
-            let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-            let mut local_changed = false;
-
-            for (pop, by_child) in groups {
-                for (child, mut entries) in by_child {
-                    if entries.len() <= 1 {
-                        // Reinsert as-is
-                        if let Some((llm0, sids0)) = entries.pop() {
-                            new_children.entry((pop, llm0)).or_default().insert(child, sids0);
-                        }
-                        continue;
-                    }
-                    // Mark dominated
-                    let mut keep = vec![true; entries.len()];
-                    for i in 0..entries.len() {
-                        if !keep[i] { continue; }
-                        for j in 0..entries.len() {
-                            if i == j || !keep[j] { continue; } // check keep[j] to avoid comparing against already-dominated
-                            let (ref li, ref si) = entries[i];
-                            let (ref lj, ref sj) = entries[j];
-                            // If (li, si) dominated by (lj, sj), drop i
-                            if bv_subset_llm(li, lj) && bv_subset_sid(si, sj) {
-                                keep[i] = false;
-                                break; // No need to check further for i
-                            }
-                        }
-                    }
-                    // Reinsert all kept entries
-                    for (k, (llm, sids)) in entries.into_iter().enumerate() {
-                        if keep[k] {
-                            new_children.entry((pop, llm)).or_default().insert(child, sids);
-                        } else {
-                            local_changed = true;
-                        }
-                    }
-                }
-            }
-
-            if new_children != old_children {
-                let mut w = u.write(trie3_god).expect("write");
-                *w.children_mut() = new_children;
-                changed_any = true;
-            } else if local_changed {
-                // This case can happen if the BTreeMap order changes but content is same
-                changed_any = true;
-            }
-        }
-
-        changed_any
+    // Helper: is the LLM-token BV "all tokens"?
+    fn is_all_llm(bv: &LLMTokenBV) -> bool {
+        bv == &LLMTokenBV::max_ones()
     }
-
-    /// Generalized zero-pop shortcut across multiple outgoing edges of the middle node,
-    /// applied conservatively only when it doesn't increase edge count.
-    ///
-    /// For U --(p1,L1)-> V (with SIDs S1), and V has only pop-0 outgoing edges:
-    ///   For each V --(0,L2)-> C with SIDs S2:
-    ///     Produce (p1, L1∩L2) -> C with (S1∩S2), if intersections are non-empty.
-    /// Aggregate per child C (union of LLM and union of SIDs) across all eligible V under that (p1, L1) key.
-    /// Apply only if new_edges_count <= removed_edges_count for that key to avoid edge explosion.
-    fn shortcut_zero_pop_chains_batched(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-        crate::debug!(2, "Shortcutting zero-pop chains in batch (Trie 3)...");
-        let nodes = Trie::all_nodes(trie3_god, roots_vec);
-        if nodes.is_empty() { return false; }
-        let mut changed_any = false;
-
-        for u in nodes {
-            // Snapshot children
-            let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                let g = u.read(trie3_god).expect("read");
-                g.children()
-                    .iter()
-                    .map(|(ek, dm)| {
-                        let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                        (ek.clone(), dests)
-                    })
-                    .collect()
-            };
-            if children_snapshot.is_empty() { continue; }
-
-            let mut local_changed = false;
-            let mut w = u.write(trie3_god).expect("write");
-
-            for ((p1, llm1), dests) in &children_snapshot {
-                // Aggregate candidates per child, and track which V are eligible to be removed
-                let mut aggregated: BTreeMap<Trie2Index, (LLMTokenBV, StateIDBV)> = BTreeMap::new();
-                let mut eligible_vs: Vec<Trie2Index> = Vec::new();
-
-                for (v, sids1) in dests {
-                    // Inspect V
-                    let v_guard = v.read(trie3_god).expect("read");
-                    let mut has_nonzero_pop = false;
-                    let mut zero_pop_edges: Vec<(LLMTokenBV, Vec<(Trie2Index, StateIDBV)>)> = Vec::new();
-                    for (ek2, dm2) in v_guard.children() {
-                        if ek2.0 == 0 {
-                            let v2 = dm2.iter().map(|(c, s2)| (*c, s2.clone())).collect::<Vec<_>>();
-                            zero_pop_edges.push((ek2.1.clone(), v2));
-                        } else {
-                            has_nonzero_pop = true;
-                            break;
-                        }
-                    }
-                    drop(v_guard);
-
-                    if has_nonzero_pop || zero_pop_edges.is_empty() {
-                        // Not eligible: either has non-zero-pop edges, or no outgoing edges
-                        continue;
-                    }
-
-                    // Eligible V: compose through all pop-0 edges
-                    let mut contributed_any = false;
-                    for (llm2, list) in zero_pop_edges {
-                        let new_llm = llm1.clone() & &llm2;
-                        if new_llm.is_empty() { continue; }
-                        for (c, s2) in list {
-                            let new_sids = sids1 & &s2;
-                            if new_sids.is_empty() { continue; }
-                            let entry = aggregated.entry(c).or_insert_with(|| (LLMTokenBV::zeros(), StateIDBV::zeros()));
-                            entry.0 |= &new_llm;
-                            *&mut entry.1 |= &new_sids;
-                            contributed_any = true;
-                        }
-                    }
-                    if contributed_any {
-                        eligible_vs.push(*v);
-                    }
-                }
-
-                if eligible_vs.is_empty() {
-                    continue;
-                }
-
-                // Decide if beneficial: remove |eligible_vs| edges; add |aggregated| edges
-                let removed_count = eligible_vs.len();
-                let added_count = aggregated.len();
-                if added_count > removed_count {
-                    // Avoid blow-up
-                    continue;
-                }
-
-                // Apply: remove U --(p1,llm1)--> V for eligible V
-                if let Some(dm) = w.children_mut().get_mut(&(*p1, llm1.clone())) {
-                    let mut removed_any = false;
-                    for v in eligible_vs {
-                        if dm.remove(&v).is_some() {
-                            removed_any = true;
-                        }
-                    }
-                    if removed_any {
-                        if dm.is_empty() {
-                            w.children_mut().remove(&(*p1, llm1.clone()));
-                        }
-                        local_changed = true;
-                    }
-                }
-
-                // Add aggregated edges: U --(p1, aggregated_llm)--> C with aggregated_sids
-                if !aggregated.is_empty() {
-                    for (c, (llm_u, sids_u)) in aggregated {
-                        if llm_u.is_empty() || sids_u.is_empty() { continue; }
-                        let dest_map = w.children_mut().entry((*p1, llm_u)).or_default();
-                        dest_map.entry(c)
-                            .and_modify(|s| { *s |= &sids_u; })
-                            .or_insert(sids_u);
-                    }
-                }
-            }
-
-            if local_changed {
-                changed_any = true;
-            }
-        }
-
-        changed_any
+    // Helper: is the StateIDBV "all states"?
+    fn is_all_sids(bv: &StateIDBV) -> bool {
+        bv == &StateIDBV::max_ones()
     }
 
     // Pass 1: local coalesce within each node
@@ -661,10 +456,10 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         changed_any
     }
 
-    // Pass 3: shortcut when the middle has a single outgoing edge (with exactly one destination).
-    // A --(p1, L1, S1)--> B and B --(p2>0, L2, S2)--> C (only outgoing, only one destination)
-    // becomes A --(p1+p2, L1∩L2, S1∩S2)--> C (if intersections are not empty).
-    fn shortcut_single_out_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
+    // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+    // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+    // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+    fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         if nodes.is_empty() { return false; }
 
@@ -691,7 +486,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             if *is_end { continue; }
             if edges.len() != 1 { continue; }
             let (p2, llm2, dests) = &edges[0];
-            if *p2 == 0 { continue; } // leave pop=0 to other pass
+            if *p2 == 0 { continue; } // leave to zero-pop pass
             if dests.len() != 1 { continue; }
             let (c, sids2) = &dests[0];
             middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
@@ -717,7 +512,14 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             let mut w = u.write(trie3_god).expect("write");
 
             for ((p1, llm1), dests) in &children_snapshot {
+                // Only when the first edge is universal in both LLM and SIDs.
+                if !is_all_llm(llm1) {
+                    continue;
+                }
                 for (v, sids1) in dests {
+                    if !is_all_sids(sids1) {
+                        continue;
+                    }
                     if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
                         // Remove old edge U --(p1, llm1)--> V
                         if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
@@ -728,17 +530,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
                                 w.children_mut().remove(&(p1.clone(), llm1.clone()));
                             }
                         }
-                        // Intersections for new edge
-                        let new_llm = llm1 & &llm2;
-                        let new_sids = sids1 & &sids2;
-                        if !new_llm.is_empty() && !new_sids.is_empty() {
-                            // Insert U --(p1+p2, new_llm)--> C with new_sids
-                            let key_new = (p1 + p2, new_llm);
-                            let dest_map = w.children_mut().entry(key_new).or_default();
-                            dest_map.entry(c)
-                                .and_modify(|s| *s |= &new_sids)
-                                .or_insert(new_sids);
-                        }
+                        // Insert U --(p1+p2, llm2)--> C with sids2
+                        let key_new = (p1 + p2, llm2);
+                        let dest_map = w.children_mut().entry(key_new).or_default();
+                        dest_map.entry(c)
+                            .and_modify(|s| *s |= &sids2)
+                            .or_insert(sids2);
                     }
                 }
             }
@@ -765,24 +562,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
             pass_changed = true;
         }
-        // 2) Shortcut strict pop=0 chains (safe, non-expanding)
+        // 2) Shortcut pop=0 chains (safe, non-expanding)
         if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
             pass_changed = true;
         }
-        // 3) Batched pop=0 composition (conservative, only if edges do not increase)
-        if shortcut_zero_pop_chains_batched(trie3_god, &roots_vec) {
-            pass_changed = true;
-        }
-        // 4) Shortcut single-out pop>0 step from middle nodes (safe, non-expanding)
-        if shortcut_single_out_pop_step(trie3_god, &roots_vec) {
-            pass_changed = true;
-        }
-        // 5) Remove dominated edges after rewrites
-        if remove_dominated_edges_within_nodes(trie3_god, &roots_vec) {
-            pass_changed = true;
-        }
-        // 6) Coalesce again after transformations
-        if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
+        // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
+        if shortcut_universal_pop_step(trie3_god, &roots_vec) {
             pass_changed = true;
         }
         if pass_changed {
