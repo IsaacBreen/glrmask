@@ -34,7 +34,7 @@ class Model(GraphProvider):
                         p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
                     else:
                         for start, end in tqdm(state_bv_ranges, desc="Aggregating ranges", leave=False):
-                            for sid in tqdm(range(int(start), int(end) + 1), desc="Aggregating ranges", leave=False):
+                            for sid in tqdm(list(range(int(start), int(end) + 1)), desc="Aggregating ranges", leave=False):
                                 p2_key = (int(pop), sid)
                                 p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
             
