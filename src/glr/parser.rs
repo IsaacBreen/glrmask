@@ -1349,10 +1349,18 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let key = (k, tokens_all.clone());
             let all_states = StateIDBV::max_ones();
 
-            for node in std::mem::take(&mut acc.stored_trie_nodes) {
-                // TODO: complete this
-                let inserter = EdgeInserter3::new(...);
-                ...
+            for node in std::mem::take(acc.stored_trie_nodes_mut()) {
+                let source_arc = node.as_arc().clone();
+                let inserter = EdgeInserter::new(
+                    god,
+                    source_arc,
+                    key.clone(),
+                    all_states.clone(),
+                    |e, n| *e |= n,
+                    |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                    |_, _| _ = true, // Unconditional insertion
+                );
+                inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
             }
 
             if new_acc.is_none() {
@@ -1363,11 +1371,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
-        new_acc.stored_trie_nodes.clear();
-        new_acc.stored_trie_nodes.insert(dest);
+        new_acc.stored_trie_nodes_mut().clear();
+        new_acc.stored_trie_nodes_mut().insert(dest);
 
         let new_leaf = Arc::new(GSSNode::new(new_acc));
-        let new_gss = new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid });
+        let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
         let new_todo_items = vec![(hallucinate_sid, new_gss)];
 
         new_todo_items
