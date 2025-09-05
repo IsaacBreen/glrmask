@@ -136,7 +136,7 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_prune_dead_paths: true,
             optimize_trie2_merge_nodes: true,
             optimize_trie2_factor_common_destinations: false,
-            optimize_trie2_compress_edges: false,
+            optimize_trie2_compress_edges: true,
             optimize_trie2_gc: true,
             skip_precomputation: false,
         }
