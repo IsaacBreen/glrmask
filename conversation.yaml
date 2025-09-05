@@ -1,6 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model.py
+    - python/aug25/models/gpt-5-7.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -9,7 +10,6 @@ local_system:
       import time
       import heapq
       from typing import Dict, List, Tuple, Optional
-      from collections import defaultdict
 
       from ..common_interface import GraphProvider
       import _sep1 as ffi  # the compiled module
@@ -30,6 +30,9 @@ local_system:
               self.max_depth: Dict[int, int] = {}
 
               # Normalize arena children bitsets and cache max_depth
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
               for uid, node in tqdm(
                   self.arena.items(),
                   desc="Normalizing precompute3 BVs",
@@ -37,7 +40,8 @@ local_system:
               ):
                   uid_int = int(uid)
                   try:
-                      self.max_depth[uid_int] = int(node.get("max_depth", 0))
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
                   except Exception:
                       self.max_depth[uid_int] = 0
 
@@ -49,11 +53,11 @@ local_system:
                   new_children = []
                   for edge_key, dest_map in children:
                       pop, llm_bv_json = edge_key
-                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
 
                       new_dest_map = []
                       for dest_idx, state_bv_json in dest_map:
-                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
+                          state_bv = bs_from_json(dumps(state_bv_json))
                           new_dest_map.append((int(dest_idx), state_bv))
 
                       new_children.append(((int(pop), llm_bv), new_dest_map))
@@ -104,15 +108,19 @@ local_system:
               values: Dict[int, Tuple[set, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = defaultdict(set)  # depth -> set(node_idx)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
               depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
 
               print(f"[{time.time() - t0:.4f}] get_mask: after init")
 
               # Seed: map tokenizer states and their filtered GSS to trie roots
               t_seed_start = time.time()
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
               for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
+                  root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
@@ -120,17 +128,21 @@ local_system:
                   gss_clone = gss.clone_node()
                   new_mask = gss_clone.allowed_llm_tokens()
 
-                  if root_idx in values:
-                      gss_set, existing_mask = values[root_idx]
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      gss_set, existing_mask = existing
                       gss_set.add(gss_clone)
                       values[root_idx] = (gss_set, existing_mask.union(new_mask))
                   else:
                       values[root_idx] = ({gss_clone}, new_mask)
 
-                  depth = self.max_depth[root_idx]
-                  if len(todo[depth]) == 0:  # first time this depth is enqueued
-                      heapq.heappush(depth_heap, depth)
-                  todo[depth].add(root_idx)
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
               t_seed_end = time.time()
               print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
 
@@ -157,16 +169,23 @@ local_system:
 
               # Helper to enqueue a node at a given depth
               def enqueue(depth: int, node_idx: int) -> None:
-                  if len(todo[depth]) == 0:
-                      heapq.heappush(depth_heap, depth)
-                  todo[depth].add(node_idx)
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
 
               while True:
                   # Pop the smallest depth bucket (skip stale heap entries)
                   t1 = time.time()
                   node_indices: Optional[set[int]] = None
                   while depth_heap:
-                      current_depth = heapq.heappop(depth_heap)
+                      current_depth = heappop(depth_heap)
                       node_indices = todo.pop(current_depth, None)
                       if node_indices:
                           break
@@ -177,7 +196,7 @@ local_system:
                   loop_count += 1
 
                   # Process all nodes in this depth bucket
-                  for node_idx in list(node_indices):
+                  for node_idx in node_indices:
                       t1 = time.time()
                       if node_idx in stopped:
                           continue
@@ -191,7 +210,7 @@ local_system:
 
                       # End-node handling
                       t1 = time.time()
-                      if self.is_end(node_idx):
+                      if is_end(node_idx):
                           final_mask = final_mask.union(llm_mask)
                       time_end_check += time.time() - t1
                       hits_end_check += 1
@@ -201,7 +220,8 @@ local_system:
                           continue
 
                       # Transitions grouped by (pop, llm_bv)
-                      children = (self.arena.get(node_idx, {}).get("children")) or []
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
                       for (pop, llm_bv), dests in children:
                           # Collect all pops from GSS parents
                           t1 = time.time()
@@ -212,6 +232,8 @@ local_system:
                           hits_popn_collect += 1
                           if not peeks:
                               continue
+
+                          llm_empty = llm_bv.is_empty()
 
                           for dest_idx, state_bv in dests:
                               # Filter peeks by destination state bitset
@@ -232,16 +254,15 @@ local_system:
                               child_gss_nodes = matched  # already a list of parent nodes
                               time_merge_matched += time.time() - t1
                               hits_merge_matched += 1
-                              if not child_gss_nodes:
-                                  continue
 
                               # Compute child mask (intersection with llm_bv when present)
-                              child_llm_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
 
-                              d = int(dest_idx)
+                              d = dest_idx
                               t1 = time.time()
-                              if d in values:
-                                  existing_gss_set, existing_mask = values[d]
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss_set, existing_mask = existing
                                   old_len = len(existing_gss_set)
                                   existing_gss_set.update(child_gss_nodes)
                                   # Only re-enqueue if effectively changed
@@ -256,7 +277,7 @@ local_system:
                               time_merge_values += time.time() - t1
                               hits_merge_values += 1
 
-                              enqueue(self.max_depth[d], d)
+                              enqueue(max_depth[d], d)
 
               t_loop_end = time.time()
               print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
@@ -270,6 +291,350 @@ local_system:
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
+    python/aug25/models/gpt-5-7.py: |
+      import json
+      import heapq
+      from typing import Dict, List, Tuple, Optional, DefaultDict
+
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module with Bitset and GSSNode
+      from tqdm.auto import tqdm
+
+
+      class Model(GraphProvider):
+          """
+          Optimized precomputed trie model (generation 5.7).
+
+          Key changes vs precompute3_model:
+          - Build a per-node, per-pop index mapping tokenizer state -> [(dest_idx, llm_bv or None)]
+            so we can jump directly from a GSS pop to the relevant destinations without scanning
+            all dest bitsets.
+          - Aggregate contributions over all matched states per (node, pop, dest) before updating
+            the scheduler's working set to minimize repeated unions and enqueue operations.
+          - Preserve the external interface and iter_edges semantics for equivalence checking.
+
+          Semantics around llm_bv:
+          - If an edge group carries an empty llm_bv (bv.is_empty() == True) it is treated as "no filter"
+            (i.e., child mask = current llm mask). When multiple groups contribute to a dest/state, the
+            resulting behavior is: if any group is "no filter", the union is "no filter"; otherwise we
+            intersect with union of all contributing llm_bv.
+          """
+
+          # Entry type for fast pop index:
+          # For a given node and pop, for a specific tokenizer state (sid),
+          # the value is a list of (dest_idx, llm_bv_or_none) where:
+          #   - llm_bv_or_none is ffi.Bitset if constrained, or None if unconstrained.
+          _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]]
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.max_depth: Dict[int, int] = {}
+
+              # children normalized as in precompute3_model, plus build pop-index for fast lookup
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # node_id -> (pop -> state -> list[(dest_idx, bv or None)])
+              self._pop_index: Dict[int, Dict[int, Model._StateEntries]] = {}
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing gpt-5-7 arena and building pop index",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+
+                  # Cache max_depth
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  # Normalize children into ffi bitsets (keep original structure for iter_edges)
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      self._pop_index[uid_int] = {}
+                      continue
+
+                  new_children = []
+                  # Build fast index holder for this node
+                  pop_to_state_entries: Dict[int, Model._StateEntries] = {}
+
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      # "Unconstrained" llm filter is represented by empty bitset as per existing impl
+                      llm_unconstrained = llm_bv.is_empty()
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((dest_idx, state_bv))
+
+                          # Build fast pop index for this (node, pop)
+                          # Skip epsilon-on-GSS transitions (empty state_bv) here: the existing get_mask
+                          # ignores them (handled only by iter_edges in precompute3_model).
+                          if not state_bv.is_empty():
+                              # lazily allocate per-pop map
+                              s_map = pop_to_state_entries.get(pop)
+                              if s_map is None:
+                                  s_map = {}
+                                  pop_to_state_entries[pop] = s_map
+
+                              # Fan-out to states in this bitset
+                              # to_ranges() yields disjoint intervals [start, end)
+                              for start, end in state_bv.to_ranges():
+                                  # Note: states are small (~1000); this is a fast loop and allows
+                                  # direct sid lookup during get_mask without per-dest contains() calls.
+                                  for sid in range(start, end):
+                                      entries = s_map.get(sid)
+                                      if entries is None:
+                                          entries = []
+                                          s_map[sid] = entries
+                                      # Store None for unconstrained (means "no filter")
+                                      entries.append((dest_idx, None if llm_unconstrained else llm_bv))
+
+                      new_children.append(((pop, llm_bv), new_dest_map))
+
+                  node["children"] = new_children
+                  self._pop_index[uid_int] = pop_to_state_entries
+
+          @staticmethod
+          def from_json_string(s: str) -> "Model":
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+
+              This uses the normalized arena children (same as precompute3_model).
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This version uses the per-pop, per-state fast index to avoid
+              scanning all destination bitsets on every transition.
+              """
+              Bitset = ffi.Bitset
+
+              final_mask: ffi.Bitset = Bitset.zeros()
+
+              # node_idx -> (set(GSSNode), Bitset)
+              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              for sid, gss in state_to_gss.items():
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+
+                  # Note: clone_node and allowed_llm_tokens provided by ffi; fast operations
+                  gss_clone = gss.clone_node()
+                  new_mask = gss_clone.allowed_llm_tokens()
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      gss_set, existing_mask = existing
+                      gss_set.add(gss_clone)
+                      # Union allowed tokens into the node-level mask
+                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = ({gss_clone}, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+              pop_index_all = self._pop_index
+
+              while True:
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      break  # nothing left to process
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          continue
+
+                      gss_set, llm_mask = item
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          final_mask = final_mask.union(llm_mask)
+
+                      if not gss_set:
+                          stopped.add(node_idx)
+                          continue
+
+                      # Fast dispatch via precomputed pop-index for this node
+                      pop_index = pop_index_all.get(node_idx)
+                      if not pop_index:
+                          continue  # no outgoing transitions
+
+                      # For each pop group, we collect peeks once and map sids directly to dests
+                      for pop, state_to_entries in pop_index.items():
+                          # Collect all pops from GSS parents
+                          peeks = []
+                          append_peek = peeks.append
+                          for g in gss_set:
+                              # popn_fast(pop) -> List[(sid_val, parent_gss_node)]
+                              for pair in g.popn_fast(pop):
+                                  append_peek(pair)
+
+                          if not peeks:
+                              continue
+
+                          # Bucket peeks by sid to dedupe membership lookups and aggregate parents
+                          sid_to_parents: Dict[int, List] = {}
+                          for sid_val, parent_node in peeks:
+                              lst = sid_to_parents.get(sid_val)
+                              if lst is None:
+                                  lst = [parent_node]
+                                  sid_to_parents[sid_val] = lst
+                              else:
+                                  lst.append(parent_node)
+
+                          # Aggregate per-destination contributions across all matched sids
+                          # dest_idx -> (parents_list, any_unconstrained, union_llm_bv or None if none seen yet)
+                          dest_parents: Dict[int, List] = {}
+                          dest_any_unconstrained: Dict[int, bool] = {}
+                          dest_llm_union: Dict[int, ffi.Bitset] = {}
+
+                          for sid_val, parents in sid_to_parents.items():
+                              entries = state_to_entries.get(sid_val)
+                              if not entries:
+                                  continue
+                              # entries: List[(dest_idx, bv_or_none)]
+                              for dest_idx, bv in entries:
+                                  # Accumulate parents per dest
+                                  plist = dest_parents.get(dest_idx)
+                                  if plist is None:
+                                      dest_parents[dest_idx] = parents.copy()
+                                  else:
+                                      plist.extend(parents)
+
+                                  if bv is None:
+                                      # Unconstrained filter present for this dest at this state
+                                      dest_any_unconstrained[dest_idx] = True
+                                  else:
+                                      # Union llm_bv across matched states for this dest
+                                      existing_bv = dest_llm_union.get(dest_idx)
+                                      if existing_bv is None:
+                                          dest_llm_union[dest_idx] = bv
+                                      else:
+                                          dest_llm_union[dest_idx] = existing_bv.union(bv)
+
+                          if not dest_parents:
+                              continue
+
+                          # Merge into scheduler state per dest
+                          enqueue = self._enqueue_helper(todo, depth_heap)
+                          for d, child_nodes in dest_parents.items():
+                              # Compute child mask for this dest
+                              if dest_any_unconstrained.get(d, False):
+                                  child_llm_mask = llm_mask
+                              else:
+                                  bv_union = dest_llm_union.get(d)
+                                  # If no union bits (i.e., no constrained contributions), skip mask-only update
+                                  if bv_union is None:
+                                      # No tokens allowed through (unless unconstrained, which we already handled)
+                                      # We still carry gss parents below; mask will remain as-is if node already exists.
+                                      child_llm_mask = Bitset.zeros()
+                                  else:
+                                      child_llm_mask = llm_mask.intersection(bv_union)
+
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss_set, existing_mask = existing
+                                  old_len = len(existing_gss_set)
+                                  # Note: 'child_nodes' contains unique parents per (pop, node); safe to update set
+                                  existing_gss_set.update(child_nodes)
+
+                                  # Merge masks unconditionally; correctness requires new tokens to propagate
+                                  new_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (existing_gss_set, new_mask)
+
+                                  # Re-enqueue if either set size grew or mask may have changed.
+                                  if len(existing_gss_set) != old_len or new_mask is not existing_mask:
+                                      enqueue(max_depth[d], d)
+                              else:
+                                  # Initialize from scratch
+                                  # Convert child_nodes to set once
+                                  values[d] = (set(child_nodes), child_llm_mask)
+                                  enqueue(max_depth[d], d)
+
+              return final_mask
+
+          @staticmethod
+          def _enqueue_helper(todo: Dict[int, set], depth_heap: List[int]):
+              heappush = heapq.heappush
+
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              return enqueue
   prev_file_contents:
     python/aug25/models/precompute3_model.py: |
       import json
@@ -557,6 +922,350 @@ local_system:
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
+    python/aug25/models/gpt-5-7.py: |
+      import json
+      import heapq
+      from typing import Dict, List, Tuple, Optional, DefaultDict
+
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module with Bitset and GSSNode
+      from tqdm.auto import tqdm
+
+
+      class Model(GraphProvider):
+          """
+          Optimized precomputed trie model (generation 5.7).
+
+          Key changes vs precompute3_model:
+          - Build a per-node, per-pop index mapping tokenizer state -> [(dest_idx, llm_bv or None)]
+            so we can jump directly from a GSS pop to the relevant destinations without scanning
+            all dest bitsets.
+          - Aggregate contributions over all matched states per (node, pop, dest) before updating
+            the scheduler's working set to minimize repeated unions and enqueue operations.
+          - Preserve the external interface and iter_edges semantics for equivalence checking.
+
+          Semantics around llm_bv:
+          - If an edge group carries an empty llm_bv (bv.is_empty() == True) it is treated as "no filter"
+            (i.e., child mask = current llm mask). When multiple groups contribute to a dest/state, the
+            resulting behavior is: if any group is "no filter", the union is "no filter"; otherwise we
+            intersect with union of all contributing llm_bv.
+          """
+
+          # Entry type for fast pop index:
+          # For a given node and pop, for a specific tokenizer state (sid),
+          # the value is a list of (dest_idx, llm_bv_or_none) where:
+          #   - llm_bv_or_none is ffi.Bitset if constrained, or None if unconstrained.
+          _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]]
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.max_depth: Dict[int, int] = {}
+
+              # children normalized as in precompute3_model, plus build pop-index for fast lookup
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # node_id -> (pop -> state -> list[(dest_idx, bv or None)])
+              self._pop_index: Dict[int, Dict[int, Model._StateEntries]] = {}
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing gpt-5-7 arena and building pop index",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+
+                  # Cache max_depth
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  # Normalize children into ffi bitsets (keep original structure for iter_edges)
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      self._pop_index[uid_int] = {}
+                      continue
+
+                  new_children = []
+                  # Build fast index holder for this node
+                  pop_to_state_entries: Dict[int, Model._StateEntries] = {}
+
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      # "Unconstrained" llm filter is represented by empty bitset as per existing impl
+                      llm_unconstrained = llm_bv.is_empty()
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((dest_idx, state_bv))
+
+                          # Build fast pop index for this (node, pop)
+                          # Skip epsilon-on-GSS transitions (empty state_bv) here: the existing get_mask
+                          # ignores them (handled only by iter_edges in precompute3_model).
+                          if not state_bv.is_empty():
+                              # lazily allocate per-pop map
+                              s_map = pop_to_state_entries.get(pop)
+                              if s_map is None:
+                                  s_map = {}
+                                  pop_to_state_entries[pop] = s_map
+
+                              # Fan-out to states in this bitset
+                              # to_ranges() yields disjoint intervals [start, end)
+                              for start, end in state_bv.to_ranges():
+                                  # Note: states are small (~1000); this is a fast loop and allows
+                                  # direct sid lookup during get_mask without per-dest contains() calls.
+                                  for sid in range(start, end):
+                                      entries = s_map.get(sid)
+                                      if entries is None:
+                                          entries = []
+                                          s_map[sid] = entries
+                                      # Store None for unconstrained (means "no filter")
+                                      entries.append((dest_idx, None if llm_unconstrained else llm_bv))
+
+                      new_children.append(((pop, llm_bv), new_dest_map))
+
+                  node["children"] = new_children
+                  self._pop_index[uid_int] = pop_to_state_entries
+
+          @staticmethod
+          def from_json_string(s: str) -> "Model":
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+
+              This uses the normalized arena children (same as precompute3_model).
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This version uses the per-pop, per-state fast index to avoid
+              scanning all destination bitsets on every transition.
+              """
+              Bitset = ffi.Bitset
+
+              final_mask: ffi.Bitset = Bitset.zeros()
+
+              # node_idx -> (set(GSSNode), Bitset)
+              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              for sid, gss in state_to_gss.items():
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+
+                  # Note: clone_node and allowed_llm_tokens provided by ffi; fast operations
+                  gss_clone = gss.clone_node()
+                  new_mask = gss_clone.allowed_llm_tokens()
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      gss_set, existing_mask = existing
+                      gss_set.add(gss_clone)
+                      # Union allowed tokens into the node-level mask
+                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = ({gss_clone}, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+              pop_index_all = self._pop_index
+
+              while True:
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      break  # nothing left to process
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          continue
+
+                      gss_set, llm_mask = item
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          final_mask = final_mask.union(llm_mask)
+
+                      if not gss_set:
+                          stopped.add(node_idx)
+                          continue
+
+                      # Fast dispatch via precomputed pop-index for this node
+                      pop_index = pop_index_all.get(node_idx)
+                      if not pop_index:
+                          continue  # no outgoing transitions
+
+                      # For each pop group, we collect peeks once and map sids directly to dests
+                      for pop, state_to_entries in pop_index.items():
+                          # Collect all pops from GSS parents
+                          peeks = []
+                          append_peek = peeks.append
+                          for g in gss_set:
+                              # popn_fast(pop) -> List[(sid_val, parent_gss_node)]
+                              for pair in g.popn_fast(pop):
+                                  append_peek(pair)
+
+                          if not peeks:
+                              continue
+
+                          # Bucket peeks by sid to dedupe membership lookups and aggregate parents
+                          sid_to_parents: Dict[int, List] = {}
+                          for sid_val, parent_node in peeks:
+                              lst = sid_to_parents.get(sid_val)
+                              if lst is None:
+                                  lst = [parent_node]
+                                  sid_to_parents[sid_val] = lst
+                              else:
+                                  lst.append(parent_node)
+
+                          # Aggregate per-destination contributions across all matched sids
+                          # dest_idx -> (parents_list, any_unconstrained, union_llm_bv or None if none seen yet)
+                          dest_parents: Dict[int, List] = {}
+                          dest_any_unconstrained: Dict[int, bool] = {}
+                          dest_llm_union: Dict[int, ffi.Bitset] = {}
+
+                          for sid_val, parents in sid_to_parents.items():
+                              entries = state_to_entries.get(sid_val)
+                              if not entries:
+                                  continue
+                              # entries: List[(dest_idx, bv_or_none)]
+                              for dest_idx, bv in entries:
+                                  # Accumulate parents per dest
+                                  plist = dest_parents.get(dest_idx)
+                                  if plist is None:
+                                      dest_parents[dest_idx] = parents.copy()
+                                  else:
+                                      plist.extend(parents)
+
+                                  if bv is None:
+                                      # Unconstrained filter present for this dest at this state
+                                      dest_any_unconstrained[dest_idx] = True
+                                  else:
+                                      # Union llm_bv across matched states for this dest
+                                      existing_bv = dest_llm_union.get(dest_idx)
+                                      if existing_bv is None:
+                                          dest_llm_union[dest_idx] = bv
+                                      else:
+                                          dest_llm_union[dest_idx] = existing_bv.union(bv)
+
+                          if not dest_parents:
+                              continue
+
+                          # Merge into scheduler state per dest
+                          enqueue = self._enqueue_helper(todo, depth_heap)
+                          for d, child_nodes in dest_parents.items():
+                              # Compute child mask for this dest
+                              if dest_any_unconstrained.get(d, False):
+                                  child_llm_mask = llm_mask
+                              else:
+                                  bv_union = dest_llm_union.get(d)
+                                  # If no union bits (i.e., no constrained contributions), skip mask-only update
+                                  if bv_union is None:
+                                      # No tokens allowed through (unless unconstrained, which we already handled)
+                                      # We still carry gss parents below; mask will remain as-is if node already exists.
+                                      child_llm_mask = Bitset.zeros()
+                                  else:
+                                      child_llm_mask = llm_mask.intersection(bv_union)
+
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss_set, existing_mask = existing
+                                  old_len = len(existing_gss_set)
+                                  # Note: 'child_nodes' contains unique parents per (pop, node); safe to update set
+                                  existing_gss_set.update(child_nodes)
+
+                                  # Merge masks unconditionally; correctness requires new tokens to propagate
+                                  new_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (existing_gss_set, new_mask)
+
+                                  # Re-enqueue if either set size grew or mask may have changed.
+                                  if len(existing_gss_set) != old_len or new_mask is not existing_mask:
+                                      enqueue(max_depth[d], d)
+                              else:
+                                  # Initialize from scratch
+                                  # Convert child_nodes to set once
+                                  values[d] = (set(child_nodes), child_llm_mask)
+                                  enqueue(max_depth[d], d)
+
+              return final_mask
+
+          @staticmethod
+          def _enqueue_helper(todo: Dict[int, set], depth_heap: List[int]):
+              heappush = heapq.heappush
+
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              return enqueue
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: simple
@@ -594,296 +1303,6 @@ messages:
       ephemeral: false
   - user: |-
       ```python 'python/aug25/models/precompute3_model.py'
-      import json
-      import time
-      import heapq
-      from typing import Dict, List, Tuple, Optional
-      from collections import defaultdict
-
-      from ..common_interface import GraphProvider
-      import _sep1 as ffi  # the compiled module
-      from tqdm.auto import tqdm
-
-
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation).
-          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
-          and provides graph traversal and mask computation interfaces.
-          """
-
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              # Map tokenizer state -> trie root node
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.max_depth: Dict[int, int] = {}
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in tqdm(
-                  self.arena.items(),
-                  desc="Normalizing precompute3 BVs",
-                  total=len(self.arena),
-              ):
-                  uid_int = int(uid)
-                  try:
-                      self.max_depth[uid_int] = int(node.get("max_depth", 0))
-                  except Exception:
-                      self.max_depth[uid_int] = 0
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
-
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv = ffi.Bitset.from_json_string(json.dumps(llm_bv_json))
-
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv = ffi.Bitset.from_json_string(json.dumps(state_bv_json))
-                          new_dest_map.append((int(dest_idx), state_bv))
-
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> "Model":
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              return Model(roots_map, arena)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              Only used by equivalence checking; not performance-critical.
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():  # Epsilon on GSS stack
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
-              """
-              Compute the final LLM token mask given a mapping from tokenizer state to
-              GSS nodes. This is the performance-critical routine.
-              """
-              t0 = time.time()
-              print(f"[{time.time() - t0:.4f}] get_mask: start")
-
-              final_mask = ffi.Bitset.zeros()
-
-              # node_idx -> (set(GSSNode), Bitset)
-              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
-
-              stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = defaultdict(set)  # depth -> set(node_idx)
-              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
-              print(f"[{time.time() - t0:.4f}] get_mask: after init")
-
-              # Seed: map tokenizer states and their filtered GSS to trie roots
-              t_seed_start = time.time()
-              for sid, gss in state_to_gss.items():
-                  root_idx = self.roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  gss_clone = gss.clone_node()
-                  new_mask = gss_clone.allowed_llm_tokens()
-
-                  if root_idx in values:
-                      gss_set, existing_mask = values[root_idx]
-                      gss_set.add(gss_clone)
-                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = ({gss_clone}, new_mask)
-
-                  depth = self.max_depth[root_idx]
-                  if len(todo[depth]) == 0:  # first time this depth is enqueued
-                      heapq.heappush(depth_heap, depth)
-                  todo[depth].add(root_idx)
-              t_seed_end = time.time()
-              print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
-
-              # Main scheduler
-              t_loop_start = time.time()
-
-              # Timing accumulators
-              time_pop_bucket = 0.0
-              time_node_setup = 0.0
-              time_end_check = 0.0
-              time_popn_collect = 0.0
-              time_filter_peeks = 0.0
-              time_merge_matched = 0.0
-              time_merge_values = 0.0
-              hits_pop_bucket = 0
-              hits_node_setup = 0
-              hits_end_check = 0
-              hits_popn_collect = 0
-              hits_filter_peeks = 0
-              hits_merge_matched = 0
-              hits_merge_values = 0
-
-              loop_count = 0
-
-              # Helper to enqueue a node at a given depth
-              def enqueue(depth: int, node_idx: int) -> None:
-                  if len(todo[depth]) == 0:
-                      heapq.heappush(depth_heap, depth)
-                  todo[depth].add(node_idx)
-
-              while True:
-                  # Pop the smallest depth bucket (skip stale heap entries)
-                  t1 = time.time()
-                  node_indices: Optional[set[int]] = None
-                  while depth_heap:
-                      current_depth = heapq.heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  time_pop_bucket += time.time() - t1
-                  if not node_indices:
-                      break  # nothing left to process
-                  hits_pop_bucket += 1
-                  loop_count += 1
-
-                  # Process all nodes in this depth bucket
-                  for node_idx in list(node_indices):
-                      t1 = time.time()
-                      if node_idx in stopped:
-                          continue
-
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          continue
-                      gss_set, llm_mask = item
-                      time_node_setup += time.time() - t1
-                      hits_node_setup += 1
-
-                      # End-node handling
-                      t1 = time.time()
-                      if self.is_end(node_idx):
-                          final_mask = final_mask.union(llm_mask)
-                      time_end_check += time.time() - t1
-                      hits_end_check += 1
-
-                      if not gss_set:
-                          stopped.add(node_idx)
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      children = (self.arena.get(node_idx, {}).get("children")) or []
-                      for (pop, llm_bv), dests in children:
-                          # Collect all pops from GSS parents
-                          t1 = time.time()
-                          peeks = []
-                          for g in gss_set:
-                              peeks.extend(g.popn_fast(pop))
-                          time_popn_collect += time.time() - t1
-                          hits_popn_collect += 1
-                          if not peeks:
-                              continue
-
-                          for dest_idx, state_bv in dests:
-                              # Filter peeks by destination state bitset
-                              t1 = time.time()
-                              matched = []
-                              if not state_bv.is_empty():
-                                  contains = state_bv.contains
-                                  for sid_val, parent_node in peeks:
-                                      if contains(sid_val):
-                                          matched.append(parent_node)
-                              time_filter_peeks += time.time() - t1
-                              hits_filter_peeks += 1
-                              if not matched:
-                                  continue
-
-                              # Merge matched parents
-                              t1 = time.time()
-                              child_gss_nodes = matched  # already a list of parent nodes
-                              time_merge_matched += time.time() - t1
-                              hits_merge_matched += 1
-                              if not child_gss_nodes:
-                                  continue
-
-                              # Compute child mask (intersection with llm_bv when present)
-                              child_llm_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
-
-                              d = int(dest_idx)
-                              t1 = time.time()
-                              if d in values:
-                                  existing_gss_set, existing_mask = values[d]
-                                  old_len = len(existing_gss_set)
-                                  existing_gss_set.update(child_gss_nodes)
-                                  # Only re-enqueue if effectively changed
-                                  if len(existing_gss_set) == old_len:
-                                      time_merge_values += time.time() - t1
-                                      hits_merge_values += 1
-                                      continue
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (existing_gss_set, combined_mask)
-                              else:
-                                  values[d] = (set(child_gss_nodes), child_llm_mask)
-                              time_merge_values += time.time() - t1
-                              hits_merge_values += 1
-
-                              enqueue(self.max_depth[d], d)
-
-              t_loop_end = time.time()
-              print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-              print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
-              print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
-              print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
-              print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
-              print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
-              print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
-              print(f"    - 7. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
-
-              print(f"[{time.time() - t0:.4f}] get_mask: returning")
-              return final_mask
-
-      ```
-    metadata:
-      filename: python/aug25/models/precompute3_model.py
-  - user: Simplify this code. Make it perform faster too. And make it more readable
-      and succinct. Make sure its functionally identical.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      ```python "python/aug25/models/precompute3_model.py"
       import json
       import time
       import heapq
@@ -1169,20 +1588,429 @@ messages:
 
               print(f"[{time.time() - t0:.4f}] get_mask: returning")
               return final_mask
+
+      ```
+    metadata:
+      filename: python/aug25/models/precompute3_model.py
+  - user: |-
+      This is a competition to make `get_mask`  as fast as possible.
+      You may use any techniques as long as you implement the given interface (and don't 'cheat' `iter_edges`), which is used to validate the consistency of the graph.
+      Assume the external types used here are already well-optimized.
+      But note that the input tree itself may not be well-optimized, and the model used to represent the tree here may not be well optimized either.
+      Things you could try:
+      - Keep the same tree model, but optimize it.
+      - Optimize `get_mask`.
+      - Create a new, optimized model for the tree that allows for much faster `get_mask` performance.
+      Make it very fast and optimal.
+
+
+      Hint: here's how it performs currently:
+      ```
+      [0.0000] get_mask: after init
+      [0.0000] get_mask: seed loop took 0.0000s
+      [0.0515] get_mask: scheduler loop finished in 0.0514s (36 iterations)
+          - 1. Pop bucket:           0.0000s (      36 hits)
+          - 2. Node setup:           0.0008s (    1196 hits)
+          - 3. End check:            0.0011s (    1196 hits)
+          - 4. Pop'n'collect:        0.0081s (    4388 hits)
+          - 5. Filter peeks:         0.0233s (   88962 hits)
+          - 6. Merge matched:        0.0006s (    3824 hits)
+          - 7. Merge into values:    0.0023s (    3824 hits)
+      ```
+      That's a lot of filter peeks hits.
+      What if we didn't have to loop over `dests` and check each one for a match? What if we could loop over peeks and somehow just look up in a map
+      state ID -> dest node -> llm token bv
+
+      Actually no, better yet.
+      What if the outgoing links from a node were organised like this:
+      state ID -> LLM token bv -> dest node
+
+      Or this?
+      state ID -> dest node -> llm token BV
+
+      Hmm... think about this. What's the best way?
+      Annecdotally, there's a LOT of states - like 1000. Often a lot of edges have the same LLM token bv. And often there's relatively few destination nodes as well. ie there's a lot of edges pointing to the same node with the same LLM tokens.
+      But the question of what order to process these things in is a hard one. Hmm. Figure it out.
+
+
+      Create a new entry at python/aug25/models/gpt-5-7.py
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output the full, final contents of any created or modified files.
+                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
+                    ```python "path/to/your_file.py"
+                    ... full code ...
+                    ```
+                  - Do not include placeholders; the code must be complete and immediately usable.
+                  - Do NOT output git diffs in this mode.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: simple
+      phase: default
+  - assistant: |-
+      ```python "python/aug25/models/gpt-5-7.py"
+      import json
+      import heapq
+      from typing import Dict, List, Tuple, Optional, DefaultDict
+
+      from ..common_interface import GraphProvider
+      import _sep1 as ffi  # compiled module with Bitset and GSSNode
+      from tqdm.auto import tqdm
+
+
+      class Model(GraphProvider):
+          """
+          Optimized precomputed trie model (generation 5.7).
+
+          Key changes vs precompute3_model:
+          - Build a per-node, per-pop index mapping tokenizer state -> [(dest_idx, llm_bv or None)]
+            so we can jump directly from a GSS pop to the relevant destinations without scanning
+            all dest bitsets.
+          - Aggregate contributions over all matched states per (node, pop, dest) before updating
+            the scheduler's working set to minimize repeated unions and enqueue operations.
+          - Preserve the external interface and iter_edges semantics for equivalence checking.
+
+          Semantics around llm_bv:
+          - If an edge group carries an empty llm_bv (bv.is_empty() == True) it is treated as "no filter"
+            (i.e., child mask = current llm mask). When multiple groups contribute to a dest/state, the
+            resulting behavior is: if any group is "no filter", the union is "no filter"; otherwise we
+            intersect with union of all contributing llm_bv.
+          """
+
+          # Entry type for fast pop index:
+          # For a given node and pop, for a specific tokenizer state (sid),
+          # the value is a list of (dest_idx, llm_bv_or_none) where:
+          #   - llm_bv_or_none is ffi.Bitset if constrained, or None if unconstrained.
+          _StateEntries = Dict[int, List[Tuple[int, Optional[ffi.Bitset]]]]
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.max_depth: Dict[int, int] = {}
+
+              # children normalized as in precompute3_model, plus build pop-index for fast lookup
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # node_id -> (pop -> state -> list[(dest_idx, bv or None)])
+              self._pop_index: Dict[int, Dict[int, Model._StateEntries]] = {}
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing gpt-5-7 arena and building pop index",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+
+                  # Cache max_depth
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  # Normalize children into ffi bitsets (keep original structure for iter_edges)
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      self._pop_index[uid_int] = {}
+                      continue
+
+                  new_children = []
+                  # Build fast index holder for this node
+                  pop_to_state_entries: Dict[int, Model._StateEntries] = {}
+
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      pop = int(pop)
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      # "Unconstrained" llm filter is represented by empty bitset as per existing impl
+                      llm_unconstrained = llm_bv.is_empty()
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          dest_idx = int(dest_idx)
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((dest_idx, state_bv))
+
+                          # Build fast pop index for this (node, pop)
+                          # Skip epsilon-on-GSS transitions (empty state_bv) here: the existing get_mask
+                          # ignores them (handled only by iter_edges in precompute3_model).
+                          if not state_bv.is_empty():
+                              # lazily allocate per-pop map
+                              s_map = pop_to_state_entries.get(pop)
+                              if s_map is None:
+                                  s_map = {}
+                                  pop_to_state_entries[pop] = s_map
+
+                              # Fan-out to states in this bitset
+                              # to_ranges() yields disjoint intervals [start, end)
+                              for start, end in state_bv.to_ranges():
+                                  # Note: states are small (~1000); this is a fast loop and allows
+                                  # direct sid lookup during get_mask without per-dest contains() calls.
+                                  for sid in range(start, end):
+                                      entries = s_map.get(sid)
+                                      if entries is None:
+                                          entries = []
+                                          s_map[sid] = entries
+                                      # Store None for unconstrained (means "no filter")
+                                      entries.append((dest_idx, None if llm_unconstrained else llm_bv))
+
+                      new_children.append(((pop, llm_bv), new_dest_map))
+
+                  node["children"] = new_children
+                  self._pop_index[uid_int] = pop_to_state_entries
+
+          @staticmethod
+          def from_json_string(s: str) -> "Model":
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              return Model(roots_map, arena)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+
+              This uses the normalized arena children (same as precompute3_model).
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This version uses the per-pop, per-state fast index to avoid
+              scanning all destination bitsets on every transition.
+              """
+              Bitset = ffi.Bitset
+
+              final_mask: ffi.Bitset = Bitset.zeros()
+
+              # node_idx -> (set(GSSNode), Bitset)
+              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              for sid, gss in state_to_gss.items():
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+
+                  # Note: clone_node and allowed_llm_tokens provided by ffi; fast operations
+                  gss_clone = gss.clone_node()
+                  new_mask = gss_clone.allowed_llm_tokens()
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      gss_set, existing_mask = existing
+                      gss_set.add(gss_clone)
+                      # Union allowed tokens into the node-level mask
+                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = ({gss_clone}, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+              pop_index_all = self._pop_index
+
+              while True:
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      break  # nothing left to process
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          continue
+
+                      gss_set, llm_mask = item
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          final_mask = final_mask.union(llm_mask)
+
+                      if not gss_set:
+                          stopped.add(node_idx)
+                          continue
+
+                      # Fast dispatch via precomputed pop-index for this node
+                      pop_index = pop_index_all.get(node_idx)
+                      if not pop_index:
+                          continue  # no outgoing transitions
+
+                      # For each pop group, we collect peeks once and map sids directly to dests
+                      for pop, state_to_entries in pop_index.items():
+                          # Collect all pops from GSS parents
+                          peeks = []
+                          append_peek = peeks.append
+                          for g in gss_set:
+                              # popn_fast(pop) -> List[(sid_val, parent_gss_node)]
+                              for pair in g.popn_fast(pop):
+                                  append_peek(pair)
+
+                          if not peeks:
+                              continue
+
+                          # Bucket peeks by sid to dedupe membership lookups and aggregate parents
+                          sid_to_parents: Dict[int, List] = {}
+                          for sid_val, parent_node in peeks:
+                              lst = sid_to_parents.get(sid_val)
+                              if lst is None:
+                                  lst = [parent_node]
+                                  sid_to_parents[sid_val] = lst
+                              else:
+                                  lst.append(parent_node)
+
+                          # Aggregate per-destination contributions across all matched sids
+                          # dest_idx -> (parents_list, any_unconstrained, union_llm_bv or None if none seen yet)
+                          dest_parents: Dict[int, List] = {}
+                          dest_any_unconstrained: Dict[int, bool] = {}
+                          dest_llm_union: Dict[int, ffi.Bitset] = {}
+
+                          for sid_val, parents in sid_to_parents.items():
+                              entries = state_to_entries.get(sid_val)
+                              if not entries:
+                                  continue
+                              # entries: List[(dest_idx, bv_or_none)]
+                              for dest_idx, bv in entries:
+                                  # Accumulate parents per dest
+                                  plist = dest_parents.get(dest_idx)
+                                  if plist is None:
+                                      dest_parents[dest_idx] = parents.copy()
+                                  else:
+                                      plist.extend(parents)
+
+                                  if bv is None:
+                                      # Unconstrained filter present for this dest at this state
+                                      dest_any_unconstrained[dest_idx] = True
+                                  else:
+                                      # Union llm_bv across matched states for this dest
+                                      existing_bv = dest_llm_union.get(dest_idx)
+                                      if existing_bv is None:
+                                          dest_llm_union[dest_idx] = bv
+                                      else:
+                                          dest_llm_union[dest_idx] = existing_bv.union(bv)
+
+                          if not dest_parents:
+                              continue
+
+                          # Merge into scheduler state per dest
+                          enqueue = self._enqueue_helper(todo, depth_heap)
+                          for d, child_nodes in dest_parents.items():
+                              # Compute child mask for this dest
+                              if dest_any_unconstrained.get(d, False):
+                                  child_llm_mask = llm_mask
+                              else:
+                                  bv_union = dest_llm_union.get(d)
+                                  # If no union bits (i.e., no constrained contributions), skip mask-only update
+                                  if bv_union is None:
+                                      # No tokens allowed through (unless unconstrained, which we already handled)
+                                      # We still carry gss parents below; mask will remain as-is if node already exists.
+                                      child_llm_mask = Bitset.zeros()
+                                  else:
+                                      child_llm_mask = llm_mask.intersection(bv_union)
+
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss_set, existing_mask = existing
+                                  old_len = len(existing_gss_set)
+                                  # Note: 'child_nodes' contains unique parents per (pop, node); safe to update set
+                                  existing_gss_set.update(child_nodes)
+
+                                  # Merge masks unconditionally; correctness requires new tokens to propagate
+                                  new_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (existing_gss_set, new_mask)
+
+                                  # Re-enqueue if either set size grew or mask may have changed.
+                                  if len(existing_gss_set) != old_len or new_mask is not existing_mask:
+                                      enqueue(max_depth[d], d)
+                              else:
+                                  # Initialize from scratch
+                                  # Convert child_nodes to set once
+                                  values[d] = (set(child_nodes), child_llm_mask)
+                                  enqueue(max_depth[d], d)
+
+              return final_mask
+
+          @staticmethod
+          def _enqueue_helper(todo: Dict[int, set], depth_heap: List[int]):
+              heappush = heapq.heappush
+
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              return enqueue
       ```
     metadata:
   - user: |
-      Identified target file 'python/aug25/models/precompute3_model.py' on fence open line 1:
-      ```python "python/aug25/models/precompute3_model.py"
+      Identified target file 'python/aug25/models/gpt-5-7.py' on fence open line 1:
+      ```python "python/aug25/models/gpt-5-7.py"
       Found 1 code blocks.
       Matching against available files:
         1: python/aug25/models/precompute3_model.py
       --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to python/aug25/models/precompute3_model.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 0
+      Assigned block to NEW file python/aug25/models/gpt-5-7.py based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 1
       --- Phase 6: Applying changes to assigned files ---
+      Successfully created new file: python/aug25/models/gpt-5-7.py
     metadata:
-  - user: 'Changes committed with message: "Refactor: Optimize get_mask for performance
-      and readability"'
+  - user: 'Changes committed with message: "feat: Implement optimized precomputed
+      trie model (gpt-5-7) with per-pop indexing"'
     metadata:
 ...
