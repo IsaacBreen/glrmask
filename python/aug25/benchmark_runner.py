@@ -177,6 +177,7 @@ def print_model_statistics(model, model_name: str):
 def run_benchmark(args):
     """Main benchmark logic."""
     print("--- Setting up benchmark environment ---")
+    is_builtin_ref = (args.reference == 'builtin')
 
     # 1. Load pre-compiled GrammarConstraint
     print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
@@ -207,54 +208,62 @@ def run_benchmark(args):
     if args.print_stats:
         print_model_statistics(competitor_model, args.competitor.name)
 
-    # 5. Equivalence Check
-    print(f"Loading reference model from: {args.reference}")
-    ReferenceModel = load_competitor_model(args.reference)
-    # All models are loaded from precompute3 JSON for this benchmark suite.
-    reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+    # 5. Equivalence Check / Reference Model Setup
+    reference_model = None
+    if is_builtin_ref:
+        print("Using 'builtin' reference (GrammarConstraintState) for mask verification.")
+        # Equivalence check is not possible against builtin.
+        equivalence_passed = True
+        equivalence_details = "N/A (reference is 'builtin')"
+    else:
+        ref_path = Path(args.reference)
+        print(f"Loading reference model from: {ref_path}")
+        ReferenceModel = load_competitor_model(ref_path)
+        # All models are loaded from precompute3 JSON for this benchmark suite.
+        reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
-    if args.print_stats:
-        print_model_statistics(reference_model, args.reference.name)
+        if args.print_stats:
+            print_model_statistics(reference_model, ref_path.name)
 
-    print(f"Running equivalence check against reference model: {args.reference.name}")
-    
-    equivalence_passed = True
-    equivalence_details = "All tested states are equivalent."
+        print(f"Running equivalence check against reference model: {ref_path.name}")
 
-    ENABLE_EQUIVALENCE_TEST = False
-    if ENABLE_EQUIVALENCE_TEST:
-        # Check that root sets are the same before proceeding
-        ref_roots = set(reference_model.roots_map.keys())
-        comp_roots = set(competitor_model.roots_map.keys())
-        if ref_roots != comp_roots:
-            equivalence_passed = False
-            equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-        else:
-            sorted_roots = sorted(list(ref_roots))
-            total_roots = len(sorted_roots)
-            print(f"Checking equivalence across {total_roots} tokenizer states...")
-            for i, sid in enumerate(sorted_roots):
-                # Progress indicator
-                if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
-                    print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+        equivalence_passed = True
+        equivalence_details = "All tested states are equivalent."
 
-                passed, details = are_equivalent_for_state(
-                    reference_model, reference_model.get_root(sid),
-                    competitor_model, competitor_model.get_root(sid),
-                    verbose=False
-                )
-                if not passed:
-                    print() # Newline to clear the progress indicator
-                    equivalence_passed = False
-                    equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                    break
+        ENABLE_EQUIVALENCE_TEST = False
+        if ENABLE_EQUIVALENCE_TEST:
+            # Check that root sets are the same before proceeding
+            ref_roots = set(reference_model.roots_map.keys())
+            comp_roots = set(competitor_model.roots_map.keys())
+            if ref_roots != comp_roots:
+                equivalence_passed = False
+                equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+            else:
+                sorted_roots = sorted(list(ref_roots))
+                total_roots = len(sorted_roots)
+                print(f"Checking equivalence across {total_roots} tokenizer states...")
+                for i, sid in enumerate(sorted_roots):
+                    # Progress indicator
+                    if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                        print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                    passed, details = are_equivalent_for_state(
+                        reference_model, reference_model.get_root(sid),
+                        competitor_model, competitor_model.get_root(sid),
+                        verbose=False
+                    )
+                    if not passed:
+                        print() # Newline to clear the progress indicator
+                        equivalence_passed = False
+                        equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                        break
+                if equivalence_passed:
+                    print() # Final newline after progress indicator
+
             if equivalence_passed:
-                print() # Final newline after progress indicator
-
-        if equivalence_passed:
-            print("✅ Equivalence check passed.")
-        else:
-            print(f"❌ Equivalence check failed: {equivalence_details}")
+                print("✅ Equivalence check passed.")
+            else:
+                print(f"❌ Equivalence check failed: {equivalence_details}")
 
     # 6. Prepare for benchmarking loop
     print(f"Loading and tokenizing code from: {args.code}")
@@ -273,18 +282,23 @@ def run_benchmark(args):
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
     for i, token_id in progress_bar:
+        # Get the state map for the competitor. This is needed for all mask calculations.
+        progress_bar.set_postfix_str("filtered_state_gss_map")
+        state_to_gss = constraint_state.filtered_state_gss_map()
+
         # Get the reference mask to check correctness (if enabled)
         if args.verify_masks:
             progress_bar.set_postfix_str("get_mask (ref)")
-            reference_mask_np = constraint_state.get_mask()
-            if not reference_mask_np[token_id]:
-                # This indicates an issue with the grammar or tokenizer, not the competitor.
-                print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
-                sys.exit(1)
-
-        # Get the state map for the competitor
-        progress_bar.set_postfix_str("filtered_state_gss_map")
-        state_to_gss = constraint_state.filtered_state_gss_map()
+            if is_builtin_ref:
+                reference_mask_np = constraint_state.get_mask()
+                if not reference_mask_np[token_id]:
+                    print(f"\nFATAL: Builtin reference mask forbids token {token_id} at step {i}. Aborting.")
+                    sys.exit(1)
+            else:
+                reference_mask_rs = reference_model.get_mask(state_to_gss)
+                if not reference_mask_rs.contains(token_id):
+                    print(f"\nFATAL: Reference model mask forbids token {token_id} at step {i}. Aborting.")
+                    sys.exit(1)
 
         # --- TIMED SECTION ---
         progress_bar.set_postfix_str("get_mask (competitor)")
@@ -298,7 +312,11 @@ def run_benchmark(args):
         if args.verify_masks:
             progress_bar.set_postfix_str("Verifying mask")
             # This check is expensive but crucial for validation
-            ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+            if is_builtin_ref:
+                ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+            else:
+                ref_indices = set(reference_mask_rs.to_indices())
+
             comp_indices = set(competitor_mask.to_indices())
             if ref_indices != comp_indices:
                 mask_correctness_passed = False
@@ -378,7 +396,7 @@ def main():
     parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
     parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
     parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
-    parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+    parser.add_argument("-r", "--reference", type=str, required=True, help="Path to the reference model .py file for equivalence checking, or 'builtin' to use the slow C++ implementation for verification.")
     parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
     
     parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
@@ -389,7 +407,12 @@ def main():
 
     args = parser.parse_args()
 
-    for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+    paths_to_check = [args.constraint_file, args.code, args.competitor]
+    if args.reference != 'builtin':
+        # Convert to Path for existence check
+        paths_to_check.append(Path(args.reference))
+
+    for p in paths_to_check:
         if not p.exists():
             parser.error(f"File not found: {p}")
 

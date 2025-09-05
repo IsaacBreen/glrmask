@@ -99,6 +99,11 @@ class RangeSet:
             else: j += 1
         return RangeSet(tuple(out)) if out else RangeSet.empty()
 
+    def to_indices(self) -> Iterable[int]:
+        """Yields all individual integer indices in the set."""
+        for start, end in self.intervals:
+            yield from range(start, end + 1)
+
     def to_json(self) -> List[List[int]]:
         return [[s, e] for s, e in self.intervals]
 

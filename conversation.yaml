@@ -126,1088 +126,6 @@ local_system:
           Loads benchmark results from JSON files, computes statistics, and generates plots.
           """
           all_data = []
-          for file_path in result_files:
-              with open(file_path, 'r') as f:
-                  data = json.load(f)
-                  competitor_name = Path(data["competitor_script"]).stem
-                  timings = data["results"]["get_mask_timings_seconds"]
-                  mismatch_indices = set(
-                      data["results"]
-                      .get("mask_correctness_check", {})
-                      .get("mismatch_indices", [])
-                  )
-                  for i, timing in enumerate(timings):
-                      all_data.append({
-                          "competitor": competitor_name,
-                          "token_index": i,
-                          "time_sec": timing,
-                          "equivalence_passed": data["results"]["equivalence_check"]["passed"],
-                          "mask_mismatch": i in mismatch_indices
-                      })
-
-          if not all_data:
-              print("No data to analyze.")
-              return
-
-          df = pd.DataFrame(all_data)
-
-          # --- Print Summary Statistics ---
-          print("--- Benchmark Summary ---")
-          summary = df.groupby('competitor')['time_sec'].agg(
-              ['mean', 'std', 'min', 'median', 'max', 'count']
-          ).rename(columns={'median': 'p50'})
-
-          # Add percentiles
-          percentiles = df.groupby('competitor')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
-          percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
-          summary = summary.join(percentiles)
-
-          # Add equivalence check info
-          equiv_status = df.groupby('competitor')['equivalence_passed'].first()
-          summary['equivalent'] = equiv_status.map({True: '✅', False: '❌'})
-
-          # Reorder columns for display
-          summary = summary[['equivalent', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
-          
-          # Format for printing
-          summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000 # convert to ms
-          summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'count'] else c)
-
-          print(summary.to_string(float_format="%.4f"))
-          print("\n" + "✅ = Equivalent to reference, ❌ = Not equivalent")
-
-          # --- Generate Plots ---
-          output_dir.mkdir(parents=True, exist_ok=True)
-          print(f"\nSaving plots to {output_dir}...")
-
-          # 1. Line plot of timings per token
-          plt.figure(figsize=(15, 8))
-          ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
-
-          mismatch_df = df[df['mask_mismatch']]
-          plot_title = 'get_mask() Performance per Token'
-
-          if not mismatch_df.empty:
-              plot_title += ' (X marks mask mismatches)'
-              
-              # Get hue order from the lineplot's legend to ensure colors match
-              handles, labels = ax.get_legend_handles_labels()
-              # The first entry is the title of the legend, so we skip it.
-              competitor_labels = labels[1:1+len(df['competitor'].unique())]
-
-              sns.scatterplot(
-                  data=mismatch_df,
-                  x='token_index',
-                  y='time_sec',
-                  hue='competitor',
-                  hue_order=competitor_labels,
-                  style='mask_mismatch',
-                  markers=['X'],
-                  s=150,
-                  edgecolor='black',
-                  linewidth=1,
-                  legend=False,
-                  ax=ax,
-                  zorder=5 # Ensure markers are on top of lines
-              )
-
-          ax.set_xlabel('Token Index in Sequence')
-          ax.set_ylabel('Time (seconds)')
-          ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-          
-          # Linear scale
-          ax.set_yscale('linear')
-          ax.set_title(plot_title)
-          linear_path = output_dir / "timings_per_token_linear.png"
-          plt.savefig(linear_path, dpi=300, bbox_inches='tight')
-          print(f"Saved linear scale plot to {linear_path}")
-
-          # Log scale
-          ax.set_yscale('log')
-          ax.set_title(plot_title + ' (Log Scale)')
-          log_path = output_dir / "timings_per_token_log.png"
-          plt.savefig(log_path, dpi=300, bbox_inches='tight')
-          print(f"Saved log scale plot to {log_path}")
-          plt.close()
-
-          # 2. Box plot of timing distributions
-          plt.figure(figsize=(12, 7))
-          # Convert to ms for better readability on the plot
-          df_ms = df.copy()
-          df_ms['time_ms'] = df_ms['time_sec'] * 1000
-          sns.boxplot(data=df_ms, x='competitor', y='time_ms')
-          plt.title('Distribution of get_mask() Timings')
-          plt.xlabel('Competitor')
-          plt.ylabel('Time (milliseconds)')
-          plt.xticks(rotation=15)
-          plt.grid(True, axis='y', linestyle='--', linewidth=0.5)
-          box_path = output_dir / "timings_distribution_boxplot.png"
-          plt.savefig(box_path, dpi=300, bbox_inches='tight')
-          print(f"Saved box plot to {box_path}")
-          plt.close()
-
-
-      def main():
-          parser = argparse.ArgumentParser(description="Analyze benchmark results for grammar constraint models.")
-          parser.add_argument(
-              "result_paths",
-              nargs='+',
-              help="Paths to benchmark JSON files or directories containing them."
-          )
-          parser.add_argument(
-              "-o", "--output-dir",
-              default="benchmark_plots",
-              help="Directory to save the generated plots."
-          )
-          args = parser.parse_args()
-
-          result_files = []
-          for path_str in args.result_paths:
-              path = Path(path_str)
-              if path.is_dir():
-                  result_files.extend(path.glob("*.json"))
-              elif path.is_file() and path.suffix == '.json':
-                  result_files.append(path)
-
-          if not result_files:
-              print(f"Error: No .json files found in the specified paths.")
-              return
-
-          analyze_results(sorted(list(set(result_files))), Path(args.output_dir))
-
-      if __name__ == "__main__":
-          main()
-    python/aug25/benchmark_runner.py: |
-      import argparse
-      import json
-      import gzip
-      import os
-      import requests
-      import time
-      import sys
-      import importlib.util
-      from pathlib import Path
-      from datetime import datetime, timezone
-      import numpy as np
-      from collections import Counter
-      from tqdm import tqdm
-
-      import _sep1
-      from aug25.equality import are_equivalent_for_state
-      from aug25.common_interface import RangeSet
-
-      # --- Helper Functions (from former example_js.py) ---
-
-      def load_or_download_gpt2_vocab(cache_dir, file_name, url):
-          cache_dir = Path(cache_dir)
-          cache_dir.mkdir(parents=True, exist_ok=True)
-          cache_path = cache_dir / file_name
-          if not cache_path.exists():
-              print(f"Downloading GPT-2 vocab from: {url}")
-              response = requests.get(url)
-              response.raise_for_status()
-              with open(cache_path, 'w', encoding='utf-8') as f:
-                  f.write(response.text)
-
-          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
-
-          # Exclude tokens longer than 5
-          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
-
-          return vocab_map
-
-      def greedy_tokenizer(text_bytes, id_to_token):
-          # Build a Trie for fast prefix matching.
-          # The key '<ID>' stores the token ID for a complete token.
-          trie_root = {}
-          for token_id, token_bytes in id_to_token.items():
-              node = trie_root
-              for byte_val in token_bytes:
-                  node = node.setdefault(byte_val, {})
-              node['<ID>'] = token_id
-
-          token_ids = []
-          pos = 0
-          while pos < len(text_bytes):
-              # Find the longest possible token match starting at the current position.
-              node = trie_root
-              longest_match_id = -1
-              longest_match_len = 0
-              
-              # Traverse the Trie with bytes from the current position.
-              for i in range(len(text_bytes) - pos):
-                  current_byte = text_bytes[pos + i]
-                  if current_byte in node:
-                      node = node[current_byte]
-                      if '<ID>' in node:
-                          # Found a valid token, record it and keep searching for a longer one.
-                          longest_match_id = node['<ID>']
-                          longest_match_len = i + 1
-                  else:
-                      # No further matches possible from this prefix.
-                      break
-              
-              if longest_match_len > 0:
-                  token_ids.append(longest_match_id)
-                  pos += longest_match_len
-              else:
-                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-          return token_ids
-
-      def load_competitor_model(competitor_path: Path):
-          """Dynamically loads the 'Model' class from a Python file."""
-          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
-          module_name = ".".join(competitor_path.with_suffix('').parts)
-          spec = importlib.util.spec_from_file_location(module_name, competitor_path)
-          if spec is None or spec.loader is None:
-              raise ImportError(f"Could not load spec for module at {competitor_path}")
-          module = importlib.util.module_from_spec(spec)
-          sys.modules[module_name] = module
-          spec.loader.exec_module(module)
-          
-          if not hasattr(module, 'Model'):
-              raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
-          
-          return getattr(module, 'Model')
-
-      def print_model_statistics(model, model_name: str):
-          """Analyzes and prints statistics about the loaded graph model."""
-          print(f"\n--- Statistics for {model_name} ---")
-
-          if not hasattr(model, 'arena') or not model.arena:
-              print("  - Model has no arena or is empty. Cannot compute stats.")
-              return
-
-          num_nodes = len(model.arena)
-          num_roots = len(model.roots_map)
-          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
-
-          print(f"  - Roots: {num_roots}")
-          print(f"  - Nodes: {num_nodes}")
-          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
-
-          # Detect model type by inspecting the first child edge of the first node with children
-          is_precompute3 = False
-          for node_data in model.arena.values():
-              children = node_data.get("children")
-              if children:
-                  edge_key, _ = children[0]
-                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
-                  if isinstance(edge_key[1], RangeSet):
-                       is_precompute3 = True
-                  break
-          
-          model_type = "Precompute3" if is_precompute3 else "Precompute2"
-          print(f"  - Detected Model Type: {model_type}")
-
-          pops = []
-          fan_outs = []
-          llm_rs_sizes = []
-          state_rs_sizes = [] # precompute3 only
-
-          if is_precompute3:
-              total_edge_groups = 0
-              total_dest_edges = 0
-              for node_data in model.arena.values():
-                  children = node_data.get("children", [])
-                  fan_outs.append(len(children))
-                  total_edge_groups += len(children)
-                  for (pop, llm_rs), dests in children:
-                      pops.append(pop)
-                      if llm_rs.intervals:
-                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
-                      total_dest_edges += len(dests)
-                      for _, state_bv in dests:
-                          if state_bv:
-                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
-              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
-              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
-
-          else: # Precompute2
-              total_edge_groups = 0
-              total_dest_edges = 0
-              for node_data in model.arena.values():
-                  children = node_data.get("children", [])
-                  fan_outs.append(len(children))
-                  total_edge_groups += len(children)
-                  for (pop, _), dests in children:
-                      pops.append(pop)
-                      total_dest_edges += len(dests)
-                      for _, llm_rs in dests:
-                          if llm_rs.intervals:
-                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
-              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
-              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
-
-          def print_dist(name, data):
-              if not data:
-                  print(f"  - {name} Distribution: N/A (no data)")
-                  return
-              arr = np.array(data)
-              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
-              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
-
-          print_dist("Pop counts", pops)
-          print_dist("Node fan-out", fan_outs)
-          print_dist("LLM RangeSet sizes", llm_rs_sizes)
-          if is_precompute3:
-              print_dist("State RangeSet sizes", state_rs_sizes)
-          print("-" * 20)
-
-      def run_benchmark(args):
-          """Main benchmark logic."""
-          print("--- Setting up benchmark environment ---")
-
-          # 1. Load pre-compiled GrammarConstraint
-          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
-          # Read the gzipped JSON into a string and construct the GrammarConstraint using the
-          # available from_json_string(...) API.
-          p = str(args.constraint_file)
-          if p.endswith('.gz'):
-              with gzip.open(p, 'rt', encoding='utf-8') as f:
-                  constraint_json_str = f.read()
-          else:
-              # Fallback: if the file is plain JSON, read it directly.
-              constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
-          grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
-
-          # 2. Extract vocabulary for tokenizer
-          id_to_token = grammar_constraint.get_id_to_token_map()
-
-          # 4. Load competitor model
-          print(f"Loading competitor model from: {args.competitor}")
-          CompetitorModel = load_competitor_model(args.competitor)
-          
-          t_start_load = time.perf_counter()
-          full_constraint_json_str = grammar_constraint.to_json_string()
-          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
-          load_time = time.perf_counter() - t_start_load
-          print(f"Competitor model loaded in {load_time:.4f} seconds.")
-
-          if args.print_stats:
-              print_model_statistics(competitor_model, args.competitor.name)
-
-          # 5. Equivalence Check
-          print(f"Loading reference model from: {args.reference}")
-          ReferenceModel = load_competitor_model(args.reference)
-          # All models are loaded from precompute3 JSON for this benchmark suite.
-          reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
-
-          if args.print_stats:
-              print_model_statistics(reference_model, args.reference.name)
-
-          print(f"Running equivalence check against reference model: {args.reference.name}")
-          
-          equivalence_passed = True
-          equivalence_details = "All tested states are equivalent."
-
-          ENABLE_EQUIVALENCE_TEST = False
-          if ENABLE_EQUIVALENCE_TEST:
-              # Check that root sets are the same before proceeding
-              ref_roots = set(reference_model.roots_map.keys())
-              comp_roots = set(competitor_model.roots_map.keys())
-              if ref_roots != comp_roots:
-                  equivalence_passed = False
-                  equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-              else:
-                  sorted_roots = sorted(list(ref_roots))
-                  total_roots = len(sorted_roots)
-                  print(f"Checking equivalence across {total_roots} tokenizer states...")
-                  for i, sid in enumerate(sorted_roots):
-                      # Progress indicator
-                      if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
-                          print(f"  ... verified {i+1}/{total_roots} states", end='\r')
-
-                      passed, details = are_equivalent_for_state(
-                          reference_model, reference_model.get_root(sid),
-                          competitor_model, competitor_model.get_root(sid),
-                          verbose=False
-                      )
-                      if not passed:
-                          print() # Newline to clear the progress indicator
-                          equivalence_passed = False
-                          equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                          break
-                  if equivalence_passed:
-                      print() # Final newline after progress indicator
-
-              if equivalence_passed:
-                  print("✅ Equivalence check passed.")
-              else:
-                  print(f"❌ Equivalence check failed: {equivalence_details}")
-
-          # 6. Prepare for benchmarking loop
-          print(f"Loading and tokenizing code from: {args.code}")
-          code_bytes = args.code.read_bytes()
-          token_ids = greedy_tokenizer(code_bytes, id_to_token)
-          print(f"Tokenized into {len(token_ids)} tokens.")
-
-          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
-          timings = []
-          mask_correctness_passed = True
-          mask_correctness_details = "All masks matched the reference implementation."
-          mask_mismatch_indices = []
-
-          # 7. Run benchmark loop
-          print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
-          progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
-          for i, token_id in progress_bar:
-              # Get the reference mask to check correctness (if enabled)
-              if args.verify_masks:
-                  progress_bar.set_postfix_str("get_mask (ref)")
-                  reference_mask_np = constraint_state.get_mask()
-                  if not reference_mask_np[token_id]:
-                      # This indicates an issue with the grammar or tokenizer, not the competitor.
-                      print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
-                      sys.exit(1)
-
-              # Get the state map for the competitor
-              progress_bar.set_postfix_str("filtered_state_gss_map")
-              state_to_gss = constraint_state.filtered_state_gss_map()
-
-              # --- TIMED SECTION ---
-              progress_bar.set_postfix_str("get_mask (competitor)")
-              t_start_mask = time.perf_counter()
-              competitor_mask = competitor_model.get_mask(state_to_gss)
-              t_end_mask = time.perf_counter()
-              timings.append(t_end_mask - t_start_mask)
-              # --- END TIMED SECTION ---
-
-              # Verify the competitor's mask (if enabled)
-              if args.verify_masks:
-                  progress_bar.set_postfix_str("Verifying mask")
-                  # This check is expensive but crucial for validation
-                  ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
-                  comp_indices = set(competitor_mask.to_indices())
-                  if ref_indices != comp_indices:
-                      mask_correctness_passed = False
-                      mask_mismatch_indices.append(i)
-
-              # Advance the state
-              progress_bar.set_postfix_str("commit")
-              constraint_state.commit(token_id)
-
-          if not mask_correctness_passed:
-              mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
-              print(f"\n❌ {mask_correctness_details}")
-
-          print("--- Benchmark finished ---")
-
-          # 8. Compile and save results
-          if timings:
-              p = np.percentile(timings, [50, 90, 99])
-              summary_stats = {
-                  "count": len(timings),
-                  "mean": float(np.mean(timings)),
-                  "stddev": float(np.std(timings)),
-                  "min": float(np.min(timings)),
-                  "max": float(np.max(timings)),
-                  "p50": float(p[0]),
-                  "p90": float(p[1]),
-                  "p99": float(p[2]),
-              }
-          else:
-              summary_stats = {}
-
-          output_data = {
-              "competitor_script": str(args.competitor),
-              "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-              "inputs": {
-                  "grammar_file": str(args.constraint_file),
-                  "code_file": str(args.code),
-              },
-              "results": {
-                  "load_time_seconds": load_time,
-                  "equivalence_check": {
-                      "passed": equivalence_passed,
-                      "details": equivalence_details,
-                  },
-                  "mask_correctness_check": {
-                      "enabled": args.verify_masks,
-                      "passed": mask_correctness_passed,
-                      "details": mask_correctness_details,
-                      "mismatch_indices": mask_mismatch_indices,
-                  },
-                  "get_mask_timings_seconds": timings,
-                  "summary_stats": summary_stats,
-              }
-          }
-
-          # Determine output path
-          if args.output:
-              output_path = Path(args.output)
-              if output_path.is_dir():
-                  output_path = output_path / f"{args.competitor.stem}_results.json"
-          else:
-              output_path = Path(f"{args.competitor.stem}_results.json")
-          
-          output_path.parent.mkdir(parents=True, exist_ok=True)
-          with open(output_path, 'w') as f:
-              json.dump(output_data, f, indent=2)
-          
-          print(f"\nBenchmark results saved to: {output_path}")
-
-
-      def main():
-          parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
-          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
-          parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
-          parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
-          parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
-          parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
-          
-          parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
-                              help="Disable correctness verification of masks at each step (improves benchmark purity).")
-          parser.add_argument('--print-stats', action='store_true',
-                              help="Print detailed statistics about the loaded models before running the benchmark.")
-          parser.set_defaults(verify_masks=True)
-
-          args = parser.parse_args()
-
-          for p in [args.constraint_file, args.code, args.competitor, args.reference]:
-              if not p.exists():
-                  parser.error(f"File not found: {p}")
-
-          run_benchmark(args)
-
-      if __name__ == "__main__":
-          main()
-    python/aug25/common_interface.py: |
-      from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
-      from dataclasses import dataclass
-      import bisect
-
-      class GraphProvider:
-          def get_root(self, state_id: int) -> int:
-              raise NotImplementedError
-          def is_end(self, node: int) -> bool:
-              raise NotImplementedError
-          def iter_edges(self, node: int, token: int):
-              """
-              Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
-              Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
-              """
-              raise NotImplementedError
-
-      @dataclass(frozen=True, slots=True)
-      class RangeSet:
-          """
-          Efficient, normalized (sorted, disjoint, inclusive) intervals for large, sparse token sets.
-          Internally represented as a tuple of (start, end) pairs, both inclusive.
-          """
-          intervals: Tuple[Tuple[int, int], ...]
-
-          @staticmethod
-          def empty() -> "RangeSet":
-              return RangeSet(())
-
-          @staticmethod
-          def from_ranges(ranges: Iterable[Sequence[int]]) -> "RangeSet":
-              normalized = RangeSet._merge_unsorted(ranges)
-              return RangeSet(tuple(normalized))
-
-          @staticmethod
-          def from_indices(indices: Iterable[int]) -> "RangeSet":
-              ranges = [(x, x) for x in indices]
-              normalized = RangeSet._merge_unsorted(ranges)
-              return RangeSet(tuple(normalized))
-
-          @staticmethod
-          def from_json(ranges_json: Optional[List[List[int]]]) -> "RangeSet":
-              if not ranges_json:
-                  return RangeSet.empty()
-              return RangeSet.from_ranges(ranges_json)
-
-          def is_empty(self) -> bool:
-              return not self.intervals
-
-          def __bool__(self) -> bool:
-              return not self.is_empty()
-
-          def contains(self, x: int) -> bool:
-              a = self.intervals
-              if not a:
-                  return False
-              starts = [s for s, _ in a]
-              i = bisect.bisect_right(starts, x) - 1
-              if i < 0:
-                  return False
-              s, e = a[i]
-              return s <= x <= e
-
-          def union(self, other: "RangeSet") -> "RangeSet":
-              if self.is_empty(): return other
-              if other.is_empty(): return self
-              merged: List[Tuple[int, int]] = []
-              i, j = 0, 0
-              a, b = self.intervals, other.intervals
-              def append_or_merge(start: int, end: int) -> None:
-                  if not merged:
-                      merged.append((start, end))
-                      return
-                  ps, pe = merged[-1]
-                  if start <= pe + 1:
-                      merged[-1] = (ps, max(pe, end))
-                  else:
-                      merged.append((start, end))
-              while i < len(a) and j < len(b):
-                  if a[i][0] <= b[j][0]:
-                      append_or_merge(a[i][0], a[i][1]); i += 1
-                  else:
-                      append_or_merge(b[j][0], b[j][1]); j += 1
-              while i < len(a):
-                  append_or_merge(a[i][0], a[i][1]); i += 1
-              while j < len(b):
-                  append_or_merge(b[j][0], b[j][1]); j += 1
-              return RangeSet(tuple(merged))
-
-          def intersection(self, other: "RangeSet") -> "RangeSet":
-              if self.is_empty() or other.is_empty(): return RangeSet.empty()
-              i, j = 0, 0
-              a, b = self.intervals, other.intervals
-              out: List[Tuple[int, int]] = []
-              while i < len(a) and j < len(b):
-                  s1, e1 = a[i]; s2, e2 = b[j]
-                  start = max(s1, s2); end = min(e1, e2)
-                  if start <= end: out.append((start, end))
-                  if e1 < e2: i += 1
-                  else: j += 1
-              return RangeSet(tuple(out)) if out else RangeSet.empty()
-
-          def to_json(self) -> List[List[int]]:
-              return [[s, e] for s, e in self.intervals]
-
-          def __str__(self) -> str:
-              if self.is_empty(): return "{}"
-              parts = [f"{s}-{e}" if s != e else str(s) for s, e in self.intervals]
-              return "{" + ", ".join(parts) + "}"
-
-          @staticmethod
-          def _merge_unsorted(ranges: Iterable[Sequence[int]]) -> List[Tuple[int, int]]:
-              items = sorted([(int(s), int(e)) for s, e in ranges if s is not None and e is not None])
-              if not items: return []
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1: ce = max(ce, ne)
-                  else: merged.append((cs, ce)); cs, ce = ns, ne
-              merged.append((cs, ce))
-              return merged
-    python/aug25/equality.py: |
-      from typing import Dict, List, Tuple, Optional, Iterable, Set, Deque
-      from .common_interface import GraphProvider, RangeSet
-      import collections
-
-      # The alphabet for normalized graphs: labels are pairs (k, sid)
-      Label = Tuple[int, int]  # (k, state_id)
-      NormEdge = Tuple[Label, int]  # (label, dest_node_index)
-
-      class TokenNormalizer:
-          """
-          Builds token-specific normalized edges (epsilon-free) on demand.
-          """
-          def __init__(self, provider: GraphProvider, token: int, max_closure_expansions: int = 200000):
-              self.provider = provider
-              self.token = int(token)
-              self._accept_cache: Dict[int, bool] = {}
-              self._edges_cache: Dict[int, List[NormEdge]] = {}
-              self._max_closure_expansions = max(1, int(max_closure_expansions))
-
-          def accepting(self, node: int) -> bool:
-              if node in self._accept_cache:
-                  return self._accept_cache[node]
-              # BFS over None-edges only
-              q: Deque[int] = collections.deque([node])
-              seen: Set[int] = set()
-              accepts = False
-              while q:
-                  u = q.popleft()
-                  if u in seen:
-                      continue
-                  seen.add(u)
-                  if self.provider.is_end(u):
-                      accepts = True
-                      break
-                  for pop, sid_opt, v in self.provider.iter_edges(u, self.token):
-                      if sid_opt is None:
-                          q.append(v)
-              self._accept_cache[node] = accepts
-              return accepts
-
-          def out_edges(self, node: int) -> List[NormEdge]:
-              if node in self._edges_cache:
-                  return self._edges_cache[node]
-
-              out: List[NormEdge] = []
-              expansions = 0
-              stack: List[Tuple[int, int]] = [(node, 0)]
-              seen: Set[Tuple[int, int]] = set()
-
-              while stack:
-                  u, ksum = stack.pop()
-                  key = (u, ksum)
-                  if key in seen:
-                      continue
-                  seen.add(key)
-
-                  for p, sid_opt, v in self.provider.iter_edges(u, self.token):
-                      if sid_opt is not None:
-                          label: Label = (ksum + p, sid_opt)
-                          out.append((label, v))
-
-                  for p, sid_opt, v in self.provider.iter_edges(u, self.token):
-                      if sid_opt is None:
-                          new_ksum = ksum + p
-                          stack.append((v, new_ksum))
-                          expansions += 1
-                          if expansions > self._max_closure_expansions:
-                              raise RuntimeError(f"Exceeded maximum None-closure expansions for token {self.token}")
-
-              dedup: Dict[Tuple[int, int, int], None] = {}
-              norm_edges: List[NormEdge] = []
-              for (label, dest) in out:
-                  k, sid = label
-                  key = (k, sid, dest)
-                  if key not in dedup:
-                      dedup[key] = None
-                      norm_edges.append((label, dest))
-
-              self._edges_cache[node] = norm_edges
-              return norm_edges
-
-      def nfa_equivalence_on_labels(
-          normA: TokenNormalizer,
-          rootA: int,
-          normB: TokenNormalizer,
-          rootB: int,
-          max_product_states: int = 200000,
-      ) -> Tuple[bool, Optional[List[Label]]]:
-          def subset_accepts(nodes: Set[int], norm: TokenNormalizer) -> bool:
-              return any(norm.accepting(n) for n in nodes)
-
-          def next_subset(nodes: Set[int], norm: TokenNormalizer, label: Label) -> Set[int]:
-              return {dest for n in nodes for lbl, dest in norm.out_edges(n) if lbl == label}
-
-          def labels_from_subset(nodes: Set[int], norm: TokenNormalizer) -> Set[Label]:
-              return {lbl for n in nodes for lbl, _ in norm.out_edges(n)}
-
-          startA: frozenset = frozenset({rootA})
-          startB: frozenset = frozenset({rootB})
-          ParentKey = Tuple[frozenset, frozenset]
-          parent: Dict[ParentKey, Tuple[Optional[ParentKey], Optional[Label]]] = {}
-
-          def _reconstruct_path(to_key: ParentKey) -> List[Label]:
-              seq: List[Label] = []
-              cur: Optional[ParentKey] = to_key
-              while cur is not None:
-                  par, edge_lab = parent.get(cur, (None, None))
-                  if edge_lab is not None:
-                      seq.append(edge_lab)
-                  cur = par
-              seq.reverse()
-              return seq
-          parent[(startA, startB)] = (None, None)
-
-          visited: Set[ParentKey] = set()
-          q: Deque[ParentKey] = collections.deque([(startA, startB)])
-
-          if subset_accepts(set(startA), normA) != subset_accepts(set(startB), normB):
-              return (False, [])
-
-          explored = 0
-          while q:
-              SA, SB = q.popleft()
-              if (SA, SB) in visited:
-                  continue
-              visited.add((SA, SB))
-              explored += 1
-              if explored > max_product_states:
-                  raise RuntimeError("Equivalence check exceeded product state limit")
-
-              labels_A = labels_from_subset(set(SA), normA)
-              labels_B = labels_from_subset(set(SB), normB)
-
-              if labels_A != labels_B:
-                  diff_labels = (labels_A - labels_B) or (labels_B - labels_A)
-                  witness_step = next(iter(diff_labels))
-                  seq = _reconstruct_path((SA, SB))
-                  seq.append(witness_step)
-                  return (False, seq)
-
-              for lab in labels_A:
-                  NSA = frozenset(next_subset(set(SA), normA, lab))
-                  NSB = frozenset(next_subset(set(SB), normB, lab))
-                  key = (NSA, NSB)
-                  if key not in parent:
-                      parent[key] = ((SA, SB), lab)
-
-                  if subset_accepts(set(NSA), normA) != subset_accepts(set(NSB), normB):
-                      return (False, _reconstruct_path(key))
-
-                  if key not in visited:
-                      q.append(key)
-
-          return (True, None)
-
-      def collect_interesting_tokens(provider: GraphProvider, root: int, arena_nodes: Iterable[int]) -> List[int]:
-          # For simplicity, return just [0] or a small set. Replace with full range boundary extraction if needed.
-          return [0]
-
-
-      def are_equivalent_for_state(provider_a: GraphProvider, root_a: int, provider_b: GraphProvider, root_b: int,
-                                   tokens: Optional[List[int]] = None, verbose: bool = False) -> Tuple[bool, Optional[str]]:
-          if tokens is None:
-              # This is a placeholder. A real implementation would need a way to inspect all edge BVs.
-              tokens = [0, 1, 10, 100, 1000]
-
-          for token in tokens:
-              try:
-                  norm_a = TokenNormalizer(provider_a, token)
-                  norm_b = TokenNormalizer(provider_b, token)
-                  eq, witness = nfa_equivalence_on_labels(norm_a, root_a, norm_b, root_b)
-                  if not eq:
-                      msg = f"Equivalence failed for token {token}"
-                      if witness is not None:
-                          seq_str = " -> ".join(f"(k={k}, sid={sid})" for (k, sid) in witness) if witness else "(empty)"
-                          msg += f". Counterexample label sequence: {seq_str}"
-                      return False, msg
-              except Exception as e:
-                  return False, f"Equivalence check raised an exception for token {token}: {e}"
-          return True, None
-    python/aug25/optimizer_general.py: |
-      from typing import Any, Dict, List, Tuple, Optional, Iterable
-      from .common_interface import GraphProvider, RangeSet
-
-      class CompEdge:
-          __slots__ = ("pop", "sid", "dest", "bv")
-          def __init__(self, pop: int, sid: Optional[int], dest: int, bv: RangeSet):
-              self.pop = pop
-              self.sid = sid
-              self.dest = dest
-              self.bv = bv
-
-      class CompressedTrie:
-          def __init__(self, roots: Dict[int,int], ends: List[bool], edges: List[List[CompEdge]]):
-              self.roots = roots
-              self.ends = ends
-              self.edges = edges
-              self.node_count = len(ends)
-              self.edge_count = sum(len(e) for e in edges)
-
-      def optimize(provider: GraphProvider, roots_map: Dict[int, int]) -> CompressedTrie:
-          """
-          Optimizes a graph provided via a common interface using bisimulation-style quotienting.
-          Note: This requires the provider to expose its raw arena for full graph inspection,
-          which is a limitation of the per-token `iter_edges` interface for this kind of optimization.
-          We assume the provider has an `.arena` attribute (like `Precompute2`).
-          """
-          if not hasattr(provider, 'arena'):
-              print("Warning: optimizer_general.py requires a provider with an .arena attribute. Skipping optimization.")
-              all_nodes = list(roots_map.values()) # A guess
-              ends = [provider.is_end(u) for u in all_nodes]
-              edges = [[] for _ in all_nodes]
-              return CompressedTrie(roots_map, ends, edges)
-
-          arena = provider.arena
-          print("Optimizing graph using bisimulation-style quotient...")
-
-          node_ids_sorted = sorted(int(i) for i in arena.keys())
-          dense_of: Dict[int, int] = {old: idx for idx, old in enumerate(node_ids_sorted)}
-          N: int = len(node_ids_sorted)
-
-          ends: List[bool] = [False] * N
-          raw_edges: List[List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]] = [[] for _ in range(N)]
-
-          for old_idx, node in arena.items():
-              u = dense_of[int(old_idx)]
-              ends[u] = bool((node.get("value", {}) or {}).get("end", False))
-              for (p, s), dest_map in node.get("children", []):
-                  for v_old, edge_bv in dest_map:
-                      if int(v_old) not in dense_of: continue
-                      v = dense_of[int(v_old)]
-                      raw_edges[u].append((p, s, v, edge_bv.intervals))
-
-          prev_class: List[int] = [1 if e else 0 for e in ends]
-
-          def aggregate_edges_for_node(u: int, cls: List[int]) -> List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]:
-              aggr: Dict[Tuple[int, Optional[int], int], List[Tuple[int, int]]] = {}
-              for (p, s, v, intervals) in raw_edges[u]:
-                  dcls = cls[v]
-                  key = (p, s, dcls)
-                  if key not in aggr: aggr[key] = []
-                  aggr[key].extend(intervals)
-
-              items: List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]] = []
-              for (p, s, dcls), ranges in aggr.items():
-                  merged = RangeSet._merge_unsorted(ranges)
-                  items.append((p, s, dcls, tuple(merged)))
-              items.sort()
-              return items
-
-          for it in range(40):
-              sig_to_id: Dict[Tuple[bool, Tuple], int] = {}
-              new_class: List[int] = [0] * N
-              next_id = 0
-              changes = 0
-
-              for u in range(N):
-                  items = aggregate_edges_for_node(u, prev_class)
-                  sig = (ends[u], tuple(items))
-                  cid = sig_to_id.get(sig)
-                  if cid is None:
-                      cid = next_id
-                      sig_to_id[sig] = cid
-                      next_id += 1
-                  new_class[u] = cid
-                  if new_class[u] != prev_class[u]:
-                      changes += 1
-
-              prev_class = new_class
-              if changes == 0:
-                  break
-
-          num_classes = max(prev_class) + 1 if prev_class else 0
-          q_ends: List[bool] = [False] * num_classes
-          q_edges: List[List[CompEdge]] = [[] for _ in range(num_classes)]
-          class_built: List[bool] = [False] * num_classes
-
-          q_roots: Dict[int, int] = {}
-          for sid, old_root in roots_map.items():
-              if int(old_root) in dense_of:
-                  q_roots[int(sid)] = prev_class[dense_of[int(old_root)]]
-
-          for u in range(N):
-              cid = prev_class[u]
-              if class_built[cid]:
-                  continue
-              class_built[cid] = True
-              q_ends[cid] = ends[u]
-
-              items = aggregate_edges_for_node(u, prev_class)
-              out: List[CompEdge] = []
-              for (p, s, dcls, intervals) in items:
-                  rs = RangeSet(tuple(intervals))
-                  out.append(CompEdge(pop=p, sid=s, dest=dcls, bv=rs))
-              q_edges[cid] = out
-
-          return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
-  prev_file_contents:
-    python/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # comparing them against a reference implementation, and generating analysis plots.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-      #                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 2 ]; then
-          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
-          echo "Error: At least two arguments are required: a reference model and one competitor model."
-          exit 1
-      fi
-
-      REFERENCE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      # Check that all provided files exist
-      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$CONSTRAINT_FILE" ]; then
-          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Reference Model: $REFERENCE_MODEL"
-      echo "Competitors: ${COMPETITORS[*]}"
-      echo "Constraint File: $CONSTRAINT_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for competitor in "${COMPETITORS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$competitor")"
-          python -m aug25.benchmark_runner \
-              --code "$CODE_FILE" \
-              --constraint-file "$CONSTRAINT_FILE" \
-              --reference "$REFERENCE_MODEL" \
-              --competitor "$competitor" \
-              --output "$RESULTS_DIR"
-          echo ">>> Finished benchmark for: $(basename "$competitor")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      python -m aug25.benchmark_analyzer \
-          "${RESULTS_DIR}"/*.json \
-          --output-dir "$PLOTS_DIR"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
-    python/aug25/__init__.py: ''
-    python/aug25/benchmark_analyzer.py: |
-      import argparse
-      import json
-      import os
-      from pathlib import Path
-      import pandas as pd
-      import matplotlib.pyplot as plt
-      import seaborn as sns
-
-      def analyze_results(result_files: list[Path], output_dir: Path):
-          """
-          Loads benchmark results from JSON files, computes statistics, and generates plots.
-          """
-          all_data = []
           commit_timings_raw = None
           for file_path in result_files:
               with open(file_path, 'r') as f:
@@ -2216,6 +1134,1159 @@ local_system:
               q_edges[cid] = out
 
           return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
+  prev_file_contents:
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # comparing them against a reference implementation, and generating analysis plots.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ../src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="../src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 2 ]; then
+          echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
+          echo "Error: At least two arguments are required: a reference model and one competitor model."
+          exit 1
+      fi
+
+      REFERENCE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      # Check that all provided files exist
+      for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Model: $REFERENCE_MODEL"
+      echo "Competitors: ${COMPETITORS[*]}"
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for competitor in "${COMPETITORS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$competitor")"
+          python -m aug25.benchmark_runner \
+              --code "$CODE_FILE" \
+              --constraint-file "$CONSTRAINT_FILE" \
+              --reference "$REFERENCE_MODEL" \
+              --competitor "$competitor" \
+              --output "$RESULTS_DIR"
+          echo ">>> Finished benchmark for: $(basename "$competitor")"
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      python -m aug25.benchmark_analyzer \
+          "${RESULTS_DIR}"/*.json \
+          --output-dir "$PLOTS_DIR"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
+    python/aug25/__init__.py: ''
+    python/aug25/benchmark_analyzer.py: |
+      import argparse
+      import json
+      import os
+      from pathlib import Path
+      import pandas as pd
+      import matplotlib.pyplot as plt
+      import seaborn as sns
+
+      def analyze_results(result_files: list[Path], output_dir: Path):
+          """
+          Loads benchmark results from JSON files, computes statistics, and generates plots.
+          """
+          all_data = []
+          commit_timings_raw = None
+          for file_path in result_files:
+              with open(file_path, 'r') as f:
+                  data = json.load(f)
+                  competitor_name = Path(data["competitor_script"]).stem
+                  timings = data["results"]["get_mask_timings_seconds"]
+                  if commit_timings_raw is None:
+                      commit_timings_raw = data["results"].get("commit_timings_seconds")
+
+                  mismatch_indices = set(
+                      data["results"]
+                      .get("mask_correctness_check", {})
+                      .get("mismatch_indices", [])
+                  )
+                  for i, timing in enumerate(timings):
+                      all_data.append({
+                          "competitor": competitor_name,
+                          "token_index": i,
+                          "time_sec": timing,
+                          "equivalence_passed": data["results"]["equivalence_check"]["passed"],
+                          "mask_mismatch": i in mismatch_indices
+                      })
+
+          if not all_data:
+              print("No data to analyze.")
+              return
+
+          df = pd.DataFrame(all_data)
+
+          # Create commit DataFrame
+          df_commit = pd.DataFrame()
+          if commit_timings_raw:
+              df_commit = pd.DataFrame({
+                  "token_index": range(len(commit_timings_raw)),
+                  "time_sec": commit_timings_raw
+              })
+
+          # --- Print Summary Statistics ---
+          print("--- Benchmark Summary ---")
+          summary = df.groupby('competitor')['time_sec'].agg(
+              ['mean', 'std', 'min', 'median', 'max', 'count']
+          ).rename(columns={'median': 'p50'})
+
+          # Add percentiles
+          percentiles = df.groupby('competitor')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+          percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
+          summary = summary.join(percentiles)
+
+          # Add equivalence check info
+          equiv_status = df.groupby('competitor')['equivalence_passed'].first()
+          summary['equivalent'] = equiv_status.map({True: '✅', False: '❌'})
+
+          # Reorder columns for display
+          summary = summary[['equivalent', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+          
+          # Format for printing
+          summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000 # convert to ms
+          summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'count'] else c)
+
+          print(summary.to_string(float_format="%.4f"))
+          print("\n" + "✅ = Equivalent to reference, ❌ = Not equivalent")
+
+          # --- Generate Plots ---
+          output_dir.mkdir(parents=True, exist_ok=True)
+          print(f"\nSaving plots to {output_dir}...")
+
+          # 1. Line plot of timings per token
+          plt.figure(figsize=(15, 8))
+          ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8, linewidth=1.2)
+
+          mismatch_df = df[df['mask_mismatch']]
+          plot_title = 'get_mask() Performance per Token'
+
+          if not mismatch_df.empty:
+              plot_title += ' (X marks mask mismatches)'
+              
+              # Get hue order from the lineplot's legend to ensure colors match
+              handles, labels = ax.get_legend_handles_labels()
+              # The first entry is the title of the legend, so we skip it.
+              competitor_labels = labels[1:1+len(df['competitor'].unique())]
+
+              sns.scatterplot(
+                  data=mismatch_df,
+                  x='token_index',
+                  y='time_sec',
+                  hue='competitor',
+                  hue_order=competitor_labels,
+                  style='mask_mismatch',
+                  markers=['X'],
+                  s=150,
+                  edgecolor='black',
+                  linewidth=1,
+                  legend=False,
+                  ax=ax,
+                  zorder=5 # Ensure markers are on top of lines
+              )
+
+          ax.set_xlabel('Token Index in Sequence')
+          ax.set_ylabel('Time (seconds)')
+          ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+          
+          # Linear scale
+          ax.set_yscale('linear')
+          ax.set_title(plot_title)
+          linear_path = output_dir / "timings_per_token_linear.png"
+          plt.savefig(linear_path, dpi=300, bbox_inches='tight')
+          print(f"Saved linear scale plot to {linear_path}")
+
+          # Log scale
+          ax.set_yscale('log')
+          ax.set_title(plot_title + ' (Log Scale)')
+          log_path = output_dir / "timings_per_token_log.png"
+          plt.savefig(log_path, dpi=300, bbox_inches='tight')
+          print(f"Saved log scale plot to {log_path}")
+          plt.close()
+
+          # 2. Box plot of timing distributions
+          plt.figure(figsize=(12, 7))
+          # Convert to ms for better readability on the plot
+          df_ms = df.copy()
+          df_ms['time_ms'] = df_ms['time_sec'] * 1000
+          sns.boxplot(data=df_ms, x='competitor', y='time_ms')
+          plt.title('Distribution of get_mask() Timings')
+          plt.xlabel('Competitor')
+          plt.ylabel('Time (milliseconds)')
+          plt.xticks(rotation=15)
+          plt.grid(True, axis='y', linestyle='--', linewidth=0.5)
+          box_path = output_dir / "timings_distribution_boxplot.png"
+          plt.savefig(box_path, dpi=300, bbox_inches='tight')
+          print(f"Saved box plot to {box_path}")
+          plt.close()
+
+          # 3. Line plot of commit timings per token
+          if not df_commit.empty:
+              plt.figure(figsize=(15, 8))
+              ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=1.2)
+
+              ax_commit.set_xlabel('Token Index in Sequence')
+              ax_commit.set_ylabel('Time (seconds)')
+              ax_commit.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+              # Linear scale
+              ax_commit.set_yscale('linear')
+              ax_commit.set_title('commit() Performance per Token')
+              commit_linear_path = output_dir / "commit_timings_per_token_linear.png"
+              plt.savefig(commit_linear_path, dpi=300, bbox_inches='tight')
+              print(f"Saved commit linear scale plot to {commit_linear_path}")
+
+              # Log scale
+              ax_commit.set_yscale('log')
+              ax_commit.set_title('commit() Performance per Token (Log Scale)')
+              commit_log_path = output_dir / "commit_timings_per_token_log.png"
+              plt.savefig(commit_log_path, dpi=300, bbox_inches='tight')
+              print(f"Saved commit log scale plot to {commit_log_path}")
+              plt.close()
+
+
+
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze benchmark results for grammar constraint models.")
+          parser.add_argument(
+              "result_paths",
+              nargs='+',
+              help="Paths to benchmark JSON files or directories containing them."
+          )
+          parser.add_argument(
+              "-o", "--output-dir",
+              default="benchmark_plots",
+              help="Directory to save the generated plots."
+          )
+          args = parser.parse_args()
+
+          result_files = []
+          for path_str in args.result_paths:
+              path = Path(path_str)
+              if path.is_dir():
+                  result_files.extend(path.glob("*.json"))
+              elif path.is_file() and path.suffix == '.json':
+                  result_files.append(path)
+
+          if not result_files:
+              print(f"Error: No .json files found in the specified paths.")
+              return
+
+          analyze_results(sorted(list(set(result_files))), Path(args.output_dir))
+
+      if __name__ == "__main__":
+          main()
+    python/aug25/benchmark_runner.py: |
+      import argparse
+      import json
+      import gzip
+      import os
+      import requests
+      import time
+      import sys
+      import importlib.util
+      from pathlib import Path
+      from datetime import datetime, timezone
+      import numpy as np
+      from collections import Counter
+      from tqdm import tqdm
+
+      import _sep1
+      from aug25.equality import are_equivalent_for_state
+      from aug25.common_interface import RangeSet
+
+      # --- Helper Functions (from former example_js.py) ---
+
+      def load_or_download_gpt2_vocab(cache_dir, file_name, url):
+          cache_dir = Path(cache_dir)
+          cache_dir.mkdir(parents=True, exist_ok=True)
+          cache_path = cache_dir / file_name
+          if not cache_path.exists():
+              print(f"Downloading GPT-2 vocab from: {url}")
+              response = requests.get(url)
+              response.raise_for_status()
+              with open(cache_path, 'w', encoding='utf-8') as f:
+                  f.write(response.text)
+
+          vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
+
+          # Exclude tokens longer than 5
+          vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
+
+          return vocab_map
+
+      def greedy_tokenizer(text_bytes, id_to_token):
+          # Build a Trie for fast prefix matching.
+          # The key '<ID>' stores the token ID for a complete token.
+          trie_root = {}
+          for token_id, token_bytes in id_to_token.items():
+              node = trie_root
+              for byte_val in token_bytes:
+                  node = node.setdefault(byte_val, {})
+              node['<ID>'] = token_id
+
+          token_ids = []
+          pos = 0
+          while pos < len(text_bytes):
+              # Find the longest possible token match starting at the current position.
+              node = trie_root
+              longest_match_id = -1
+              longest_match_len = 0
+              
+              # Traverse the Trie with bytes from the current position.
+              for i in range(len(text_bytes) - pos):
+                  current_byte = text_bytes[pos + i]
+                  if current_byte in node:
+                      node = node[current_byte]
+                      if '<ID>' in node:
+                          # Found a valid token, record it and keep searching for a longer one.
+                          longest_match_id = node['<ID>']
+                          longest_match_len = i + 1
+                  else:
+                      # No further matches possible from this prefix.
+                      break
+              
+              if longest_match_len > 0:
+                  token_ids.append(longest_match_id)
+                  pos += longest_match_len
+              else:
+                  raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+          return token_ids
+
+      def load_competitor_model(competitor_path: Path):
+          """Dynamically loads the 'Model' class from a Python file."""
+          # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
+          module_name = ".".join(competitor_path.with_suffix('').parts)
+          spec = importlib.util.spec_from_file_location(module_name, competitor_path)
+          if spec is None or spec.loader is None:
+              raise ImportError(f"Could not load spec for module at {competitor_path}")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[module_name] = module
+          spec.loader.exec_module(module)
+          
+          if not hasattr(module, 'Model'):
+              raise AttributeError(f"Competitor script {competitor_path} must define a 'Model' class.")
+          
+          return getattr(module, 'Model')
+
+      def print_model_statistics(model, model_name: str):
+          """Analyzes and prints statistics about the loaded graph model."""
+          print(f"\n--- Statistics for {model_name} ---")
+
+          if not hasattr(model, 'arena') or not model.arena:
+              print("  - Model has no arena or is empty. Cannot compute stats.")
+              return
+
+          num_nodes = len(model.arena)
+          num_roots = len(model.roots_map)
+          num_end_nodes = sum(1 for i in model.arena if model.is_end(i))
+
+          print(f"  - Roots: {num_roots}")
+          print(f"  - Nodes: {num_nodes}")
+          print(f"  - End nodes: {num_end_nodes} ({num_end_nodes/num_nodes:.2%} of total)")
+
+          # Detect model type by inspecting the first child edge of the first node with children
+          is_precompute3 = False
+          for node_data in model.arena.values():
+              children = node_data.get("children")
+              if children:
+                  edge_key, _ = children[0]
+                  # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
+                  if isinstance(edge_key[1], RangeSet):
+                       is_precompute3 = True
+                  break
+          
+          model_type = "Precompute3" if is_precompute3 else "Precompute2"
+          print(f"  - Detected Model Type: {model_type}")
+
+          pops = []
+          fan_outs = []
+          llm_rs_sizes = []
+          state_rs_sizes = [] # precompute3 only
+
+          if is_precompute3:
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, llm_rs), dests in children:
+                      pops.append(pop)
+                      if llm_rs.intervals:
+                          llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+                      total_dest_edges += len(dests)
+                      for _, state_bv in dests:
+                          if state_bv:
+                              state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+              print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
+
+          else: # Precompute2
+              total_edge_groups = 0
+              total_dest_edges = 0
+              for node_data in model.arena.values():
+                  children = node_data.get("children", [])
+                  fan_outs.append(len(children))
+                  total_edge_groups += len(children)
+                  for (pop, _), dests in children:
+                      pops.append(pop)
+                      total_dest_edges += len(dests)
+                      for _, llm_rs in dests:
+                          if llm_rs.intervals:
+                              llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
+              print(f"  - Edge Groups (pop, sid): {total_edge_groups}")
+              print(f"  - Destination Edges (dest, llm_rs): {total_dest_edges}")
+
+          def print_dist(name, data):
+              if not data:
+                  print(f"  - {name} Distribution: N/A (no data)")
+                  return
+              arr = np.array(data)
+              p = np.percentile(arr, [0, 25, 50, 75, 90, 99, 100])
+              print(f"  - {name} Distribution:\n    - Mean: {arr.mean():.2f}, Std: {arr.std():.2f}\n    - Min: {p[0]:.0f}, 25%: {p[1]:.0f}, Med: {p[2]:.0f}, 75%: {p[3]:.0f}, 90%: {p[4]:.0f}, 99%: {p[5]:.0f}, Max: {p[6]:.0f}")
+
+          print_dist("Pop counts", pops)
+          print_dist("Node fan-out", fan_outs)
+          print_dist("LLM RangeSet sizes", llm_rs_sizes)
+          if is_precompute3:
+              print_dist("State RangeSet sizes", state_rs_sizes)
+          print("-" * 20)
+
+      def run_benchmark(args):
+          """Main benchmark logic."""
+          print("--- Setting up benchmark environment ---")
+          is_builtin_ref = (args.reference == 'builtin')
+
+          # 1. Load pre-compiled GrammarConstraint
+          print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+          # Read the gzipped JSON into a string and construct the GrammarConstraint using the
+          # available from_json_string(...) API.
+          p = str(args.constraint_file)
+          if p.endswith('.gz'):
+              with gzip.open(p, 'rt', encoding='utf-8') as f:
+                  constraint_json_str = f.read()
+          else:
+              # Fallback: if the file is plain JSON, read it directly.
+              constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+          grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
+
+          # 2. Extract vocabulary for tokenizer
+          id_to_token = grammar_constraint.get_id_to_token_map()
+
+          # 4. Load competitor model
+          print(f"Loading competitor model from: {args.competitor}")
+          CompetitorModel = load_competitor_model(args.competitor)
+          
+          t_start_load = time.perf_counter()
+          full_constraint_json_str = grammar_constraint.to_json_string()
+          competitor_model = CompetitorModel.from_json_string(full_constraint_json_str)
+          load_time = time.perf_counter() - t_start_load
+          print(f"Competitor model loaded in {load_time:.4f} seconds.")
+
+          if args.print_stats:
+              print_model_statistics(competitor_model, args.competitor.name)
+
+          # 5. Equivalence Check / Reference Model Setup
+          reference_model = None
+          if is_builtin_ref:
+              print("Using 'builtin' reference (GrammarConstraintState) for mask verification.")
+              # Equivalence check is not possible against builtin.
+              equivalence_passed = True
+              equivalence_details = "N/A (reference is 'builtin')"
+          else:
+              ref_path = Path(args.reference)
+              print(f"Loading reference model from: {ref_path}")
+              ReferenceModel = load_competitor_model(ref_path)
+              # All models are loaded from precompute3 JSON for this benchmark suite.
+              reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+
+              if args.print_stats:
+                  print_model_statistics(reference_model, ref_path.name)
+
+              print(f"Running equivalence check against reference model: {ref_path.name}")
+
+              equivalence_passed = True
+              equivalence_details = "All tested states are equivalent."
+
+              ENABLE_EQUIVALENCE_TEST = False
+              if ENABLE_EQUIVALENCE_TEST:
+                  # Check that root sets are the same before proceeding
+                  ref_roots = set(reference_model.roots_map.keys())
+                  comp_roots = set(competitor_model.roots_map.keys())
+                  if ref_roots != comp_roots:
+                      equivalence_passed = False
+                      equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+                  else:
+                      sorted_roots = sorted(list(ref_roots))
+                      total_roots = len(sorted_roots)
+                      print(f"Checking equivalence across {total_roots} tokenizer states...")
+                      for i, sid in enumerate(sorted_roots):
+                          # Progress indicator
+                          if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                              print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+
+                          passed, details = are_equivalent_for_state(
+                              reference_model, reference_model.get_root(sid),
+                              competitor_model, competitor_model.get_root(sid),
+                              verbose=False
+                          )
+                          if not passed:
+                              print() # Newline to clear the progress indicator
+                              equivalence_passed = False
+                              equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                              break
+                      if equivalence_passed:
+                          print() # Final newline after progress indicator
+
+                  if equivalence_passed:
+                      print("✅ Equivalence check passed.")
+                  else:
+                      print(f"❌ Equivalence check failed: {equivalence_details}")
+
+          # 6. Prepare for benchmarking loop
+          print(f"Loading and tokenizing code from: {args.code}")
+          code_bytes = args.code.read_bytes()
+          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          print(f"Tokenized into {len(token_ids)} tokens.")
+
+          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+          get_mask_timings = []
+          commit_timings = []
+          mask_correctness_passed = True
+          mask_correctness_details = "All masks matched the reference implementation."
+          mask_mismatch_indices = []
+
+          # 7. Run benchmark loop
+          print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+          progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+          for i, token_id in progress_bar:
+              # Get the state map for the competitor. This is needed for all mask calculations.
+              progress_bar.set_postfix_str("filtered_state_gss_map")
+              state_to_gss = constraint_state.filtered_state_gss_map()
+
+              # Get the reference mask to check correctness (if enabled)
+              if args.verify_masks:
+                  progress_bar.set_postfix_str("get_mask (ref)")
+                  if is_builtin_ref:
+                      reference_mask_np = constraint_state.get_mask()
+                      if not reference_mask_np[token_id]:
+                          print(f"\nFATAL: Builtin reference mask forbids token {token_id} at step {i}. Aborting.")
+                          sys.exit(1)
+                  else:
+                      reference_mask_rs = reference_model.get_mask(state_to_gss)
+                      if not reference_mask_rs.contains(token_id):
+                          print(f"\nFATAL: Reference model mask forbids token {token_id} at step {i}. Aborting.")
+                          sys.exit(1)
+
+              # --- TIMED SECTION ---
+              progress_bar.set_postfix_str("get_mask (competitor)")
+              t_start_mask = time.perf_counter()
+              competitor_mask = competitor_model.get_mask(state_to_gss)
+              t_end_mask = time.perf_counter()
+              get_mask_timings.append(t_end_mask - t_start_mask)
+              # --- END TIMED SECTION ---
+
+              # Verify the competitor's mask (if enabled)
+              if args.verify_masks:
+                  progress_bar.set_postfix_str("Verifying mask")
+                  # This check is expensive but crucial for validation
+                  if is_builtin_ref:
+                      ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+                  else:
+                      ref_indices = set(reference_mask_rs.to_indices())
+
+                  comp_indices = set(competitor_mask.to_indices())
+                  if ref_indices != comp_indices:
+                      mask_correctness_passed = False
+                      mask_mismatch_indices.append(i)
+
+              # Advance the state
+              progress_bar.set_postfix_str("commit")
+              t_start_commit = time.perf_counter()
+              constraint_state.commit(token_id)
+              t_end_commit = time.perf_counter()
+              commit_timings.append(t_end_commit - t_start_commit)
+
+          if not mask_correctness_passed:
+              mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
+              print(f"\n❌ {mask_correctness_details}")
+
+          print("--- Benchmark finished ---")
+
+          # 8. Compile and save results
+          if get_mask_timings:
+              p = np.percentile(get_mask_timings, [50, 90, 99])
+              summary_stats = {
+                  "count": len(get_mask_timings),
+                  "mean": float(np.mean(get_mask_timings)),
+                  "stddev": float(np.std(get_mask_timings)),
+                  "min": float(np.min(get_mask_timings)),
+                  "max": float(np.max(get_mask_timings)),
+                  "p50": float(p[0]),
+                  "p90": float(p[1]),
+                  "p99": float(p[2]),
+              }
+          else:
+              summary_stats = {}
+
+          output_data = {
+              "competitor_script": str(args.competitor),
+              "run_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "inputs": {
+                  "grammar_file": str(args.constraint_file),
+                  "code_file": str(args.code),
+              },
+              "results": {
+                  "load_time_seconds": load_time,
+                  "equivalence_check": {
+                      "passed": equivalence_passed,
+                      "details": equivalence_details,
+                  },
+                  "mask_correctness_check": {
+                      "enabled": args.verify_masks,
+                      "passed": mask_correctness_passed,
+                      "details": mask_correctness_details,
+                      "mismatch_indices": mask_mismatch_indices,
+                  },
+                  "get_mask_timings_seconds": get_mask_timings,
+                  "commit_timings_seconds": commit_timings,
+                  "summary_stats": summary_stats,
+              }
+          }
+
+          # Determine output path
+          if args.output:
+              output_path = Path(args.output)
+              if output_path.is_dir():
+                  output_path = output_path / f"{args.competitor.stem}_results.json"
+          else:
+              output_path = Path(f"{args.competitor.stem}_results.json")
+          
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+          with open(output_path, 'w') as f:
+              json.dump(output_data, f, indent=2)
+          
+          print(f"\nBenchmark results saved to: {output_path}")
+
+
+      def main():
+          parser = argparse.ArgumentParser(description="Benchmark a grammar constraint model implementation.")
+          parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+          parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+          parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+          parser.add_argument("-r", "--reference", type=str, required=True, help="Path to the reference model .py file for equivalence checking, or 'builtin' to use the slow C++ implementation for verification.")
+          parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+          
+          parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                              help="Disable correctness verification of masks at each step (improves benchmark purity).")
+          parser.add_argument('--print-stats', action='store_true',
+                              help="Print detailed statistics about the loaded models before running the benchmark.")
+          parser.set_defaults(verify_masks=True)
+
+          args = parser.parse_args()
+
+          paths_to_check = [args.constraint_file, args.code, args.competitor]
+          if args.reference != 'builtin':
+              # Convert to Path for existence check
+              paths_to_check.append(Path(args.reference))
+
+          for p in paths_to_check:
+              if not p.exists():
+                  parser.error(f"File not found: {p}")
+
+          run_benchmark(args)
+
+      if __name__ == "__main__":
+          main()
+    python/aug25/common_interface.py: |
+      from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
+      from dataclasses import dataclass
+      import bisect
+
+      class GraphProvider:
+          def get_root(self, state_id: int) -> int:
+              raise NotImplementedError
+          def is_end(self, node: int) -> bool:
+              raise NotImplementedError
+          def iter_edges(self, node: int, token: int):
+              """
+              Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
+              Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
+              """
+              raise NotImplementedError
+
+      @dataclass(frozen=True, slots=True)
+      class RangeSet:
+          """
+          Efficient, normalized (sorted, disjoint, inclusive) intervals for large, sparse token sets.
+          Internally represented as a tuple of (start, end) pairs, both inclusive.
+          """
+          intervals: Tuple[Tuple[int, int], ...]
+
+          @staticmethod
+          def empty() -> "RangeSet":
+              return RangeSet(())
+
+          @staticmethod
+          def from_ranges(ranges: Iterable[Sequence[int]]) -> "RangeSet":
+              normalized = RangeSet._merge_unsorted(ranges)
+              return RangeSet(tuple(normalized))
+
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> "RangeSet":
+              ranges = [(x, x) for x in indices]
+              normalized = RangeSet._merge_unsorted(ranges)
+              return RangeSet(tuple(normalized))
+
+          @staticmethod
+          def from_json(ranges_json: Optional[List[List[int]]]) -> "RangeSet":
+              if not ranges_json:
+                  return RangeSet.empty()
+              return RangeSet.from_ranges(ranges_json)
+
+          def is_empty(self) -> bool:
+              return not self.intervals
+
+          def __bool__(self) -> bool:
+              return not self.is_empty()
+
+          def contains(self, x: int) -> bool:
+              a = self.intervals
+              if not a:
+                  return False
+              starts = [s for s, _ in a]
+              i = bisect.bisect_right(starts, x) - 1
+              if i < 0:
+                  return False
+              s, e = a[i]
+              return s <= x <= e
+
+          def union(self, other: "RangeSet") -> "RangeSet":
+              if self.is_empty(): return other
+              if other.is_empty(): return self
+              merged: List[Tuple[int, int]] = []
+              i, j = 0, 0
+              a, b = self.intervals, other.intervals
+              def append_or_merge(start: int, end: int) -> None:
+                  if not merged:
+                      merged.append((start, end))
+                      return
+                  ps, pe = merged[-1]
+                  if start <= pe + 1:
+                      merged[-1] = (ps, max(pe, end))
+                  else:
+                      merged.append((start, end))
+              while i < len(a) and j < len(b):
+                  if a[i][0] <= b[j][0]:
+                      append_or_merge(a[i][0], a[i][1]); i += 1
+                  else:
+                      append_or_merge(b[j][0], b[j][1]); j += 1
+              while i < len(a):
+                  append_or_merge(a[i][0], a[i][1]); i += 1
+              while j < len(b):
+                  append_or_merge(b[j][0], b[j][1]); j += 1
+              return RangeSet(tuple(merged))
+
+          def intersection(self, other: "RangeSet") -> "RangeSet":
+              if self.is_empty() or other.is_empty(): return RangeSet.empty()
+              i, j = 0, 0
+              a, b = self.intervals, other.intervals
+              out: List[Tuple[int, int]] = []
+              while i < len(a) and j < len(b):
+                  s1, e1 = a[i]; s2, e2 = b[j]
+                  start = max(s1, s2); end = min(e1, e2)
+                  if start <= end: out.append((start, end))
+                  if e1 < e2: i += 1
+                  else: j += 1
+              return RangeSet(tuple(out)) if out else RangeSet.empty()
+
+          def to_indices(self) -> Iterable[int]:
+              """Yields all individual integer indices in the set."""
+              for start, end in self.intervals:
+                  yield from range(start, end + 1)
+
+          def to_json(self) -> List[List[int]]:
+              return [[s, e] for s, e in self.intervals]
+
+          def __str__(self) -> str:
+              if self.is_empty(): return "{}"
+              parts = [f"{s}-{e}" if s != e else str(s) for s, e in self.intervals]
+              return "{" + ", ".join(parts) + "}"
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Sequence[int]]) -> List[Tuple[int, int]]:
+              items = sorted([(int(s), int(e)) for s, e in ranges if s is not None and e is not None])
+              if not items: return []
+              merged: List[Tuple[int, int]] = []
+              cs, ce = items[0]
+              for ns, ne in items[1:]:
+                  if ns <= ce + 1: ce = max(ce, ne)
+                  else: merged.append((cs, ce)); cs, ce = ns, ne
+              merged.append((cs, ce))
+              return merged
+    python/aug25/equality.py: |
+      from typing import Dict, List, Tuple, Optional, Iterable, Set, Deque
+      from .common_interface import GraphProvider, RangeSet
+      import collections
+
+      # The alphabet for normalized graphs: labels are pairs (k, sid)
+      Label = Tuple[int, int]  # (k, state_id)
+      NormEdge = Tuple[Label, int]  # (label, dest_node_index)
+
+      class TokenNormalizer:
+          """
+          Builds token-specific normalized edges (epsilon-free) on demand.
+          """
+          def __init__(self, provider: GraphProvider, token: int, max_closure_expansions: int = 200000):
+              self.provider = provider
+              self.token = int(token)
+              self._accept_cache: Dict[int, bool] = {}
+              self._edges_cache: Dict[int, List[NormEdge]] = {}
+              self._max_closure_expansions = max(1, int(max_closure_expansions))
+
+          def accepting(self, node: int) -> bool:
+              if node in self._accept_cache:
+                  return self._accept_cache[node]
+              # BFS over None-edges only
+              q: Deque[int] = collections.deque([node])
+              seen: Set[int] = set()
+              accepts = False
+              while q:
+                  u = q.popleft()
+                  if u in seen:
+                      continue
+                  seen.add(u)
+                  if self.provider.is_end(u):
+                      accepts = True
+                      break
+                  for pop, sid_opt, v in self.provider.iter_edges(u, self.token):
+                      if sid_opt is None:
+                          q.append(v)
+              self._accept_cache[node] = accepts
+              return accepts
+
+          def out_edges(self, node: int) -> List[NormEdge]:
+              if node in self._edges_cache:
+                  return self._edges_cache[node]
+
+              out: List[NormEdge] = []
+              expansions = 0
+              stack: List[Tuple[int, int]] = [(node, 0)]
+              seen: Set[Tuple[int, int]] = set()
+
+              while stack:
+                  u, ksum = stack.pop()
+                  key = (u, ksum)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+
+                  for p, sid_opt, v in self.provider.iter_edges(u, self.token):
+                      if sid_opt is not None:
+                          label: Label = (ksum + p, sid_opt)
+                          out.append((label, v))
+
+                  for p, sid_opt, v in self.provider.iter_edges(u, self.token):
+                      if sid_opt is None:
+                          new_ksum = ksum + p
+                          stack.append((v, new_ksum))
+                          expansions += 1
+                          if expansions > self._max_closure_expansions:
+                              raise RuntimeError(f"Exceeded maximum None-closure expansions for token {self.token}")
+
+              dedup: Dict[Tuple[int, int, int], None] = {}
+              norm_edges: List[NormEdge] = []
+              for (label, dest) in out:
+                  k, sid = label
+                  key = (k, sid, dest)
+                  if key not in dedup:
+                      dedup[key] = None
+                      norm_edges.append((label, dest))
+
+              self._edges_cache[node] = norm_edges
+              return norm_edges
+
+      def nfa_equivalence_on_labels(
+          normA: TokenNormalizer,
+          rootA: int,
+          normB: TokenNormalizer,
+          rootB: int,
+          max_product_states: int = 200000,
+      ) -> Tuple[bool, Optional[List[Label]]]:
+          def subset_accepts(nodes: Set[int], norm: TokenNormalizer) -> bool:
+              return any(norm.accepting(n) for n in nodes)
+
+          def next_subset(nodes: Set[int], norm: TokenNormalizer, label: Label) -> Set[int]:
+              return {dest for n in nodes for lbl, dest in norm.out_edges(n) if lbl == label}
+
+          def labels_from_subset(nodes: Set[int], norm: TokenNormalizer) -> Set[Label]:
+              return {lbl for n in nodes for lbl, _ in norm.out_edges(n)}
+
+          startA: frozenset = frozenset({rootA})
+          startB: frozenset = frozenset({rootB})
+          ParentKey = Tuple[frozenset, frozenset]
+          parent: Dict[ParentKey, Tuple[Optional[ParentKey], Optional[Label]]] = {}
+
+          def _reconstruct_path(to_key: ParentKey) -> List[Label]:
+              seq: List[Label] = []
+              cur: Optional[ParentKey] = to_key
+              while cur is not None:
+                  par, edge_lab = parent.get(cur, (None, None))
+                  if edge_lab is not None:
+                      seq.append(edge_lab)
+                  cur = par
+              seq.reverse()
+              return seq
+          parent[(startA, startB)] = (None, None)
+
+          visited: Set[ParentKey] = set()
+          q: Deque[ParentKey] = collections.deque([(startA, startB)])
+
+          if subset_accepts(set(startA), normA) != subset_accepts(set(startB), normB):
+              return (False, [])
+
+          explored = 0
+          while q:
+              SA, SB = q.popleft()
+              if (SA, SB) in visited:
+                  continue
+              visited.add((SA, SB))
+              explored += 1
+              if explored > max_product_states:
+                  raise RuntimeError("Equivalence check exceeded product state limit")
+
+              labels_A = labels_from_subset(set(SA), normA)
+              labels_B = labels_from_subset(set(SB), normB)
+
+              if labels_A != labels_B:
+                  diff_labels = (labels_A - labels_B) or (labels_B - labels_A)
+                  witness_step = next(iter(diff_labels))
+                  seq = _reconstruct_path((SA, SB))
+                  seq.append(witness_step)
+                  return (False, seq)
+
+              for lab in labels_A:
+                  NSA = frozenset(next_subset(set(SA), normA, lab))
+                  NSB = frozenset(next_subset(set(SB), normB, lab))
+                  key = (NSA, NSB)
+                  if key not in parent:
+                      parent[key] = ((SA, SB), lab)
+
+                  if subset_accepts(set(NSA), normA) != subset_accepts(set(NSB), normB):
+                      return (False, _reconstruct_path(key))
+
+                  if key not in visited:
+                      q.append(key)
+
+          return (True, None)
+
+      def collect_interesting_tokens(provider: GraphProvider, root: int, arena_nodes: Iterable[int]) -> List[int]:
+          # For simplicity, return just [0] or a small set. Replace with full range boundary extraction if needed.
+          return [0]
+
+
+      def are_equivalent_for_state(provider_a: GraphProvider, root_a: int, provider_b: GraphProvider, root_b: int,
+                                   tokens: Optional[List[int]] = None, verbose: bool = False) -> Tuple[bool, Optional[str]]:
+          if tokens is None:
+              # This is a placeholder. A real implementation would need a way to inspect all edge BVs.
+              tokens = [0, 1, 10, 100, 1000]
+
+          for token in tokens:
+              try:
+                  norm_a = TokenNormalizer(provider_a, token)
+                  norm_b = TokenNormalizer(provider_b, token)
+                  eq, witness = nfa_equivalence_on_labels(norm_a, root_a, norm_b, root_b)
+                  if not eq:
+                      msg = f"Equivalence failed for token {token}"
+                      if witness is not None:
+                          seq_str = " -> ".join(f"(k={k}, sid={sid})" for (k, sid) in witness) if witness else "(empty)"
+                          msg += f". Counterexample label sequence: {seq_str}"
+                      return False, msg
+              except Exception as e:
+                  return False, f"Equivalence check raised an exception for token {token}: {e}"
+          return True, None
+    python/aug25/optimizer_general.py: |
+      from typing import Any, Dict, List, Tuple, Optional, Iterable
+      from .common_interface import GraphProvider, RangeSet
+
+      class CompEdge:
+          __slots__ = ("pop", "sid", "dest", "bv")
+          def __init__(self, pop: int, sid: Optional[int], dest: int, bv: RangeSet):
+              self.pop = pop
+              self.sid = sid
+              self.dest = dest
+              self.bv = bv
+
+      class CompressedTrie:
+          def __init__(self, roots: Dict[int,int], ends: List[bool], edges: List[List[CompEdge]]):
+              self.roots = roots
+              self.ends = ends
+              self.edges = edges
+              self.node_count = len(ends)
+              self.edge_count = sum(len(e) for e in edges)
+
+      def optimize(provider: GraphProvider, roots_map: Dict[int, int]) -> CompressedTrie:
+          """
+          Optimizes a graph provided via a common interface using bisimulation-style quotienting.
+          Note: This requires the provider to expose its raw arena for full graph inspection,
+          which is a limitation of the per-token `iter_edges` interface for this kind of optimization.
+          We assume the provider has an `.arena` attribute (like `Precompute2`).
+          """
+          if not hasattr(provider, 'arena'):
+              print("Warning: optimizer_general.py requires a provider with an .arena attribute. Skipping optimization.")
+              all_nodes = list(roots_map.values()) # A guess
+              ends = [provider.is_end(u) for u in all_nodes]
+              edges = [[] for _ in all_nodes]
+              return CompressedTrie(roots_map, ends, edges)
+
+          arena = provider.arena
+          print("Optimizing graph using bisimulation-style quotient...")
+
+          node_ids_sorted = sorted(int(i) for i in arena.keys())
+          dense_of: Dict[int, int] = {old: idx for idx, old in enumerate(node_ids_sorted)}
+          N: int = len(node_ids_sorted)
+
+          ends: List[bool] = [False] * N
+          raw_edges: List[List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]] = [[] for _ in range(N)]
+
+          for old_idx, node in arena.items():
+              u = dense_of[int(old_idx)]
+              ends[u] = bool((node.get("value", {}) or {}).get("end", False))
+              for (p, s), dest_map in node.get("children", []):
+                  for v_old, edge_bv in dest_map:
+                      if int(v_old) not in dense_of: continue
+                      v = dense_of[int(v_old)]
+                      raw_edges[u].append((p, s, v, edge_bv.intervals))
+
+          prev_class: List[int] = [1 if e else 0 for e in ends]
+
+          def aggregate_edges_for_node(u: int, cls: List[int]) -> List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]]:
+              aggr: Dict[Tuple[int, Optional[int], int], List[Tuple[int, int]]] = {}
+              for (p, s, v, intervals) in raw_edges[u]:
+                  dcls = cls[v]
+                  key = (p, s, dcls)
+                  if key not in aggr: aggr[key] = []
+                  aggr[key].extend(intervals)
+
+              items: List[Tuple[int, Optional[int], int, Tuple[Tuple[int, int], ...]]] = []
+              for (p, s, dcls), ranges in aggr.items():
+                  merged = RangeSet._merge_unsorted(ranges)
+                  items.append((p, s, dcls, tuple(merged)))
+              items.sort()
+              return items
+
+          for it in range(40):
+              sig_to_id: Dict[Tuple[bool, Tuple], int] = {}
+              new_class: List[int] = [0] * N
+              next_id = 0
+              changes = 0
+
+              for u in range(N):
+                  items = aggregate_edges_for_node(u, prev_class)
+                  sig = (ends[u], tuple(items))
+                  cid = sig_to_id.get(sig)
+                  if cid is None:
+                      cid = next_id
+                      sig_to_id[sig] = cid
+                      next_id += 1
+                  new_class[u] = cid
+                  if new_class[u] != prev_class[u]:
+                      changes += 1
+
+              prev_class = new_class
+              if changes == 0:
+                  break
+
+          num_classes = max(prev_class) + 1 if prev_class else 0
+          q_ends: List[bool] = [False] * num_classes
+          q_edges: List[List[CompEdge]] = [[] for _ in range(num_classes)]
+          class_built: List[bool] = [False] * num_classes
+
+          q_roots: Dict[int, int] = {}
+          for sid, old_root in roots_map.items():
+              if int(old_root) in dense_of:
+                  q_roots[int(sid)] = prev_class[dense_of[int(old_root)]]
+
+          for u in range(N):
+              cid = prev_class[u]
+              if class_built[cid]:
+                  continue
+              class_built[cid] = True
+              q_ends[cid] = ends[u]
+
+              items = aggregate_edges_for_node(u, prev_class)
+              out: List[CompEdge] = []
+              for (p, s, dcls, intervals) in items:
+                  rs = RangeSet(tuple(intervals))
+                  out.append(CompEdge(pop=p, sid=s, dest=dcls, bv=rs))
+              q_edges[cid] = out
+
+          return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -2378,11 +2449,15 @@ messages:
           Loads benchmark results from JSON files, computes statistics, and generates plots.
           """
           all_data = []
+          commit_timings_raw = None
           for file_path in result_files:
               with open(file_path, 'r') as f:
                   data = json.load(f)
                   competitor_name = Path(data["competitor_script"]).stem
                   timings = data["results"]["get_mask_timings_seconds"]
+                  if commit_timings_raw is None:
+                      commit_timings_raw = data["results"].get("commit_timings_seconds")
+
                   mismatch_indices = set(
                       data["results"]
                       .get("mask_correctness_check", {})
@@ -2402,6 +2477,14 @@ messages:
               return
 
           df = pd.DataFrame(all_data)
+
+          # Create commit DataFrame
+          df_commit = pd.DataFrame()
+          if commit_timings_raw:
+              df_commit = pd.DataFrame({
+                  "token_index": range(len(commit_timings_raw)),
+                  "time_sec": commit_timings_raw
+              })
 
           # --- Print Summary Statistics ---
           print("--- Benchmark Summary ---")
@@ -2434,7 +2517,7 @@ messages:
 
           # 1. Line plot of timings per token
           plt.figure(figsize=(15, 8))
-          ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
+          ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8, linewidth=1.2)
 
           mismatch_df = df[df['mask_mismatch']]
           plot_title = 'get_mask() Performance per Token'
@@ -2497,6 +2580,32 @@ messages:
           plt.savefig(box_path, dpi=300, bbox_inches='tight')
           print(f"Saved box plot to {box_path}")
           plt.close()
+
+          # 3. Line plot of commit timings per token
+          if not df_commit.empty:
+              plt.figure(figsize=(15, 8))
+              ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=1.2)
+
+              ax_commit.set_xlabel('Token Index in Sequence')
+              ax_commit.set_ylabel('Time (seconds)')
+              ax_commit.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+              # Linear scale
+              ax_commit.set_yscale('linear')
+              ax_commit.set_title('commit() Performance per Token')
+              commit_linear_path = output_dir / "commit_timings_per_token_linear.png"
+              plt.savefig(commit_linear_path, dpi=300, bbox_inches='tight')
+              print(f"Saved commit linear scale plot to {commit_linear_path}")
+
+              # Log scale
+              ax_commit.set_yscale('log')
+              ax_commit.set_title('commit() Performance per Token (Log Scale)')
+              commit_log_path = output_dir / "commit_timings_per_token_log.png"
+              plt.savefig(commit_log_path, dpi=300, bbox_inches='tight')
+              print(f"Saved commit log scale plot to {commit_log_path}")
+              plt.close()
+
+
 
 
       def main():
@@ -2800,7 +2909,8 @@ messages:
           print(f"Tokenized into {len(token_ids)} tokens.")
 
           constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
-          timings = []
+          get_mask_timings = []
+          commit_timings = []
           mask_correctness_passed = True
           mask_correctness_details = "All masks matched the reference implementation."
           mask_mismatch_indices = []
@@ -2827,7 +2937,7 @@ messages:
               t_start_mask = time.perf_counter()
               competitor_mask = competitor_model.get_mask(state_to_gss)
               t_end_mask = time.perf_counter()
-              timings.append(t_end_mask - t_start_mask)
+              get_mask_timings.append(t_end_mask - t_start_mask)
               # --- END TIMED SECTION ---
 
               # Verify the competitor's mask (if enabled)
@@ -2842,7 +2952,10 @@ messages:
 
               # Advance the state
               progress_bar.set_postfix_str("commit")
+              t_start_commit = time.perf_counter()
               constraint_state.commit(token_id)
+              t_end_commit = time.perf_counter()
+              commit_timings.append(t_end_commit - t_start_commit)
 
           if not mask_correctness_passed:
               mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
@@ -2851,14 +2964,14 @@ messages:
           print("--- Benchmark finished ---")
 
           # 8. Compile and save results
-          if timings:
-              p = np.percentile(timings, [50, 90, 99])
+          if get_mask_timings:
+              p = np.percentile(get_mask_timings, [50, 90, 99])
               summary_stats = {
-                  "count": len(timings),
-                  "mean": float(np.mean(timings)),
-                  "stddev": float(np.std(timings)),
-                  "min": float(np.min(timings)),
-                  "max": float(np.max(timings)),
+                  "count": len(get_mask_timings),
+                  "mean": float(np.mean(get_mask_timings)),
+                  "stddev": float(np.std(get_mask_timings)),
+                  "min": float(np.min(get_mask_timings)),
+                  "max": float(np.max(get_mask_timings)),
                   "p50": float(p[0]),
                   "p90": float(p[1]),
                   "p99": float(p[2]),
@@ -2885,7 +2998,8 @@ messages:
                       "details": mask_correctness_details,
                       "mismatch_indices": mask_mismatch_indices,
                   },
-                  "get_mask_timings_seconds": timings,
+                  "get_mask_timings_seconds": get_mask_timings,
+                  "commit_timings_seconds": commit_timings,
                   "summary_stats": summary_stats,
               }
           }
@@ -3367,9 +3481,10 @@ messages:
       ```
     metadata:
       filename: python/aug25/optimizer_general.py
-  - user: |-
-      Modify this code so that when we run run_benchmarks.sh we also get plots for commit times. Obviously commit time is independent of get_mask time, and hence independent of the model/competitor used. But it's useful to see nonetheless. Create two new graphs for commit times: one linear and one log.
-      Also, make the other plot lines thinner so we can see details.
+  - user: Verify masks against the reference model, not the constraint state. Unless
+      the passed reference model is "builtin", in which case use the constriant state.
+      The constraint state is generally too expensive to run, so we want to avoid
+      it, otherwise the program will take forever.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3388,184 +3503,246 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify the benchmark scripts to include commit time analysis and adjust the plot aesthetics, followed by the corresponding git diffs.
+      Of course. Performing mask verification against a fast reference model instead of the slow `constraint_state` is crucial for efficient benchmarking. Here are the step-by-step instructions and corresponding git diffs to implement this change, including the ability to fall back to the original slow implementation using a "builtin" option.
 
       ### Step-by-Step Instructions
 
-      #### 1. Modify the Benchmark Runner to Capture Commit Timings
+      1.  **File: `python/aug25/common_interface.py`**
+          *   In the `RangeSet` class, I will add a `to_indices()` method. This is necessary because the benchmark runner's verification logic expects to be able to convert a mask object into a set of token indices for comparison. This method will iterate through the intervals and yield each individual token ID.
 
-      In `python/aug25/benchmark_runner.py`, you'll need to time the `commit` operation and save the results to the output JSON file.
+      2.  **File: `python/aug25/benchmark_runner.py`**
+          *   **In the `main()` function:**
+              *   I will change the command-line argument `--reference` to accept a string (`str`) instead of a `Path`. This allows it to accept either a file path or the special keyword `builtin`.
+              *   The help text for this argument will be updated to reflect the new `builtin` option.
+              *   The file existence validation logic will be modified to skip checking the reference path if it is specified as `builtin`.
 
-      1.  **In `python/aug25/benchmark_runner.py`:**
-          *   In the `run_benchmark` function (around line 301), rename the `timings` list to `get_mask_timings` for clarity and add a new list named `commit_timings`.
-          *   In the main benchmark loop (around line 339), wrap the `constraint_state.commit(token_id)` call with `time.perf_counter()` to measure its execution time and append the duration to the `commit_timings` list.
-          *   Update the results compilation section (around line 348) to use the new `get_mask_timings` variable.
-          *   Finally, add `commit_timings_seconds` to the `output_data` dictionary (around line 380) so it gets saved in the JSON results file.
-
-      #### 2. Update the Analyzer to Plot Commit Timings
-
-      In `python/aug25/benchmark_analyzer.py`, you'll read the new commit timing data and generate plots for it. You will also make the existing plot lines thinner.
-
-      1.  **In `python/aug25/benchmark_analyzer.py`:**
-          *   In the `analyze_results` function, add logic to read the `commit_timings_seconds` from the first JSON file processed. Since this data is independent of the competitor, it only needs to be read once.
-          *   Create a new pandas DataFrame, `df_commit`, from this timing data.
-          *   In the `get_mask()` performance plot (around line 80), modify the call to `seaborn.lineplot` by adding the argument `linewidth=1.2` to make the lines thinner.
-          *   At the end of the function, add a new section to generate and save two plots for commit performance: one with a linear y-axis and another with a logarithmic y-axis.
+          *   **In the `run_benchmark()` function:**
+              *   A new boolean variable, `is_builtin_ref`, will be defined at the top to easily check which reference mode is active.
+              *   The "Equivalence Check" section will be updated. If `is_builtin_ref` is true, it will skip loading a reference model and bypass the equivalence check. Otherwise, it will load the model from the provided file path as before.
+              *   In the main benchmark loop (`for i, token_id in progress_bar:`):
+                  *   The calculation of `state_to_gss` will be moved to the beginning of the loop, as it's now needed by the reference model's `get_mask` method.
+                  *   The mask verification logic (`if args.verify_masks:`) will be updated. It will now use `is_builtin_ref` to decide the source of the ground-truth mask:
+                      *   If `builtin`, it will call the slow `constraint_state.get_mask()`.
+                      *   Otherwise, it will call the much faster `reference_model.get_mask(state_to_gss)`.
+                  *   The logic for comparing the competitor's mask against the reference mask will be updated to correctly handle both the numpy array returned by the `builtin` method and the `RangeSet` object returned by the model.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes directly.
-
-      ```diff
-      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
-      index 2850933..d547f80 100644
-      --- a/python/aug25/benchmark_analyzer.py
-      +++ b/python/aug25/benchmark_analyzer.py
-      @@ -11,11 +11,15 @@
-           Loads benchmark results from JSON files, computes statistics, and generates plots.
-           """
-           all_data = []
-      +    commit_timings_raw = None
-           for file_path in result_files:
-               with open(file_path, 'r') as f:
-                   data = json.load(f)
-                   competitor_name = Path(data["competitor_script"]).stem
-                   timings = data["results"]["get_mask_timings_seconds"]
-      +            if commit_timings_raw is None:
-      +                commit_timings_raw = data["results"].get("commit_timings_seconds")
-      +
-                   mismatch_indices = set(
-                       data["results"]
-                       .get("mask_correctness_check", {})
-      @@ -34,6 +38,14 @@
-               return
-       
-           df = pd.DataFrame(all_data)
-      +
-      +    # Create commit DataFrame
-      +    df_commit = pd.DataFrame()
-      +    if commit_timings_raw:
-      +        df_commit = pd.DataFrame({
-      +            "token_index": range(len(commit_timings_raw)),
-      +            "time_sec": commit_timings_raw
-      +        })
-       
-           # --- Print Summary Statistics ---
-           print("--- Benchmark Summary ---")
-      @@ -63,7 +75,7 @@
-       
-           # 1. Line plot of timings per token
-           plt.figure(figsize=(15, 8))
-      -    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
-      +    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8, linewidth=1.2)
-       
-           mismatch_df = df[df['mask_mismatch']]
-           plot_title = 'get_mask() Performance per Token'
-      @@ -126,6 +138,32 @@
-           plt.savefig(box_path, dpi=300, bbox_inches='tight')
-           print(f"Saved box plot to {box_path}")
-           plt.close()
-      +
-      +    # 3. Line plot of commit timings per token
-      +    if not df_commit.empty:
-      +        plt.figure(figsize=(15, 8))
-      +        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=1.2)
-      +
-      +        ax_commit.set_xlabel('Token Index in Sequence')
-      +        ax_commit.set_ylabel('Time (seconds)')
-      +        ax_commit.grid(True, which='both', linestyle='--', linewidth=0.5)
-      +
-      +        # Linear scale
-      +        ax_commit.set_yscale('linear')
-      +        ax_commit.set_title('commit() Performance per Token')
-      +        commit_linear_path = output_dir / "commit_timings_per_token_linear.png"
-      +        plt.savefig(commit_linear_path, dpi=300, bbox_inches='tight')
-      +        print(f"Saved commit linear scale plot to {commit_linear_path}")
-      +
-      +        # Log scale
-      +        ax_commit.set_yscale('log')
-      +        ax_commit.set_title('commit() Performance per Token (Log Scale)')
-      +        commit_log_path = output_dir / "commit_timings_per_token_log.png"
-      +        plt.savefig(commit_log_path, dpi=300, bbox_inches='tight')
-      +        print(f"Saved commit log scale plot to {commit_log_path}")
-      +        plt.close()
-      +
-      +
-       
-       
-       def main():
-
-      ```
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
-      index 455428a..36a684b 100644
+      index 455a153..371e7d8 100644
       --- a/python/aug25/benchmark_runner.py
       +++ b/python/aug25/benchmark_runner.py
-      @@ -298,7 +298,8 @@
-           print(f"Tokenized into {len(token_ids)} tokens.")
+      @@ -181,6 +181,7 @@
+       def run_benchmark(args):
+           """Main benchmark logic."""
+           print("--- Setting up benchmark environment ---")
+      +    is_builtin_ref = (args.reference == 'builtin')
        
-           constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
-      -    timings = []
-      +    get_mask_timings = []
-      +    commit_timings = []
-           mask_correctness_passed = True
-           mask_correctness_details = "All masks matched the reference implementation."
-           mask_mismatch_indices = []
-      @@ -323,7 +324,7 @@
-               t_start_mask = time.perf_counter()
-               competitor_mask = competitor_model.get_mask(state_to_gss)
-               t_end_mask = time.perf_counter()
-      -        timings.append(t_end_mask - t_start_mask)
-      +        get_mask_timings.append(t_end_mask - t_start_mask)
-               # --- END TIMED SECTION ---
+           # 1. Load pre-compiled GrammarConstraint
+           print(f"Loading pre-compiled grammar constraint from: {args.constraint_file}")
+      @@ -209,51 +210,56 @@
+           if args.print_stats:
+               print_model_statistics(competitor_model, args.competitor.name)
        
-               # Verify the competitor's mask (if enabled)
-      @@ -337,10 +338,13 @@
+      -    # 5. Equivalence Check
+      -    print(f"Loading reference model from: {args.reference}")
+      -    ReferenceModel = load_competitor_model(args.reference)
+      -    # All models are loaded from precompute3 JSON for this benchmark suite.
+      -    reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+      -
+      -    if args.print_stats:
+      -        print_model_statistics(reference_model, args.reference.name)
+      -
+      -    print(f"Running equivalence check against reference model: {args.reference.name}")
+      -    
+      -    equivalence_passed = True
+      -    equivalence_details = "All tested states are equivalent."
+      -
+      -    ENABLE_EQUIVALENCE_TEST = False
+      -    if ENABLE_EQUIVALENCE_TEST:
+      -        # Check that root sets are the same before proceeding
+      -        ref_roots = set(reference_model.roots_map.keys())
+      -        comp_roots = set(competitor_model.roots_map.keys())
+      -        if ref_roots != comp_roots:
+      -            equivalence_passed = False
+      -            equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+      -        else:
+      -            sorted_roots = sorted(list(ref_roots))
+      -            total_roots = len(sorted_roots)
+      -            print(f"Checking equivalence across {total_roots} tokenizer states...")
+      -            for i, sid in enumerate(sorted_roots):
+      -                # Progress indicator
+      -                if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+      -                    print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+      -
+      -                passed, details = are_equivalent_for_state(
+      -                    reference_model, reference_model.get_root(sid),
+      -                    competitor_model, competitor_model.get_root(sid),
+      -                    verbose=False
+      -                )
+      -                if not passed:
+      -                    print() # Newline to clear the progress indicator
+      -                    equivalence_passed = False
+      -                    equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+      -                    break
+      -            if equivalence_passed:
+      -                print() # Final newline after progress indicator
+      -
+      -        if equivalence_passed:
+      -            print("✅ Equivalence check passed.")
+      -        else:
+      -            print(f"❌ Equivalence check failed: {equivalence_details}")
+      +    # 5. Equivalence Check / Reference Model Setup
+      +    reference_model = None
+      +    if is_builtin_ref:
+      +        print("Using 'builtin' reference (GrammarConstraintState) for mask verification.")
+      +        # Equivalence check is not possible against builtin.
+      +        equivalence_passed = True
+      +        equivalence_details = "N/A (reference is 'builtin')"
+      +    else:
+      +        ref_path = Path(args.reference)
+      +        print(f"Loading reference model from: {ref_path}")
+      +        ReferenceModel = load_competitor_model(ref_path)
+      +        # All models are loaded from precompute3 JSON for this benchmark suite.
+      +        reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+      +
+      +        if args.print_stats:
+      +            print_model_statistics(reference_model, ref_path.name)
+      +
+      +        print(f"Running equivalence check against reference model: {ref_path.name}")
+      +
+      +        equivalence_passed = True
+      +        equivalence_details = "All tested states are equivalent."
+      +
+      +        ENABLE_EQUIVALENCE_TEST = False
+      +        if ENABLE_EQUIVALENCE_TEST:
+      +            # Check that root sets are the same before proceeding
+      +            ref_roots = set(reference_model.roots_map.keys())
+      +            comp_roots = set(competitor_model.roots_map.keys())
+      +            if ref_roots != comp_roots:
+      +                equivalence_passed = False
+      +                equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+      +            else:
+      +                sorted_roots = sorted(list(ref_roots))
+      +                total_roots = len(sorted_roots)
+      +                print(f"Checking equivalence across {total_roots} tokenizer states...")
+      +                for i, sid in enumerate(sorted_roots):
+      +                    # Progress indicator
+      +                    if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+      +                        print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+      +
+      +                    passed, details = are_equivalent_for_state(
+      +                        reference_model, reference_model.get_root(sid),
+      +                        competitor_model, competitor_model.get_root(sid),
+      +                        verbose=False
+      +                    )
+      +                    if not passed:
+      +                        print() # Newline to clear the progress indicator
+      +                        equivalence_passed = False
+      +                        equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+      +                        break
+      +                if equivalence_passed:
+      +                    print() # Final newline after progress indicator
+      +
+      +            if equivalence_passed:
+      +                print("✅ Equivalence check passed.")
+      +            else:
+      +                print(f"❌ Equivalence check failed: {equivalence_details}")
        
-               # Advance the state
-               progress_bar.set_postfix_str("commit")
-      +        t_start_commit = time.perf_counter()
-               constraint_state.commit(token_id)
-      +        t_end_commit = time.perf_counter()
-      +        commit_timings.append(t_end_commit - t_start_commit)
+           # 6. Prepare for benchmarking loop
+           print(f"Loading and tokenizing code from: {args.code}")
+      @@ -270,20 +276,24 @@
+           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+           progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+           for i, token_id in progress_bar:
+      +        # Get the state map for the competitor. This is needed for all mask calculations.
+      +        progress_bar.set_postfix_str("filtered_state_gss_map")
+      +        state_to_gss = constraint_state.filtered_state_gss_map()
+      +
+               # Get the reference mask to check correctness (if enabled)
+               if args.verify_masks:
+                   progress_bar.set_postfix_str("get_mask (ref)")
+      -            reference_mask_np = constraint_state.get_mask()
+      -            if not reference_mask_np[token_id]:
+      -                # This indicates an issue with the grammar or tokenizer, not the competitor.
+      -                print(f"\nFATAL: Reference mask forbids token {token_id} at step {i}. Aborting.")
+      -                sys.exit(1)
+      -
+      -        # Get the state map for the competitor
+      -        progress_bar.set_postfix_str("filtered_state_gss_map")
+      -        state_to_gss = constraint_state.filtered_state_gss_map()
+      +            if is_builtin_ref:
+      +                reference_mask_np = constraint_state.get_mask()
+      +                if not reference_mask_np[token_id]:
+      +                    print(f"\nFATAL: Builtin reference mask forbids token {token_id} at step {i}. Aborting.")
+      +                    sys.exit(1)
+      +            else:
+      +                reference_mask_rs = reference_model.get_mask(state_to_gss)
+      +                if not reference_mask_rs.contains(token_id):
+      +                    print(f"\nFATAL: Reference model mask forbids token {token_id} at step {i}. Aborting.")
+      +                    sys.exit(1)
        
-           if not mask_correctness_passed:
-      -        mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
-      +        mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
-               print(f"\n❌ {mask_correctness_details}")
+               # --- TIMED SECTION ---
+               progress_bar.set_postfix_str("get_mask (competitor)")
+      @@ -296,8 +306,12 @@
+               if args.verify_masks:
+                   progress_bar.set_postfix_str("Verifying mask")
+                   # This check is expensive but crucial for validation
+      -            ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+      +            if is_builtin_ref:
+      +                ref_indices = {idx for idx, v in enumerate(reference_mask_np) if v}
+      +            else:
+      +                ref_indices = set(reference_mask_rs.to_indices())
+      +
+                   comp_indices = set(competitor_mask.to_indices())
+                   if ref_indices != comp_indices:
+                       mask_correctness_passed = False
+      @@ -369,19 +383,24 @@
+           parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
+           parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
+           parser.add_argument("-m", "--competitor", type=Path, required=True, help="Path to the competitor's model .py file.")
+      -    parser.add_argument("-r", "--reference", type=Path, required=True, help="Path to the reference model .py file for equivalence checking.")
+      +    parser.add_argument("-r", "--reference", type=str, required=True, help="Path to the reference model .py file for equivalence checking, or 'builtin' to use the slow C++ implementation for verification.")
+           parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
+           
+           parser.add_argument('--no-verify-masks', dest='verify_masks', action='store_false',
+                               help="Disable correctness verification of masks at each step (improves benchmark purity).")
+           parser.add_argument('--print-stats', action='store_true',
+                               help="Print detailed statistics about the loaded models before running the benchmark.")
+           parser.set_defaults(verify_masks=True)
        
-           print("--- Benchmark finished ---")
+           args = parser.parse_args()
        
-           # 8. Compile and save results
-      -    if timings:
-      -        p = np.percentile(timings, [50, 90, 99])
-      +    if get_mask_timings:
-      +        p = np.percentile(get_mask_timings, [50, 90, 99])
-               summary_stats = {
-      -            "count": len(timings),
-      -            "mean": float(np.mean(timings)),
-      -            "stddev": float(np.std(timings)),
-      -            "min": float(np.min(timings)),
-      -            "max": float(np.max(timings)),
-      +            "count": len(get_mask_timings),
-      +            "mean": float(np.mean(get_mask_timings)),
-      +            "stddev": float(np.std(get_mask_timings)),
-      +            "min": float(np.min(get_mask_timings)),
-      +            "max": float(np.max(get_mask_timings)),
-                   "p50": float(p[0]),
-                   "p90": float(p[1]),
-                   "p99": float(p[2]),
-      @@ -366,7 +370,8 @@
-                       "details": mask_correctness_details,
-                       "mismatch_indices": mask_mismatch_indices,
-                   },
-      -            "get_mask_timings_seconds": timings,
-      +            "get_mask_timings_seconds": get_mask_timings,
-      +            "commit_timings_seconds": commit_timings,
-                   "summary_stats": summary_stats,
-               }
-           }
+      -    for p in [args.constraint_file, args.code, args.competitor, args.reference]:
+      +    paths_to_check = [args.constraint_file, args.code, args.competitor]
+      +    if args.reference != 'builtin':
+      +        # Convert to Path for existence check
+      +        paths_to_check.append(Path(args.reference))
+      +
+      +    for p in paths_to_check:
+               if not p.exists():
+                   parser.error(f"File not found: {p}")
+       
+      ``````diff
+      diff --git a/python/aug25/common_interface.py b/python/aug25/common_interface.py
+      index 32057d3..40d3a52 100644
+      --- a/python/aug25/common_interface.py
+      +++ b/python/aug25/common_interface.py
+      @@ -102,6 +102,11 @@
+                   if e1 < e2: i += 1
+                   else: j += 1
+               return RangeSet(tuple(out)) if out else RangeSet.empty()
+      +
+      +    def to_indices(self) -> Iterable[int]:
+      +        """Yields all individual integer indices in the set."""
+      +        for start, end in self.intervals:
+      +            yield from range(start, end + 1)
+       
+           def to_json(self) -> List[List[int]]:
+               return [[s, e] for s, e in self.intervals]
 
       ```
     metadata:
@@ -3574,16 +3751,16 @@ messages:
       Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/benchmark_analyzer.py
-      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
-
-      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/benchmark_runner.py
       Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/common_interface.py
+      Applying patch to 'python/aug25/common_interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/common_interface.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Benchmark and plot commit times,
-      add linear/log plots for commit, thin get_mask lines"'
+  - user: "Changes committed with message: \"feat: Allow 'builtin' reference for mask
+      verification and add RangeSet.to_indices\""
     metadata:
 ...
