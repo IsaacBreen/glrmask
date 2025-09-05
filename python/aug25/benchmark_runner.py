@@ -263,7 +263,8 @@ def run_benchmark(args):
     print(f"Tokenized into {len(token_ids)} tokens.")
 
     constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
-    timings = []
+    get_mask_timings = []
+    commit_timings = []
     mask_correctness_passed = True
     mask_correctness_details = "All masks matched the reference implementation."
     mask_mismatch_indices = []
@@ -290,7 +291,7 @@ def run_benchmark(args):
         t_start_mask = time.perf_counter()
         competitor_mask = competitor_model.get_mask(state_to_gss)
         t_end_mask = time.perf_counter()
-        timings.append(t_end_mask - t_start_mask)
+        get_mask_timings.append(t_end_mask - t_start_mask)
         # --- END TIMED SECTION ---
 
         # Verify the competitor's mask (if enabled)
@@ -305,7 +306,10 @@ def run_benchmark(args):
 
         # Advance the state
         progress_bar.set_postfix_str("commit")
+        t_start_commit = time.perf_counter()
         constraint_state.commit(token_id)
+        t_end_commit = time.perf_counter()
+        commit_timings.append(t_end_commit - t_start_commit)
 
     if not mask_correctness_passed:
         mask_correctness_details = f"Found {len(mask_mismatch_indices)} mask mismatches across {len(token_ids)} steps."
@@ -314,14 +318,14 @@ def run_benchmark(args):
     print("--- Benchmark finished ---")
 
     # 8. Compile and save results
-    if timings:
-        p = np.percentile(timings, [50, 90, 99])
+    if get_mask_timings:
+        p = np.percentile(get_mask_timings, [50, 90, 99])
         summary_stats = {
-            "count": len(timings),
-            "mean": float(np.mean(timings)),
-            "stddev": float(np.std(timings)),
-            "min": float(np.min(timings)),
-            "max": float(np.max(timings)),
+            "count": len(get_mask_timings),
+            "mean": float(np.mean(get_mask_timings)),
+            "stddev": float(np.std(get_mask_timings)),
+            "min": float(np.min(get_mask_timings)),
+            "max": float(np.max(get_mask_timings)),
             "p50": float(p[0]),
             "p90": float(p[1]),
             "p99": float(p[2]),
@@ -348,7 +352,8 @@ def run_benchmark(args):
                 "details": mask_correctness_details,
                 "mismatch_indices": mask_mismatch_indices,
             },
-            "get_mask_timings_seconds": timings,
+            "get_mask_timings_seconds": get_mask_timings,
+            "commit_timings_seconds": commit_timings,
             "summary_stats": summary_stats,
         }
     }

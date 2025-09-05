@@ -11,11 +11,15 @@ def analyze_results(result_files: list[Path], output_dir: Path):
     Loads benchmark results from JSON files, computes statistics, and generates plots.
     """
     all_data = []
+    commit_timings_raw = None
     for file_path in result_files:
         with open(file_path, 'r') as f:
             data = json.load(f)
             competitor_name = Path(data["competitor_script"]).stem
             timings = data["results"]["get_mask_timings_seconds"]
+            if commit_timings_raw is None:
+                commit_timings_raw = data["results"].get("commit_timings_seconds")
+
             mismatch_indices = set(
                 data["results"]
                 .get("mask_correctness_check", {})
@@ -35,6 +39,14 @@ def analyze_results(result_files: list[Path], output_dir: Path):
         return
 
     df = pd.DataFrame(all_data)
+
+    # Create commit DataFrame
+    df_commit = pd.DataFrame()
+    if commit_timings_raw:
+        df_commit = pd.DataFrame({
+            "token_index": range(len(commit_timings_raw)),
+            "time_sec": commit_timings_raw
+        })
 
     # --- Print Summary Statistics ---
     print("--- Benchmark Summary ---")
@@ -67,7 +79,7 @@ def analyze_results(result_files: list[Path], output_dir: Path):
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8)
+    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8, linewidth=1.2)
 
     mismatch_df = df[df['mask_mismatch']]
     plot_title = 'get_mask() Performance per Token'
@@ -130,6 +142,32 @@ def analyze_results(result_files: list[Path], output_dir: Path):
     plt.savefig(box_path, dpi=300, bbox_inches='tight')
     print(f"Saved box plot to {box_path}")
     plt.close()
+
+    # 3. Line plot of commit timings per token
+    if not df_commit.empty:
+        plt.figure(figsize=(15, 8))
+        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=1.2)
+
+        ax_commit.set_xlabel('Token Index in Sequence')
+        ax_commit.set_ylabel('Time (seconds)')
+        ax_commit.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        # Linear scale
+        ax_commit.set_yscale('linear')
+        ax_commit.set_title('commit() Performance per Token')
+        commit_linear_path = output_dir / "commit_timings_per_token_linear.png"
+        plt.savefig(commit_linear_path, dpi=300, bbox_inches='tight')
+        print(f"Saved commit linear scale plot to {commit_linear_path}")
+
+        # Log scale
+        ax_commit.set_yscale('log')
+        ax_commit.set_title('commit() Performance per Token (Log Scale)')
+        commit_log_path = output_dir / "commit_timings_per_token_log.png"
+        plt.savefig(commit_log_path, dpi=300, bbox_inches='tight')
+        print(f"Saved commit log scale plot to {commit_log_path}")
+        plt.close()
+
+
 
 
 def main():
