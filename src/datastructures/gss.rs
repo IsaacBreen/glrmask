@@ -728,7 +728,72 @@ impl GSSNode {
 
     pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
 
-    pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+    pub fn is_alive(&self) -> bool {
+        // This is an optimized version of `!self.allowed_llm_tokens().is_empty()`.
+        // The original `allowed_llm_tokens` is slow because it calls `self.acc()`, which
+        // traverses the entire subgraph to compute the union of all reachable root tokens.
+        //
+        // The check `!(&local & &aggregated).is_empty()` is equivalent to checking if there
+        // exists *any* reachable root `r` such that `(&local & &r.acc.tokens).is_empty()` is false.
+        // This allows us to traverse the graph and exit early as soon as we find such a root.
+
+        let local_acc = self.local_acc();
+        if local_acc.llm_tokens_union.is_empty() {
+            return false;
+        }
+
+        match self {
+            GSSNode::Root(_) => {
+                // For a root, `allowed_llm_tokens()` is just its own `llm_tokens_union`.
+                // Since we've already checked that it's not empty, it must be alive.
+                true
+            }
+            GSSNode::Internal(_) => {
+                // For an internal node, traverse to find at least one reachable root
+                // whose tokens have a non-empty intersection with this node's local tokens.
+                let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
+                let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+
+                // Start traversal from self's direct predecessors.
+                for preds_by_depth in self.predecessors().values() {
+                    for pred_vec in preds_by_depth.values() {
+                        for pred in pred_vec {
+                            queue.push_back(pred.clone());
+                        }
+                    }
+                }
+
+                while let Some(node) = queue.pop_front() {
+                    let ptr = Arc::as_ptr(&node);
+                    if !visited_nodes.insert(ptr) {
+                        continue;
+                    }
+
+                    match node.as_ref() {
+                        GSSNode::Root(r) => {
+                            // Found a root. Check for non-empty intersection.
+                            if !(&local_acc.llm_tokens_union & &r.acc.llm_tokens_union).is_empty() {
+                                return true; // Early exit: found a valid path.
+                            }
+                        }
+                        GSSNode::Internal(ii) => {
+                            // Not a root, continue traversal.
+                            for preds_by_depth in ii.predecessors.values() {
+                                for pred_vec in preds_by_depth.values() {
+                                    for pred in pred_vec {
+                                        queue.push_back(pred.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Traversed all paths and found no live ones.
+                false
+            }
+        }
+    }
 
     pub fn is_ok(&self) -> bool { self.is_alive() }
 

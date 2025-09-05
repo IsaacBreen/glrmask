@@ -3799,7 +3799,72 @@ local_system:
 
           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
 
-          pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+          pub fn is_alive(&self) -> bool {
+              // This is an optimized version of `!self.allowed_llm_tokens().is_empty()`.
+              // The original `allowed_llm_tokens` is slow because it calls `self.acc()`, which
+              // traverses the entire subgraph to compute the union of all reachable root tokens.
+              //
+              // The check `!(&local & &aggregated).is_empty()` is equivalent to checking if there
+              // exists *any* reachable root `r` such that `(&local & &r.acc.tokens).is_empty()` is false.
+              // This allows us to traverse the graph and exit early as soon as we find such a root.
+
+              let local_acc = self.local_acc();
+              if local_acc.llm_tokens_union.is_empty() {
+                  return false;
+              }
+
+              match self {
+                  GSSNode::Root(_) => {
+                      // For a root, `allowed_llm_tokens()` is just its own `llm_tokens_union`.
+                      // Since we've already checked that it's not empty, it must be alive.
+                      true
+                  }
+                  GSSNode::Internal(_) => {
+                      // For an internal node, traverse to find at least one reachable root
+                      // whose tokens have a non-empty intersection with this node's local tokens.
+                      let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
+                      let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+
+                      // Start traversal from self's direct predecessors.
+                      for preds_by_depth in self.predecessors().values() {
+                          for pred_vec in preds_by_depth.values() {
+                              for pred in pred_vec {
+                                  queue.push_back(pred.clone());
+                              }
+                          }
+                      }
+
+                      while let Some(node) = queue.pop_front() {
+                          let ptr = Arc::as_ptr(&node);
+                          if !visited_nodes.insert(ptr) {
+                              continue;
+                          }
+
+                          match node.as_ref() {
+                              GSSNode::Root(r) => {
+                                  // Found a root. Check for non-empty intersection.
+                                  if !(&local_acc.llm_tokens_union & &r.acc.llm_tokens_union).is_empty() {
+                                      return true; // Early exit: found a valid path.
+                                  }
+                              }
+                              GSSNode::Internal(ii) => {
+                                  // Not a root, continue traversal.
+                                  for preds_by_depth in ii.predecessors.values() {
+                                      for pred_vec in preds_by_depth.values() {
+                                          for pred in pred_vec {
+                                              queue.push_back(pred.clone());
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      // Traversed all paths and found no live ones.
+                      false
+                  }
+              }
+          }
 
           pub fn is_ok(&self) -> bool { self.is_alive() }
 
@@ -6131,9 +6196,9 @@ local_system:
               );
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -9235,5 +9300,202 @@ messages:
     metadata:
       filename: src/datastructures/gss.rs
   - user: Make `is_alive` much faster. It's very slow right now, mainly due to acc().
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to optimize `is_alive()` by avoiding the expensive `acc()` call, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file** `src/datastructures/gss.rs`.
+      2.  **Locate the `is_alive` function**. It is a single line of code:
+
+          ```rust
+          pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+          ```
+
+      3.  **Replace the entire `is_alive` function** with the following optimized implementation. This new version preserves the original logic but avoids traversing the entire GSS to compute the full set of allowed tokens, instead exiting early as soon as it can determine the node is "alive".
+
+          ```rust
+          pub fn is_alive(&self) -> bool {
+              // This is an optimized version of `!self.allowed_llm_tokens().is_empty()`.
+              // The original `allowed_llm_tokens` is slow because it calls `self.acc()`, which
+              // traverses the entire subgraph to compute the union of all reachable root tokens.
+              //
+              // The check `!(&local & &aggregated).is_empty()` is equivalent to checking if there
+              // exists *any* reachable root `r` such that `(&local & &r.acc.tokens).is_empty()` is false.
+              // This allows us to traverse the graph and exit early as soon as we find such a root.
+
+              let local_acc = self.local_acc();
+              if local_acc.llm_tokens_union.is_empty() {
+                  return false;
+              }
+
+              match self {
+                  GSSNode::Root(_) => {
+                      // For a root, `allowed_llm_tokens()` is just its own `llm_tokens_union`.
+                      // Since we've already checked that it's not empty, it must be alive.
+                      true
+                  }
+                  GSSNode::Internal(_) => {
+                      // For an internal node, traverse to find at least one reachable root
+                      // whose tokens have a non-empty intersection with this node's local tokens.
+                      let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
+                      let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+
+                      // Start traversal from self's direct predecessors.
+                      for preds_by_depth in self.predecessors().values() {
+                          for pred_vec in preds_by_depth.values() {
+                              for pred in pred_vec {
+                                  queue.push_back(pred.clone());
+                              }
+                          }
+                      }
+
+                      while let Some(node) = queue.pop_front() {
+                          let ptr = Arc::as_ptr(&node);
+                          if !visited_nodes.insert(ptr) {
+                              continue;
+                          }
+
+                          match node.as_ref() {
+                              GSSNode::Root(r) => {
+                                  // Found a root. Check for non-empty intersection.
+                                  if !(&local_acc.llm_tokens_union & &r.acc.llm_tokens_union).is_empty() {
+                                      return true; // Early exit: found a valid path.
+                                  }
+                              }
+                              GSSNode::Internal(ii) => {
+                                  // Not a root, continue traversal.
+                                  for preds_by_depth in ii.predecessors.values() {
+                                      for pred_vec in preds_by_depth.values() {
+                                          for pred in pred_vec {
+                                              queue.push_back(pred.clone());
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      // Traversed all paths and found no live ones.
+                      false
+                  }
+              }
+          }
+          ```
+
+      ### Git Diff
+
+      Here is the git patch to apply the changes:
+
+      ```diff
+      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
+      index 014a901..644b62e 100644
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -1021,7 +1021,52 @@
+       
+           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
+       
+      -    pub fn is_alive(&self) -> bool { !self.allowed_llm_tokens().is_empty() }
+      +    pub fn is_alive(&self) -> bool {
+      +        // This is an optimized version of `!self.allowed_llm_tokens().is_empty()`.
+      +        // The original `allowed_llm_tokens` is slow because it calls `self.acc()`, which
+      +        // traverses the entire subgraph to compute the union of all reachable root tokens.
+      +        //
+      +        // The check `!(&local & &aggregated).is_empty()` is equivalent to checking if there
+      +        // exists *any* reachable root `r` such that `(&local & &r.acc.tokens).is_empty()` is false.
+      +        // This allows us to traverse the graph and exit early as soon as we find such a root.
+      +
+      +        let local_acc = self.local_acc();
+      +        if local_acc.llm_tokens_union.is_empty() {
+      +            return false;
+      +        }
+      +
+      +        match self {
+      +            GSSNode::Root(_) => {
+      +                // For a root, `allowed_llm_tokens()` is just its own `llm_tokens_union`.
+      +                // Since we've already checked that it's not empty, it must be alive.
+      +                true
+      +            }
+      +            GSSNode::Internal(_) => {
+      +                // For an internal node, traverse to find at least one reachable root
+      +                // whose tokens have a non-empty intersection with this node's local tokens.
+      +                let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
+      +                let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
+      +
+      +                // Start traversal from self's direct predecessors.
+      +                for preds_by_depth in self.predecessors().values() {
+      +                    for pred_vec in preds_by_depth.values() {
+      +                        for pred in pred_vec {
+      +                            queue.push_back(pred.clone());
+      +                        }
+      +                    }
+      +                }
+      +
+      +                while let Some(node) = queue.pop_front() {
+      +                    let ptr = Arc::as_ptr(&node);
+      +                    if !visited_nodes.insert(ptr) {
+      +                        continue;
+      +                    }
+      +
+      +                    match node.as_ref() {
+      +                        GSSNode::Root(r) => {
+      +                            // Found a root. Check for non-empty intersection.
+      +                            if !(&local_acc.llm_tokens_union & &r.acc.llm_tokens_union).is_empty() {
+      +                                return true; // Early exit: found a valid path.
+      +                            }
+      +                        }
+      +                        GSSNode::Internal(ii) => {
+      +                            // Not a root, continue traversal.
+      +                            for preds_by_depth in ii.predecessors.values() {
+      +                                for pred_vec in preds_by_depth.values() {
+      +                                    for pred in pred_vec {
+      +                                        queue.push_back(pred.clone());
+      +                                    }
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                }
+      +
+      +                // Traversed all paths and found no live ones.
+      +                false
+      +            }
+      +        }
+      +    }
+       
+           pub fn is_ok(&self) -> bool { self.is_alive() }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
+    metadata:
+  - user: 'Changes committed with message: "Optimize `is_alive` by avoiding full GSS
+      traversal"'
     metadata:
 ...
