@@ -49,7 +49,7 @@ class Model(GraphProvider):
     def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         # This model uses the precompute3 graph, as it's the most detailed representation
-        roots_map = list(data['precomputed3'].items())
+        roots_map = data['precomputed3']
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
