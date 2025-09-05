@@ -81,7 +81,7 @@ class Model(GraphProvider):
                     else:
                         for start, end in state_bv.to_ranges():
                             for sid in range(start, end):
-                                yield (int(pop), sid, int(dest_idx)))
+                                yield (int(pop), sid, int(dest_idx))
 
     def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         """
