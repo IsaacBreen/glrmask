@@ -670,7 +670,7 @@ impl GrammarConstraint {
             |glr_s1, glr_s2| {
                 reset();
                 glr_s1.merge_with(glr_s2);
-                print_summary();
+                // print_summary();
                 reset();
             },
             |precomputed_node_data, glr_s| {
@@ -725,7 +725,7 @@ impl GrammarConstraint {
                 simplify_roots_in_place(&mut stack);
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
-                print_summary();
+                // print_summary();
                 reset();
 
                 keep_going
