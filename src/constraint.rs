@@ -121,6 +121,7 @@ pub struct GrammarConstraintConfig {
     pub optimize_trie2_compress_edges: bool,
     pub optimize_trie2_gc: bool,
     pub skip_precomputation: bool,
+    pub optimize_trie3_constrain_bitvecs: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -139,6 +140,7 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_compress_edges: true,
             optimize_trie2_gc: true,
             skip_precomputation: false,
+            optimize_trie3_constrain_bitvecs: true,
         }
     }
 }
@@ -734,7 +736,8 @@ impl GrammarConstraint {
         );
 
         crate::debug!(2, "Finished precomputing Trie 3.");
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config);
+        let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token);
 
         (precomputed3, trie3_god)
     }

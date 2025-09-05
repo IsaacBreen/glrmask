@@ -10,10 +10,16 @@ pub fn optimize_trie3_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
     config: &GrammarConstraintConfig,
+    max_state_id: usize,
+    max_llm_token_id: usize,
 ) {
     crate::debug!(2, "Optimizing Trie 3 size...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
+
+    if config.optimize_trie3_constrain_bitvecs {
+        constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+    }
 
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
         prune_dead_paths_trie3(roots, &trie3_god);
@@ -37,6 +43,51 @@ pub fn optimize_trie3_size(
         Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     }
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+}
+
+fn constrain_bitvecs_trie3(
+    trie3_god: &Trie3GodWrapper,
+    roots_vec: &[PrecomputeNode3Index],
+    max_state_id: usize,
+    max_llm_token_id: usize,
+) {
+    crate::debug!(2, "Constraining bitvectors in Trie 3...");
+    let all_nodes = Trie::all_nodes(trie3_god, roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    for node_arc in all_nodes {
+        let mut guard = node_arc.write(trie3_god).unwrap();
+
+        // Constrain live_tokens on the node value
+        guard.value.live_tokens.constrain(max_llm_token_id);
+
+        let old_children = std::mem::take(guard.children_mut());
+        let mut new_children = BTreeMap::new();
+
+        for ((pop, mut llm_bv), dest_map) in old_children {
+            llm_bv.constrain(max_llm_token_id);
+
+            let mut new_dest_map = OrderedHashMap::new();
+            for (dest_wrapper, mut sids_bv) in dest_map {
+                sids_bv.constrain(max_state_id);
+                if !sids_bv.is_empty() {
+                    new_dest_map.insert(dest_wrapper, sids_bv);
+                }
+            }
+
+            if !llm_bv.is_empty() && !new_dest_map.is_empty() {
+                // Need to merge if the key (with constrained llm_bv) already exists
+                let entry = new_children.entry((pop, llm_bv)).or_insert_with(OrderedHashMap::new);
+                for (dest, sids) in new_dest_map {
+                    entry.entry(dest)
+                        .and_modify(|existing_sids| *existing_sids |= &sids)
+                        .or_insert(sids);
+                }
+            }
+        }
+        *guard.children_mut() = new_children;
+    }
+    crate::debug!(2, "Finished constraining bitvectors.");
 }
 
 pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
