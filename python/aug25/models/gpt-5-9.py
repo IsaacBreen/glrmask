@@ -129,7 +129,7 @@ class Model(GraphProvider):
                     for start, end in to_ranges():
                         # [start, end)
                         # For each SID in the range, union the llm mask into that dest
-                        end = max_state_id
+                        end = min(int(end), max_state_id + 1)
                         for sid_val in range(start, end):
                             by_dest = sid_map.get(sid_val)
                             if by_dest is None:
