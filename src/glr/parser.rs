@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
-use crate::datastructures::trie::{EdgeInserter, Trie2Index};
+use crate::datastructures::trie::EdgeInserter;
 use crate::{debug, hit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
@@ -1580,7 +1580,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", {
             // Avoid re-linking the same (source, destination, k) pair within a single reduce_and_goto call.
-            let mut edge_link_memo: std::collections::HashSet<(Trie2Index, Trie2Index, usize)> = std::collections::HashSet::new();
+            let mut edge_link_memo: std::collections::HashSet<(usize, usize, usize)> = std::collections::HashSet::new();
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
                 if let Some((state_id, acc, stored_nodes, _leaf_root)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
@@ -1623,10 +1623,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         for source_wrapper in &stored_nodes {
                             let source_arc = source_wrapper.as_arc().clone();
                             // Deduplicate within this call to avoid redundant inserter work.
-                            let src_ptr = source_arc;
-                            let dst_ptr = cached_dest.as_arc();;
+                            let src_ptr = Arc::as_ptr(&source_arc) as usize;
+                            let dst_ptr = Arc::as_ptr(&cached_dest.as_arc()) as usize;
                             let k = edge_key.0;
-                            if edge_link_memo.insert((src_ptr, *dst_ptr, k)) {
+                            if edge_link_memo.insert((src_ptr, dst_ptr, k)) {
                                 let inserter = EdgeInserter::new(
                                     &god,
                                     source_arc,
