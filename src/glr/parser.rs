@@ -1301,6 +1301,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     // Refactored helpers to make reduce_and_goto clearer
     // ----------------------------------------------------------------------
 
+    #[time_it]
     fn build_below_bottom_accs(&self, popper: &GSSPopper) -> BTreeMap<usize, Acc> {
         // New simplified version: do NOT push state ID edges here anymore.
         // Just merge Accs by k and return them; edge additions will be handled later.
@@ -1318,6 +1319,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         result
     }
 
+    #[time_it]
     fn handle_below_bottom(
         &mut self,
         nt: NonTerminalID,
@@ -1424,6 +1426,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         for (predecessor_state_id, isolated_parent) in todo {
+            timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
             let mut nt_queue = VecDeque::new();
             nt_queue.push_back(nt);
 
@@ -1537,11 +1540,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 }
             }
+            });
         }
 
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
+            timeit!("GLRParserState::reduce_and_goto::Caching", {
             for gss_arc in out {
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
                     let cache_key = BelowBottomCacheKey {
@@ -1608,6 +1613,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     final_out.push(gss_arc);
                 }
             }
+            });
         } else {
             // No trie god, so no caching is possible.
             final_out = out;
