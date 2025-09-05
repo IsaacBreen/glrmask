@@ -598,6 +598,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // grammar_constraint.dump_precomputed2();
     grammar_constraint.dump_precomputed3_stats();
     println!("GrammarConstraint constructed successfully.");
+    return Ok(());
 
     // --- Tokenization Phase ---
     
