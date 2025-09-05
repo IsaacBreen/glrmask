@@ -1861,7 +1861,7 @@ impl GSSNode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct GSSStats {
+pub struct GSSStats {
     pub(crate) num_roots: usize,
     pub(crate) num_root_predecessors: usize,
     pub(crate) num_unique_root_predecessor_keys: usize,
@@ -1880,7 +1880,7 @@ pub(crate) struct GSSStats {
 
 /// Gathers statistics about the structure and complexity of a GSS forest.
 #[time_it]
-pub(crate) fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
+pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
