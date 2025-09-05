@@ -695,7 +695,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values: HashMap<usize, V> = HashMap::new();
         let mut stopped_nodes: HashSet<usize> = HashSet::new();
-        let mut processed_nodes: HashSet<usize> = HashSet::new();
         let mut todo: BTreeMap<usize, OrderedHashSet<Trie2Index>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
@@ -809,7 +808,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values: HashMap<usize, V> = HashMap::new();
         let mut stopped_nodes: HashSet<usize> = HashSet::new();
-        let mut processed_nodes: HashSet<usize> = HashSet::new();
         let mut todo: BTreeMap<usize, OrderedHashSet<Trie2Index>> = BTreeMap::new();
 
         let initial_nodes: Vec<_> = initial_nodes_and_values.iter().map(|(n, _)| *n).collect();
@@ -827,7 +825,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             todo.entry(depth).or_default().insert(node_idx);
         }
 
-
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_indices)) = todo.pop_first() {
             for node_idx in &node_indices {
@@ -838,10 +835,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     Some(v) => v,
                     None => continue,
                 };
-
-                if !processed_nodes.insert(ptr) {
-                    panic!("Node {} was processed more than once in special_map_grouped.", ptr);
-                }
 
                 let proceed = {
                     let guard = node_idx.read(arena).expect("poison");
