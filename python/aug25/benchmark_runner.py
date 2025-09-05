@@ -204,8 +204,15 @@ def run_benchmark(args):
     print(f"Loading reference model from: {args.reference}")
     ReferenceModel = load_competitor_model(args.reference)
     # The reference model is always loaded from precompute2 JSON for this benchmark suite.
-    reference_model = ReferenceModel.from_json_string(pre2_json_str)
-
+    # Load reference model using precompute2 or precompute3 JSON based on its name.
+    if 'precompute3' in args.reference.name:
+        print("-> Using precompute3 JSON for reference model.")
+        reference_json_str = pre3_json_str
+    else:
+        print("-> Using precompute2 JSON for reference model.")
+        reference_json_str = pre2_json_str
+    reference_model = ReferenceModel.from_json_string(reference_json_str)
+    
     if args.print_stats:
         print_model_statistics(reference_model, args.reference.name)
 
