@@ -1390,7 +1390,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!({
             let stats = gather_gss_stats(&[peek.isolated_parent().as_ref()]);
             let num_nodes = stats.unique_nodes;
-            format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes", num_nodes)
+            format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges", stats.unique_nodes, stats.total_edges)
         }, {
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
@@ -1454,7 +1454,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
-            crate::debug!(2, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
+            crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
@@ -1462,7 +1462,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let mut nt_queue = VecDeque::new();
                 nt_queue.push_back(nt);
 
-                crate::debug!(2, "Processing nonterminal '{}' from predecessor state {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), predecessor_state_id.0);
+                crate::debug!(9, "Processing nonterminal '{}' from predecessor state {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), predecessor_state_id.0);
                 while let Some(current_nt) = nt_queue.pop_front() {
                     // GOTO lookup from predecessor_state_id, possibly hallucinated.
                     let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
@@ -1490,9 +1490,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     });
                     crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
-                    // crate::debug!(2, "Found {} GOTO entries for NT '{}' from state {}:", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0);
+                    // crate::debug!(9, "Found {} GOTO entries for NT '{}' from state {}:", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0);
                     // for (goto, maybe_filter) in &gotos_with_filters {
-                    //     crate::debug!(2, "  GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
+                    //     crate::debug!(9, "  GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
                     // }
 
                     timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {

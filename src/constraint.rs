@@ -722,7 +722,7 @@ impl GrammarConstraint {
                 }
 
                 let mut stack = vec![glr_s.active_state.stack.clone()];
-                simplify_roots_in_place(&mut stack);
+                // simplify_roots_in_place(&mut stack);
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
                 // print_summary();
