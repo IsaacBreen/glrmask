@@ -22,26 +22,26 @@ class Model(GraphProvider):
             # Aggregate into precompute2 format: (pop, sid) -> {dest -> llm_bv}
             p2_children_agg = defaultdict(lambda: defaultdict(RangeSet.empty))
 
-            for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False):
+            for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
                 pop, llm_bv_json = edge_key
                 llm_rs = RangeSet.from_json(llm_bv_json)
                 if llm_rs.is_empty():
                     continue
 
-                for dest_idx, state_bv_ranges in tqdm(dest_map, desc="Aggregating dests", leave=False):
+                for dest_idx, state_bv_ranges in tqdm(dest_map, desc="Aggregating dests", leave=False, disable=True):
                     if not state_bv_ranges: # Corresponds to Option<StateID> == None
                         p2_key = (int(pop), None)
                         p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
                     else:
-                        for start, end in tqdm(state_bv_ranges, desc="Aggregating ranges", leave=False):
-                            end = max(int(end), start)
-                            for sid in tqdm(list(range(int(start), end + 1)), desc="Aggregating ranges", leave=False):
+                        for start, end in tqdm(state_bv_ranges, desc="Aggregating ranges", leave=False, disable=True):
+                            end = min(int(end), start)
+                            for sid in tqdm(list(range(int(start), end + 1)), desc="Aggregating ranges", leave=False, disable=True):
                                 p2_key = (int(pop), sid)
                                 p2_children_agg[p2_key][int(dest_idx)] = p2_children_agg[p2_key][int(dest_idx)].union(llm_rs)
             
             # Convert aggregated map to final list format
             new_children = []
-            for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False):
+            for (pop, sid), dests in tqdm(p2_children_agg.items(), desc="Converting to list", leave=False, disable=True):
                 dest_list = list(dests.items())
                 new_children.append(((pop, sid), dest_list))
             
@@ -55,7 +55,7 @@ class Model(GraphProvider):
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        max_state_id = max(dict(data['parser']['stage_7_table']).keys())
+        max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
         return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
