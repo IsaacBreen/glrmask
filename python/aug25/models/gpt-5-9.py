@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple, Optional, Iterable, Set
 
 from ..common_interface import GraphProvider
 import _sep1 as ffi
-
+from tqdm import tqdm
 
 class _PopGroup:
     """
@@ -63,7 +63,7 @@ class Model(GraphProvider):
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
 
-        for uid, node in arena.items():
+        for uid, node in tqdm(arena.items()):
             uid_int = int(uid)
 
             # Depth cache
