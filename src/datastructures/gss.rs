@@ -227,7 +227,7 @@ fn deep_add_precompute_trie_edges_recursive(
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
     pub(crate) terminals_union: HybridL2Bitset,
-    pub(crate) stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+    stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
 }
 
 impl Acc {
@@ -812,7 +812,7 @@ impl GSSNode {
     }
 
     /// Returns the local Acc stored on this node (both internal and root).
-    pub(crate) fn local_acc(&self) -> Arc<Acc> {
+    fn local_acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => i.acc.clone(),
@@ -1552,7 +1552,7 @@ pub(crate) fn merge_stored_trie_nodes(
         }
         let mut new_acc = (*root.acc).clone();
         // Create a single new destination for this merge operation.
-        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), new_acc.llm_tokens_union.clone()))
+        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), root.acc.llm_tokens_union.clone()))
             .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal()))))
             .clone();
         let edge_key = (0, new_acc.llm_tokens_union.clone());
@@ -1671,7 +1671,7 @@ pub(crate) fn fuse_predecessors_recursive(
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,
-) -> Option<SimpleGSSInfo> {
+) -> Option<(StateID, Arc<Acc>)> {
     if let GSSNode::Internal(internal) = node.as_ref() {
         // Must have exactly one predecessor edge group.
         if internal.predecessors.len() == 1 {
@@ -1699,12 +1699,7 @@ pub(crate) fn is_simple_gss(
                                             // The returned Acc must be the result of narrowing down the path.
                                             let path_acc1 = Acc::narrow(&internal.acc, &pred_internal.acc);
                                             let final_acc = Acc::narrow(&path_acc1, &leaf_root.acc);
-                                            return Some(SimpleGSSInfo {
-                                                top_state_id: state_id_x,
-                                                hallucinated_state_id,
-                                                leaf_root: leaf.clone(),
-                                                path_acc: Arc::new(final_acc),
-                                            });
+                                            return Some((state_id_x, Arc::new(final_acc)));
                                         }
                                     }
                                 }
@@ -1716,16 +1711,6 @@ pub(crate) fn is_simple_gss(
         }
     }
     None
-}
-
-/// Describes a compact, performance-critical tower shape:
-/// Internal(top_state_id) -> Internal(hallucinated_state_id) -> Root(leaf with stored_trie_nodes)
-#[derive(Debug, Clone)]
-pub(crate) struct SimpleGSSInfo {
-    pub top_state_id: StateID,
-    pub hallucinated_state_id: StateID,
-    pub leaf_root: Arc<GSSNode>,
-    pub path_acc: Arc<Acc>,
 }
 
 // --- Deep canonicalization & interning ---
