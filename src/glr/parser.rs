@@ -1600,11 +1600,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     if add_to_out {
                         // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
                         // We add the modified GSS to the output to serve as the canonical representation.
+                        crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
                         final_out.push(new_gss_arc);
                     }
                     // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                 } else {
                     // Not a simple GSS, keep it for merging.
+                    crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
                     final_out.push(gss_arc);
                 }
             }
