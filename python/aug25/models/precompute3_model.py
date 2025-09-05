@@ -173,7 +173,7 @@ class Model(GraphProvider):
 
                         # Merge matched parents
                         t1 = time.time()
-                        child_gss = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss = ffi.gss_merge_many_with_depth(matched, 999999999)
                         time_merge_matched += time.time() - t1
                         hits_merge_matched += 1
 
@@ -189,7 +189,7 @@ class Model(GraphProvider):
                         d = int(dest_idx)
                         t1 = time.time()
                         if d in values:
-                            combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 1)
+                            combined = ffi.gss_merge_many_with_depth([values[d], child_gss], 999999999)
                             # Only re-enqueue if effectively changed
                             if combined.ptr() == values[d].ptr():
                                 continue
