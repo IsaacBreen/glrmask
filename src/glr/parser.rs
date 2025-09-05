@@ -1332,43 +1332,43 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // - Push a single hallucinated state edge on top.
         // - Return a single (hallucinated_state_id, gss) todo per k-group.
         let hallucinate_sid = self.parser.hallucinated_state_id;
-        let mut new_todo_items = Vec::new();
 
         if below.is_empty() {
-            return new_todo_items;
+            return Vec::new();
         }
 
         let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
 
+        let mut new_acc = None;
+        let mut dest = PrecomputeNode3Index::new(
+            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+        );
         for (k, mut acc) in below {
-            let mut root = Arc::new(GSSNode::new(acc));
-
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
             let tokens_all = LLMTokenBV::max_ones();
             let key = (k, tokens_all.clone());
             let all_states = StateIDBV::max_ones();
-            let mut memo = PruneAndTransformRecursiveMemo::default();
-            let mut dest_provider = || {
-                PrecomputeNode3Index::new(
-                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                )
-            };
-            deep_add_precompute_trie_edges(
-                &mut root,
-                god,
-                &key,
-                &all_states,
-                &tokens_all,
-                &mut dest_provider,
-                &mut memo,
-            );
 
-            // Push the hallucinated state edge
-            let gss_with_hallucinate = Arc::new(root.push(ParseStateEdgeContent {
-                state_id: hallucinate_sid,
-            }));
-            new_todo_items.push((hallucinate_sid, gss_with_hallucinate));
+            for node in std::mem::take(&mut acc.stored_trie_nodes) {
+                // TODO: complete this
+                let inserter = EdgeInserter3::new(...);
+                ...
+            }
+
+            if new_acc.is_none() {
+                new_acc = Some(acc);
+            } else {
+                new_acc = Some(Acc::merge(&new_acc.unwrap(), &acc));
+            }
         }
+
+        let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
+        new_acc.stored_trie_nodes.clear();
+        new_acc.stored_trie_nodes.insert(dest);
+
+        let new_leaf = Arc::new(GSSNode::new(new_acc));
+        let new_gss = new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid });
+        let new_todo_items = vec![(hallucinate_sid, new_gss)];
 
         new_todo_items
     }
