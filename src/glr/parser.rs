@@ -84,7 +84,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
@@ -1657,8 +1657,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
                                 let new_tokens = acc.llm_tokens_union.clone();
-                                vacant.insert((new_dest, new_tokens));
-                                (vacant.get().0.clone(), true)
+                                vacant.insert((new_dest.clone(), new_tokens));
+                                (new_dest, true)
                             }
                         }
                     });

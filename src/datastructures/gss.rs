@@ -227,7 +227,7 @@ fn deep_add_precompute_trie_edges_recursive(
 pub(crate) struct Acc {
     pub(crate) llm_tokens_union: HybridBitset,
     pub(crate) terminals_union: HybridL2Bitset,
-    stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+    pub(crate) stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
 }
 
 impl Acc {
@@ -812,7 +812,7 @@ impl GSSNode {
     }
 
     /// Returns the local Acc stored on this node (both internal and root).
-    fn local_acc(&self) -> Arc<Acc> {
+    pub(crate) fn local_acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => i.acc.clone(),
