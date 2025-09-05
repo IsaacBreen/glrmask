@@ -1432,7 +1432,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             while let Some(current_nt) = nt_queue.pop_front() {
                 // GOTO lookup from predecessor_state_id, possibly hallucinated.
-                let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = if predecessor_state_id == self.parser.hallucinated_state_id {
+                let gotos_with_filters: Vec<(Goto, Option<StateIDBV>)> = timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::NTQueuePop", {
+                if predecessor_state_id == self.parser.hallucinated_state_id {
                     // Fetch all possible gotos for this NT with associated state filters.
                     if let Some(entries) = self.parser.hallucinated_row.gotos.get(&current_nt) {
                         entries.iter().map(|(g, bv)| (*g, Some(bv.clone()))).collect()
@@ -1453,9 +1454,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             )
                         });
                     vec![(goto, None)]
-                };
+                }
+                });
                 crate::debug!(5, "Found {} GOTO entries for NT '{}' from state {}: {:?}", gotos_with_filters.len(), self.parser.non_terminal_map.get_by_right(&current_nt).unwrap(), predecessor_state_id.0, gotos_with_filters);
 
+                timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
                 for (goto, maybe_filter) in gotos_with_filters {
                     // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
                     let mut parent_after_filter = isolated_parent.clone();
@@ -1539,6 +1542,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         // No goto target -> we're done.
                     }
                 }
+                });
             }
             });
         }
