@@ -662,6 +662,11 @@ impl PyGrammarConstraintState {
         Ok(bools.into_pyarray_bound(py))
     }
 
+    fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
+        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+        Ok(PyHybridBitset { inner: bitset })
+    }
+
     fn commit(&mut self, llm_token_id: usize) {
         // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
         self.inner.with_inner_mut(|state| {

@@ -215,17 +215,26 @@ def run_benchmark(args):
     masks_ranges: list[list[list[int]]] = []  # list of [[s,e], ...] per step
 
     # 5. Run benchmark loop
+    is_rust_model = hasattr(model, 'IS_RUST_WRAPPER') and model.IS_RUST_WRAPPER
+
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
     for i, token_id in progress_bar:
-        # Get the state map for the model. This is needed for all mask calculations.
-        progress_bar.set_postfix_str("filtered_state_gss_map")
-        state_to_gss = constraint_state.filtered_state_gss_map()
-
-        # --- TIMED SECTION: get_mask ---
-        progress_bar.set_postfix_str("get_mask (model)")
         t_start_mask = time.perf_counter()
-        mask_rs: RangeSet = model.get_mask(state_to_gss)
+        if is_rust_model:
+            progress_bar.set_postfix_str("get_mask (rust)")
+            # The Rust model calls the native get_mask directly on the state object.
+            mask_bv = constraint_state.get_mask_bv()
+            mask_rs = RangeSet.from_ranges(mask_bv.to_ranges())
+        else:
+            # Get the state map for the model. This is needed for all mask calculations.
+            progress_bar.set_postfix_str("filtered_state_gss_map")
+            state_to_gss = constraint_state.filtered_state_gss_map()
+
+            # --- TIMED SECTION: get_mask ---
+            progress_bar.set_postfix_str("get_mask (model)")
+            mask_rs: RangeSet = model.get_mask(state_to_gss)
+
         t_end_mask = time.perf_counter()
         get_mask_timings.append(t_end_mask - t_start_mask)
         # Export the mask for later cross-model comparison during analysis
