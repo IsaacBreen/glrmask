@@ -224,7 +224,7 @@ def run_benchmark(args):
         if is_rust_model:
             progress_bar.set_postfix_str("get_mask (rust)")
             # The Rust model calls the native get_mask directly on the state object.
-            mask_bv = constraint_state.get_mask()
+            mask_bv = constraint_state.get_mask_bv()
             mask_rs = RangeSet.from_ranges(mask_bv.to_ranges())
         else:
             # Get the state map for the model. This is needed for all mask calculations.
