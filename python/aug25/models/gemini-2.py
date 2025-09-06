@@ -1,12 +1,12 @@
-import json
-import time
 import heapq
+import json
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Set
+
+import _sep1 as ffi
+from tqdm.auto import tqdm
 
 from ..common_interface import GraphProvider
-import _sep1 as ffi  # the compiled module
-from tqdm.auto import tqdm
 
 
 class Model(GraphProvider):
