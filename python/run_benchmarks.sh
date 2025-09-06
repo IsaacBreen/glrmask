@@ -69,17 +69,19 @@ echo "---"
 
 
 # --- Run Benchmarks ---
+ALL_MODELS=("$REFERENCE_MODEL" "${COMPETITORS[@]}")
+
 echo "Starting benchmark runs..."
-for competitor in "${COMPETITORS[@]}"; do
+for model_to_benchmark in "${ALL_MODELS[@]}"; do
     echo
-    echo ">>> Running benchmark for: $(basename "$competitor")"
+    echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
     python -m aug25.benchmark_runner \
         --code "$CODE_FILE" \
         --constraint-file "$CONSTRAINT_FILE" \
         --reference "$REFERENCE_MODEL" \
-        --competitor "$competitor" \
+        --competitor "$model_to_benchmark" \
         --output "$RESULTS_DIR"
-    echo ">>> Finished benchmark for: $(basename "$competitor")"
+    echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
 done
 echo
 echo "All benchmark runs completed."

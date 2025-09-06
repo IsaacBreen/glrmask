@@ -217,53 +217,59 @@ def run_benchmark(args):
         equivalence_details = "N/A (reference is 'builtin')"
     else:
         ref_path = Path(args.reference)
-        print(f"Loading reference model from: {ref_path}")
-        ReferenceModel = load_competitor_model(ref_path)
-        # All models are loaded from precompute3 JSON for this benchmark suite.
-        reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
+        if ref_path == args.competitor:
+            print("Reference and competitor are the same. Using single model instance.")
+            reference_model = competitor_model
+            equivalence_passed = True
+            equivalence_details = "N/A (competitor is the reference)"
+        else:
+            print(f"Loading reference model from: {ref_path}")
+            ReferenceModel = load_competitor_model(ref_path)
+            # All models are loaded from precompute3 JSON for this benchmark suite.
+            reference_model = ReferenceModel.from_json_string(full_constraint_json_str)
 
-        if args.print_stats:
-            print_model_statistics(reference_model, ref_path.name)
+            if args.print_stats:
+                print_model_statistics(reference_model, ref_path.name)
 
-        print(f"Running equivalence check against reference model: {ref_path.name}")
+            print(f"Running equivalence check against reference model: {ref_path.name}")
 
-        equivalence_passed = True
-        equivalence_details = "All tested states are equivalent."
+            equivalence_passed = True
+            equivalence_details = "All tested states are equivalent."
 
-        ENABLE_EQUIVALENCE_TEST = False
-        if ENABLE_EQUIVALENCE_TEST:
-            # Check that root sets are the same before proceeding
-            ref_roots = set(reference_model.roots_map.keys())
-            comp_roots = set(competitor_model.roots_map.keys())
-            if ref_roots != comp_roots:
-                equivalence_passed = False
-                equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
-            else:
-                sorted_roots = sorted(list(ref_roots))
-                total_roots = len(sorted_roots)
-                print(f"Checking equivalence across {total_roots} tokenizer states...")
-                for i, sid in enumerate(sorted_roots):
-                    # Progress indicator
-                    if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
-                        print(f"  ... verified {i+1}/{total_roots} states", end='\r')
+            ENABLE_EQUIVALENCE_TEST = False
+            if ENABLE_EQUIVALENCE_TEST:
+                # Check that root sets are the same before proceeding
+                ref_roots = set(reference_model.roots_map.keys())
+                comp_roots = set(competitor_model.roots_map.keys())
+                if ref_roots != comp_roots:
+                    equivalence_passed = False
+                    equivalence_details = f"Root sets differ. Ref: {len(ref_roots)} roots, Comp: {len(comp_roots)} roots."
+                else:
+                    sorted_roots = sorted(list(ref_roots))
+                    total_roots = len(sorted_roots)
+                    print(f"Checking equivalence across {total_roots} tokenizer states...")
+                    for i, sid in enumerate(sorted_roots):
+                        # Progress indicator
+                        if (i > 0 and i % 25 == 0) or i == total_roots - 1 or i == 0:
+                            print(f"  ... verified {i+1}/{total_roots} states", end='\r')
 
-                    passed, details = are_equivalent_for_state(
-                        reference_model, reference_model.get_root(sid),
-                        competitor_model, competitor_model.get_root(sid),
-                        verbose=False
-                    )
-                    if not passed:
-                        print() # Newline to clear the progress indicator
-                        equivalence_passed = False
-                        equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
-                        break
+                        passed, details = are_equivalent_for_state(
+                            reference_model, reference_model.get_root(sid),
+                            competitor_model, competitor_model.get_root(sid),
+                            verbose=False
+                        )
+                        if not passed:
+                            print() # Newline to clear the progress indicator
+                            equivalence_passed = False
+                            equivalence_details = f"Equivalence failed for tokenizer state {sid}. Details: {details}"
+                            break
+                    if equivalence_passed:
+                        print() # Final newline after progress indicator
+
                 if equivalence_passed:
-                    print() # Final newline after progress indicator
-
-            if equivalence_passed:
-                print("✅ Equivalence check passed.")
-            else:
-                print(f"❌ Equivalence check failed: {equivalence_details}")
+                    print("✅ Equivalence check passed.")
+                else:
+                    print(f"❌ Equivalence check failed: {equivalence_details}")
 
     # 6. Prepare for benchmarking loop
     print(f"Loading and tokenizing code from: {args.code}")
