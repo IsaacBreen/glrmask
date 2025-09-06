@@ -186,10 +186,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    ax = sns.lineplot(
-        data=df, x='token_index', y='time_sec', hue='model', style='model',
-        markers=True, dashes=True, alpha=0.7, linewidth=1.0
-    )
+    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
 
     mismatch_df = df[df['mask_mismatch']]
     plot_title = f'get_mask() Performance per Token (Baseline: {baseline_name})'
@@ -256,7 +253,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     # 3. Line plot of commit timings per token
     if not df_commit.empty:
         plt.figure(figsize=(15, 8))
-        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=1.2)
+        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=0.7)
 
         ax_commit.set_xlabel('Token Index in Sequence')
         ax_commit.set_ylabel('Time (seconds)')
