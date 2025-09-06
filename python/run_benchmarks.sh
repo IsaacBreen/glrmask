@@ -5,12 +5,14 @@ set -euo pipefail
 # run_benchmarks.sh
 #
 # A script to automate running benchmarks for multiple grammar constraint models,
-# comparing them against a reference implementation, and generating analysis plots.
+# generating JSON results and analysis plots. This script runs each model once
+# (no in-process reference/baseline). The analyzer is later told which result
+# is the baseline to perform mask comparisons.
 #
 # This script should be run from the `python` directory.
 #
 # Usage:
-#   ./run_benchmarks.sh <reference_model.py> <competitor1.py> [competitor2.py ...]
+#   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
 #
 # Example:
 #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
@@ -28,18 +30,20 @@ set -euo pipefail
 : "${CODE_FILE:="../src/example_code.js"}"
 
 # --- Argument Validation ---
-if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <reference_model.py> <competitor1.py> [competitor2.py ...]"
-    echo "Error: At least two arguments are required: a reference model and one competitor model."
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+    echo "Error: At least one model argument is required. The first is treated as the baseline."
     exit 1
 fi
 
-REFERENCE_MODEL="$1"
+BASELINE_MODEL="$1"
 shift
 COMPETITORS=("$@")
 
+ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
 # Check that all provided files exist
-for file in "$REFERENCE_MODEL" "${COMPETITORS[@]}"; do
+for file in "${ALL_MODELS[@]}"; do
     if [ ! -f "$file" ]; then
         echo "Error: Model file not found: $file"
         exit 1
@@ -61,16 +65,18 @@ RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
 mkdir -p "$RESULTS_DIR"
 echo "Benchmark results will be saved in: $RESULTS_DIR"
 echo "---"
-echo "Reference Model: $REFERENCE_MODEL"
-echo "Competitors: ${COMPETITORS[*]}"
+echo "Baseline Model: $BASELINE_MODEL"
+if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+  echo "Other Models: ${COMPETITORS[*]}"
+else
+  echo "Other Models: (none)"
+fi
 echo "Constraint File: $CONSTRAINT_FILE"
 echo "Code: $CODE_FILE"
 echo "---"
 
 
 # --- Run Benchmarks ---
-ALL_MODELS=("$REFERENCE_MODEL" "${COMPETITORS[@]}")
-
 echo "Starting benchmark runs..."
 for model_to_benchmark in "${ALL_MODELS[@]}"; do
     echo
@@ -78,8 +84,7 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
     python -m aug25.benchmark_runner \
         --code "$CODE_FILE" \
         --constraint-file "$CONSTRAINT_FILE" \
-        --reference "$REFERENCE_MODEL" \
-        --competitor "$model_to_benchmark" \
+        --model "$model_to_benchmark" \
         --output "$RESULTS_DIR"
     echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
 done
@@ -91,12 +96,15 @@ echo "---"
 # --- Analyze Results ---
 echo "Analyzing results and generating plots..."
 PLOTS_DIR="${RESULTS_DIR}/analysis"
+BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
 python -m aug25.benchmark_analyzer \
     "${RESULTS_DIR}"/*.json \
+    --baseline "$BASELINE_STEM" \
     --output-dir "$PLOTS_DIR"
 
 echo
 echo "---"
 echo "Benchmark analysis complete."
+echo "Baseline: $BASELINE_STEM"
 echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
 echo "Full JSON results are in: $RESULTS_DIR"

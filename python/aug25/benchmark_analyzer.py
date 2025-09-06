@@ -1,46 +1,149 @@
 import argparse
 import json
-import os
 from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def analyze_results(result_files: list[Path], output_dir: Path):
+
+def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, int], ...]:
     """
-    Loads benchmark results from JSON files, computes statistics, and generates plots.
+    Normalize a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
     """
-    all_data = []
-    commit_timings_raw = None
+    if not ranges:
+        return tuple()
+    items = sorted((int(s), int(e)) for s, e in ranges)
+    merged: List[Tuple[int, int]] = []
+    cs, ce = items[0]
+    for ns, ne in items[1:]:
+        if ns <= ce + 1:
+            ce = max(ce, ne)
+        else:
+            merged.append((cs, ce))
+            cs, ce = ns, ne
+    merged.append((cs, ce))
+    return tuple(merged)
+
+
+def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None):
+    """
+    Loads benchmark results from JSON files, computes statistics, compares masks against a chosen baseline,
+    and generates plots.
+    """
+    all_data_rows = []
+    commit_timings_by_model: Dict[str, List[float]] = {}
+    masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
+    get_mask_timings_by_model: Dict[str, List[float]] = {}
+
+    model_order: List[str] = []
+
+    # Load all results
     for file_path in result_files:
         with open(file_path, 'r') as f:
             data = json.load(f)
-            competitor_name = Path(data["competitor_script"]).stem
-            timings = data["results"]["get_mask_timings_seconds"]
-            if commit_timings_raw is None:
-                commit_timings_raw = data["results"].get("commit_timings_seconds")
 
-            mismatch_indices = set(
-                data["results"]
-                .get("mask_correctness_check", {})
-                .get("mismatch_indices", [])
-            )
-            for i, timing in enumerate(timings):
-                all_data.append({
-                    "competitor": competitor_name,
-                    "token_index": i,
-                    "time_sec": timing,
-                    "equivalence_passed": data["results"]["equivalence_check"]["passed"],
-                    "mask_mismatch": i in mismatch_indices
-                })
+        model_script = data.get("model_script") or data.get("competitor_script")  # legacy fallback
+        model_name = Path(model_script).stem if model_script else Path(file_path).stem
 
-    if not all_data:
+        if model_name not in model_order:
+            model_order.append(model_name)
+
+        timings = data["results"].get("get_mask_timings_seconds", [])
+        get_mask_timings_by_model[model_name] = timings
+
+        commit_timings = data["results"].get("commit_timings_seconds", [])
+        commit_timings_by_model[model_name] = commit_timings
+
+        masks_raw = data["results"].get("masks_ranges") or data["results"].get("masks_intervals")
+        if masks_raw is None:
+            print(f"Warning: No masks present in {file_path}. Mask comparisons will be skipped for {model_name}.")
+            masks_by_model[model_name] = []
+        else:
+            masks_by_model[model_name] = [_normalize_intervals(r) for r in masks_raw]
+
+    if not get_mask_timings_by_model:
         print("No data to analyze.")
         return
 
-    df = pd.DataFrame(all_data)
+    # Determine baseline
+    if baseline_key:
+        # Allow either a model name (stem) or a path to a results file
+        candidate = baseline_key
+        path_candidate = Path(candidate)
+        if path_candidate.exists():
+            try:
+                with open(path_candidate, 'r') as f:
+                    d = json.load(f)
+                candidate_name = Path(d.get("model_script", path_candidate)).stem
+            except Exception:
+                candidate_name = path_candidate.stem
+        else:
+            candidate_name = candidate
+        if candidate_name not in masks_by_model:
+            print(f"Warning: Baseline '{baseline_key}' not found among models: {list(masks_by_model.keys())}. Using first available model.")
+            baseline_name = model_order[0]
+        else:
+            baseline_name = candidate_name
+    else:
+        baseline_name = model_order[0]
 
-    # Create commit DataFrame
+    baseline_masks = masks_by_model.get(baseline_name, [])
+    baseline_timings = get_mask_timings_by_model.get(baseline_name, [])
+    print(f"Selected baseline: {baseline_name}")
+
+    # Compute per-model mismatch indices against the baseline
+    mismatch_indices_by_model: Dict[str, List[int]] = {}
+    equivalent_by_model: Dict[str, bool] = {}
+
+    have_masks = all(len(v) > 0 for v in masks_by_model.values())
+
+    for model_name, masks in masks_by_model.items():
+        if not have_masks or not baseline_masks or not masks:
+            mismatch_indices_by_model[model_name] = []
+            equivalent_by_model[model_name] = True if model_name == baseline_name else False
+            continue
+        length = min(len(baseline_masks), len(masks))
+        mismatches: List[int] = []
+        for i in range(length):
+            if baseline_masks[i] != masks[i]:
+                mismatches.append(i)
+        # If lengths differ, count extra indices as mismatches (conservative)
+        if len(baseline_masks) != len(masks):
+            extra_mismatches = list(range(length, max(len(baseline_masks), len(masks))))
+            mismatches.extend(extra_mismatches)
+        mismatch_indices_by_model[model_name] = mismatches
+        equivalent_by_model[model_name] = (len(mismatches) == 0)
+
+    # Build a unified dataframe for timings and mismatch flags
+    for model_name, timings in get_mask_timings_by_model.items():
+        mismatches_set = set(mismatch_indices_by_model.get(model_name, []))
+        for i, t in enumerate(timings):
+            all_data_rows.append({
+                "model": model_name,
+                "token_index": i,
+                "time_sec": t,
+                "mask_mismatch": (i in mismatches_set)
+            })
+
+    if not all_data_rows:
+        print("No timing rows to analyze.")
+        return
+
+    df = pd.DataFrame(all_data_rows)
+
+    # Create commit DataFrame (use baseline's commit timings if available, otherwise the first present)
+    commit_timings_raw: List[float] = []
+    if baseline_name in commit_timings_by_model and commit_timings_by_model[baseline_name]:
+        commit_timings_raw = commit_timings_by_model[baseline_name]
+    else:
+        # fallback to any available
+        for v in commit_timings_by_model.values():
+            if v:
+                commit_timings_raw = v
+                break
+
     df_commit = pd.DataFrame()
     if commit_timings_raw:
         df_commit = pd.DataFrame({
@@ -50,28 +153,32 @@ def analyze_results(result_files: list[Path], output_dir: Path):
 
     # --- Print Summary Statistics ---
     print("--- Benchmark Summary ---")
-    summary = df.groupby('competitor')['time_sec'].agg(
+    summary = df.groupby('model')['time_sec'].agg(
         ['mean', 'std', 'min', 'median', 'max', 'count']
     ).rename(columns={'median': 'p50'})
 
     # Add percentiles
-    percentiles = df.groupby('competitor')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+    percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
     percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
     summary = summary.join(percentiles)
 
-    # Add equivalence check info
-    equiv_status = df.groupby('competitor')['equivalence_passed'].first()
-    summary['equivalent'] = equiv_status.map({True: '✅', False: '❌'})
+    # Add equivalence info vs baseline
+    eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalent_by_model.items()}, name='equivalent')
+    # Add mismatch counts
+    mm_series = pd.Series({k: len(v) for k, v in mismatch_indices_by_model.items()}, name='mask_mismatch_count')
+
+    summary = summary.join(eq_series).join(mm_series)
 
     # Reorder columns for display
-    summary = summary[['equivalent', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
-    
+    summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+
     # Format for printing
-    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000 # convert to ms
-    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'count'] else c)
+    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
 
     print(summary.to_string(float_format="%.4f"))
-    print("\n" + "✅ = Equivalent to reference, ❌ = Not equivalent")
+    print(f"\nBaseline: {baseline_name}")
+    print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
 
     # --- Generate Plots ---
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,25 +186,25 @@ def analyze_results(result_files: list[Path], output_dir: Path):
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='competitor', alpha=0.8, linewidth=1.2)
+    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='model', alpha=0.8, linewidth=1.2)
 
     mismatch_df = df[df['mask_mismatch']]
-    plot_title = 'get_mask() Performance per Token'
+    plot_title = f'get_mask() Performance per Token (Baseline: {baseline_name})'
 
     if not mismatch_df.empty:
         plot_title += ' (X marks mask mismatches)'
-        
+
         # Get hue order from the lineplot's legend to ensure colors match
         handles, labels = ax.get_legend_handles_labels()
         # The first entry is the title of the legend, so we skip it.
-        competitor_labels = labels[1:1+len(df['competitor'].unique())]
+        model_labels = labels[1:1+len(df['model'].unique())]
 
         sns.scatterplot(
             data=mismatch_df,
             x='token_index',
             y='time_sec',
-            hue='competitor',
-            hue_order=competitor_labels,
+            hue='model',
+            hue_order=model_labels,
             style='mask_mismatch',
             markers=['X'],
             s=150,
@@ -105,13 +212,13 @@ def analyze_results(result_files: list[Path], output_dir: Path):
             linewidth=1,
             legend=False,
             ax=ax,
-            zorder=5 # Ensure markers are on top of lines
+            zorder=5  # Ensure markers are on top of lines
         )
 
     ax.set_xlabel('Token Index in Sequence')
     ax.set_ylabel('Time (seconds)')
     ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-    
+
     # Linear scale
     ax.set_yscale('linear')
     ax.set_title(plot_title)
@@ -132,9 +239,9 @@ def analyze_results(result_files: list[Path], output_dir: Path):
     # Convert to ms for better readability on the plot
     df_ms = df.copy()
     df_ms['time_ms'] = df_ms['time_sec'] * 1000
-    sns.boxplot(data=df_ms, x='competitor', y='time_ms')
+    sns.boxplot(data=df_ms, x='model', y='time_ms')
     plt.title('Distribution of get_mask() Timings')
-    plt.xlabel('Competitor')
+    plt.xlabel('Model')
     plt.ylabel('Time (milliseconds)')
     plt.xticks(rotation=15)
     plt.grid(True, axis='y', linestyle='--', linewidth=0.5)
@@ -168,8 +275,6 @@ def analyze_results(result_files: list[Path], output_dir: Path):
         plt.close()
 
 
-
-
 def main():
     parser = argparse.ArgumentParser(description="Analyze benchmark results for grammar constraint models.")
     parser.add_argument(
@@ -182,9 +287,14 @@ def main():
         default="benchmark_plots",
         help="Directory to save the generated plots."
     )
+    parser.add_argument(
+        "-b", "--baseline",
+        default=None,
+        help="Baseline model name (stem) or a path to a results JSON file. Defaults to the first model found."
+    )
     args = parser.parse_args()
 
-    result_files = []
+    result_files: List[Path] = []
     for path_str in args.result_paths:
         path = Path(path_str)
         if path.is_dir():
@@ -196,7 +306,8 @@ def main():
         print(f"Error: No .json files found in the specified paths.")
         return
 
-    analyze_results(sorted(list(set(result_files))), Path(args.output_dir))
+    analyze_results(sorted(list(set(result_files))), Path(args.output_dir), baseline_key=args.baseline)
+
 
 if __name__ == "__main__":
     main()
