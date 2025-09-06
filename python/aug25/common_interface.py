@@ -43,6 +43,9 @@ class RangeSet:
             return RangeSet.empty()
         return RangeSet.from_ranges(ranges_json)
 
+    def ranges(self) -> Iterable[Tuple[int, int]]:
+        return iter(self.intervals)
+
     def is_empty(self) -> bool:
         return not self.intervals
 
