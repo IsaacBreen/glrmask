@@ -229,7 +229,7 @@ def run_benchmark(args):
         t_end_mask = time.perf_counter()
         get_mask_timings.append(t_end_mask - t_start_mask)
         # Export the mask for later cross-model comparison during analysis
-        masks_ranges.append(mask_rs.to_json())
+        masks_ranges.append(mask_rs.to_ranges())
 
         # Advance the state
         progress_bar.set_postfix_str("commit")
