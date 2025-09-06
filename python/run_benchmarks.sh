@@ -81,11 +81,13 @@ echo "Starting benchmark runs..."
 for model_to_benchmark in "${ALL_MODELS[@]}"; do
     echo
     echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
-    python -m aug25.benchmark_runner \
-        --code "$CODE_FILE" \
-        --constraint-file "$CONSTRAINT_FILE" \
-        --model "$model_to_benchmark" \
-        --output "$RESULTS_DIR"
+    cmd=(python -m aug25.benchmark_runner
+        --code "$CODE_FILE"
+        --constraint-file "$CONSTRAINT_FILE"
+        --model "$model_to_benchmark"
+        --output "$RESULTS_DIR")
+    echo "+ ${cmd[*]}"
+    "${cmd[@]}"
     echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
 done
 echo
@@ -97,10 +99,12 @@ echo "---"
 echo "Analyzing results and generating plots..."
 PLOTS_DIR="${RESULTS_DIR}/analysis"
 BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
-python -m aug25.benchmark_analyzer \
-    "${RESULTS_DIR}"/*.json \
-    --baseline "$BASELINE_STEM" \
-    --output-dir "$PLOTS_DIR"
+cmd=(python -m aug25.benchmark_analyzer
+    "${RESULTS_DIR}"/*.json
+    --baseline "$BASELINE_STEM"
+    --output-dir "$PLOTS_DIR")
+echo "+ ${cmd[*]}"
+"${cmd[@]}"
 
 echo
 echo "---"
