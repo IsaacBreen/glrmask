@@ -186,7 +186,10 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='model', alpha=0.8, linewidth=1.2)
+    ax = sns.lineplot(
+        data=df, x='token_index', y='time_sec', hue='model', style='model',
+        markers=True, dashes=True, alpha=0.7, linewidth=1.0
+    )
 
     mismatch_df = df[df['mask_mismatch']]
     plot_title = f'get_mask() Performance per Token (Baseline: {baseline_name})'
