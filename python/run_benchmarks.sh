@@ -86,7 +86,7 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         --constraint-file "$CONSTRAINT_FILE"
         --model "$model_to_benchmark"
         --output "$RESULTS_DIR")
-    echo "+ ${cmd[*]}"
+    echo "${cmd[*]}"
     "${cmd[@]}"
     echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
 done
@@ -103,7 +103,7 @@ cmd=(python -m aug25.benchmark_analyzer
     "${RESULTS_DIR}"/*.json
     --baseline "$BASELINE_STEM"
     --output-dir "$PLOTS_DIR")
-echo "+ ${cmd[*]}"
+echo "${cmd[*]}"
 "${cmd[@]}"
 
 echo
