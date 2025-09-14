@@ -28,7 +28,12 @@ class ReferenceGSS(GSS[T, Acc]):
                 new_stacks.append((stack[:-1], acc))
         
         # If popping results in no stacks, represent this as an empty list of stacks.
+        # The __init__ will add back the default empty stack if new_stacks is empty.
+        if not new_stacks and any(s for s, a in self.stacks):
+             return ReferenceGSS([], self._acc_default_factory)
+
         return ReferenceGSS(new_stacks, self._acc_default_factory)
+
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
         new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
@@ -41,14 +46,22 @@ class ReferenceGSS(GSS[T, Acc]):
     def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
         all_stacks: List[Tuple[List[T], Acc]] = []
         factory = None
+        
+        gss_list = list(gss_list)
+        if not gss_list:
+            raise ValueError("Cannot merge empty list of GSS")
+
         for gss in gss_list:
             if isinstance(gss, ReferenceGSS):
-                all_stacks.extend(gss.stacks)
+                # Don't add the default empty stack if there are other stacks
+                if len(gss.stacks) > 1 or gss.stacks[0][0]:
+                    all_stacks.extend(gss.stacks)
                 if factory is None:
                     factory = gss._acc_default_factory
         
         if factory is None:
-             raise ValueError("Cannot merge empty list of GSS or list with non-reference implementations")
+             # This can happen if all GSSs were empty.
+             factory = gss_list[0]._acc_default_factory
 
         merged_map: Dict[Tuple[T, ...], Acc] = {}
         for stack, acc in all_stacks:
