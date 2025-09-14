@@ -1934,7 +1934,8 @@ local_system:
               timings = data["results"].get("get_mask_timings_seconds", [])
               get_mask_timings_by_model[model_name] = timings
 
-              commit_timings = data["results"].get("commit_timings_seconds", [])
+              # Look for the new key first, with a fallback to the old key for backward compatibility.
+              commit_timings = data["results"].get("commit_bytes_timings_seconds") or data["results"].get("commit_timings_seconds", [])
               commit_timings_by_model[model_name] = commit_timings
 
               masks_raw = data["results"].get("masks_ranges") or data["results"].get("masks_intervals")
@@ -2383,15 +2384,16 @@ local_system:
           grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
           # 2. Extract vocabulary for tokenizer
-          id_to_token = grammar_constraint.get_id_to_token_map()
+          # The map from the grammar is string -> ID. The tokenizer needs ID -> bytes.
+          str_to_id_map = grammar_constraint.get_id_to_token_map()
+          id_to_token_bytes = {v: k.encode('utf-8') for k, v in str_to_id_map.items()}
 
           # 3. Load model
           print(f"Loading model from: {args.model}")
           ModelClass = load_model_class(args.model)
           
           t_start_load = time.perf_counter()
-          full_constraint_json_str = grammar_constraint.to_json_string()
-          model = ModelClass.from_json_string(full_constraint_json_str)
+          model = ModelClass.from_json_string(constraint_json_str)
           load_time = time.perf_counter() - t_start_load
           print(f"Model loaded in {load_time:.4f} seconds.")
 
@@ -2401,46 +2403,34 @@ local_system:
           # 4. Tokenize input code
           print(f"Loading and tokenizing code from: {args.code}")
           code_bytes = args.code.read_bytes()
-          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          token_ids = greedy_tokenizer(code_bytes, id_to_token_bytes)
           print(f"Tokenized into {len(token_ids)} tokens.")
 
-          constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
           get_mask_timings: list[float] = []
-          commit_timings: list[float] = []
+          commit_bytes_timings: list[float] = []
           masks_ranges: list[list[list[int]]] = []  # list of [[s,e], ...] per step
 
           # 5. Run benchmark loop
-          is_rust_model = hasattr(model, 'IS_RUST_WRAPPER') and model.IS_RUST_WRAPPER
-
           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
           progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
           for i, token_id in progress_bar:
+              token_bytes = id_to_token_bytes[token_id]
+
+              # --- TIMED SECTION: get_mask ---
+              progress_bar.set_postfix_str("get_mask (model)")
               t_start_mask = time.perf_counter()
-              if is_rust_model:
-                  progress_bar.set_postfix_str("get_mask (rust)")
-                  # The Rust model calls the native get_mask directly on the state object.
-                  mask_bv = constraint_state.get_mask_bv()
-                  mask_rs = RangeSet.from_ranges(mask_bv.to_ranges())
-              else:
-                  # Get the state map for the model. This is needed for all mask calculations.
-                  progress_bar.set_postfix_str("filtered_state_gss_map")
-                  state_to_gss = constraint_state.filtered_state_gss_map()
-
-                  # --- TIMED SECTION: get_mask ---
-                  progress_bar.set_postfix_str("get_mask (model)")
-                  mask_rs: RangeSet = model.get_mask(state_to_gss)
-
+              # The model interface is now simpler. It manages its own state.
+              mask_rs: RangeSet = model.get_mask()
               t_end_mask = time.perf_counter()
               get_mask_timings.append(t_end_mask - t_start_mask)
-              # Export the mask for later cross-model comparison during analysis
               masks_ranges.append(mask_rs.to_ranges())
 
-              # Advance the state
-              progress_bar.set_postfix_str("commit")
+              # --- TIMED SECTION: commit_bytes ---
+              progress_bar.set_postfix_str("commit_bytes")
               t_start_commit = time.perf_counter()
-              constraint_state.commit(token_id)
+              model.commit_bytes(token_bytes)
               t_end_commit = time.perf_counter()
-              commit_timings.append(t_end_commit - t_start_commit)
+              commit_bytes_timings.append(t_end_commit - t_start_commit)
 
           print("--- Benchmark finished ---")
 
@@ -2470,7 +2460,7 @@ local_system:
               "results": {
                   "load_time_seconds": load_time,
                   "get_mask_timings_seconds": get_mask_timings,
-                  "commit_timings_seconds": commit_timings,
+                  "commit_bytes_timings_seconds": commit_bytes_timings,
                   "masks_ranges": masks_ranges,
                   "summary_stats": summary_stats,
               }
@@ -2511,7 +2501,7 @@ local_system:
       if __name__ == "__main__":
           main()
     python/aug25/common_interface.py: |
-      from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
+      from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence, Protocol
       from dataclasses import dataclass
       import bisect
 
@@ -2524,6 +2514,31 @@ local_system:
               """
               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
+              """
+              raise NotImplementedError
+
+      class Model(Protocol):
+          """
+          Protocol defining the interface for a benchmarked grammar constraint model.
+          """
+          @classmethod
+          def from_json_string(cls, json_str: str) -> "Model":
+              """Loads a model from the JSON representation of a GrammarConstraint."""
+              ...
+
+          def get_mask(self) -> "RangeSet":
+              """
+              Calculates the allowed token mask based on the current grammar state.
+              The model is responsible for accessing the state internally.
+              """
+              ...
+
+          def commit_bytes(self, token_bytes: bytes) -> None:
+              """
+              Advances the internal grammar state by committing a token.
+              
+              Args:
+                  token_bytes: The UTF-8 bytes of the token being committed.
               """
               raise NotImplementedError
 
@@ -5632,5 +5647,395 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Implement FastGSS optimized GSS
       structure"'
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of gss_test_spec/spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of gss_implementations/fast_gss/fast_gss.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      Modify the Python benchmarking framework to incorporate commit_bytes timing and update the models accordingly.
+
+      Key changes needed:
+      1. In the benchmark runner, add separate timing for commit_bytes alongside get_mask. Do not initialize a Rust constraint state in the benchmark runner; models should handle their own state.
+      2. Update the get_mask method in models to no longer take a map from tokenizer state to GSS node. Instead, get_mask should only take self (which wraps the grammar constraint state).
+      3. Add a commit_bytes method to the model interface that models must implement. For existing models, this should wrap the grammar constraint state's commit implementation.
+      4. Ensure that the testing framework for get_mask now also tests commit_bytes if applicable.
+      5. Update all existing model implementations in the benchmark folder to:
+         - Remove the map parameter from get_mask.
+         - Add a commit_bytes method that calls the underlying grammar constraint state's commit.
+         - Maintain compatibility with the current approach by wrapping the grammar constraint state.
+
+      Files to modify:
+      - constraint.rs (if needed for Python bindings)
+      - python/src/lib.rs (for PyO3 bindings and interface changes)
+      - All Python files in the benchmark folder (e.g., aug25/models/*.py, benchmark_runner.py, etc.)
+      - Any other relevant files in the benchmark folder.
+
+      Ensure that the changes are backward-compatible for models that use the Rust grammar constraint state.
+
+      Write the necessary code changes for these modifications.
+    metadata:
+  - assistant: |-
+      This is a significant refactoring of the benchmarking framework to make the models self-contained and to time the `commit_bytes` operation separately. Here are the step-by-step instructions and corresponding diffs for the Python files, followed by guidance on how to update your model and Rust files.
+
+      ### Step-by-step Instructions
+
+      #### 1. Update the Model Interface Protocol
+
+      First, we'll formally define the new interface that benchmarked models are expected to implement.
+
+      *   **File:** `python/aug25/common_interface.py`
+      *   **Action:** Add a new `Model` protocol at the end of the file. This protocol will define the `from_json_string`, `get_mask`, and the new `commit_bytes` methods.
+
+      #### 2. Modify the Benchmark Runner
+
+      Next, update the benchmark runner to delegate state management to the models and to time the new `commit_bytes` method.
+
+      *   **File:** `python/aug25/benchmark_runner.py`
+      *   **Action:**
+          1.  In `run_benchmark`, change how the vocabulary map is created to be `id -> bytes`, which is what `greedy_tokenizer` expects. This also fixes a latent bug.
+          2.  Remove the creation of the `_sep1.GrammarConstraintState` object. The model is now responsible for its own state.
+          3.  Remove the `is_rust_model` check and the conditional logic inside the main benchmark loop.
+          4.  The loop will now call `model.get_mask()` (with no arguments) and the new `model.commit_bytes(token_bytes)` method.
+          5.  Time the `model.commit_bytes` call and store it in a new list called `commit_bytes_timings`.
+          6.  Update the output JSON to save the new timing data under the key `commit_bytes_timings_seconds`.
+
+      #### 3. Update the Benchmark Analyzer
+
+      The analyzer needs to be updated to read the new timing key from the results files, while maintaining backward compatibility with old results.
+
+      *   **File:** `python/aug25/benchmark_analyzer.py`
+      *   **Action:**
+          1.  In `analyze_results`, find the line that loads `commit_timings_seconds`.
+          2.  Modify it to first look for `commit_bytes_timings_seconds` and fall back to `commit_timings_seconds` if the new key is not present.
+
+      ---
+
+      ### Git Diffs
+
+      Here are the git diffs for the files mentioned above.
+
+      ```diff
+      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
+      index 585c490..014f346 100644
+      --- a/python/aug25/benchmark_analyzer.py
+      +++ b/python/aug25/benchmark_analyzer.py
+      @@ -42,7 +42,8 @@
+               timings = data["results"].get("get_mask_timings_seconds", [])
+               get_mask_timings_by_model[model_name] = timings
+       
+      -        commit_timings = data["results"].get("commit_timings_seconds", [])
+      +        # Look for the new key first, with a fallback to the old key for backward compatibility.
+      +        commit_timings = data["results"].get("commit_bytes_timings_seconds") or data["results"].get("commit_timings_seconds", [])
+               commit_timings_by_model[model_name] = commit_timings
+       
+               masks_raw = data["results"].get("masks_ranges") or data["results"].get("masks_intervals")
+
+      ``````diff
+      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
+      index 4554867..208a54d 100644
+      --- a/python/aug25/benchmark_runner.py
+      +++ b/python/aug25/benchmark_runner.py
+      @@ -236,12 +236,13 @@
+           grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
+       
+           # 2. Extract vocabulary for tokenizer
+      -    id_to_token = grammar_constraint.get_id_to_token_map()
+      +    # The map from the grammar is string -> ID. The tokenizer needs ID -> bytes.
+      +    str_to_id_map = grammar_constraint.get_id_to_token_map()
+      +    id_to_token_bytes = {v: k.encode('utf-8') for k, v in str_to_id_map.items()}
+       
+           # 3. Load model
+           print(f"Loading model from: {args.model}")
+           ModelClass = load_model_class(args.model)
+           
+           t_start_load = time.perf_counter()
+      -    full_constraint_json_str = grammar_constraint.to_json_string()
+      -    model = ModelClass.from_json_string(full_constraint_json_str)
+      +    model = ModelClass.from_json_string(constraint_json_str)
+           load_time = time.perf_counter() - t_start_load
+           print(f"Model loaded in {load_time:.4f} seconds.")
+       
+      @@ -251,39 +252,34 @@
+           # 4. Tokenize input code
+           print(f"Loading and tokenizing code from: {args.code}")
+           code_bytes = args.code.read_bytes()
+      -    token_ids = greedy_tokenizer(code_bytes, id_to_token)
+      +    token_ids = greedy_tokenizer(code_bytes, id_to_token_bytes)
+           print(f"Tokenized into {len(token_ids)} tokens.")
+       
+      -    constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
+           get_mask_timings: list[float] = []
+      -    commit_timings: list[float] = []
+      +    commit_bytes_timings: list[float] = []
+           masks_ranges: list[list[list[int]]] = []  # list of [[s,e], ...] per step
+       
+           # 5. Run benchmark loop
+      -    is_rust_model = hasattr(model, 'IS_RUST_WRAPPER') and model.IS_RUST_WRAPPER
+      -
+           print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+           progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
+           for i, token_id in progress_bar:
+      +        token_bytes = id_to_token_bytes[token_id]
+      +
+      +        # --- TIMED SECTION: get_mask ---
+      +        progress_bar.set_postfix_str("get_mask (model)")
+               t_start_mask = time.perf_counter()
+      -        if is_rust_model:
+      -            progress_bar.set_postfix_str("get_mask (rust)")
+      -            # The Rust model calls the native get_mask directly on the state object.
+      -            mask_bv = constraint_state.get_mask_bv()
+      -            mask_rs = RangeSet.from_ranges(mask_bv.to_ranges())
+      -        else:
+      -            # Get the state map for the model. This is needed for all mask calculations.
+      -            progress_bar.set_postfix_str("filtered_state_gss_map")
+      -            state_to_gss = constraint_state.filtered_state_gss_map()
+      -
+      -            # --- TIMED SECTION: get_mask ---
+      -            progress_bar.set_postfix_str("get_mask (model)")
+      -            mask_rs: RangeSet = model.get_mask(state_to_gss)
+      -
+      +        # The model interface is now simpler. It manages its own state.
+      +        mask_rs: RangeSet = model.get_mask()
+               t_end_mask = time.perf_counter()
+               get_mask_timings.append(t_end_mask - t_start_mask)
+      -        # Export the mask for later cross-model comparison during analysis
+               masks_ranges.append(mask_rs.to_ranges())
+       
+      -        # Advance the state
+      -        progress_bar.set_postfix_str("commit")
+      +        # --- TIMED SECTION: commit_bytes ---
+      +        progress_bar.set_postfix_str("commit_bytes")
+               t_start_commit = time.perf_counter()
+      -        constraint_state.commit(token_id)
+      +        model.commit_bytes(token_bytes)
+               t_end_commit = time.perf_counter()
+      -        commit_timings.append(t_end_commit - t_start_commit)
+      +        commit_bytes_timings.append(t_end_commit - t_start_commit)
+       
+           print("--- Benchmark finished ---")
+       
+      @@ -310,7 +306,7 @@
+               "results": {
+                   "load_time_seconds": load_time,
+                   "get_mask_timings_seconds": get_mask_timings,
+      -            "commit_timings_seconds": commit_timings,
+      +            "commit_bytes_timings_seconds": commit_bytes_timings,
+                   "masks_ranges": masks_ranges,
+                   "summary_stats": summary_stats,
+               }
+
+      ``````diff
+      diff --git a/python/aug25/common_interface.py b/python/aug25/common_interface.py
+      index 81b255e..20e0350 100644
+      --- a/python/aug25/common_interface.py
+      +++ b/python/aug25/common_interface.py
+      @@ -1,4 +1,4 @@
+      -from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
+      +from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence, Protocol
+       from dataclasses import dataclass
+       import bisect
+       
+      @@ -10,6 +10,32 @@
+               Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
+               Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
+               """
+      +        raise NotImplementedError
+      +
+      +class Model(Protocol):
+      +    """
+      +    Protocol defining the interface for a benchmarked grammar constraint model.
+      +    """
+      +    @classmethod
+      +    def from_json_string(cls, json_str: str) -> "Model":
+      +        """Loads a model from the JSON representation of a GrammarConstraint."""
+      +        ...
+      +
+      +    def get_mask(self) -> "RangeSet":
+      +        """
+      +        Calculates the allowed token mask based on the current grammar state.
+      +        The model is responsible for accessing the state internally.
+      +        """
+      +        ...
+      +
+      +    def commit_bytes(self, token_bytes: bytes) -> None:
+      +        """
+      +        Advances the internal grammar state by committing a token.
+      +        
+      +        Args:
+      +            token_bytes: The UTF-8 bytes of the token being committed.
+      +        """
+               raise NotImplementedError
+       
+       @dataclass(frozen=True, slots=True)
+
+      ```
+
+      ---
+
+      ### Guidance for Model and Rust Code Updates
+
+      You will need to apply the following conceptual changes to your model implementations and Rust bindings.
+
+      #### 1. Model Implementation Changes (e.g., `aug25/precompute2_model.py`)
+
+      Each of your Python model files must be updated to manage its own state.
+
+      **Conceptual Diff (Before vs. After):**
+
+      ```python
+      # --- BEFORE ---
+      # from .common_interface import RangeSet
+      #
+      # class Model:
+      #     @classmethod
+      #     def from_json_string(cls, s: str):
+      #         # Logic to parse JSON and load graph structure
+      #         # Does NOT create a constraint state object.
+      #         ...
+      #         return cls(...)
+      #
+      #     def get_mask(self, state_to_gss: Dict[int, Any]) -> RangeSet:
+      #         # Receives the state map from the benchmark runner.
+      #         # Uses it to compute the mask.
+      #         ...
+
+      # --- AFTER ---
+      import _sep1
+      from .common_interface import RangeSet, Model
+
+      class Model: # Implement the protocol
+          def __init__(self, grammar_constraint: _sep1.GrammarConstraint):
+              # Store the constraint and create a state object for this model instance.
+              self.constraint = grammar_constraint
+              self.constraint_state = _sep1.GrammarConstraintState(self.constraint)
+              # ... existing logic to load graph structure from the grammar_constraint ...
+
+          @classmethod
+          def from_json_string(cls, s: str) -> "Model":
+              # Now responsible for creating the full GrammarConstraint object.
+              grammar_constraint = _sep1.GrammarConstraint.from_json_string(s)
+              return cls(grammar_constraint)
+
+          def get_mask(self) -> RangeSet:
+              # Get the state map from its own internal state object.
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              # ... rest of the get_mask logic remains the same ...
+              ...
+
+          def commit_bytes(self, token_bytes: bytes) -> None:
+              # New method to advance the internal state.
+              # This assumes the Rust binding has been updated with `commit_bytes`.
+              self.constraint_state.commit_bytes(token_bytes)
+
+      ```
+
+      #### 2. Rust Binding Changes (`python/src/lib.rs`)
+
+      To support the `commit_bytes` method in Python, you need to add it to the `GrammarConstraintState` in Rust and expose it through PyO3.
+
+      1.  **Add `commit_bytes` to the Rust `GrammarConstraintState`:** This method will need a way to look up a token ID from its byte representation. This typically means the `GrammarConstraint` needs a reverse mapping from bytes to IDs, which can be built when it's first loaded.
+
+          ```rust
+          // In your Rust library's GrammarConstraintState implementation
+          impl<'c> GrammarConstraintState<'c> {
+              pub fn commit_bytes(&mut self, token_bytes: &[u8]) {
+                  // Assumes self.constraint has a method to get token ID from bytes.
+                  if let Some(token_id) = self.constraint.get_token_id_from_bytes(token_bytes) {
+                      self.commit(token_id);
+                  } else {
+                      // Or handle the error appropriately, e.g., by resetting.
+                      self.reset();
+                  }
+              }
+          }
+          ```
+
+      2.  **Expose `commit_bytes` in PyO3:** Add the method to your `#[pymethods]` block for the `GrammarConstraintState` Python wrapper.
+
+          ```rust
+          // In python/src/lib.rs
+          #[pymethods]
+          impl PyGrammarConstraintState {
+              // ... other existing methods ...
+
+              /// Commits a token using its raw bytes, advancing the grammar state.
+              fn commit_bytes(&mut self, token_bytes: &[u8]) {
+                  self.0.commit_bytes(token_bytes);
+              }
+          }
+          ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_analyzer.py
+      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/benchmark_runner.py
+      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/aug25/common_interface.py
+      Applying patch to 'python/aug25/common_interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/common_interface.py.
+    metadata:
+  - user: 'Changes committed with message: "Refactor benchmark runner: introduce commit_bytes
+      timing, models manage state, update interface"'
     metadata:
 ...

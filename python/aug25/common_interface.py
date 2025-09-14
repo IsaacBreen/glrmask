@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
+from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence, Protocol
 from dataclasses import dataclass
 import bisect
 
@@ -11,6 +11,31 @@ class GraphProvider:
         """
         Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
         Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
+        """
+        raise NotImplementedError
+
+class Model(Protocol):
+    """
+    Protocol defining the interface for a benchmarked grammar constraint model.
+    """
+    @classmethod
+    def from_json_string(cls, json_str: str) -> "Model":
+        """Loads a model from the JSON representation of a GrammarConstraint."""
+        ...
+
+    def get_mask(self) -> "RangeSet":
+        """
+        Calculates the allowed token mask based on the current grammar state.
+        The model is responsible for accessing the state internally.
+        """
+        ...
+
+    def commit_bytes(self, token_bytes: bytes) -> None:
+        """
+        Advances the internal grammar state by committing a token.
+        
+        Args:
+            token_bytes: The UTF-8 bytes of the token being committed.
         """
         raise NotImplementedError
 

@@ -53,7 +53,8 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         timings = data["results"].get("get_mask_timings_seconds", [])
         get_mask_timings_by_model[model_name] = timings
 
-        commit_timings = data["results"].get("commit_timings_seconds", [])
+        # Look for the new key first, with a fallback to the old key for backward compatibility.
+        commit_timings = data["results"].get("commit_bytes_timings_seconds") or data["results"].get("commit_timings_seconds", [])
         commit_timings_by_model[model_name] = commit_timings
 
         masks_raw = data["results"].get("masks_ranges") or data["results"].get("masks_intervals")
