@@ -1,130 +1,22 @@
 local_system:
   attached_files:
-    - python/run_benchmarks.sh
     - python/aug25/__init__.py
     - python/aug25/benchmark_analyzer.py
     - python/aug25/benchmark_runner.py
     - python/aug25/common_interface.py
     - python/aug25/equality.py
     - python/aug25/optimizer_general.py
+    - python/gss_tester/__init__.py
+    - python/gss_tester/interface.py
+    - python/gss_tester/reference_impl.py
+    - python/gss_tester/test_spec.py
+    - python/gss_tester/runner.py
+    - python/gss_tester/analyzer.py
+    - python/gss_tester/implementations/__init__.py
+    - python/gss_tester/implementations/graph_impl.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # generating JSON results and analysis plots. This script runs each model once
-      # (no in-process reference/baseline). The analyzer is later told which result
-      # is the baseline to perform mask comparisons.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-      #                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 1 ]; then
-          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
-          echo "Error: At least one model argument is required. The first is treated as the baseline."
-          exit 1
-      fi
-
-      BASELINE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
-
-      # Check that all provided files exist
-      for file in "${ALL_MODELS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$CONSTRAINT_FILE" ]; then
-          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Baseline Model: $BASELINE_MODEL"
-      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
-        echo "Other Models: ${COMPETITORS[*]}"
-      else
-        echo "Other Models: (none)"
-      fi
-      echo "Constraint File: $CONSTRAINT_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for model_to_benchmark in "${ALL_MODELS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
-          cmd=(python -m aug25.benchmark_runner
-              --code "$CODE_FILE"
-              --constraint-file "$CONSTRAINT_FILE"
-              --model "$model_to_benchmark"
-              --output "$RESULTS_DIR")
-          echo "+ ${cmd[*]}"
-          "${cmd[@]}"
-          echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
-      cmd=(python -m aug25.benchmark_analyzer
-          "${RESULTS_DIR}"/*.json
-          --baseline "$BASELINE_STEM"
-          --output-dir "$PLOTS_DIR")
-      echo "+ ${cmd[*]}"
-      "${cmd[@]}"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Baseline: $BASELINE_STEM"
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
     python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
@@ -1185,122 +1077,556 @@ local_system:
               q_edges[cid] = out
 
           return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/interface.py: |
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+      import json
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc') # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+              """Creates an initial GSS, typically with one empty stack."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self, value: T) -> 'GSS[T, Acc]':
+              """
+              For all stacks ending in `value`, creates new stacks by removing that value.
+              Returns a new GSS state containing only these popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          @abstractmethod
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              pass
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              try:
+                  data = self.to_json_serializable()
+                  return json.dumps(data, indent=2, sort_keys=True)
+              except Exception:
+                  return super().__str__()
+
+          def __eq__(self, other):
+              """Defines equality based on the canonical JSON representation."""
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+    python/gss_tester/reference_impl.py: |
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from .interface import GSS, T, Acc
+
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Its behavior is the gold standard for the consistency tests.
+          """
+          def __init__(self, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]):
+              self.stacks = stacks
+              self._acc_default_factory = acc_default_factory
+              if not self.stacks:
+                  self.stacks.append(([], self._acc_default_factory()))
+
+          @classmethod
+          def initial(cls: Type['ReferenceGSS'], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+              """Creates a GSS with a single empty stack and a default accumulator."""
+              return cls([], acc_default_factory)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack and stack[-1] == value:
+                      new_stacks.append((stack[:-1], acc))
+              
+              # If popping results in no stacks, represent this as an empty list of stacks.
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {stack[-1] for stack, acc in self.stacks if stack}
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              factory = None
+              for gss in gss_list:
+                  if isinstance(gss, ReferenceGSS):
+                      all_stacks.extend(gss.stacks)
+                      if factory is None:
+                          factory = gss._acc_default_factory
+              
+              if factory is None:
+                   raise ValueError("Cannot merge empty list of GSS or list with non-reference implementations")
+
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for stack, acc in all_stacks:
+                  key = tuple(stack)
+                  if key in merged_map:
+                      merged_map[key] = merge_func(merged_map[key], acc)
+                  else:
+                      merged_map[key] = acc
+              
+              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+              return ReferenceGSS(final_stacks, factory)
+
+          def to_json_serializable(self) -> Any:
+              # Sort stacks for a canonical representation, making comparisons reliable.
+              # Stacks (lists) are converted to tuples to be sortable keys.
+              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
+              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.initial(acc_factory)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.pop(20)
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.pop(10)
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.initial(acc_factory).push(1).push(2)
+          gss_b = gss_class.initial(acc_factory).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.initial(acc_factory).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.initial(acc_factory).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.initial(acc_factory)
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.pop(4)
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.pop(2)
+          s8 = s6.pop(3)
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.initial(acc_factory).push(1)
+          gss_empty = gss_d.pop(2) # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/implementations/__init__.py: |
+      # This file makes 'implementations' a Python sub-package.
+    python/gss_tester/implementations/graph_impl.py: |
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from ..interface import GSS, T, Acc
+      import itertools
+
+      # Type alias for clarity
+      NodeId = int
+
+      class GraphGSS(GSS[T, Acc]):
+          """
+          A GSS implementation using a directed graph to merge common stack suffixes.
+          - Nodes are defined by (value, parent_tuple) and are canonicalized.
+          - The GSS state is a map from head_node_id -> accumulator.
+          - This implementation has different pop() semantics than the reference one.
+          """
+          # Class-level storage for the graph nodes to ensure all instances share one graph
+          _node_counter = itertools.count()
+          _node_to_id: Dict[Tuple[T, Tuple[NodeId, ...]], NodeId] = {}
+          _id_to_node: Dict[NodeId, Tuple[T, Tuple[NodeId, ...]]] = {}
+          _root_id: NodeId = -1 # Special ID for the root (representing an empty stack)
+
+          def __init__(self, heads: Dict[NodeId, Acc], acc_default_factory: Callable[[], Acc]):
+              self.heads = heads
+              self._acc_default_factory = acc_default_factory
+              if not self.heads:
+                   self.heads[self._root_id] = self._acc_default_factory()
+
+          @classmethod
+          def _get_node_id(cls, value: T, parents: Tuple[NodeId, ...]) -> NodeId:
+              # Sort parents to make the key canonical, ensuring (v, (p1,p2)) == (v, (p2,p1))
+              parents = tuple(sorted(parents))
+              key = (value, parents)
+              if key in cls._node_to_id:
+                  return cls._node_to_id[key]
+              
+              new_id = next(cls._node_counter)
+              cls._node_to_id[key] = new_id
+              cls._id_to_node[new_id] = key
+              return new_id
+
+          @classmethod
+          def initial(cls: Type['GraphGSS'], acc_default_factory: Callable[[], Acc]) -> 'GraphGSS[T, Acc]':
+              return cls({}, acc_default_factory)
+
+          def push(self, value: T) -> 'GraphGSS[T, Acc]':
+              new_heads: Dict[NodeId, Acc] = {}
+              acc_to_nodes: Dict[Acc, List[NodeId]] = {}
+              for node_id, acc in self.heads.items():
+                  if acc not in acc_to_nodes:
+                      acc_to_nodes[acc] = []
+                  acc_to_nodes[acc].append(node_id)
+
+              for acc, node_ids in acc_to_nodes.items():
+                  new_node_id = self._get_node_id(value, tuple(node_ids))
+                  new_heads[new_node_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'GraphGSS[T, Acc]':
+              # This implementation merges accumulators on pop, which differs from the reference.
+              # This is a deliberate choice to showcase how the analyzer would catch semantic differences.
+              # NOTE: This assumes a merge operation on the accumulator. For the purpose of this test,
+              # we assume `+` is the merge operation, as defined in the test spec. A more robust
+              # implementation would require the merge function to be available here.
+              new_heads: Dict[NodeId, Acc] = {}
+              
+              for node_id, acc in self.heads.items():
+                  if node_id == self._root_id:
+                      continue
+                  
+                  node_val, parents = self._id_to_node.get(node_id, (None, None))
+                  if node_val == value:
+                      for parent_id in parents:
+                          if parent_id in new_heads:
+                              new_heads[parent_id] = new_heads[parent_id] + acc
+                          else:
+                              new_heads[parent_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              new_heads = {node_id: func(acc) for node_id, acc in self.heads.items()}
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {self._id_to_node[node_id][0] for node_id in self.heads if node_id != self._root_id}
+
+          @staticmethod
+          def merge(gss_list: Iterable['GraphGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              factory = None
+              merged_heads: Dict[NodeId, Acc] = {}
+
+              for gss in gss_list:
+                  if isinstance(gss, GraphGSS):
+                      if factory is None:
+                          factory = gss._acc_default_factory
+                      for node_id, acc in gss.heads.items():
+                          if node_id in merged_heads:
+                              merged_heads[node_id] = merge_func(merged_heads[node_id], acc)
+                          else:
+                              merged_heads[node_id] = acc
+              
+              if factory is None:
+                  raise ValueError("Cannot merge empty list of GSS or list with non-graph implementations")
+
+              return GraphGSS(merged_heads, factory)
+
+          def to_json_serializable(self) -> Any:
+              # To be comparable with the reference impl, we must reconstruct the full stacks.
+              memo: Dict[NodeId, List[List[T]]] = {}
+
+              def get_paths(node_id: NodeId) -> List[List[T]]:
+                  if node_id in memo:
+                      return memo[node_id]
+                  if node_id == self._root_id:
+                      return [[]]
+                  
+                  val, parents = self._id_to_node[node_id]
+                  all_paths = []
+                  for p_id in parents:
+                      parent_paths = get_paths(p_id)
+                      for p_path in parent_paths:
+                          all_paths.append(p_path + [val])
+                  memo[node_id] = all_paths
+                  return all_paths
+
+              output_stacks = []
+              for node_id, acc in self.heads.items():
+                  paths = get_paths(node_id)
+                  for path in paths:
+                      output_stacks.append({"stack": path, "acc": acc})
+              
+              # Sort for canonical representation
+              return sorted(output_stacks, key=lambda x: (tuple(x['stack']), x['acc']))
   prev_file_contents:
-    python/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # generating JSON results and analysis plots. This script runs each model once
-      # (no in-process reference/baseline). The analyzer is later told which result
-      # is the baseline to perform mask comparisons.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-      #                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 1 ]; then
-          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
-          echo "Error: At least one model argument is required. The first is treated as the baseline."
-          exit 1
-      fi
-
-      BASELINE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
-
-      # Check that all provided files exist
-      for file in "${ALL_MODELS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$CONSTRAINT_FILE" ]; then
-          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Baseline Model: $BASELINE_MODEL"
-      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
-        echo "Other Models: ${COMPETITORS[*]}"
-      else
-        echo "Other Models: (none)"
-      fi
-      echo "Constraint File: $CONSTRAINT_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for model_to_benchmark in "${ALL_MODELS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
-          cmd=(python -m aug25.benchmark_runner
-              --code "$CODE_FILE"
-              --constraint-file "$CONSTRAINT_FILE"
-              --model "$model_to_benchmark"
-              --output "$RESULTS_DIR")
-          echo "${cmd[*]}"
-          "${cmd[@]}"
-          echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
-      cmd=(python -m aug25.benchmark_analyzer
-          "${RESULTS_DIR}"/*.json
-          --baseline "$BASELINE_STEM"
-          --output-dir "$PLOTS_DIR")
-      echo "${cmd[*]}"
-      "${cmd[@]}"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Baseline: $BASELINE_STEM"
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
     python/aug25/__init__.py: ''
     python/aug25/benchmark_analyzer.py: |
       import argparse
@@ -1935,134 +2261,17 @@ local_system:
       if __name__ == "__main__":
           main()
     python/aug25/common_interface.py: |
-      from typing import Any, Dict, List, Tuple, Optional, Iterable, Sequence
-      from dataclasses import dataclass
-      import bisect
-
-      class GraphProvider:
-          def get_root(self, state_id: int) -> int:
-              raise NotImplementedError
-          def is_end(self, node: int) -> bool:
-              raise NotImplementedError
-          def iter_edges(self, node: int, token: int):
-              """
-              Yield (pop_count: int, state_id_or_none: Optional[int], dest_node: int) for edges whose token filter passes.
-              Implementations for precompute3 can prefilter with their token bitsets; for precompute2 leave filtering to caller.
-              """
-              raise NotImplementedError
-
-      @dataclass(frozen=True, slots=True)
-      class RangeSet:
-          """
-          Efficient, normalized (sorted, disjoint, inclusive) intervals for large, sparse token sets.
-          Internally represented as a tuple of (start, end) pairs, both inclusive.
-          """
-          intervals: Tuple[Tuple[int, int], ...]
-
-          @staticmethod
-          def empty() -> "RangeSet":
-              return RangeSet(())
-
-          @staticmethod
-          def from_ranges(ranges: Iterable[Sequence[int]]) -> "RangeSet":
-              normalized = RangeSet._merge_unsorted(ranges)
-              return RangeSet(tuple(normalized))
-
-          @staticmethod
-          def from_indices(indices: Iterable[int]) -> "RangeSet":
-              ranges = [(x, x) for x in indices]
-              normalized = RangeSet._merge_unsorted(ranges)
-              return RangeSet(tuple(normalized))
-
-          @staticmethod
-          def from_json(ranges_json: Optional[List[List[int]]]) -> "RangeSet":
-              if not ranges_json:
-                  return RangeSet.empty()
-              return RangeSet.from_ranges(ranges_json)
-
-          def to_ranges(self) -> Iterable[Tuple[int, int]]:
-              return iter(self.intervals)
-
-          def is_empty(self) -> bool:
-              return not self.intervals
-
-          def __bool__(self) -> bool:
-              return not self.is_empty()
-
-          def contains(self, x: int) -> bool:
-              a = self.intervals
-              if not a:
-                  return False
-              starts = [s for s, _ in a]
-              i = bisect.bisect_right(starts, x) - 1
-              if i < 0:
-                  return False
-              s, e = a[i]
-              return s <= x <= e
-
-          def union(self, other: "RangeSet") -> "RangeSet":
-              if self.is_empty(): return other
-              if other.is_empty(): return self
-              merged: List[Tuple[int, int]] = []
-              i, j = 0, 0
-              a, b = self.intervals, other.intervals
-              def append_or_merge(start: int, end: int) -> None:
-                  if not merged:
-                      merged.append((start, end))
-                      return
-                  ps, pe = merged[-1]
-                  if start <= pe + 1:
-                      merged[-1] = (ps, max(pe, end))
-                  else:
-                      merged.append((start, end))
-              while i < len(a) and j < len(b):
-                  if a[i][0] <= b[j][0]:
-                      append_or_merge(a[i][0], a[i][1]); i += 1
-                  else:
-                      append_or_merge(b[j][0], b[j][1]); j += 1
-              while i < len(a):
-                  append_or_merge(a[i][0], a[i][1]); i += 1
-              while j < len(b):
-                  append_or_merge(b[j][0], b[j][1]); j += 1
-              return RangeSet(tuple(merged))
-
-          def intersection(self, other: "RangeSet") -> "RangeSet":
-              if self.is_empty() or other.is_empty(): return RangeSet.empty()
-              i, j = 0, 0
-              a, b = self.intervals, other.intervals
-              out: List[Tuple[int, int]] = []
-              while i < len(a) and j < len(b):
-                  s1, e1 = a[i]; s2, e2 = b[j]
-                  start = max(s1, s2); end = min(e1, e2)
-                  if start <= end: out.append((start, end))
-                  if e1 < e2: i += 1
-                  else: j += 1
-              return RangeSet(tuple(out)) if out else RangeSet.empty()
-
-          def to_indices(self) -> Iterable[int]:
-              """Yields all individual integer indices in the set."""
-              for start, end in self.intervals:
-                  yield from range(start, end + 1)
-
-          def to_json(self) -> List[List[int]]:
-              return [[s, e] for s, e in self.intervals]
-
-          def __str__(self) -> str:
-              if self.is_empty(): return "{}"
-              parts = [f"{s}-{e}" if s != e else str(s) for s, e in self.intervals]
-              return "{" + ", ".join(parts) + "}"
-
-          @staticmethod
-          def _merge_unsorted(ranges: Iterable[Sequence[int]]) -> List[Tuple[int, int]]:
-              items = sorted([(int(s), int(e)) for s, e in ranges if s is not None and e is not None])
-              if not items: return []
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1: ce = max(ce, ne)
-                  else: merged.append((cs, ce)); cs, ce = ns, ne
-              merged.append((cs, ce))
-              return merged
+      python/
+      └── gss_tester/
+          ├── __init__.py
+          ├── analyzer.py
+          ├── interface.py
+          ├── reference_impl.py
+          ├── runner.py
+          ├── test_spec.py
+          └── implementations/
+              ├── __init__.py
+              └── graph_impl.py
     python/aug25/equality.py: |
       from typing import Dict, List, Tuple, Optional, Iterable, Set, Deque
       from .common_interface import GraphProvider, RangeSet
@@ -2361,9 +2570,558 @@ local_system:
               q_edges[cid] = out
 
           return CompressedTrie(roots=q_roots, ends=q_ends, edges=q_edges)
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/interface.py: |
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+      import json
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc') # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+              """Creates an initial GSS, typically with one empty stack."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self, value: T) -> 'GSS[T, Acc]':
+              """
+              For all stacks ending in `value`, creates new stacks by removing that value.
+              Returns a new GSS state containing only these popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          @abstractmethod
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              pass
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              try:
+                  data = self.to_json_serializable()
+                  return json.dumps(data, indent=2, sort_keys=True)
+              except Exception:
+                  return super().__str__()
+
+          def __eq__(self, other):
+              """Defines equality based on the canonical JSON representation."""
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+    python/gss_tester/reference_impl.py: |
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from .interface import GSS, T, Acc
+
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Its behavior is the gold standard for the consistency tests.
+          """
+          def __init__(self, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]):
+              self.stacks = stacks
+              self._acc_default_factory = acc_default_factory
+              if not self.stacks:
+                  self.stacks.append(([], self._acc_default_factory()))
+
+          @classmethod
+          def initial(cls: Type['ReferenceGSS'], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+              """Creates a GSS with a single empty stack and a default accumulator."""
+              return cls([], acc_default_factory)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack and stack[-1] == value:
+                      new_stacks.append((stack[:-1], acc))
+              
+              # If popping results in no stacks, represent this as an empty list of stacks.
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {stack[-1] for stack, acc in self.stacks if stack}
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              factory = None
+              for gss in gss_list:
+                  if isinstance(gss, ReferenceGSS):
+                      all_stacks.extend(gss.stacks)
+                      if factory is None:
+                          factory = gss._acc_default_factory
+              
+              if factory is None:
+                   raise ValueError("Cannot merge empty list of GSS or list with non-reference implementations")
+
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for stack, acc in all_stacks:
+                  key = tuple(stack)
+                  if key in merged_map:
+                      merged_map[key] = merge_func(merged_map[key], acc)
+                  else:
+                      merged_map[key] = acc
+              
+              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+              return ReferenceGSS(final_stacks, factory)
+
+          def to_json_serializable(self) -> Any:
+              # Sort stacks for a canonical representation, making comparisons reliable.
+              # Stacks (lists) are converted to tuples to be sortable keys.
+              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
+              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.initial(acc_factory)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.pop(20)
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.pop(10)
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.initial(acc_factory).push(1).push(2)
+          gss_b = gss_class.initial(acc_factory).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.initial(acc_factory).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.initial(acc_factory).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.initial(acc_factory)
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.pop(4)
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.pop(2)
+          s8 = s6.pop(3)
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.initial(acc_factory).push(1)
+          gss_empty = gss_d.pop(2) # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/implementations/__init__.py: |
+      # This file makes 'implementations' a Python sub-package.
+    python/gss_tester/implementations/graph_impl.py: |
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from ..interface import GSS, T, Acc
+      import itertools
+
+      # Type alias for clarity
+      NodeId = int
+
+      class GraphGSS(GSS[T, Acc]):
+          """
+          A GSS implementation using a directed graph to merge common stack suffixes.
+          - Nodes are defined by (value, parent_tuple) and are canonicalized.
+          - The GSS state is a map from head_node_id -> accumulator.
+          - This implementation has different pop() semantics than the reference one.
+          """
+          # Class-level storage for the graph nodes to ensure all instances share one graph
+          _node_counter = itertools.count()
+          _node_to_id: Dict[Tuple[T, Tuple[NodeId, ...]], NodeId] = {}
+          _id_to_node: Dict[NodeId, Tuple[T, Tuple[NodeId, ...]]] = {}
+          _root_id: NodeId = -1 # Special ID for the root (representing an empty stack)
+
+          def __init__(self, heads: Dict[NodeId, Acc], acc_default_factory: Callable[[], Acc]):
+              self.heads = heads
+              self._acc_default_factory = acc_default_factory
+              if not self.heads:
+                   self.heads[self._root_id] = self._acc_default_factory()
+
+          @classmethod
+          def _get_node_id(cls, value: T, parents: Tuple[NodeId, ...]) -> NodeId:
+              # Sort parents to make the key canonical, ensuring (v, (p1,p2)) == (v, (p2,p1))
+              parents = tuple(sorted(parents))
+              key = (value, parents)
+              if key in cls._node_to_id:
+                  return cls._node_to_id[key]
+              
+              new_id = next(cls._node_counter)
+              cls._node_to_id[key] = new_id
+              cls._id_to_node[new_id] = key
+              return new_id
+
+          @classmethod
+          def initial(cls: Type['GraphGSS'], acc_default_factory: Callable[[], Acc]) -> 'GraphGSS[T, Acc]':
+              return cls({}, acc_default_factory)
+
+          def push(self, value: T) -> 'GraphGSS[T, Acc]':
+              new_heads: Dict[NodeId, Acc] = {}
+              acc_to_nodes: Dict[Acc, List[NodeId]] = {}
+              for node_id, acc in self.heads.items():
+                  if acc not in acc_to_nodes:
+                      acc_to_nodes[acc] = []
+                  acc_to_nodes[acc].append(node_id)
+
+              for acc, node_ids in acc_to_nodes.items():
+                  new_node_id = self._get_node_id(value, tuple(node_ids))
+                  new_heads[new_node_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'GraphGSS[T, Acc]':
+              # This implementation merges accumulators on pop, which differs from the reference.
+              # This is a deliberate choice to showcase how the analyzer would catch semantic differences.
+              # NOTE: This assumes a merge operation on the accumulator. For the purpose of this test,
+              # we assume `+` is the merge operation, as defined in the test spec. A more robust
+              # implementation would require the merge function to be available here.
+              new_heads: Dict[NodeId, Acc] = {}
+              
+              for node_id, acc in self.heads.items():
+                  if node_id == self._root_id:
+                      continue
+                  
+                  node_val, parents = self._id_to_node.get(node_id, (None, None))
+                  if node_val == value:
+                      for parent_id in parents:
+                          if parent_id in new_heads:
+                              new_heads[parent_id] = new_heads[parent_id] + acc
+                          else:
+                              new_heads[parent_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              new_heads = {node_id: func(acc) for node_id, acc in self.heads.items()}
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {self._id_to_node[node_id][0] for node_id in self.heads if node_id != self._root_id}
+
+          @staticmethod
+          def merge(gss_list: Iterable['GraphGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              factory = None
+              merged_heads: Dict[NodeId, Acc] = {}
+
+              for gss in gss_list:
+                  if isinstance(gss, GraphGSS):
+                      if factory is None:
+                          factory = gss._acc_default_factory
+                      for node_id, acc in gss.heads.items():
+                          if node_id in merged_heads:
+                              merged_heads[node_id] = merge_func(merged_heads[node_id], acc)
+                          else:
+                              merged_heads[node_id] = acc
+              
+              if factory is None:
+                  raise ValueError("Cannot merge empty list of GSS or list with non-graph implementations")
+
+              return GraphGSS(merged_heads, factory)
+
+          def to_json_serializable(self) -> Any:
+              # To be comparable with the reference impl, we must reconstruct the full stacks.
+              memo: Dict[NodeId, List[List[T]]] = {}
+
+              def get_paths(node_id: NodeId) -> List[List[T]]:
+                  if node_id in memo:
+                      return memo[node_id]
+                  if node_id == self._root_id:
+                      return [[]]
+                  
+                  val, parents = self._id_to_node[node_id]
+                  all_paths = []
+                  for p_id in parents:
+                      parent_paths = get_paths(p_id)
+                      for p_path in parent_paths:
+                          all_paths.append(p_path + [val])
+                  memo[node_id] = all_paths
+                  return all_paths
+
+              output_stacks = []
+              for node_id, acc in self.heads.items():
+                  paths = get_paths(node_id)
+                  for path in paths:
+                      output_stacks.append({"stack": path, "acc": acc})
+              
+              # Sort for canonical representation
+              return sorted(output_stacks, key=lambda x: (tuple(x['stack']), x['acc']))
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: simple
 system:
   message: |-
     You are a helpful assistant.
@@ -2371,14 +3129,15 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
     - gemini/gemini-2.5-flash-lite-preview-06-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: simple
+  llm_context_mode: full
 messages:
   - user: |-
       Developer note (core guidance):
@@ -2390,132 +3149,15 @@ messages:
         Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
       - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
       - If asked for full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
 
       The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
     metadata:
       kind: core-guidance
       role: developer
       ephemeral: false
-  - user: |-
-      ```shell 'python/run_benchmarks.sh'
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running benchmarks for multiple grammar constraint models,
-      # generating JSON results and analysis plots. This script runs each model once
-      # (no in-process reference/baseline). The analyzer is later told which result
-      # is the baseline to perform mask comparisons.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
-      #
-      # Example:
-      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
-      #
-      # Environment Variables:
-      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-      #                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
-      #   CODE_FILE:    Path to the code file to use as input.
-      #                 (Default: ../src/example_code.js)
-      # ==============================================================================
-
-      # --- Configuration ---
-      # Use environment variables if set, otherwise use defaults.
-      : "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
-      : "${CODE_FILE:="../src/example_code.js"}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 1 ]; then
-          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
-          echo "Error: At least one model argument is required. The first is treated as the baseline."
-          exit 1
-      fi
-
-      BASELINE_MODEL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
-
-      # Check that all provided files exist
-      for file in "${ALL_MODELS[@]}"; do
-          if [ ! -f "$file" ]; then
-              echo "Error: Model file not found: $file"
-              exit 1
-          fi
-      done
-      if [ ! -f "$CONSTRAINT_FILE" ]; then
-          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
-          exit 1
-      fi
-      if [ ! -f "$CODE_FILE" ]; then
-          echo "Error: Code file not found: $CODE_FILE"
-          exit 1
-      fi
-
-
-      # --- Setup ---
-      # Create a unique directory for this benchmark run's results.
-      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Benchmark results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Baseline Model: $BASELINE_MODEL"
-      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
-        echo "Other Models: ${COMPETITORS[*]}"
-      else
-        echo "Other Models: (none)"
-      fi
-      echo "Constraint File: $CONSTRAINT_FILE"
-      echo "Code: $CODE_FILE"
-      echo "---"
-
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark runs..."
-      for model_to_benchmark in "${ALL_MODELS[@]}"; do
-          echo
-          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
-          cmd=(python -m aug25.benchmark_runner
-              --code "$CODE_FILE"
-              --constraint-file "$CONSTRAINT_FILE"
-              --model "$model_to_benchmark"
-              --output "$RESULTS_DIR")
-          echo "+ ${cmd[*]}"
-          "${cmd[@]}"
-          echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
-      done
-      echo
-      echo "All benchmark runs completed."
-      echo "---"
-
-
-      # --- Analyze Results ---
-      echo "Analyzing results and generating plots..."
-      PLOTS_DIR="${RESULTS_DIR}/analysis"
-      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
-      cmd=(python -m aug25.benchmark_analyzer
-          "${RESULTS_DIR}"/*.json
-          --baseline "$BASELINE_STEM"
-          --output-dir "$PLOTS_DIR")
-      echo "+ ${cmd[*]}"
-      "${cmd[@]}"
-
-      echo
-      echo "---"
-      echo "Benchmark analysis complete."
-      echo "Baseline: $BASELINE_STEM"
-      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
-      echo "Full JSON results are in: $RESULTS_DIR"
-
-      ```
-    metadata:
-      filename: python/run_benchmarks.sh
   - user: |-
       ```python 'python/aug25/__init__.py'
 
@@ -3606,97 +4248,708 @@ messages:
       ```
     metadata:
       filename: python/aug25/optimizer_general.py
-  - user: Don't print the plus in front of the command that's getting run. I want
-      to be able to just copy the whole line and paste it in my CLI, not select part
-      of the line.
+  - user: |-
+      First, a test specification will be generated. This says exactly what the test will be. I guess it'll involve making a GSS, then modifying it in some way. Each GSS implementation should be evaluated individually using the running, taking the same test specification as input, and producing an output JSON. The test specification is simply a Python script. It runs a bunch of operations on the GSS and yields result values, ie as an iterator. The runner just gets all these yields and outputs them. Simple. Not all ops need to yield. Only things that we want to check.
+
+      Generally, in an auto generated test, we should just yield the whole GSS after each change to it.
+
+      Along with the whole GSS, yield the position in code of this field, ie line number. We're using Python 3.13, if that helps.
+
+      The tests are consistency tests, ie we don't specify what the expected results are, we're just checking that the implementations are consistent. We could, however, include an 'expected' result if we wish, but this would be treated the same way as a generated result. We could also include a 'reference' model if we wish. But, again, this isn't necessary.
+
+      Once the results are generated, we read them all in on one call to the script and analyse for consistency. We're essentially producing an equivalence partition of the results. Display this in  a pretty but readable, concise way. Optionally take a reference result. If the reference result is passed, display everything otherwise shown and also show a tick/cross emoji if an implementation matches/mismatches the reference.
+
+      Include elegant and comprehensive tests for important cases, such as corner cases or 'classic' troublesome ones, as well as basic 'sanity checks'.
+
+      If any two equivalence classes diverged, we should know exactly where that happened. If code position is yielded it should be reported prettily. A yield can occur at the same code position in both tests, or it can appear at different code positions (eg if there is a loop whose number of iterations varies) If the code positions were different, it should report both. Otherwise just report it as a mismatch at a code position. If we get the same yield value but at different code positions, that's a mismatch still. (After all, the code position is part of the yield value.)
+
+      What is the GSS itself?
+
+      Include a reference implementation that is 'dumb' but illustrates the desired behaviour. It just uses stacks. Inside, it's list[tuple[list[T], Acc]]. Push just pushes to all. Pop pops from all. Etc.
+
+      Push takes list[tuple[Self, T]] and returns Self. It loops over the entries, pushes T to each Self, then gathers all the Selfs into one Self and returns it.
+
+      Pop takes Self, an integer, and T, and returns Self. It keeps only those stacks whose top value is the passed T.
+
+      There's also a function that mutates all the Accs independently. It takes a closure.
+
+      And there'll have to be a function that takes a closure for merging two Accs returns all stacks, ie dict[list[T], Acc].
+
+      Peek takes Self and a set of Ts, the top values across stacks.
+
+      Merge takes Selfs and a closure that merges two Accs.
+
+      Put the code into its own sub folder. Then implementations should be in sub folder.
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, output the full, final contents of any created or modified files.
+                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
+                    ```python "path/to/your_file.py"
+                    ... full code ...
+                    ```
+                  - Do not include placeholders; the code must be complete and immediately usable.
+                  - Do NOT output git diffs in this mode.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: simple
       phase: default
   - assistant: |-
-      Of course. To make the command output from the script easier to copy and paste, I'll remove the leading `+ ` prefix. Here are the steps and the corresponding diff.
+      Here are the full contents of the files for the GSS (Graph-Structured Stack) testing framework.
 
-      ### Step-by-step Instructions
+      ### Directory Structure
 
-      In the file `python/run_benchmarks.sh`, you will need to make two small changes to how commands are printed.
+      The files will be organized as follows:
 
-      1.  **Modify Benchmark Runner Command Echo:**
-          *   Open `python/run_benchmarks.sh`.
-          *   Around line 87, find this line:
-              ```bash
-              echo "+ ${cmd[*]}"
-              ```
-          *   Change it to remove the `+ ` prefix:
-              ```bash
-              echo "${cmd[*]}"
-              ```
+      ```
+      python/
+      └── gss_tester/
+          ├── __init__.py
+          ├── analyzer.py
+          ├── interface.py
+          ├── reference_impl.py
+          ├── runner.py
+          ├── test_spec.py
+          └── implementations/
+              ├── __init__.py
+              └── graph_impl.py
+      ```
 
-      2.  **Modify Analyzer Command Echo:**
-          *   In the same file, `python/run_benchmarks.sh`, go to the analysis section.
-          *   Around line 104, find this line:
-              ```bash
-              echo "+ ${cmd[*]}"
-              ```
-          *   Change it as well to remove the `+ ` prefix:
-              ```bash
-              echo "${cmd[*]}"
-              ```
+      ### File Contents
 
-      These changes will ensure the full command is printed without any extra characters, making it directly runnable if copied.
+      ```python "python/gss_tester/__init__.py"
+      # This file makes 'gss_tester' a Python package.
+      ```
 
-      ### Git Diff
+      ```python "python/gss_tester/interface.py"
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+      import json
 
-      Here is the git diff to apply these changes directly.
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc') # Accumulator type
 
-      ```diff
-      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
-      index 9928198..a838f71 100755
-      --- a/python/run_benchmarks.sh
-      +++ b/python/run_benchmarks.sh
-      @@ -84,7 +84,7 @@
-               --constraint-file "$CONSTRAINT_FILE"
-               --model "$model_to_benchmark"
-               --output "$RESULTS_DIR")
-      -    echo "+ ${cmd[*]}"
-      +    echo "${cmd[*]}"
-           "${cmd[@]}"
-           echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
-       done
-      @@ -100,7 +100,7 @@
-           "${RESULTS_DIR}"/*.json
-           --baseline "$BASELINE_STEM"
-           --output-dir "$PLOTS_DIR")
-      -echo "+ ${cmd[*]}"
-      +echo "${cmd[*]}"
-       "${cmd[@]}"
-       
-       echo
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
 
+          @classmethod
+          @abstractmethod
+          def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+              """Creates an initial GSS, typically with one empty stack."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self, value: T) -> 'GSS[T, Acc]':
+              """
+              For all stacks ending in `value`, creates new stacks by removing that value.
+              Returns a new GSS state containing only these popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          @abstractmethod
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              pass
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              try:
+                  data = self.to_json_serializable()
+                  return json.dumps(data, indent=2, sort_keys=True)
+              except Exception:
+                  return super().__str__()
+
+          def __eq__(self, other):
+              """Defines equality based on the canonical JSON representation."""
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+      ```
+
+      ```python "python/gss_tester/reference_impl.py"
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from .interface import GSS, T, Acc
+
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Its behavior is the gold standard for the consistency tests.
+          """
+          def __init__(self, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]):
+              self.stacks = stacks
+              self._acc_default_factory = acc_default_factory
+              if not self.stacks:
+                  self.stacks.append(([], self._acc_default_factory()))
+
+          @classmethod
+          def initial(cls: Type['ReferenceGSS'], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+              """Creates a GSS with a single empty stack and a default accumulator."""
+              return cls([], acc_default_factory)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack and stack[-1] == value:
+                      new_stacks.append((stack[:-1], acc))
+              
+              # If popping results in no stacks, represent this as an empty list of stacks.
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {stack[-1] for stack, acc in self.stacks if stack}
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              factory = None
+              for gss in gss_list:
+                  if isinstance(gss, ReferenceGSS):
+                      all_stacks.extend(gss.stacks)
+                      if factory is None:
+                          factory = gss._acc_default_factory
+              
+              if factory is None:
+                   raise ValueError("Cannot merge empty list of GSS or list with non-reference implementations")
+
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for stack, acc in all_stacks:
+                  key = tuple(stack)
+                  if key in merged_map:
+                      merged_map[key] = merge_func(merged_map[key], acc)
+                  else:
+                      merged_map[key] = acc
+              
+              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+              return ReferenceGSS(final_stacks, factory)
+
+          def to_json_serializable(self) -> Any:
+              # Sort stacks for a canonical representation, making comparisons reliable.
+              # Stacks (lists) are converted to tuples to be sortable keys.
+              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
+              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+      ```
+
+      ```python "python/gss_tester/test_spec.py"
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.initial(acc_factory)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.pop(20)
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.pop(10)
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.initial(acc_factory).push(1).push(2)
+          gss_b = gss_class.initial(acc_factory).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.initial(acc_factory).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.initial(acc_factory).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.initial(acc_factory)
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.pop(4)
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.pop(2)
+          s8 = s6.pop(3)
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.initial(acc_factory).push(1)
+          gss_empty = gss_d.pop(2) # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+      ```
+
+      ```python "python/gss_tester/runner.py"
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+      ```
+
+      ```python "python/gss_tester/analyzer.py"
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+      ```
+
+      ```python "python/gss_tester/implementations/__init__.py"
+      # This file makes 'implementations' a Python sub-package.
+      ```
+
+      ```python "python/gss_tester/implementations/graph_impl.py"
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from ..interface import GSS, T, Acc
+      import itertools
+
+      # Type alias for clarity
+      NodeId = int
+
+      class GraphGSS(GSS[T, Acc]):
+          """
+          A GSS implementation using a directed graph to merge common stack suffixes.
+          - Nodes are defined by (value, parent_tuple) and are canonicalized.
+          - The GSS state is a map from head_node_id -> accumulator.
+          - This implementation has different pop() semantics than the reference one.
+          """
+          # Class-level storage for the graph nodes to ensure all instances share one graph
+          _node_counter = itertools.count()
+          _node_to_id: Dict[Tuple[T, Tuple[NodeId, ...]], NodeId] = {}
+          _id_to_node: Dict[NodeId, Tuple[T, Tuple[NodeId, ...]]] = {}
+          _root_id: NodeId = -1 # Special ID for the root (representing an empty stack)
+
+          def __init__(self, heads: Dict[NodeId, Acc], acc_default_factory: Callable[[], Acc]):
+              self.heads = heads
+              self._acc_default_factory = acc_default_factory
+              if not self.heads:
+                   self.heads[self._root_id] = self._acc_default_factory()
+
+          @classmethod
+          def _get_node_id(cls, value: T, parents: Tuple[NodeId, ...]) -> NodeId:
+              # Sort parents to make the key canonical, ensuring (v, (p1,p2)) == (v, (p2,p1))
+              parents = tuple(sorted(parents))
+              key = (value, parents)
+              if key in cls._node_to_id:
+                  return cls._node_to_id[key]
+              
+              new_id = next(cls._node_counter)
+              cls._node_to_id[key] = new_id
+              cls._id_to_node[new_id] = key
+              return new_id
+
+          @classmethod
+          def initial(cls: Type['GraphGSS'], acc_default_factory: Callable[[], Acc]) -> 'GraphGSS[T, Acc]':
+              return cls({}, acc_default_factory)
+
+          def push(self, value: T) -> 'GraphGSS[T, Acc]':
+              new_heads: Dict[NodeId, Acc] = {}
+              acc_to_nodes: Dict[Acc, List[NodeId]] = {}
+              for node_id, acc in self.heads.items():
+                  if acc not in acc_to_nodes:
+                      acc_to_nodes[acc] = []
+                  acc_to_nodes[acc].append(node_id)
+
+              for acc, node_ids in acc_to_nodes.items():
+                  new_node_id = self._get_node_id(value, tuple(node_ids))
+                  new_heads[new_node_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def pop(self, value: T) -> 'GraphGSS[T, Acc]':
+              # This implementation merges accumulators on pop, which differs from the reference.
+              # This is a deliberate choice to showcase how the analyzer would catch semantic differences.
+              # NOTE: This assumes a merge operation on the accumulator. For the purpose of this test,
+              # we assume `+` is the merge operation, as defined in the test spec. A more robust
+              # implementation would require the merge function to be available here.
+              new_heads: Dict[NodeId, Acc] = {}
+              
+              for node_id, acc in self.heads.items():
+                  if node_id == self._root_id:
+                      continue
+                  
+                  node_val, parents = self._id_to_node.get(node_id, (None, None))
+                  if node_val == value:
+                      for parent_id in parents:
+                          if parent_id in new_heads:
+                              new_heads[parent_id] = new_heads[parent_id] + acc
+                          else:
+                              new_heads[parent_id] = acc
+              
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              new_heads = {node_id: func(acc) for node_id, acc in self.heads.items()}
+              return GraphGSS(new_heads, self._acc_default_factory)
+
+          def peek(self) -> Set[T]:
+              return {self._id_to_node[node_id][0] for node_id in self.heads if node_id != self._root_id}
+
+          @staticmethod
+          def merge(gss_list: Iterable['GraphGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GraphGSS[T, Acc]':
+              factory = None
+              merged_heads: Dict[NodeId, Acc] = {}
+
+              for gss in gss_list:
+                  if isinstance(gss, GraphGSS):
+                      if factory is None:
+                          factory = gss._acc_default_factory
+                      for node_id, acc in gss.heads.items():
+                          if node_id in merged_heads:
+                              merged_heads[node_id] = merge_func(merged_heads[node_id], acc)
+                          else:
+                              merged_heads[node_id] = acc
+              
+              if factory is None:
+                  raise ValueError("Cannot merge empty list of GSS or list with non-graph implementations")
+
+              return GraphGSS(merged_heads, factory)
+
+          def to_json_serializable(self) -> Any:
+              # To be comparable with the reference impl, we must reconstruct the full stacks.
+              memo: Dict[NodeId, List[List[T]]] = {}
+
+              def get_paths(node_id: NodeId) -> List[List[T]]:
+                  if node_id in memo:
+                      return memo[node_id]
+                  if node_id == self._root_id:
+                      return [[]]
+                  
+                  val, parents = self._id_to_node[node_id]
+                  all_paths = []
+                  for p_id in parents:
+                      parent_paths = get_paths(p_id)
+                      for p_path in parent_paths:
+                          all_paths.append(p_path + [val])
+                  memo[node_id] = all_paths
+                  return all_paths
+
+              output_stacks = []
+              for node_id, acc in self.heads.items():
+                  paths = get_paths(node_id)
+                  for path in paths:
+                      output_stacks.append({"stack": path, "acc": acc})
+              
+              # Sort for canonical representation
+              return sorted(output_stacks, key=lambda x: (tuple(x['stack']), x['acc']))
       ```
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/run_benchmarks.sh
-      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
-      Successfully applied patch and wrote to python/run_benchmarks.sh.
+      Could not identify target file on fence open line 1:
+      ```
+      Identified target file 'python/gss_tester/__init__.py' on fence open line 2:
+      ```python "python/gss_tester/__init__.py"
+      Identified target file 'python/gss_tester/interface.py' on fence open line 3:
+      ```python "python/gss_tester/interface.py"
+      Identified target file 'python/gss_tester/reference_impl.py' on fence open line 4:
+      ```python "python/gss_tester/reference_impl.py"
+      Identified target file 'python/gss_tester/test_spec.py' on fence open line 5:
+      ```python "python/gss_tester/test_spec.py"
+      Identified target file 'python/gss_tester/runner.py' on fence open line 6:
+      ```python "python/gss_tester/runner.py"
+      Identified target file 'python/gss_tester/analyzer.py' on fence open line 7:
+      ```python "python/gss_tester/analyzer.py"
+      Identified target file 'python/gss_tester/implementations/__init__.py' on fence open line 8:
+      ```python "python/gss_tester/implementations/__init__.py"
+      Identified target file 'python/gss_tester/implementations/graph_impl.py' on fence open line 9:
+      ```python "python/gss_tester/implementations/graph_impl.py"
+      Found 9 code blocks.
+      Matching against available files:
+        1: python/aug25/common_interface.py
+        2: python/aug25/optimizer_general.py
+        3: python/aug25/benchmark_runner.py
+        4: python/aug25/equality.py
+        5: python/aug25/__init__.py
+        6: python/aug25/benchmark_analyzer.py
+      --- Phase 1: Processing explicit file paths in fences ---
+      Assigned block to NEW file python/gss_tester/__init__.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/interface.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/reference_impl.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/test_spec.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/runner.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/analyzer.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/implementations/__init__.py based on explicit fence path.
+      Assigned block to NEW file python/gss_tester/implementations/graph_impl.py based on explicit fence path.
+      Remaining unassigned blocks: 1, Available files: 6
+      --- Phase 2: Checking preceding lines for hints ---
+      Remaining unassigned blocks: 1, Available files: 6
+      --- Phase 3: Checking first lines inside blocks for hints ---
+      Remaining unassigned blocks: 1, Available files: 6
+      --- Phase 4: Applying single remaining block heuristic ---
+      Attempting single block heuristic for 6 available files.
+        - Similarity with python/aug25/common_interface.py: 0.01
+        - Similarity with python/aug25/optimizer_general.py: 0.01
+        - Similarity with python/aug25/benchmark_runner.py: 0.00
+        - Similarity with python/aug25/equality.py: 0.01
+        - Similarity with python/aug25/__init__.py: 0.00
+        - Similarity with python/aug25/benchmark_analyzer.py: 0.00
+      Assigned single remaining block to best match: python/aug25/common_interface.py (similarity: 0.01).
+      Remaining unassigned blocks: 0, Available files: 5
+      --- Phase 6: Applying changes to assigned files ---
+      Successfully updated file: python/aug25/common_interface.py
+      Created directory: python/gss_tester
+      Successfully created new file: python/gss_tester/__init__.py
+      Successfully created new file: python/gss_tester/interface.py
+      Successfully created new file: python/gss_tester/reference_impl.py
+      Successfully created new file: python/gss_tester/test_spec.py
+      Successfully created new file: python/gss_tester/runner.py
+      Successfully created new file: python/gss_tester/analyzer.py
+      Created directory: python/gss_tester/implementations
+      Successfully created new file: python/gss_tester/implementations/__init__.py
+      Successfully created new file: python/gss_tester/implementations/graph_impl.py
     metadata:
-  - user: "Changes committed with message: \"Clean up benchmark script output by removing
-      '+' prefix from command echoes\""
+  - user: 'Changes committed with message: "feat: Introduce GSS testing framework
+      with analyzer, runner, and example implementations"'
     metadata:
 ...
