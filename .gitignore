@@ -3,6 +3,7 @@ llm_logs/
 .partial_completion.txt
 restore-chat-history
 .temp*
+zzz_bash_agent.yaml
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
