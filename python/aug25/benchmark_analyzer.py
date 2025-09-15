@@ -267,6 +267,129 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         print(f"Saved commit log scale plot to {commit_log_path}")
         plt.close()
 
+    # 4. Combined get_mask and commit timings per token
+    if not df.empty and not df_commit.empty:
+        df_get_mask = df.copy()
+        df_get_mask['operation'] = 'get_mask'
+        df_commit_copy = df_commit.copy()
+        df_commit_copy['operation'] = 'commit'
+
+        df_combined = pd.concat([
+            df_get_mask[['model', 'token_index', 'time_sec', 'operation']],
+            df_commit_copy[['model', 'token_index', 'time_sec', 'operation']]
+        ], ignore_index=True)
+
+        plt.figure(figsize=(15, 8))
+        ax_combined = sns.lineplot(
+            data=df_combined,
+            x='token_index',
+            y='time_sec',
+            hue='model',
+            style='operation',
+            linewidth=0.8
+        )
+        ax_combined.set_xlabel('Token Index in Sequence')
+        ax_combined.set_ylabel('Time (seconds)')
+        ax_combined.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        # Linear scale
+        ax_combined.set_yscale('linear')
+        ax_combined.set_title('get_mask() (solid) vs commit() (dashed) Performance')
+        combined_linear_path = output_dir / "combined_timings_per_token_linear.png"
+        plt.savefig(combined_linear_path, dpi=300, bbox_inches='tight')
+        print(f"Saved combined linear scale plot to {combined_linear_path}")
+
+        # Log scale
+        ax_combined.set_yscale('log')
+        ax_combined.set_title('get_mask() (solid) vs commit() (dashed) Performance (Log Scale)')
+        combined_log_path = output_dir / "combined_timings_per_token_log.png"
+        plt.savefig(combined_log_path, dpi=300, bbox_inches='tight')
+        print(f"Saved combined log scale plot to {combined_log_path}")
+        plt.close()
+
+    # 5. Stacked area plot of timings per model
+    if not df.empty and not df_commit.empty:
+        models = model_order # Use the determined model order for consistency
+        num_models = len(models)
+        if num_models > 0:
+            cols = 2 if num_models > 1 else 1
+            rows = (num_models + cols - 1) // cols
+            fig, axes = plt.subplots(rows, cols, figsize=(8 * cols, 5 * rows), sharex=True, sharey=True, squeeze=False)
+            axes = axes.flatten()
+
+            for i, model_name in enumerate(models):
+                ax = axes[i]
+                model_df_get_mask = df[df['model'] == model_name].sort_values('token_index')
+                model_df_commit = df_commit[df_commit['model'] == model_name].sort_values('token_index')
+
+                # Align indices and fill missing values with 0, which is safe for plotting time
+                merged = pd.merge(
+                    model_df_get_mask[['token_index', 'time_sec']],
+                    model_df_commit[['token_index', 'time_sec']],
+                    on='token_index',
+                    how='outer',
+                    suffixes=('_get_mask', '_commit')
+                ).sort_values('token_index').fillna(0)
+
+                x = merged['token_index']
+                y_get_mask = merged['time_sec_get_mask']
+                y_commit = merged['time_sec_commit']
+
+                ax.stackplot(x, y_get_mask, y_commit, labels=['get_mask', 'commit'], alpha=0.8)
+                ax.set_title(f'Stacked Timings for {model_name}')
+                ax.set_ylabel('Time (seconds)')
+                ax.grid(True, linestyle='--', linewidth=0.5)
+                ax.set_yscale('linear') # Explicitly linear as requested
+
+                # Only show legend on the first plot to avoid clutter
+                if i == 0:
+                    ax.legend(loc='upper left')
+
+            # Hide any unused subplots
+            for j in range(num_models, len(axes)):
+                fig.delaxes(axes[j])
+
+            # Add a common X-axis label
+            fig.text(0.5, 0.02, 'Token Index in Sequence', ha='center', va='center')
+            fig.suptitle('Stacked get_mask() and commit() Performance per Token (Linear Scale)', fontsize=16)
+            fig.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+            stacked_area_path = output_dir / "timings_stacked_area.png"
+            plt.savefig(stacked_area_path, dpi=300, bbox_inches='tight')
+            print(f"Saved stacked area plot to {stacked_area_path}")
+            plt.close()
+
+    # 6. Total time (get_mask + commit) per token
+    if not df.empty and not df_commit.empty:
+        df_total = pd.merge(
+            df[['model', 'token_index', 'time_sec']],
+            df_commit[['model', 'token_index', 'time_sec']],
+            on=['model', 'token_index'],
+            suffixes=('_get_mask', '_commit')
+        )
+        df_total['time_sec'] = df_total['time_sec_get_mask'] + df_total['time_sec_commit']
+
+        plt.figure(figsize=(15, 8))
+        ax_total = sns.lineplot(data=df_total, x='token_index', y='time_sec', hue='model', linewidth=0.7)
+        ax_total.set_xlabel('Token Index in Sequence')
+        ax_total.set_ylabel('Total Time (seconds)')
+        ax_total.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        # Linear scale
+        ax_total.set_yscale('linear')
+        ax_total.set_title('Total (get_mask + commit) Performance per Token')
+        total_linear_path = output_dir / "total_timings_per_token_linear.png"
+        plt.savefig(total_linear_path, dpi=300, bbox_inches='tight')
+        print(f"Saved total time linear scale plot to {total_linear_path}")
+
+        # Log scale
+        ax_total.set_yscale('log')
+        ax_total.set_title('Total (get_mask + commit) Performance per Token (Log Scale)')
+        total_log_path = output_dir / "total_timings_per_token_log.png"
+        plt.savefig(total_log_path, dpi=300, bbox_inches='tight')
+        print(f"Saved total time log scale plot to {total_log_path}")
+        plt.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze benchmark results for grammar constraint models.")
