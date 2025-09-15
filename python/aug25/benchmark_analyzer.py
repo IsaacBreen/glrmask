@@ -133,23 +133,16 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     df = pd.DataFrame(all_data_rows)
 
-    # Create commit DataFrame (use baseline's commit timings if available, otherwise the first present)
-    commit_timings_raw: List[float] = []
-    if baseline_name in commit_timings_by_model and commit_timings_by_model[baseline_name]:
-        commit_timings_raw = commit_timings_by_model[baseline_name]
-    else:
-        # fallback to any available
-        for v in commit_timings_by_model.values():
-            if v:
-                commit_timings_raw = v
-                break
-
-    df_commit = pd.DataFrame()
-    if commit_timings_raw:
-        df_commit = pd.DataFrame({
-            "token_index": range(len(commit_timings_raw)),
-            "time_sec": commit_timings_raw
-        })
+    # Create commit DataFrame
+    all_commit_rows = []
+    for model_name, timings in commit_timings_by_model.items():
+        for i, t in enumerate(timings):
+            all_commit_rows.append({
+                "model": model_name,
+                "token_index": i,
+                "time_sec": t,
+            })
+    df_commit = pd.DataFrame(all_commit_rows)
 
     # --- Print Summary Statistics ---
     print("--- Benchmark Summary ---")
@@ -253,7 +246,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     # 3. Line plot of commit timings per token
     if not df_commit.empty:
         plt.figure(figsize=(15, 8))
-        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', color='purple', label='commit() time', linewidth=0.7)
+        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', hue='model', linewidth=0.7)
 
         ax_commit.set_xlabel('Token Index in Sequence')
         ax_commit.set_ylabel('Time (seconds)')
@@ -261,14 +254,14 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
         # Linear scale
         ax_commit.set_yscale('linear')
-        ax_commit.set_title('commit() Performance per Token')
+        ax_commit.set_title('commit() Performance per Token by Model')
         commit_linear_path = output_dir / "commit_timings_per_token_linear.png"
         plt.savefig(commit_linear_path, dpi=300, bbox_inches='tight')
         print(f"Saved commit linear scale plot to {commit_linear_path}")
 
         # Log scale
         ax_commit.set_yscale('log')
-        ax_commit.set_title('commit() Performance per Token (Log Scale)')
+        ax_commit.set_title('commit() Performance per Token by Model (Log Scale)')
         commit_log_path = output_dir / "commit_timings_per_token_log.png"
         plt.savefig(commit_log_path, dpi=300, bbox_inches='tight')
         print(f"Saved commit log scale plot to {commit_log_path}")

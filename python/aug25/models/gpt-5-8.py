@@ -2,8 +2,7 @@ import json
 import heapq
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Iterable, Set
-
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # compiled module (Bitset, GSSNode, etc.)
 
 
@@ -47,6 +46,7 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         # Store arena as int keyed
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.arena: Dict[int, dict] = {int(k): v for k, v in arena.items()}
 
         # Core per-node caches
@@ -97,13 +97,15 @@ class Model(GraphProvider):
             self.pop_index_by_node[uid_int] = self._build_pop_index(normalized_children)
 
     @staticmethod
-    def from_json_string(s: str) -> "Model":
+    def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -213,11 +215,15 @@ class Model(GraphProvider):
     # Fast get_mask
     # --------------------
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. Uses the per-pop dispatch index to avoid repeated O(dests * peeks) filters.
         """
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         final_mask = ffi.Bitset.zeros()
 
         # Node -> (set(GSSNode), Bitset)
@@ -384,4 +390,4 @@ class Model(GraphProvider):
                             values[d] = (set(gss_children), child_llm_mask)
                             enqueue(max_depth_get(d, 0), d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())

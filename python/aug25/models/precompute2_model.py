@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         self.roots_map = dict((int(s), int(r)) for s, r in roots_map)
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
         # Convert precompute3 graph structure to precompute2-like structure
@@ -48,7 +49,7 @@ class Model(GraphProvider):
             n["children"] = new_children
 
     @staticmethod
-    def from_json_string(s: str) -> 'Model':
+    def from_json_string(s: str) -> "Model":
         data = json.loads(s)
         # This model uses the precompute3 graph, as it's the most detailed representation
         roots_map = data['precomputed3']
@@ -56,7 +57,9 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-        return Model(roots_map, arena, max_state_id)
+        model = Model(roots_map, arena, max_state_id)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -71,7 +74,11 @@ class Model(GraphProvider):
                 if rs.contains(token):
                     yield (int(pop), sid, int(dest))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         final_mask = ffi.Bitset.zeros()
         values: Dict[int, ffi.GSSNode] = {}
         stopped: set[int] = set()
@@ -157,4 +164,4 @@ class Model(GraphProvider):
                         child_depth = self.max_depth.get(d, 0)
                         todo[child_depth].add(d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())
