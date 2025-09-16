@@ -2235,7 +2235,30 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         self.parser.gss_forest_to_dot(&roots, None, None)
     }
+
+    pub fn export_table_for_python(&self) -> JSONNode {
+        let mut table_obj = StdMap::new();
+        for (state_id, row) in &self.table {
+            let mut row_obj = StdMap::new();
+
+            let shifts_and_reduces = row.shifts_and_reduces_full.to_json();
+            row_obj.insert("actions".to_string(), shifts_and_reduces);
+
+            let gotos = row.gotos.to_json();
+            row_obj.insert("gotos".to_string(), gotos);
+
+            table_obj.insert(state_id.0.to_string(), JSONNode::Object(row_obj));
+        }
+
+        let mut result = StdMap::new();
+        result.insert("table".to_string(), JSONNode::Object(table_obj));
+        result.insert("start_state_id".to_string(), self.start_state_id.to_json());
+        result.insert("hallucinated_state_id".to_string(), self.hallucinated_state_id.to_json());
+        JSONNode::Object(result)
+    }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 
 impl GLRParser {
     /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
