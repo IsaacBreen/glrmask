@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 import numpy as np
 from tqdm import tqdm
 
+import _sep1
+from aug25.common_interface import RangeSet
+
 # --- Helper Functions (from former example_js.py) ---
 
 def load_or_download_gpt2_vocab(cache_dir, file_name, url):
@@ -87,7 +90,6 @@ def load_model_class(model_path: Path):
 def print_model_statistics(model, model_name: str):
     """Analyzes and prints statistics about the loaded graph model."""
     from aug25.common_interface import RangeSet  # local import to avoid cycles
-    import _sep1 as ffi
     print(f"\n--- Statistics for {model_name} ---")
 
     if not hasattr(model, 'arena') or not model.arena:
@@ -109,7 +111,7 @@ def print_model_statistics(model, model_name: str):
         if children:
             edge_key, _ = children[0]
             # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
-            if isinstance(edge_key[1], ffi.Bitset):
+            if isinstance(edge_key[1], RangeSet):
                  is_precompute3 = True
             break
     
@@ -128,15 +130,15 @@ def print_model_statistics(model, model_name: str):
             children = node_data.get("children", [])
             fan_outs.append(len(children))
             total_edge_groups += len(children)
-            for (pop, llm_bv), dests in children:
+            for (pop, llm_rs), dests in children:
                 pops.append(pop)
-                if not llm_bv.is_empty():
-                    llm_rs_sizes.append(llm_bv.len())
+                if llm_rs.intervals:
+                    llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
                 total_dest_edges += len(dests)
                 for _, state_bv in dests:
-                    if not state_bv.is_empty():
-                        state_rs_sizes.append(state_bv.len())
-        print(f"  - Edge Groups (pop, llm_bv): {total_edge_groups}")
+                    if state_bv:
+                        state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+        print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
         print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
 
     else: # Precompute2
@@ -166,9 +168,9 @@ def print_model_statistics(model, model_name: str):
 
     print_dist("Pop counts", pops)
     print_dist("Node fan-out", fan_outs)
-    print_dist("LLM Bitset sizes", llm_rs_sizes)
+    print_dist("LLM RangeSet sizes", llm_rs_sizes)
     if is_precompute3:
-        print_dist("State Bitset sizes", state_rs_sizes)
+        print_dist("State RangeSet sizes", state_rs_sizes)
     print("-" * 20)
 
 def run_benchmark(args):
@@ -183,18 +185,18 @@ def run_benchmark(args):
             constraint_json_str = f.read()
     else:
         constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
+    grammar_constraint = _sep1.GrammarConstraint.from_json_string(constraint_json_str)
 
     # 2. Extract vocabulary for tokenizer
-    constraint_json = json.loads(constraint_json_str)
-    # The vocabulary maps token strings to integer IDs. We need ID -> token bytes.
-    id_to_token = {v: k.encode('utf-8') for k, v in constraint_json['vocabulary'].items()}
+    id_to_token = grammar_constraint.get_id_to_token_map()
 
     # 3. Load model
     print(f"Loading model from: {args.model}")
     ModelClass = load_model_class(args.model)
     
     t_start_load = time.perf_counter()
-    model = ModelClass.from_json_string(constraint_json_str)
+    full_constraint_json_str = grammar_constraint.to_json_string()
+    model = ModelClass.from_json_string(full_constraint_json_str)
     load_time = time.perf_counter() - t_start_load
     print(f"Model loaded in {load_time:.4f} seconds.")
 
@@ -207,18 +209,32 @@ def run_benchmark(args):
     token_ids = greedy_tokenizer(code_bytes, id_to_token)
     print(f"Tokenized into {len(token_ids)} tokens.")
 
+    constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
     get_mask_timings: list[float] = []
     commit_timings: list[float] = []
     masks_ranges: list[list[list[int]]] = []  # list of [[s,e], ...] per step
 
     # 5. Run benchmark loop
+    is_rust_model = hasattr(model, 'IS_RUST_WRAPPER') and model.IS_RUST_WRAPPER
 
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps")
     for i, token_id in progress_bar:
         t_start_mask = time.perf_counter()
-        progress_bar.set_postfix_str("get_mask")
-        mask_rs = model.get_mask()
+        if is_rust_model:
+            progress_bar.set_postfix_str("get_mask (rust)")
+            # The Rust model calls the native get_mask directly on the state object.
+            mask_bv = constraint_state.get_mask_bv()
+            mask_rs = RangeSet.from_ranges(mask_bv.to_ranges())
+        else:
+            # Get the state map for the model. This is needed for all mask calculations.
+            progress_bar.set_postfix_str("filtered_state_gss_map")
+            state_to_gss = constraint_state.filtered_state_gss_map()
+
+            # --- TIMED SECTION: get_mask ---
+            progress_bar.set_postfix_str("get_mask (model)")
+            mask_rs: RangeSet = model.get_mask(state_to_gss)
+
         t_end_mask = time.perf_counter()
         get_mask_timings.append(t_end_mask - t_start_mask)
         # Export the mask for later cross-model comparison during analysis
@@ -227,7 +243,7 @@ def run_benchmark(args):
         # Advance the state
         progress_bar.set_postfix_str("commit")
         t_start_commit = time.perf_counter()
-        model.commit(token_id)
+        constraint_state.commit(token_id)
         t_end_commit = time.perf_counter()
         commit_timings.append(t_end_commit - t_start_commit)
 

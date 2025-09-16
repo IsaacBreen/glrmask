@@ -1352,7 +1352,7 @@ pub(crate) fn disallow_llm_tokens_and_prune_arc(
     allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
 }
 
-pub fn reset_llm_tokens(
+pub(crate) fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
@@ -1422,7 +1422,7 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     *root_arc = new_arc;
 }
 
-pub fn prune_disallowed_terminals(
+pub(crate) fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1455,7 +1455,7 @@ pub fn prune_disallowed_terminals(
     }
 }
 
-pub fn map_allowed_terminals_tokenizer_states(
+pub(crate) fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1563,7 +1563,7 @@ impl GSSNode {
     }
 }
 
-pub fn fuse_predecessors_recursive(
+pub(crate) fn fuse_predecessors_recursive(
     node_arc: &Arc<GSSNode>,
     levels: usize,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,

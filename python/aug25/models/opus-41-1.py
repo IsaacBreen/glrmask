@@ -1,13 +1,12 @@
 import json
 from typing import Dict, List, Tuple, Optional
 import time
-from ..common_interface import GraphProvider, RangeSet
+from ..common_interface import GraphProvider
 import _sep1 as ffi
 from tqdm.auto import tqdm
 
 class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.roots_map = {int(s): int(r) for s, r in roots_map}
         self.arena = arena
 
@@ -71,15 +70,13 @@ class Model(GraphProvider):
         self.sorted_depths = sorted(self.depth_buckets.keys())
 
     @staticmethod
-    def from_json_string(s: str) -> "Model":
+    def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data['precomputed3']
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        model = Model(roots_map, arena)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-        return model
+        return Model(roots_map, arena)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -111,11 +108,7 @@ class Model(GraphProvider):
                                 for sid in range(start, end):
                                     yield (int(pop), sid, dest_node)
 
-    def commit(self, token_id: int):
-        self.constraint_state.commit(token_id)
-
-    def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         final_mask = ffi.Bitset.zeros()
 
         # Use arrays instead of dicts where possible
@@ -236,4 +229,4 @@ class Model(GraphProvider):
 
                         node_active[dest_idx] = True
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        return final_mask

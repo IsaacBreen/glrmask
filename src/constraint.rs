@@ -147,8 +147,8 @@ impl Default for GrammarConstraintConfig {
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
-    pub tokenizer:        Regex,
-    pub parser:           GLRParser,
+    pub(crate) tokenizer:        Regex,
+    pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,

@@ -2,7 +2,7 @@ import json
 import heapq
 from typing import Dict, List, Tuple, Optional, Set, Iterable
 
-from ..common_interface import GraphProvider, RangeSet
+from ..common_interface import GraphProvider
 import _sep1 as ffi
 from tqdm import tqdm
 
@@ -79,7 +79,6 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Normalize arena and build fast structures
         self.nodes: Dict[int, _NodeData] = {}
@@ -234,16 +233,14 @@ class Model(GraphProvider):
             self.nodes[uid_int] = _NodeData(end_flag=end_flag, groups=groups, max_depth=md_int)
 
     @staticmethod
-    def from_json_string(s: str) -> 'Model':
+    def from_json_string(s: str) -> "Model":
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
-        model = Model(roots_map, arena, max_state_id)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-        return model
+        return Model(roots_map, arena, max_state_id)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -281,17 +278,13 @@ class Model(GraphProvider):
                     if (llm_bv is None) or llm_bv.contains(t):
                         yield (group.pop, int(sid_val), int(dest_idx))
 
-    def commit(self, token_id: int):
-        self.constraint_state.commit(token_id)
-
-    def get_mask(self) -> RangeSet:
+    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. Optimized to avoid per-destination filtering by using
         precomputed SID->ArcBundle mapping per pop group and grouping peeks by
         ArcBundle to minimize repeated work.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
@@ -504,4 +497,4 @@ class Model(GraphProvider):
                             values[d] = (parent_set, next_mask[d])
                             enqueue(depth_d, d)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        return final_mask
