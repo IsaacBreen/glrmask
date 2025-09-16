@@ -1,6 +1,7 @@
 import json
 import time
 import heapq
+import collections
 from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
@@ -20,6 +21,8 @@ class Model(GraphProvider):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+        self.constraint: Optional[ffi.GrammarConstraint] = None
+        self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
 
         # Normalize arena children bitsets and cache max_depth
@@ -65,6 +68,8 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -90,7 +95,81 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        self.constraint_state.commit(token_id)
+        token_bytes = self.id_to_token.get(token_id)
+        if token_bytes:
+            self.commit_bytes(token_bytes)
+
+    def python_step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
+        """
+        This should implement the GLR parser step logic in Python.
+        It takes a GSS node and a terminal ID, and returns a new GSS node
+        representing the state after processing the token.
+        """
+        raise NotImplementedError("Python GLR parser step is not implemented.")
+
+    def commit_bytes(self, llm_token_bytes: bytes):
+        if not llm_token_bytes:
+            return
+
+        state = self.constraint_state
+        tokenizer = self.constraint.tokenizer()
+        
+        current_state_map = state.get_state_map()
+
+        for gss in current_state_map.values():
+            ffi.gss_reset_llm_tokens(gss)
+
+        state_map = {}
+        terminals_map = {}
+        for tokenizer_state_id in current_state_map.keys():
+            end_state, matches = tokenizer.execute_from_state(llm_token_bytes, tokenizer_state_id)
+            if end_state is not None:
+                state_map[tokenizer_state_id] = end_state
+            
+            terminals = ffi.Bitset.zeros()
+            for term_id, _ in matches:
+                terminals.insert(term_id)
+            terminals_map[tokenizer_state_id] = terminals
+
+        for gss in current_state_map.values():
+            ffi.gss_prune_disallowed_terminals(gss, terminals_map)
+            ffi.gss_map_allowed_terminals_tokenizer_states(gss, state_map)
+
+        new_overall_state = {}
+        
+        processing_queue = collections.defaultdict(dict)
+        processing_queue[0] = current_state_map
+
+        sorted_offsets = sorted(processing_queue.keys())
+        
+        while sorted_offsets:
+            offset = sorted_offsets.pop(0)
+            states_to_process = processing_queue.pop(offset)
+
+            for tokenizer_s_id_at_offset, gss_at_offset in states_to_process.items():
+                if offset >= len(llm_token_bytes):
+                    continue
+
+                end_state, matches = tokenizer.execute_from_state(llm_token_bytes[offset:], tokenizer_s_id_at_offset)
+
+                # Placeholder for Python parser logic
+
+                if end_state is not None:
+                    final_tokenizer_state = end_state
+                    if final_tokenizer_state in new_overall_state:
+                        new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth([new_overall_state[final_tokenizer_state], gss_at_offset], 1)
+                    else:
+                        new_overall_state[final_tokenizer_state] = gss_at_offset
+        
+        for gss in new_overall_state.values():
+            ffi.gss_reset_llm_tokens(gss)
+        
+        final_state = {sid: gss for sid, gss in new_overall_state.items() if gss.is_ok()}
+
+        for gss in final_state.values():
+            ffi.gss_fuse_predecessors(gss, 1)
+
+        state.set_state_map(final_state)
 
     def get_mask(self) -> RangeSet:
         """

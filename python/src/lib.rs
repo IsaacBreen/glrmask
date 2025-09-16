@@ -15,7 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ouroboros::self_referencing;
-use numpy::{IntoPyArray, PyArray1, ToPyArray};
+use numpy::{IntoPyArray, PyArray1};
 use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
@@ -200,7 +200,12 @@ pub struct PyRegex {
 
 #[pymethods]
 impl PyRegex {
-    // Python methods for PyRegex if needed
+    fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
+        let exec_result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
+        let end_state = exec_result.end_state;
+        let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
+        Ok((end_state, matches))
+    }
 }
 
 #[pyclass(name = "GrammarDefinition")]
@@ -293,19 +298,72 @@ impl PyCompiledGrammar {
     }
 }
 
-// PyGLRParser might not be needed if not directly manipulated from Python,
-// as it's part of CompiledGrammar.
-// #[pyclass]
-// #[derive(Clone)]
-// pub struct PyGLRParser {
-//     inner: GLRParser,
-// }
-// #[pymethods]
-// impl PyGLRParser {
-//     fn print(&self) {
-//         println!("{}", self.inner)
-//     }
-// }
+#[pyclass(name = "GLRParser")]
+#[derive(Clone)]
+pub struct PyGLRParser {
+    inner: Arc<GLRParser>,
+}
+
+#[pymethods]
+impl PyGLRParser {
+    fn get_parse_table<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let table_dict = PyDict::new_bound(py);
+        for (&state_id, row) in &self.inner.table {
+            let row_dict = PyDict::new_bound(py);
+            
+            let actions_dict = PyDict::new_bound(py);
+            for (&terminal_id, action) in &row.shifts_and_reduces_full {
+                let py_action = match action {
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
+                        PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
+                    }
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                        let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
+                        PyTuple::new_bound(py, &[
+                            "reduce".to_object(py),
+                            nonterminal_id.0.to_object(py),
+                            len.to_object(py),
+                            pids.to_object(py)
+                        ]).to_object(py)
+                    }
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        let py_reduces = PyDict::new_bound(py);
+                        for (len, nts) in reduces {
+                            let py_nts = PyDict::new_bound(py);
+                            for (nt, pids) in nts {
+                                let pids_vec: Vec<usize> = pids.iter().map(|p| p.0).collect();
+                                py_nts.set_item(nt.0, pids_vec)?;
+                            }
+                            py_reduces.set_item(len, py_nts)?;
+                        }
+                        PyTuple::new_bound(py, &[
+                            "split".to_object(py),
+                            shift.map(|s| s.0).to_object(py),
+                            py_reduces.to_object(py)
+                        ]).to_object(py)
+                    }
+                };
+                actions_dict.set_item(terminal_id.0, py_action)?;
+            }
+            row_dict.set_item("shifts_and_reduces", actions_dict)?;
+
+            let gotos_dict = PyDict::new_bound(py);
+            for (&nonterminal_id, goto) in &row.gotos {
+                let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
+                gotos_dict.set_item(nonterminal_id.0, py_goto)?;
+            }
+            row_dict.set_item("gotos", gotos_dict)?;
+
+            table_dict.set_item(state_id.0, row_dict)?;
+        }
+
+        let result_dict = PyDict::new_bound(py);
+        result_dict.set_item("start_state_id", self.inner.start_state_id.0)?;
+        result_dict.set_item("table", table_dict)?;
+        
+        Ok(result_dict)
+    }
+}
 
 #[pyclass(name = "GrammarConstraint")]
 #[derive(Clone)]
@@ -418,6 +476,26 @@ impl PyGrammarConstraint {
 
     fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
         PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
+    }
+
+    fn tokenizer(&self) -> PyRegex {
+        PyRegex { inner: self.inner.tokenizer.clone() }
+    }
+
+    fn glr_parser(&self) -> PyGLRParser {
+        PyGLRParser { inner: Arc::new(self.inner.parser.clone()) }
+    }
+
+    fn possible_matches(&self, py: Python) -> PyResult<PyObject> {
+        let dict = PyDict::new_bound(py);
+        for (tokenizer_state_id, terminal_map) in &self.inner.possible_matches {
+            let terminal_dict = PyDict::new_bound(py);
+            for (terminal_id, llm_token_bv) in terminal_map {
+                terminal_dict.set_item(terminal_id.0, PyHybridBitset { inner: llm_token_bv.clone() })?;
+            }
+            dict.set_item(tokenizer_state_id.0, terminal_dict)?;
+        }
+        Ok(dict.into())
     }
 }
 
@@ -620,6 +698,50 @@ fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset
 }
 
 #[pyfunction]
+fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
+    let mut arc = node.inner.clone();
+    sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+    node.inner = arc;
+}
+
+#[pyfunction]
+fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+    let mut rust_terminals_map = BTreeMap::new();
+    for (k, v) in terminals_map.iter() {
+        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+        rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+    }
+    
+    let mut arc = node.inner.clone();
+    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+    node.inner = arc;
+    Ok(())
+}
+
+#[pyfunction]
+fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+    let mut rust_state_map = BTreeMap::new();
+    for (k, v) in state_map.iter() {
+        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+        rust_state_map.insert(from_state, to_state);
+    }
+
+    let mut arc = node.inner.clone();
+    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+    node.inner = arc;
+    Ok(())
+}
+
+#[pyfunction]
+fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
+    let mut arc = node.inner.clone();
+    arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+    node.inner = arc;
+}
+
+#[pyfunction]
 fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
     let pairs = rust_popn_collect(&node.inner, n);
     pairs.into_iter()
@@ -676,6 +798,28 @@ impl PyGrammarConstraintState {
 
     fn print_stats(&self) {
         self.inner.with_inner(|state| state.print_gss_stats());
+    }
+
+    fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
+        let mut out = BTreeMap::new();
+        self.inner.with_inner(|state| {
+            for (tokenizer_state_id, glr_state) in &state.state {
+                out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
+            }
+        });
+        Ok(out)
+    }
+
+    fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
+        self.inner.with_inner_mut(|state| {
+            let mut new_b_tree_map = BTreeMap::new();
+            for (tokenizer_state_id, gss_node) in new_state {
+                let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
+                new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+            }
+            state.state = new_b_tree_map;
+        });
+        Ok(())
     }
 
     fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
@@ -756,13 +900,17 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRegex>()?;
     m.add_class::<PyGrammarDefinition>()?;
     m.add_class::<PyCompiledGrammar>()?;
-    // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
+    m.add_class::<PyGLRParser>()?;
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitset>()?;
     m.add_class::<PyGSSNode>()?;
     m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
     m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
