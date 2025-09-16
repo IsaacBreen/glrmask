@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
+from gss_tester.rust_impl import RustGSS
 from tqdm.auto import tqdm
 
 
@@ -97,13 +98,18 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss_nodes = self.constraint_state.get_state_gss()
+        acc_factory = lambda: None
+        state_to_gss = {
+            sid: RustGSS({(gss_node, acc_factory())}, acc_factory)
+            for sid, gss_node in state_to_gss_nodes.items()
+        }
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[RustGSS, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -121,16 +127,15 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
-            gss_clone = gss.clone_node()
-            new_mask = gss_clone.allowed_llm_tokens()
+            new_mask = gss.allowed_llm_tokens()
 
             existing = values.get(root_idx)
             if existing is not None:
-                gss_set, existing_mask = existing
-                gss_set.add(gss_clone)
-                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = RustGSS.merge([existing_gss, gss], lambda a, b: a)
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = ({gss_clone}, new_mask)
+                values[root_idx] = (gss, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -174,13 +179,13 @@ class Model(GraphProvider):
                 item = values.pop(node_idx, None)
                 if item is None:
                     continue
-                gss_set, llm_mask = item
+                gss, llm_mask = item
 
                 # End-node handling
                 if is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
 
-                if not gss_set:
+                if gss.is_empty():
                     stopped.add(node_idx)
                     continue
 
@@ -189,9 +194,7 @@ class Model(GraphProvider):
                 children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
                     # Collect all pops from GSS parents
-                    peeks = []
-                    for g in gss_set:
-                        peeks.extend(g.popn_fast(pop))
+                    peeks = gss.popn_fast(pop)
                     if not peeks:
                         continue
 
@@ -209,7 +212,8 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parents
-                        child_gss_nodes = matched  # already a list of parent nodes
+                        child_gss_heads = {(node, acc_factory()) for node in matched}
+                        child_gss = RustGSS(child_gss_heads, acc_factory)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -217,16 +221,15 @@ class Model(GraphProvider):
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
-                            existing_gss_set, existing_mask = existing
-                            old_len = len(existing_gss_set)
-                            existing_gss_set.update(child_gss_nodes)
+                            existing_gss, existing_mask = existing
+                            new_gss = RustGSS.merge([existing_gss, child_gss], lambda a, b: a)
                             # Only re-enqueue if effectively changed
-                            if len(existing_gss_set) == old_len:
+                            if new_gss._heads == existing_gss._heads:
                                 continue
                             combined_mask = existing_mask.union(child_llm_mask)
-                            values[d] = (existing_gss_set, combined_mask)
+                            values[d] = (new_gss, combined_mask)
                         else:
-                            values[d] = (set(child_gss_nodes), child_llm_mask)
+                            values[d] = (child_gss, child_llm_mask)
 
                         enqueue(max_depth[d], d)
 

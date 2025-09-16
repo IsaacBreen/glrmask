@@ -2,6 +2,7 @@ from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
 
 from .interface import GSS, T, Acc
 from _sep1 import GSSNode
+import _sep1 as ffi
 
 # A global cache is acceptable here since GSS nodes are immutable and the graph is append-only.
 # A path from a given node will never change.
@@ -101,6 +102,33 @@ class RustGSS(GSS[T, Acc]):
                 all_stacks.append({"stack": path, "acc": acc})
         
         return sorted(all_stacks, key=lambda x: (tuple(x["stack"]), x["acc"]))
+
+    def is_empty(self) -> bool:
+        """A GSS is considered empty if it only contains the initial root node."""
+        return len(self._heads) == 1 and next(iter(self._heads))[0].max_depth() == 0
+
+    def allowed_llm_tokens(self) -> Any: # Returns a Bitset
+        """Computes the union of allowed LLM tokens over all heads."""
+        if self.is_empty():
+            return ffi.Bitset.zeros()
+        
+        mask = ffi.Bitset.zeros()
+        for node, _ in self._heads:
+            mask = mask.union(node.allowed_llm_tokens())
+        return mask
+
+    def popn_fast(self, n: int) -> List[Tuple[int, GSSNode]]:
+        """
+        Collects predecessors from all heads by popping n levels.
+        This is a specialized method for precompute models and not part of the generic GSS interface.
+        """
+        all_peeks = []
+        for node, _ in self._heads:
+            # The accumulator is not carried over in this specific logic,
+            # as the precompute model doesn't use it.
+            predecessors = node.popn_fast(n)
+            all_peeks.extend(predecessors)
+        return all_peeks
 
     def _get_paths(self, node: GSSNode) -> List[List[T]]:
         node_ptr = node.ptr()
