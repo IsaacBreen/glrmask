@@ -2,7 +2,7 @@
 use std::env;
 
 fn main() {
-    if (env::var("ENABLE_PROGRESS_BAR").is_ok() || cfg!(pbar)) && !cfg!(no_pbar) {
+    if (env::var("ENABLE_PROGRESS_BAR").is_ok() || cfg!(feature = "pbar")) && !cfg!(feature = "no_pbar") {
         // Enable progress bar
     } else {
         // Disable progress bar
