@@ -1,6 +1,6 @@
 import itertools
 from functools import reduce
-from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
+from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet, Type
 
 from .interface import GSS, T, Acc
 
@@ -202,3 +202,45 @@ class FastGSS(GSS[T, Acc]):
         result = frozenset(paths)
         cache[node.id] = result
         return result
+
+    def is_empty(self) -> bool:
+        """A GSS is considered empty if it only contains the initial root node."""
+        return len(self._heads) == 1 and next(iter(self._heads)) == self._root
+
+    def popn_fast(self, n: int) -> List[Tuple[T, Any]]:
+        """
+        Collects predecessors from all heads by popping n levels.
+        This is a specialized method for precompute models and not part of the generic GSS interface.
+        """
+        if n <= 0:
+            return []
+        
+        nodes_to_pop = self._heads
+        
+        # Pop n-1 times to get to the desired level
+        for _ in range(n - 1):
+            parents = set()
+            for node in nodes_to_pop:
+                if node in self._child_to_parents:
+                    for _, parent in self._child_to_parents[node]:
+                        parents.add(parent)
+            nodes_to_pop = parents
+
+        # On the final pop, collect the edge values and parent nodes
+        results = []
+        for node in nodes_to_pop:
+            if node in self._child_to_parents:
+                for value, parent in self._child_to_parents[node]:
+                    results.append((value, parent))
+        return results
+
+    @classmethod
+    def from_heads(cls: Type['FastGSS'], heads: Set['_Node[T, Acc]'], original_gss: 'FastGSS[T, Acc]') -> 'FastGSS[T, Acc]':
+        """Creates a new GSS from a set of heads, sharing the original GSS's structure."""
+        return cls(
+            heads=frozenset(heads),
+            acc_default_factory=original_gss._acc_default_factory,
+            root=original_gss._root,
+            child_to_parents=original_gss._child_to_parents,
+            path_cache=original_gss._path_cache
+        )
