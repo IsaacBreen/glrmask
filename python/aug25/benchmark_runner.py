@@ -87,7 +87,6 @@ def load_model_class(model_path: Path):
 def print_model_statistics(model, model_name: str):
     """Analyzes and prints statistics about the loaded graph model."""
     from aug25.common_interface import RangeSet  # local import to avoid cycles
-    import _sep1 as ffi
     print(f"\n--- Statistics for {model_name} ---")
 
     if not hasattr(model, 'arena') or not model.arena:
@@ -109,7 +108,7 @@ def print_model_statistics(model, model_name: str):
         if children:
             edge_key, _ = children[0]
             # precompute3 has (pop, RangeSet) as key, precompute2 has (pop, int | None)
-            if isinstance(edge_key[1], ffi.Bitset):
+            if isinstance(edge_key[1], RangeSet):
                  is_precompute3 = True
             break
     
@@ -128,15 +127,15 @@ def print_model_statistics(model, model_name: str):
             children = node_data.get("children", [])
             fan_outs.append(len(children))
             total_edge_groups += len(children)
-            for (pop, llm_bv), dests in children:
+            for (pop, llm_rs), dests in children:
                 pops.append(pop)
-                if not llm_bv.is_empty():
-                    llm_rs_sizes.append(llm_bv.len())
+                if llm_rs.intervals:
+                    llm_rs_sizes.append(sum(e - s + 1 for s, e in llm_rs.intervals))
                 total_dest_edges += len(dests)
                 for _, state_bv in dests:
-                    if not state_bv.is_empty():
-                        state_rs_sizes.append(state_bv.len())
-        print(f"  - Edge Groups (pop, llm_bv): {total_edge_groups}")
+                    if state_bv:
+                        state_rs_sizes.append(sum(e - s + 1 for s, e in state_bv))
+        print(f"  - Edge Groups (pop, llm_rs): {total_edge_groups}")
         print(f"  - Destination Edges (dest, state_bv): {total_dest_edges}")
 
     else: # Precompute2
@@ -166,9 +165,9 @@ def print_model_statistics(model, model_name: str):
 
     print_dist("Pop counts", pops)
     print_dist("Node fan-out", fan_outs)
-    print_dist("LLM Bitset sizes", llm_rs_sizes)
+    print_dist("LLM RangeSet sizes", llm_rs_sizes)
     if is_precompute3:
-        print_dist("State Bitset sizes", state_rs_sizes)
+        print_dist("State RangeSet sizes", state_rs_sizes)
     print("-" * 20)
 
 def run_benchmark(args):

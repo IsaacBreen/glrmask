@@ -88,11 +88,7 @@ class FastGSS(GSS[T, Acc]):
                 for v, parent in self._child_to_parents[head]:
                     if v == value:
                         new_heads.add(parent)
-
-        if not new_heads:
-            # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
+        
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
@@ -126,29 +122,20 @@ class FastGSS(GSS[T, Acc]):
 
     @staticmethod
     def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
-        gss_list = list(gss_list)
         if not gss_list:
             raise ValueError("Cannot merge an empty list of GSS instances.")
         
+        gss_list = list(gss_list)
         first_gss = gss_list[0]
         
         if len(gss_list) == 1:
             return first_gss
 
-        # Filter out GSSs that only contain an empty stack if there are others with content.
-        gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
-
-        if gss_with_content:
-            gss_list_to_merge = gss_with_content
-        else:
-            # All GSSs only contain empty stacks, so merge them all.
-            gss_list_to_merge = gss_list
-
         # Combine all structural information and heads
         all_child_to_parents = {}
         all_path_caches = {}
         all_heads = set()
-        for gss in gss_list_to_merge:
+        for gss in gss_list:
             all_child_to_parents.update(gss._child_to_parents)
             all_path_caches.update(gss._path_cache)
             all_heads.update(gss._heads)

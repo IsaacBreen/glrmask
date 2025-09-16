@@ -1,7 +1,6 @@
 import json
 import time
 import heapq
-import collections
 from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
@@ -21,8 +20,6 @@ class Model(GraphProvider):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-        self.constraint: Optional[ffi.GrammarConstraint] = None
-        self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
 
         # Normalize arena children bitsets and cache max_depth
@@ -67,9 +64,7 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-        model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -102,7 +97,7 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
-        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
