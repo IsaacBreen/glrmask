@@ -97,7 +97,7 @@ impl Regex {
         TokenizerStateID(0)
     }
 
-    pub(crate) fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
+    pub fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
         let mut regex_state = self.init_to_state(state.0);
         regex_state.execute(text);
 

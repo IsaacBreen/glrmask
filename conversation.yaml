@@ -158,8 +158,8 @@ local_system:
 
       #[derive(Debug, Clone)]
       pub struct GrammarConstraint {
-          pub(crate) tokenizer:        Regex,
-          pub(crate) parser:           GLRParser,
+          pub tokenizer:        Regex,
+          pub parser:           GLRParser,
           pub(crate) precomputed:      Precomputed,
           pub precomputed2:     Precomputed2,
           pub precomputed3:     Precomputed3,
@@ -8063,7 +8063,7 @@ local_system:
           allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
       }
 
-      pub(crate) fn reset_llm_tokens(
+      pub fn reset_llm_tokens(
           root_arc: &mut Arc<GSSNode>,
           memo: &mut PruneAndTransformRecursiveMemo,
       ) {
@@ -8133,7 +8133,7 @@ local_system:
           *root_arc = new_arc;
       }
 
-      pub(crate) fn prune_disallowed_terminals(
+      pub fn prune_disallowed_terminals(
           root_arc: &mut Arc<GSSNode>,
           matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
           memo: &mut PruneAndTransformRecursiveMemo,
@@ -8166,7 +8166,7 @@ local_system:
           }
       }
 
-      pub(crate) fn map_allowed_terminals_tokenizer_states(
+      pub fn map_allowed_terminals_tokenizer_states(
           root_arc: &mut Arc<GSSNode>,
           map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
           memo: &mut PruneAndTransformRecursiveMemo,
@@ -8274,7 +8274,7 @@ local_system:
           }
       }
 
-      pub(crate) fn fuse_predecessors_recursive(
+      pub fn fuse_predecessors_recursive(
           node_arc: &Arc<GSSNode>,
           levels: usize,
           memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
@@ -10153,9 +10153,7 @@ local_system:
                   let actions_dict = PyDict::new_bound(py);
                   for (&terminal_id, action) in &row.shifts_and_reduces_full {
                       let py_action = match action {
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
-                              PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
-                          }
+                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
                           sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                               let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
                               PyTuple::new_bound(py, &[
@@ -10188,7 +10186,7 @@ local_system:
 
                   let gotos_dict = PyDict::new_bound(py);
                   for (&nonterminal_id, goto) in &row.gotos {
-                      let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
+                      let py_goto = (goto.state_id.map(|s| s.0), goto.accept).to_object(py);
                       gotos_dict.set_item(nonterminal_id.0, py_goto)?;
                   }
                   row_dict.set_item("gotos", gotos_dict)?;
@@ -18868,7 +18866,16 @@ local_system:
                   let mut new_acc = (*root.acc).clone();
                   new_acc.terminals_union -= disallowed_terminals;
                   GSSNode::new(new_acc)
-          }
+              }
+              GSSNode::Internal(internal) => {
+                  let mut new_acc = (*internal.acc).clone();
+                  new_acc.terminals_union -= disallowed_terminals;
+                  GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
+              }
+          };
+          let new_arc = Arc::new(new_node);
+          memo.insert(node_ptr, Some(new_arc.clone()));
+          *root_arc = new_arc;
       }
 
       pub fn prune_disallowed_terminals(
@@ -20891,7 +20898,7 @@ local_system:
                   let actions_dict = PyDict::new_bound(py);
                   for (&terminal_id, action) in &row.shifts_and_reduces_full {
                       let py_action = match action {
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => PyTuple::new_bound(py, ("shift", to_state.0)).to_object(py),
+                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
                           sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                               let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
                               PyTuple::new_bound(py, &[
@@ -20924,7 +20931,7 @@ local_system:
 
                   let gotos_dict = PyDict::new_bound(py);
                   for (&nonterminal_id, goto) in &row.gotos {
-                      let py_goto = PyTuple::new_bound(py, (goto.state_id.map(|s| s.0), goto.accept));
+                      let py_goto = (goto.state_id.map(|s| s.0), goto.accept).to_object(py);
                       gotos_dict.set_item(nonterminal_id.0, py_goto)?;
                   }
                   row_dict.set_item("gotos", gotos_dict)?;
@@ -21490,9 +21497,9 @@ local_system:
           m.add_class::<PyIncrementalParser>()?;
           Ok(())
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode:
 system:
   message: |-
     You are a helpful assistant.
@@ -21685,8 +21692,8 @@ messages:
 
       #[derive(Debug, Clone)]
       pub struct GrammarConstraint {
-          pub(crate) tokenizer:        Regex,
-          pub(crate) parser:           GLRParser,
+          pub tokenizer:        Regex,
+          pub parser:           GLRParser,
           pub(crate) precomputed:      Precomputed,
           pub precomputed2:     Precomputed2,
           pub precomputed3:     Precomputed3,
@@ -29605,7 +29612,7 @@ messages:
           allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
       }
 
-      pub(crate) fn reset_llm_tokens(
+      pub fn reset_llm_tokens(
           root_arc: &mut Arc<GSSNode>,
           memo: &mut PruneAndTransformRecursiveMemo,
       ) {
@@ -29675,7 +29682,7 @@ messages:
           *root_arc = new_arc;
       }
 
-      pub(crate) fn prune_disallowed_terminals(
+      pub fn prune_disallowed_terminals(
           root_arc: &mut Arc<GSSNode>,
           matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
           memo: &mut PruneAndTransformRecursiveMemo,
@@ -29708,7 +29715,7 @@ messages:
           }
       }
 
-      pub(crate) fn map_allowed_terminals_tokenizer_states(
+      pub fn map_allowed_terminals_tokenizer_states(
           root_arc: &mut Arc<GSSNode>,
           map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
           memo: &mut PruneAndTransformRecursiveMemo,
@@ -29816,7 +29823,7 @@ messages:
           }
       }
 
-      pub(crate) fn fuse_predecessors_recursive(
+      pub fn fuse_predecessors_recursive(
           node_arc: &Arc<GSSNode>,
           levels: usize,
           memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
@@ -31700,9 +31707,7 @@ messages:
                   let actions_dict = PyDict::new_bound(py);
                   for (&terminal_id, action) in &row.shifts_and_reduces_full {
                       let py_action = match action {
-                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
-                              PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
-                          }
+                          sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
                           sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                               let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
                               PyTuple::new_bound(py, &[
@@ -31735,7 +31740,7 @@ messages:
 
                   let gotos_dict = PyDict::new_bound(py);
                   for (&nonterminal_id, goto) in &row.gotos {
-                      let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
+                      let py_goto = (goto.state_id.map(|s| s.0), goto.accept).to_object(py);
                       gotos_dict.set_item(nonterminal_id.0, py_goto)?;
                   }
                   row_dict.set_item("gotos", gotos_dict)?;
@@ -32310,69 +32315,6 @@ messages:
       🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
       📡 Using build options features from pyproject.toml
          Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
-      error[E0603]: function `reset_llm_tokens` is private
-          --> src/lib.rs:703:32
-           |
-       703 |     sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
-           |                                ^^^^^^^^^^^^^^^^ private function
-           |
-      note: the function `reset_llm_tokens` is defined here
-          --> /Users/isaacbreen/Projects2/grammars2024/src/datastructures/gss.rs:1355:1
-           |
-      1355 | / pub(crate) fn reset_llm_tokens(
-      1356 | |     root_arc: &mut Arc<GSSNode>,
-      1357 | |     memo: &mut PruneAndTransformRecursiveMemo,
-      1358 | | ) {
-           | |_^
-
-      error[E0603]: function `prune_disallowed_terminals` is private
-          --> src/lib.rs:717:32
-           |
-       717 |     sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
-           |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
-           |
-      note: the function `prune_disallowed_terminals` is defined here
-          --> /Users/isaacbreen/Projects2/grammars2024/src/datastructures/gss.rs:1425:1
-           |
-      1425 | / pub(crate) fn prune_disallowed_terminals(
-      1426 | |     root_arc: &mut Arc<GSSNode>,
-      1427 | |     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
-      1428 | |     memo: &mut PruneAndTransformRecursiveMemo,
-      1429 | | ) {
-           | |_^
-
-      error[E0603]: function `map_allowed_terminals_tokenizer_states` is private
-          --> src/lib.rs:732:32
-           |
-       732 |     sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
-           |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
-           |
-      note: the function `map_allowed_terminals_tokenizer_states` is defined here
-          --> /Users/isaacbreen/Projects2/grammars2024/src/datastructures/gss.rs:1458:1
-           |
-      1458 | / pub(crate) fn map_allowed_terminals_tokenizer_states(
-      1459 | |     root_arc: &mut Arc<GSSNode>,
-      1460 | |     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
-      1461 | |     memo: &mut PruneAndTransformRecursiveMemo,
-      1462 | | ) {
-           | |_^
-
-      error[E0603]: function `fuse_predecessors_recursive` is private
-          --> src/lib.rs:740:38
-           |
-       740 |     arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
-           |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
-           |
-      note: the function `fuse_predecessors_recursive` is defined here
-          --> /Users/isaacbreen/Projects2/grammars2024/src/datastructures/gss.rs:1566:1
-           |
-      1566 | / pub(crate) fn fuse_predecessors_recursive(
-      1567 | |     node_arc: &Arc<GSSNode>,
-      1568 | |     levels: usize,
-      1569 | |     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
-      1570 | | ) -> Arc<GSSNode> {
-           | |_________________^
-
       error[E0624]: method `execute_from_state` is private
          --> src/lib.rs:204:38
           |
@@ -32384,208 +32326,10 @@ messages:
       100 |     pub(crate) fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
           |     ---------------------------------------------------------------------------------------------- private method defined here
 
-      error[E0308]: mismatched types
-         --> src/lib.rs:318:59
-          |
-      318 |                         PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
-          |                                                           ^^^^^^^^^^ expected `&str`, found `usize`
-
-      error[E0308]: mismatched types
-         --> src/lib.rs:352:84
-          |
-      352 |                 let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
-          |                                                                                    ^^^^^^^^^^^ expected `Option<usize>`, found `bool`
-          |
-          = note: expected enum `Option<usize>`
-                     found type `bool`
-
-      error[E0616]: field `tokenizer` of struct `GrammarConstraint` is private
-         --> src/lib.rs:482:37
-          |
-      482 |         PyRegex { inner: self.inner.tokenizer.clone() }
-          |                                     ^^^^^^^^^ private field
-
-      error[E0616]: field `parser` of struct `GrammarConstraint` is private
-         --> src/lib.rs:486:50
-          |
-      486 |         PyGLRParser { inner: Arc::new(self.inner.parser.clone()) }
-          |                                                  ^^^^^^ private field
-
-      error[E0616]: field `parser` of struct `GrammarConstraint` is private
-         --> src/lib.rs:817:46
-          |
-      817 |                 let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-          |                                              ^^^^^^ private field
-
-      Some errors have detailed explanations: E0308, E0603, E0616, E0624.
-      For more information about an error, try `rustc --explain E0308`.
-      error: could not compile `_sep1` (lib) due to 10 previous errors
+      For more information about this error, try `rustc --explain E0624`.
+      error: could not compile `_sep1` (lib) due to 1 previous error
       💥 maturin failed
         Caused by: Failed to build a native library through cargo
         Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_ENVIRONMENT_SIGNATURE="cpython-3.12-64bit" PYO3_PYTHON="/Users/isaacbreen/miniforge3/envs/py312/bin/python" PYTHON_SYS_EXECUTABLE="/Users/isaacbreen/miniforge3/envs/py312/bin/python" "cargo" "rustc" "--features" "pyo3/extension-module" "--message-format" "json-render-diagnostics" "--manifest-path" "/Users/isaacbreen/Projects2/grammars2024/python/Cargo.toml" "--lib" "--" "-C" "link-arg=-undefined" "-C" "link-arg=dynamic_lookup" "-C" "link-args=-Wl,-install_name,@rpath/_sep1.cpython-312-darwin.so"`
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Here are the step-by-step instructions to fix the compilation errors, followed by the corresponding git diffs.
-
-      ### Step-by-step Instructions
-
-      I've identified several issues related to visibility and type mismatches in your Python bindings. Here's how to fix them:
-
-      1.  **Make `GrammarConstraint` fields public:**
-          In `src/constraint.rs`, the `tokenizer` and `parser` fields of `GrammarConstraint` are marked as `pub(crate)`, which makes them inaccessible from the Python wrapper crate. You need to make them fully public.
-
-          -   Open `src/constraint.rs`.
-          -   Find the `GrammarConstraint` struct definition (around line 185).
-          -   Change `pub(crate) tokenizer: Regex,` to `pub tokenizer: Regex,`.
-          -   Change `pub(crate) parser: GLRParser,` to `pub parser: GLRParser,`.
-
-      2.  **Make GSS utility functions public:**
-          Several functions in `src/datastructures/gss.rs` are called from the Python wrapper but are marked as `pub(crate)`. They also need to be made public.
-
-          -   Open `src/datastructures/gss.rs`.
-          -   Find the function `reset_llm_tokens` (around line 1355) and change `pub(crate) fn` to `pub fn`.
-          -   Find the function `prune_disallowed_terminals` (around line 1425) and change `pub(crate) fn` to `pub fn`.
-          -   Find the function `map_allowed_terminals_tokenizer_states` (around line 1458) and change `pub(crate) fn` to `pub fn`.
-          -   Find the function `fuse_predecessors_recursive` (around line 1566) and change `pub(crate) fn` to `pub fn`.
-
-      3.  **Fix type mismatches in Python bindings:**
-          In `python/src/lib.rs`, you are creating Python tuples using Rust slices `&[]` containing elements of different types. This causes a type mismatch. The fix is to use Rust tuples `()` instead, which `PyTuple::new_bound` can handle correctly.
-
-          -   Open `python/src/lib.rs`.
-          -   In the `PyGLRParser::get_parse_table` method:
-              -   Around line 318, change `PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)` to `PyTuple::new_bound(py, ("shift", to_state.0)).to_object(py)`.
-              -   Around line 352, change `let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);` to `let py_goto = PyTuple::new_bound(py, (goto.state_id.map(|s| s.0), goto.accept));`.
-
-      After applying these changes, most of the compilation errors should be resolved. The remaining error regarding the private method `execute_from_state` is in a file that was not provided, so I cannot generate a fix for it. You will need to locate its definition (likely in `src/finite_automata.rs` or `src/tokenizer.rs`) and change its visibility from `pub(crate)` to `pub`.
-
-      ### Git Diffs
-
-      Here are the git diffs for the changes described above:
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -183,8 +183,8 @@
-       
-       #[derive(Debug, Clone)]
-       pub struct GrammarConstraint {
-      -    pub(crate) tokenizer:        Regex,
-      -    pub(crate) parser:           GLRParser,
-      +    pub tokenizer:        Regex,
-      +    pub parser:           GLRParser,
-           pub(crate) precomputed:      Precomputed,
-           pub precomputed2:     Precomputed2,
-           pub precomputed3:     Precomputed3,
-
-      ```
-
-      ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1352,7 +1352,7 @@
-           allow_only_llm_tokens_and_prune_arc(root_arc, &allowed_mask, memo);
-       }
-       
-      -pub(crate) fn reset_llm_tokens(
-      +pub fn reset_llm_tokens(
-           root_arc: &mut Arc<GSSNode>,
-           memo: &mut PruneAndTransformRecursiveMemo,
-       ) {
-      @@ -1422,7 +1422,7 @@
-           }
-       }
-       
-      -pub(crate) fn prune_disallowed_terminals(
-      +pub fn prune_disallowed_terminals(
-           root_arc: &mut Arc<GSSNode>,
-           matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
-           memo: &mut PruneAndTransformRecursiveMemo,
-      @@ -1455,7 +1455,7 @@
-           }
-       }
-       
-      -pub(crate) fn map_allowed_terminals_tokenizer_states(
-      +pub fn map_allowed_terminals_tokenizer_states(
-           root_arc: &mut Arc<GSSNode>,
-           map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
-           memo: &mut PruneAndTransformRecursiveMemo,
-      @@ -1563,7 +1563,7 @@
-           }
-       }
-       
-      -pub(crate) fn fuse_predecessors_recursive(
-      +pub fn fuse_predecessors_recursive(
-           node_arc: &Arc<GSSNode>,
-           levels: usize,
-           memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
-
-      ```
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -316,9 +316,7 @@
-                   let actions_dict = PyDict::new_bound(py);
-                   for (&terminal_id, action) in &row.shifts_and_reduces_full {
-                       let py_action = match action {
-      -                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
-      -                        PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
-      -                    }
-      +                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => PyTuple::new_bound(py, ("shift", to_state.0)).to_object(py),
-                           sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                               let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
-                               PyTuple::new_bound(py, &[
-      @@ -352,7 +350,7 @@
-       
-                   let gotos_dict = PyDict::new_bound(py);
-                   for (&nonterminal_id, goto) in &row.gotos {
-      -                let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
-      +                let py_goto = PyTuple::new_bound(py, (goto.state_id.map(|s| s.0), goto.accept));
-                       gotos_dict.set_item(nonterminal_id.0, py_goto)?;
-                   }
-                   row_dict.set_item("gotos", gotos_dict)?;
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Adjust visibility for Python bindings
-      and correct tuple creation"'
     metadata:
 ...
