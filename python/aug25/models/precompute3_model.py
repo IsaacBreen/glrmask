@@ -1,50 +1,12 @@
 import json
 import time
 import heapq
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
-from gss_tester.fast_impl import FastGSS
 from tqdm.auto import tqdm
 
-
-# --- GSS Bridging Helpers ---
-# These helpers are used to convert the GSS state from the Rust FFI (`GSSNode`)
-# into the pure-Python `FastGSS` implementation. This is computationally
-# expensive but necessary to use the Python GSS logic.
-
-_path_cache: Dict[int, List[List[Any]]] = {}
-
-def _get_paths(node: ffi.GSSNode) -> List[List[Any]]:
-    node_ptr = node.ptr()
-    if node_ptr in _path_cache:
-        return _path_cache[node_ptr]
-    if node.max_depth() == 0:
-        return [[]]
-    paths = []
-    for state_id, pred_node in node.popn_fast(1):
-        for p_path in _get_paths(pred_node):
-            paths.append(p_path + [state_id])
-    _path_cache[node_ptr] = paths
-    return paths
-
-def from_gss_node(gss_node: ffi.GSSNode, acc_factory) -> FastGSS:
-    paths = _get_paths(gss_node)
-    gss = FastGSS.initial(acc_factory)
-    # This is inefficient: builds many intermediate GSS objects.
-    # A more optimized from_paths constructor would be better.
-    merged_gss_list = []
-    for path in paths:
-        path_gss = FastGSS.initial(acc_factory)
-        for item in path:
-            path_gss = path_gss.push(item)
-        merged_gss_list.append(path_gss)
-    
-    if not merged_gss_list:
-        return FastGSS.initial(acc_factory)
-        
-    return FastGSS.merge(merged_gss_list, lambda a, b: a)
 
 class Model(GraphProvider):
     """
@@ -135,18 +97,13 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
-        state_to_gss_nodes = self.constraint_state.get_state_gss()
-        acc_factory = lambda: None # Accumulators are not used in this model
-        
-        # Convert Rust GSSNodes to Python FastGSS instances.
-        # This is a slow operation required to bridge the two implementations.
-        state_to_gss = { sid: from_gss_node(gss_node, acc_factory) for sid, gss_node in state_to_gss_nodes.items() }
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[set, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -158,22 +115,22 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        for sid, gss_node in state_to_gss_nodes.items():
+        for sid, gss in state_to_gss.items():
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
-            
-            gss = state_to_gss[sid]
-            new_mask = gss_node.allowed_llm_tokens()
+
+            gss_clone = gss.clone_node()
+            new_mask = gss_clone.allowed_llm_tokens()
 
             existing = values.get(root_idx)
             if existing is not None:
-                existing_gss, existing_mask = existing
-                merged_gss = FastGSS.merge([existing_gss, gss], lambda a, b: a)
-                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                gss_set, existing_mask = existing
+                gss_set.add(gss_clone)
+                values[root_idx] = (gss_set, existing_mask.union(new_mask))
             else:
-                values[root_idx] = (gss, new_mask)
+                values[root_idx] = ({gss_clone}, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -217,13 +174,13 @@ class Model(GraphProvider):
                 item = values.pop(node_idx, None)
                 if item is None:
                     continue
-                gss, llm_mask = item
+                gss_set, llm_mask = item
 
                 # End-node handling
                 if is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
 
-                if gss.is_empty():
+                if not gss_set:
                     stopped.add(node_idx)
                     continue
 
@@ -232,7 +189,9 @@ class Model(GraphProvider):
                 children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
                     # Collect all pops from GSS parents
-                    peeks = gss.popn_fast(pop)
+                    peeks = []
+                    for g in gss_set:
+                        peeks.extend(g.popn_fast(pop))
                     if not peeks:
                         continue
 
@@ -248,9 +207,9 @@ class Model(GraphProvider):
                                     matched.append(parent_node)
                         if not matched:
                             continue
-                        
-                        # Create a new GSS from the matched parent nodes from the previous GSS
-                        child_gss = FastGSS.from_heads(set(matched), gss)
+
+                        # Merge matched parents
+                        child_gss_nodes = matched  # already a list of parent nodes
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -258,15 +217,16 @@ class Model(GraphProvider):
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
-                            existing_gss, existing_mask = existing
-                            new_gss = FastGSS.merge([existing_gss, child_gss], lambda a, b: a)
+                            existing_gss_set, existing_mask = existing
+                            old_len = len(existing_gss_set)
+                            existing_gss_set.update(child_gss_nodes)
                             # Only re-enqueue if effectively changed
-                            if new_gss._heads == existing_gss._heads:
+                            if len(existing_gss_set) == old_len:
                                 continue
                             combined_mask = existing_mask.union(child_llm_mask)
-                            values[d] = (new_gss, combined_mask)
+                            values[d] = (existing_gss_set, combined_mask)
                         else:
-                            values[d] = (child_gss, child_llm_mask)
+                            values[d] = (set(child_gss_nodes), child_llm_mask)
 
                         enqueue(max_depth[d], d)
 
