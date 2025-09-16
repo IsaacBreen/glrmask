@@ -69,7 +69,7 @@ class Model(GraphProvider):
         model = Model(roots_map, arena)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-        model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
+        model.id_to_token = {k: bytes(v) for k, v in data['llm_token_map']}
         return model
 
     def get_root(self, state_id: int) -> int:
