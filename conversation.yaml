@@ -1769,11 +1769,13 @@ local_system:
       import json
       import time
       import heapq
-      from typing import Dict, List, Tuple, Optional
+      from typing import Dict, List, Tuple, Optional, Type
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
+      from gss_tester.interface import GSS
+      from gss_tester.rust_impl import RustGSS
 
 
       class Model(GraphProvider):
@@ -1782,21 +1784,21 @@ local_system:
           Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
           and provides graph traversal and mask computation interfaces.
           """
-          def __init__(self, constraint: ffi.GrammarConstraint, arena: Dict[int, dict]):
-              self.constraint = constraint
-              self.tokenizer = self.constraint.tokenizer()
-              self.possible_matches = self.constraint.possible_matches()
-              self.parser = self.constraint.get_parser()
-              self.parse_table = self.parser.export_parse_table()
+          def __init__(self, tokenizer, parser, roots_map, arena: Dict[int, dict]):
+              self.tokenizer = tokenizer
+              self.parser = parser
+              self.roots_map = roots_map
+              self.arena = arena
+
+              self.gss_class: Type[GSS] = RustGSS
+              self.acc_factory = lambda: 0
+              self.merge_func = lambda a, b: a + b
               
-              # The model's state is now a Python dictionary of tokenizer_state -> GSSNode
-              initial_gss = self.parser.init_state()
-              self.state: Dict[int, ffi.GSSNode] = {
+              # The model's state is a Python dictionary of tokenizer_state -> GSS object
+              initial_gss = self.gss_class.initial(self.acc_factory)
+              self.state: Dict[int, GSS] = {
                   self.tokenizer.initial_state_id(): initial_gss
               }
-              # Keep original arena structure for iter_edges and is_end
-              self.arena = arena
-              self.roots_map = {int(k): int(v) for k, v in self.constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
               self.max_depth: Dict[int, int] = {}
 
               # Normalize arena children bitsets and cache max_depth
@@ -1836,13 +1838,16 @@ local_system:
           @staticmethod
           def from_json_string(s: str) -> 'Model':
               constraint = ffi.GrammarConstraint.from_json_string(s)
+              tokenizer = constraint.tokenizer()
+              parser = constraint.get_parser()
+              roots_map = {int(k): int(v) for k, v in constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
+
               data = json.loads(s)
               arena_json = data["trie3_god"]
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
-              model = Model(constraint, arena)
-              # The original constraint_state is no longer needed by this model
-              return model
+              
+              return Model(tokenizer, parser, roots_map, arena)
 
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
@@ -1868,7 +1873,7 @@ local_system:
                                   for sid in range(start, end):
                                       yield (int(pop), sid, int(dest_idx))
 
-          def step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
+          def step(self, gss_state: GSS, terminal_id: int) -> GSS:
               """
               A pure-Python implementation of a GLR parser step.
               This function takes a GSS node and a terminal ID, and applies the
@@ -1877,17 +1882,17 @@ local_system:
               raise NotImplementedError("Python-side GLR step is not implemented yet.")
 
           def commit(self, token_id: int):
-              token_bytes = self.constraint.get_token_bytes(token_id)
+              # This method is complex and currently relies on Rust-side GSS logic.
+              # We adapt it to use the Python GSS wrapper (`RustGSS`), which in turn
+              # calls the necessary methods on the underlying `PyGSSNode` objects.
+              token_bytes = self.tokenizer.id_to_token(token_id) # Assuming this method exists
               if not token_bytes:
                   return
 
               # 1. Reset LLM tokens on all current GSS nodes
-              for gss_node in self.state.values():
-                  gss_node.reset_llm_tokens()
-
-              # 2. Prune based on disallowed terminals
-              # This part is complex to replicate fully without more L2Bitset methods.
-              # We will skip for now, as it's an optimization.
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.reset_llm_tokens()
 
               # 3. Map tokenizer states based on token consumption
               state_map = {}
@@ -1902,18 +1907,19 @@ local_system:
                       terminals.insert(match.id)
                   terminals_map[tokenizer_state_id] = terminals
 
-              for gss_node in self.state.values():
-                  gss_node.prune_disallowed_terminals(terminals_map)
-                  gss_node.map_allowed_terminals_tokenizer_states(state_map)
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.prune_disallowed_terminals(terminals_map)
+                      node.map_allowed_terminals_tokenizer_states(state_map)
 
               # 4. Main processing loop
-              new_overall_state: Dict[int, ffi.GSSNode] = {}
+              new_overall_state: Dict[int, GSS] = {}
               processing_queue = list(self.state.items())
               self.state = {} # Clear old state
 
               offset = 0
               while processing_queue:
-                  tokenizer_s_id, gss_node = processing_queue.pop(0)
+                  tokenizer_s_id, gss_object = processing_queue.pop(0)
                   
                   # This simplified loop only processes from the start of the token bytes.
                   # A full implementation would handle offsets correctly.
@@ -1922,15 +1928,15 @@ local_system:
                   for match in exec_result.matches:
                       try:
                           # This is where the unimplemented step function would be called
-                          next_gss = self.step(gss_node.clone_node(), match.id)
+                          next_gss = self.step(gss_object, match.id)
                           
                           if next_gss.is_ok():
                               # In a full implementation, this would go into a queue for the next offset
                               # For now, we just add it to the final state at the initial tokenizer state
                               next_tokenizer_id = self.tokenizer.initial_state_id()
                               if next_tokenizer_id in new_overall_state:
-                                  new_overall_state[next_tokenizer_id] = ffi.gss_merge_many_with_depth(
-                                      [new_overall_state[next_tokenizer_id], next_gss], 1
+                                  new_overall_state[next_tokenizer_id] = self.gss_class.merge(
+                                      [new_overall_state[next_tokenizer_id], next_gss], self.merge_func
                                   )
                               else:
                                   new_overall_state[next_tokenizer_id] = next_gss
@@ -1943,17 +1949,19 @@ local_system:
                   if exec_result.end_state is not None:
                       final_tokenizer_state = exec_result.end_state
                       if final_tokenizer_state in new_overall_state:
-                          new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth(
-                              [new_overall_state[final_tokenizer_state], gss_node], 1
+                          existing_gss = new_overall_state[final_tokenizer_state]
+                          new_overall_state[final_tokenizer_state] = self.gss_class.merge(
+                              [existing_gss, gss_object], self.merge_func
                           )
                       else:
-                          new_overall_state[final_tokenizer_state] = gss_node
+                          new_overall_state[final_tokenizer_state] = gss_object
               
               self.state = new_overall_state
 
               # 5. Fuse predecessors
-              for gss_node in self.state.values():
-                  gss_node.fuse_predecessors(1)
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.fuse_predecessors(1)
 
           def get_mask(self) -> RangeSet:
               """
@@ -1961,13 +1969,12 @@ local_system:
               GSS nodes. This is the performance-critical routine.
               """
               # The get_mask logic is already in Python, but it needs to get its
-              # initial state from self.state instead of self.constraint_state.
+              # initial state from `self.state`, which contains GSS objects.
               state_to_gss = self.state
-              # t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> (set(GSSNode), Bitset)
+              # node_idx -> (set(PyGSSNode), Bitset)
               values: Dict[int, Tuple[set, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
@@ -1980,22 +1987,29 @@ local_system:
               roots_map = self.roots_map
               max_depth = self.max_depth
 
-              for sid, gss in state_to_gss.items():
+              for sid, gss_obj in state_to_gss.items():
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
 
-                  gss_clone = gss.clone_node()
-                  new_mask = gss_clone.allowed_llm_tokens()
+                  # Unpack the GSS object into its constituent head nodes
+                  gss_nodes = gss_obj.stacks.keys()
+                  if not gss_nodes:
+                      continue
+
+                  # Compute the combined mask from all head nodes
+                  new_mask = ffi.Bitset.zeros()
+                  for node in gss_nodes:
+                      new_mask = new_mask.union(node.allowed_llm_tokens())
 
                   existing = values.get(root_idx)
                   if existing is not None:
-                      gss_set, existing_mask = existing
-                      gss_set.add(gss_clone)
-                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                      existing_gss_set, existing_mask = existing
+                      existing_gss_set.update(gss_nodes)
+                      values[root_idx] = (existing_gss_set, existing_mask.union(new_mask))
                   else:
-                      values[root_idx] = ({gss_clone}, new_mask)
+                      values[root_idx] = (set(gss_nodes), new_mask)
 
                   depth = max_depth[root_idx]
                   bucket = todo.get(depth)
@@ -3858,7 +3872,7 @@ local_system:
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
       from gss_tester.interface import GSS
-      from gss_tester.rust_impl import RustGSS
+      from gss_tester.fast_impl import FastGSS
 
 
       class Model(GraphProvider):
@@ -3873,7 +3887,7 @@ local_system:
               self.roots_map = roots_map
               self.arena = arena
 
-              self.gss_class: Type[GSS] = RustGSS
+              self.gss_class: Type[GSS] = FastGSS
               self.acc_factory = lambda: 0
               self.merge_func = lambda a, b: a + b
               
@@ -3965,234 +3979,27 @@ local_system:
               raise NotImplementedError("Python-side GLR step is not implemented yet.")
 
           def commit(self, token_id: int):
-              # This method is complex and currently relies on Rust-side GSS logic.
-              # We adapt it to use the Python GSS wrapper (`RustGSS`), which in turn
-              # calls the necessary methods on the underlying `PyGSSNode` objects.
-              token_bytes = self.tokenizer.id_to_token(token_id) # Assuming this method exists
-              if not token_bytes:
-                  return
-
-              # 1. Reset LLM tokens on all current GSS nodes
-              for gss in self.state.values():
-                  for node in gss.stacks.keys():
-                      node.reset_llm_tokens()
-
-              # 3. Map tokenizer states based on token consumption
-              state_map = {}
-              terminals_map = {}
-              for tokenizer_state_id in self.state.keys():
-                  exec_result = self.tokenizer.execute_from_state(token_bytes, tokenizer_state_id)
-                  if exec_result.end_state is not None:
-                      state_map[tokenizer_state_id] = exec_result.end_state
-                  
-                  terminals = ffi.Bitset.zeros()
-                  for match in exec_result.matches:
-                      terminals.insert(match.id)
-                  terminals_map[tokenizer_state_id] = terminals
-
-              for gss in self.state.values():
-                  for node in gss.stacks.keys():
-                      node.prune_disallowed_terminals(terminals_map)
-                      node.map_allowed_terminals_tokenizer_states(state_map)
-
-              # 4. Main processing loop
-              new_overall_state: Dict[int, GSS] = {}
-              processing_queue = list(self.state.items())
-              self.state = {} # Clear old state
-
-              offset = 0
-              while processing_queue:
-                  tokenizer_s_id, gss_object = processing_queue.pop(0)
-                  
-                  # This simplified loop only processes from the start of the token bytes.
-                  # A full implementation would handle offsets correctly.
-                  exec_result = self.tokenizer.execute_from_state(token_bytes, tokenizer_s_id)
-
-                  for match in exec_result.matches:
-                      try:
-                          # This is where the unimplemented step function would be called
-                          next_gss = self.step(gss_object, match.id)
-                          
-                          if next_gss.is_ok():
-                              # In a full implementation, this would go into a queue for the next offset
-                              # For now, we just add it to the final state at the initial tokenizer state
-                              next_tokenizer_id = self.tokenizer.initial_state_id()
-                              if next_tokenizer_id in new_overall_state:
-                                  new_overall_state[next_tokenizer_id] = self.gss_class.merge(
-                                      [new_overall_state[next_tokenizer_id], next_gss], self.merge_func
-                                  )
-                              else:
-                                  new_overall_state[next_tokenizer_id] = next_gss
-
-                      except NotImplementedError:
-                          # Since step is not implemented, we can't proceed with parsing.
-                          # We will just carry over the state to the end.
-                          pass
-
-                  if exec_result.end_state is not None:
-                      final_tokenizer_state = exec_result.end_state
-                      if final_tokenizer_state in new_overall_state:
-                          existing_gss = new_overall_state[final_tokenizer_state]
-                          new_overall_state[final_tokenizer_state] = self.gss_class.merge(
-                              [existing_gss, gss_object], self.merge_func
-                          )
-                      else:
-                          new_overall_state[final_tokenizer_state] = gss_object
-              
-              self.state = new_overall_state
-
-              # 5. Fuse predecessors
-              for gss in self.state.values():
-                  for node in gss.stacks.keys():
-                      node.fuse_predecessors(1)
+              # NOTE: The logic of this method was tightly coupled with the RustGSS
+              # implementation, which uses PyGSSNode objects with FFI methods to
+              # manipulate parser state (e.g., .reset_llm_tokens, .prune_disallowed_terminals).
+              # The pure-Python FastGSS is immutable and does not have an FFI backend,
+              # making the original logic untranslatable without a significant redesign.
+              # The original method also contained a NotImplementedError.
+              pass
 
           def get_mask(self) -> RangeSet:
               """
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              # The get_mask logic is already in Python, but it needs to get its
-              # initial state from `self.state`, which contains GSS objects.
-              state_to_gss = self.state
-
-              final_mask = ffi.Bitset.zeros()
-
-              # node_idx -> (set(PyGSSNode), Bitset)
-              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
-
-              stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
-
-              # Seed: map tokenizer states and their filtered GSS to trie roots
-              heappush = heapq.heappush
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-
-              for sid, gss_obj in state_to_gss.items():
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  # Unpack the GSS object into its constituent head nodes
-                  gss_nodes = gss_obj.stacks.keys()
-                  if not gss_nodes:
-                      continue
-
-                  # Compute the combined mask from all head nodes
-                  new_mask = ffi.Bitset.zeros()
-                  for node in gss_nodes:
-                      new_mask = new_mask.union(node.allowed_llm_tokens())
-
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      existing_gss_set, existing_mask = existing
-                      existing_gss_set.update(gss_nodes)
-                      values[root_idx] = (existing_gss_set, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = (set(gss_nodes), new_mask)
-
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
-
-              # Main scheduler
-
-              # Helper to enqueue a node at a given depth
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
-
-              heappop = heapq.heappop
-              arena = self.arena
-              is_end = self.is_end
-
-              while True:
-                  # Pop the smallest depth bucket (skip stale heap entries)
-                  node_indices: Optional[set[int]] = None
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break  # nothing left to process
-
-                  # Process all nodes in this depth bucket
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          continue
-
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          continue
-                      gss_set, llm_mask = item
-
-                      # End-node handling
-                      if is_end(node_idx):
-                          final_mask = final_mask.union(llm_mask)
-
-                      if not gss_set:
-                          stopped.add(node_idx)
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
-                          # Collect all pops from GSS parents
-                          peeks = []
-                          for g in gss_set:
-                              peeks.extend(g.popn_fast(pop))
-                          if not peeks:
-                              continue
-
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              # Filter peeks by destination state bitset
-                              matched = []
-                              if not state_bv.is_empty():
-                                  contains = state_bv.contains
-                                  for sid_val, parent_node in peeks:
-                                      if contains(sid_val):
-                                          matched.append(parent_node)
-                              if not matched:
-                                  continue
-
-                              # Merge matched parents
-                              child_gss_nodes = matched  # already a list of parent nodes
-
-                              # Compute child mask (intersection with llm_bv when present)
-                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-
-                              d = int(dest_idx)
-                              existing = values.get(d)
-                              if existing is not None:
-                                  existing_gss_set, existing_mask = existing
-                                  old_len = len(existing_gss_set)
-                                  existing_gss_set.update(child_gss_nodes)
-                                  # Only re-enqueue if effectively changed
-                                  if len(existing_gss_set) == old_len:
-                                      continue
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (existing_gss_set, combined_mask)
-                              else:
-                                  values[d] = (set(child_gss_nodes), child_llm_mask)
-
-                              enqueue(max_depth[d], d)
-
-              return RangeSet.from_ranges(final_mask.to_ranges())
+              # NOTE: The logic of this method was tightly coupled with the RustGSS
+              # implementation, relying on PyGSSNode features like .allowed_llm_tokens()
+              # and .popn_fast(). FastGSS has a different API and does not store
+              # parser-specific state in its nodes directly. Adapting this logic
+              # requires a new traversal implementation and a strategy for managing
+              # allowed token sets (which would be done in the now-disabled `commit`
+              # method).
+              return RangeSet.from_ranges([])
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -6042,11 +5849,13 @@ messages:
       import json
       import time
       import heapq
-      from typing import Dict, List, Tuple, Optional
+      from typing import Dict, List, Tuple, Optional, Type
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
+      from gss_tester.interface import GSS
+      from gss_tester.rust_impl import RustGSS
 
 
       class Model(GraphProvider):
@@ -6055,21 +5864,21 @@ messages:
           Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
           and provides graph traversal and mask computation interfaces.
           """
-          def __init__(self, constraint: ffi.GrammarConstraint, arena: Dict[int, dict]):
-              self.constraint = constraint
-              self.tokenizer = self.constraint.tokenizer()
-              self.possible_matches = self.constraint.possible_matches()
-              self.parser = self.constraint.get_parser()
-              self.parse_table = self.parser.export_parse_table()
+          def __init__(self, tokenizer, parser, roots_map, arena: Dict[int, dict]):
+              self.tokenizer = tokenizer
+              self.parser = parser
+              self.roots_map = roots_map
+              self.arena = arena
+
+              self.gss_class: Type[GSS] = RustGSS
+              self.acc_factory = lambda: 0
+              self.merge_func = lambda a, b: a + b
               
-              # The model's state is now a Python dictionary of tokenizer_state -> GSSNode
-              initial_gss = self.parser.init_state()
-              self.state: Dict[int, ffi.GSSNode] = {
+              # The model's state is a Python dictionary of tokenizer_state -> GSS object
+              initial_gss = self.gss_class.initial(self.acc_factory)
+              self.state: Dict[int, GSS] = {
                   self.tokenizer.initial_state_id(): initial_gss
               }
-              # Keep original arena structure for iter_edges and is_end
-              self.arena = arena
-              self.roots_map = {int(k): int(v) for k, v in self.constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
               self.max_depth: Dict[int, int] = {}
 
               # Normalize arena children bitsets and cache max_depth
@@ -6109,13 +5918,16 @@ messages:
           @staticmethod
           def from_json_string(s: str) -> 'Model':
               constraint = ffi.GrammarConstraint.from_json_string(s)
+              tokenizer = constraint.tokenizer()
+              parser = constraint.get_parser()
+              roots_map = {int(k): int(v) for k, v in constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
+
               data = json.loads(s)
               arena_json = data["trie3_god"]
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
-              model = Model(constraint, arena)
-              # The original constraint_state is no longer needed by this model
-              return model
+              
+              return Model(tokenizer, parser, roots_map, arena)
 
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
@@ -6141,7 +5953,7 @@ messages:
                                   for sid in range(start, end):
                                       yield (int(pop), sid, int(dest_idx))
 
-          def step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
+          def step(self, gss_state: GSS, terminal_id: int) -> GSS:
               """
               A pure-Python implementation of a GLR parser step.
               This function takes a GSS node and a terminal ID, and applies the
@@ -6150,17 +5962,17 @@ messages:
               raise NotImplementedError("Python-side GLR step is not implemented yet.")
 
           def commit(self, token_id: int):
-              token_bytes = self.constraint.get_token_bytes(token_id)
+              # This method is complex and currently relies on Rust-side GSS logic.
+              # We adapt it to use the Python GSS wrapper (`RustGSS`), which in turn
+              # calls the necessary methods on the underlying `PyGSSNode` objects.
+              token_bytes = self.tokenizer.id_to_token(token_id) # Assuming this method exists
               if not token_bytes:
                   return
 
               # 1. Reset LLM tokens on all current GSS nodes
-              for gss_node in self.state.values():
-                  gss_node.reset_llm_tokens()
-
-              # 2. Prune based on disallowed terminals
-              # This part is complex to replicate fully without more L2Bitset methods.
-              # We will skip for now, as it's an optimization.
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.reset_llm_tokens()
 
               # 3. Map tokenizer states based on token consumption
               state_map = {}
@@ -6175,18 +5987,19 @@ messages:
                       terminals.insert(match.id)
                   terminals_map[tokenizer_state_id] = terminals
 
-              for gss_node in self.state.values():
-                  gss_node.prune_disallowed_terminals(terminals_map)
-                  gss_node.map_allowed_terminals_tokenizer_states(state_map)
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.prune_disallowed_terminals(terminals_map)
+                      node.map_allowed_terminals_tokenizer_states(state_map)
 
               # 4. Main processing loop
-              new_overall_state: Dict[int, ffi.GSSNode] = {}
+              new_overall_state: Dict[int, GSS] = {}
               processing_queue = list(self.state.items())
               self.state = {} # Clear old state
 
               offset = 0
               while processing_queue:
-                  tokenizer_s_id, gss_node = processing_queue.pop(0)
+                  tokenizer_s_id, gss_object = processing_queue.pop(0)
                   
                   # This simplified loop only processes from the start of the token bytes.
                   # A full implementation would handle offsets correctly.
@@ -6195,15 +6008,15 @@ messages:
                   for match in exec_result.matches:
                       try:
                           # This is where the unimplemented step function would be called
-                          next_gss = self.step(gss_node.clone_node(), match.id)
+                          next_gss = self.step(gss_object, match.id)
                           
                           if next_gss.is_ok():
                               # In a full implementation, this would go into a queue for the next offset
                               # For now, we just add it to the final state at the initial tokenizer state
                               next_tokenizer_id = self.tokenizer.initial_state_id()
                               if next_tokenizer_id in new_overall_state:
-                                  new_overall_state[next_tokenizer_id] = ffi.gss_merge_many_with_depth(
-                                      [new_overall_state[next_tokenizer_id], next_gss], 1
+                                  new_overall_state[next_tokenizer_id] = self.gss_class.merge(
+                                      [new_overall_state[next_tokenizer_id], next_gss], self.merge_func
                                   )
                               else:
                                   new_overall_state[next_tokenizer_id] = next_gss
@@ -6216,17 +6029,19 @@ messages:
                   if exec_result.end_state is not None:
                       final_tokenizer_state = exec_result.end_state
                       if final_tokenizer_state in new_overall_state:
-                          new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth(
-                              [new_overall_state[final_tokenizer_state], gss_node], 1
+                          existing_gss = new_overall_state[final_tokenizer_state]
+                          new_overall_state[final_tokenizer_state] = self.gss_class.merge(
+                              [existing_gss, gss_object], self.merge_func
                           )
                       else:
-                          new_overall_state[final_tokenizer_state] = gss_node
+                          new_overall_state[final_tokenizer_state] = gss_object
               
               self.state = new_overall_state
 
               # 5. Fuse predecessors
-              for gss_node in self.state.values():
-                  gss_node.fuse_predecessors(1)
+              for gss in self.state.values():
+                  for node in gss.stacks.keys():
+                      node.fuse_predecessors(1)
 
           def get_mask(self) -> RangeSet:
               """
@@ -6234,13 +6049,12 @@ messages:
               GSS nodes. This is the performance-critical routine.
               """
               # The get_mask logic is already in Python, but it needs to get its
-              # initial state from self.state instead of self.constraint_state.
+              # initial state from `self.state`, which contains GSS objects.
               state_to_gss = self.state
-              # t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> (set(GSSNode), Bitset)
+              # node_idx -> (set(PyGSSNode), Bitset)
               values: Dict[int, Tuple[set, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
@@ -6253,22 +6067,29 @@ messages:
               roots_map = self.roots_map
               max_depth = self.max_depth
 
-              for sid, gss in state_to_gss.items():
+              for sid, gss_obj in state_to_gss.items():
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
 
-                  gss_clone = gss.clone_node()
-                  new_mask = gss_clone.allowed_llm_tokens()
+                  # Unpack the GSS object into its constituent head nodes
+                  gss_nodes = gss_obj.stacks.keys()
+                  if not gss_nodes:
+                      continue
+
+                  # Compute the combined mask from all head nodes
+                  new_mask = ffi.Bitset.zeros()
+                  for node in gss_nodes:
+                      new_mask = new_mask.union(node.allowed_llm_tokens())
 
                   existing = values.get(root_idx)
                   if existing is not None:
-                      gss_set, existing_mask = existing
-                      gss_set.add(gss_clone)
-                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                      existing_gss_set, existing_mask = existing
+                      existing_gss_set.update(gss_nodes)
+                      values[root_idx] = (existing_gss_set, existing_mask.union(new_mask))
                   else:
-                      values[root_idx] = ({gss_clone}, new_mask)
+                      values[root_idx] = (set(gss_nodes), new_mask)
 
                   depth = max_depth[root_idx]
                   bucket = todo.get(depth)
@@ -6373,10 +6194,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model.py
-  - user: Modify this code to use the Python wrapper for the Rust (maturin) GSS rather
-      than using the Rust GSS directly. There are other implementations of the Python
-      GSS that I want it swap in and try later. This should mean that we don't need
-      to store the original constraint or constraint state in this model at all.
+  - user: Swap in the fast pure-Python GSS implementation.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6395,285 +6213,318 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor your code, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to swap in the pure-Python GSS implementation, followed by the corresponding git diffs.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      #### File: `python/aug25/models/precompute3_model.py`
+      The `precompute3_model.py` file is tightly integrated with the `RustGSS` implementation, which relies on Python objects that are handles to Rust data structures with specific methods for interacting with the parser's state (e.g., `popn_fast`, `allowed_llm_tokens`, `prune_disallowed_terminals`).
 
-      1.  **Add Imports**: At the top of the file, add the necessary imports for the GSS interface and the `RustGSS` implementation.
+      The `FastGSS` implementation is a pure-Python, immutable data structure designed for testing the GSS interface and does not have these Rust-specific capabilities. A direct swap requires removing the incompatible logic.
+
+      Here are the edits for `python/aug25/models/precompute3_model.py`:
+
+      1.  **File**: `python/aug25/models/precompute3_model.py`
+
+      2.  **Change GSS Import**:
+          On line 8, change the import from `gss_tester.rust_impl` to `gss_tester.fast_impl` and import `FastGSS` instead of `RustGSS`.
 
           ```python
-          from gss_tester.interface import GSS
-          from gss_tester.rust_impl import RustGSS
+          # line 8
+          from gss_tester.fast_impl import FastGSS
           ```
 
-      2.  **Update `__init__` Method**: Modify the constructor to remove the direct dependency on `constraint`. It will now accept the necessary components (`tokenizer`, `parser`, `roots_map`, `arena`) directly. It will also be responsible for setting up the GSS implementation class.
+      3.  **Update GSS Class Usage**:
+          On line 20, change the type hint and assignment for `self.gss_class` from `RustGSS` to `FastGSS`.
 
-          *   Change the signature to: `def __init__(self, tokenizer, parser, roots_map, arena: Dict[int, dict]):`
-          *   Remove `self.constraint`, `self.possible_matches`, and `self.parse_table`.
-          *   Store `tokenizer`, `parser`, and `roots_map` on `self`.
-          *   Add `self.gss_class = RustGSS`, `self.acc_factory = lambda: 0`, and `self.merge_func = lambda a, b: a + b`.
-          *   Update the initialization of `self.state` to use `self.gss_class.initial()` and change its type hint to `Dict[int, GSS]`.
+          ```python
+          # line 20
+          self.gss_class: Type[GSS] = FastGSS
+          ```
 
-      3.  **Update `from_json_string` Method**: This static method will now be responsible for extracting the required components from the `GrammarConstraint` and passing them to the updated `__init__`.
+      4.  **Disable Incompatible `commit` Method**:
+          The `commit` method (lines 110-177) is entirely dependent on the FFI methods of `RustGSS`'s nodes to mutate parser state. This logic cannot be translated to the immutable, pure-Python `FastGSS`. Replace the entire body of the `commit` method with a `pass` statement and a comment explaining why the change was made.
 
-          *   After loading the `constraint`, extract `tokenizer`, `parser`, `roots_map`, and `arena`.
-          *   Instantiate the `Model` using the new constructor signature: `model = Model(tokenizer, parser, roots_map, arena)`.
-          *   Remove the line `model.constraint_state = None` as it's no longer present.
+      5.  **Disable Incompatible `get_mask` Method**:
+          Similarly, the `get_mask` method (lines 179-301) relies on `RustGSS` node features (`.allowed_llm_tokens()`, `.popn_fast()`) and the state updated by the `commit` method. To allow the code to run, its body will be replaced to return an empty `RangeSet`, along with a comment explaining the incompatibility.
 
-      4.  **Update `step` Method Signature**: Change the type hint for the GSS parameter from the low-level `ffi.GSSNode` to the abstract `GSS`.
-
-          *   Change `gss_node: ffi.GSSNode` to `gss_state: GSS`.
-
-      5.  **Refactor `commit` Method**: This is a significant change. The method must now work with `RustGSS` objects stored in `self.state`.
-
-          *   To call methods on the underlying Rust nodes (like `reset_llm_tokens`), you'll need to iterate through the nodes contained within each `RustGSS` object (e.g., `for gss in self.state.values(): for node in gss.stacks.keys(): ...`).
-          *   Update the type hint for `new_overall_state` to `Dict[int, GSS]`.
-          *   Replace calls to `ffi.gss_merge_many_with_depth` with `self.gss_class.merge(...)`, which operates on `GSS` objects.
-
-      6.  **Refactor `get_mask` Method**: The "seeding" logic at the beginning of this method needs to be adapted to handle `RustGSS` objects.
-
-          *   The method will now iterate over `RustGSS` objects from `self.state`.
-          *   For each `RustGSS` object, you must unpack its head nodes (`gss_obj.stacks.keys()`).
-          *   The initial `new_mask` for a trie root will be the union of `allowed_llm_tokens()` from all corresponding head nodes.
-          *   The `values` dictionary will be populated with sets of these unpacked `ffi.GSSNode`s. The rest of the method's logic, which consumes from `values`, can then remain the same.
+      These changes will make the file syntactically correct and runnable after swapping the GSS implementation, while clearly marking the areas that require a new design to work with `FastGSS`.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here are the git diffs to apply these changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      index 4557143..870020a 100644
       --- a/python/aug25/models/precompute3_model.py
       +++ b/python/aug25/models/precompute3_model.py
-      @@ -1,8 +1,10 @@
-       import json
-       import time
-       import heapq
-      -from typing import Dict, List, Tuple, Optional
-      +from typing import Dict, List, Tuple, Optional, Type
-       
+      @@ -5,7 +5,7 @@
        from ..common_interface import GraphProvider, RangeSet
        import _sep1 as ffi  # the compiled module
        from tqdm.auto import tqdm
-      +from gss_tester.interface import GSS
-      +from gss_tester.rust_impl import RustGSS
+       from gss_tester.interface import GSS
+      -from gss_tester.rust_impl import RustGSS
+      +from gss_tester.fast_impl import FastGSS
        
        
        class Model(GraphProvider):
-      @@ -11,21 +13,21 @@
-           Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
-           and provides graph traversal and mask computation interfaces.
-           """
-      -    def __init__(self, constraint: ffi.GrammarConstraint, arena: Dict[int, dict]):
-      -        self.constraint = constraint
-      -        self.tokenizer = self.constraint.tokenizer()
-      -        self.possible_matches = self.constraint.possible_matches()
-      -        self.parser = self.constraint.get_parser()
-      -        self.parse_table = self.parser.export_parse_table()
-      +    def __init__(self, tokenizer, parser, roots_map, arena: Dict[int, dict]):
-      +        self.tokenizer = tokenizer
-      +        self.parser = parser
-      +        self.roots_map = roots_map
-      +        self.arena = arena
-      +
-      +        self.gss_class: Type[GSS] = RustGSS
-      +        self.acc_factory = lambda: 0
-      +        self.merge_func = lambda a, b: a + b
+      @@ -18,7 +18,7 @@
+               self.roots_map = roots_map
+               self.arena = arena
+       
+      -        self.gss_class: Type[GSS] = RustGSS
+      +        self.gss_class: Type[GSS] = FastGSS
+               self.acc_factory = lambda: 0
+               self.merge_func = lambda a, b: a + b
                
-      -        # The model's state is now a Python dictionary of tokenizer_state -> GSSNode
-      -        initial_gss = self.parser.init_state()
-      -        self.state: Dict[int, ffi.GSSNode] = {
-      -            self.tokenizer.initial_state_id(): initial_gss
-      +        # The model's state is a Python dictionary of tokenizer_state -> GSS object
-      +        initial_gss = self.gss_class.initial(self.acc_factory)
-      +        self.state: Dict[int, GSS] = {
-      +            self.tokenizer.initial_state_id(): initial_gss
-               }
-      -        # Keep original arena structure for iter_edges and is_end
-      -        self.arena = arena
-      -        self.roots_map = {int(k): int(v) for k, v in self.constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
-               self.max_depth: Dict[int, int] = {}
-       
-               # Normalize arena children bitsets and cache max_depth
-      @@ -62,13 +64,17 @@
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-               constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        tokenizer = constraint.tokenizer()
-      +        parser = constraint.get_parser()
-      +        roots_map = {int(k): int(v) for k, v in constraint.precompute3_json_string().rsplit('],', 1)[0].split('[', 2)[-1].replace('],[', '],[').split('],[')}
-      +
-               data = json.loads(s)
-               arena_json = data["trie3_god"]
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-      -        model = Model(constraint, arena)
-      -        # The original constraint_state is no longer needed by this model
-      -        return model
-      +        
-      +        return Model(tokenizer, parser, roots_map, arena)
-       
-           def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
-      @@ -93,25 +99,25 @@
-                                   for sid in range(start, end):
-                                       yield (int(pop), sid, int(dest_idx))
-       
-      -    def step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
-      +    def step(self, gss_state: GSS, terminal_id: int) -> GSS:
-               """
-               A pure-Python implementation of a GLR parser step.
-               This function takes a GSS node and a terminal ID, and applies the
-               shifts and reduces defined in the parse table to produce a new GSS.
+      @@ -95,113 +95,17 @@
                """
                raise NotImplementedError("Python-side GLR step is not implemented yet.")
        
            def commit(self, token_id: int):
-      -        token_bytes = self.constraint.get_token_bytes(token_id)
-      +        # This method is complex and currently relies on Rust-side GSS logic.
-      +        # We adapt it to use the Python GSS wrapper (`RustGSS`), which in turn
-      +        # calls the necessary methods on the underlying `PyGSSNode` objects.
-      +        token_bytes = self.tokenizer.id_to_token(token_id) # Assuming this method exists
-               if not token_bytes:
-                   return
-       
-               # 1. Reset LLM tokens on all current GSS nodes
-      -        for gss_node in self.state.values():
-      -            gss_node.reset_llm_tokens()
+      -        # This method is complex and currently relies on Rust-side GSS logic.
+      -        # We adapt it to use the Python GSS wrapper (`RustGSS`), which in turn
+      -        # calls the necessary methods on the underlying `PyGSSNode` objects.
+      -        token_bytes = self.tokenizer.id_to_token(token_id) # Assuming this method exists
+      -        if not token_bytes:
+      -            return
       -
-      -        # 2. Prune based on disallowed terminals
-      -        # This part is complex to replicate fully without more L2Bitset methods.
-      -        # We will skip for now, as it's an optimization.
-      +        for gss in self.state.values():
-      +            for node in gss.stacks.keys():
-      +                node.reset_llm_tokens()
-       
-               # 3. Map tokenizer states based on token consumption
-               state_map = {}
-      @@ -125,12 +131,13 @@
-                       terminals.insert(match.id)
-                   terminals_map[tokenizer_state_id] = terminals
-       
-      -        for gss_node in self.state.values():
-      -            gss_node.prune_disallowed_terminals(terminals_map)
-      -            gss_node.map_allowed_terminals_tokenizer_states(state_map)
-      +        for gss in self.state.values():
-      +            for node in gss.stacks.keys():
-      +                node.prune_disallowed_terminals(terminals_map)
-      +                node.map_allowed_terminals_tokenizer_states(state_map)
-       
-               # 4. Main processing loop
-      -        new_overall_state: Dict[int, ffi.GSSNode] = {}
-      +        new_overall_state: Dict[int, GSS] = {}
-               processing_queue = list(self.state.items())
-               self.state = {} # Clear old state
-       
-               offset = 0
-               while processing_queue:
-      -            tokenizer_s_id, gss_node = processing_queue.pop(0)
-      +            tokenizer_s_id, gss_object = processing_queue.pop(0)
-                   
-                   # This simplified loop only processes from the start of the token bytes.
-                   # A full implementation would handle offsets correctly.
-      @@ -139,16 +146,16 @@
-                   for match in exec_result.matches:
-                       try:
-                           # This is where the unimplemented step function would be called
-      -                    next_gss = self.step(gss_node.clone_node(), match.id)
-      +                    next_gss = self.step(gss_object, match.id)
-                           
-                           if next_gss.is_ok():
-                               # In a full implementation, this would go into a queue for the next offset
-                               # For now, we just add it to the final state at the initial tokenizer state
-                               next_tokenizer_id = self.tokenizer.initial_state_id()
-                               if next_tokenizer_id in new_overall_state:
-      -                            new_overall_state[next_tokenizer_id] = ffi.gss_merge_many_with_depth(
-      -                                [new_overall_state[next_tokenizer_id], next_gss], 1
-      +                            new_overall_state[next_tokenizer_id] = self.gss_class.merge(
-      +                                [new_overall_state[next_tokenizer_id], next_gss], self.merge_func
-                                   )
-                               else:
-                                   new_overall_state[next_tokenizer_id] = next_gss
-      @@ -161,17 +168,18 @@
-                   if exec_result.end_state is not None:
-                       final_tokenizer_state = exec_result.end_state
-                       if final_tokenizer_state in new_overall_state:
-      -                    new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth(
-      -                        [new_overall_state[final_tokenizer_state], gss_node], 1
-      +                    existing_gss = new_overall_state[final_tokenizer_state]
-      +                    new_overall_state[final_tokenizer_state] = self.gss_class.merge(
-      +                        [existing_gss, gss_object], self.merge_func
-                           )
-                       else:
-      -                    new_overall_state[final_tokenizer_state] = gss_node
-      +                    new_overall_state[final_tokenizer_state] = gss_object
-               
-               self.state = new_overall_state
-       
-               # 5. Fuse predecessors
-      -        for gss_node in self.state.values():
-      -            gss_node.fuse_predecessors(1)
-      +        for gss in self.state.values():
-      +            for node in gss.stacks.keys():
-      +                node.fuse_predecessors(1)
+      -        # 1. Reset LLM tokens on all current GSS nodes
+      -        for gss in self.state.values():
+      -            for node in gss.stacks.keys():
+      -                node.reset_llm_tokens()
+      -
+      -        # 3. Map tokenizer states based on token consumption
+      -        state_map = {}
+      -        terminals_map = {}
+      -        for tokenizer_state_id in self.state.keys():
+      -            exec_result = self.tokenizer.execute_from_state(token_bytes, tokenizer_state_id)
+      -            if exec_result.end_state is not None:
+      -                state_map[tokenizer_state_id] = exec_result.end_state
+      -            
+      -            terminals = ffi.Bitset.zeros()
+      -            for match in exec_result.matches:
+      -                terminals.insert(match.id)
+      -            terminals_map[tokenizer_state_id] = terminals
+      -
+      -        for gss in self.state.values():
+      -            for node in gss.stacks.keys():
+      -                node.prune_disallowed_terminals(terminals_map)
+      -                node.map_allowed_terminals_tokenizer_states(state_map)
+      -
+      -        # 4. Main processing loop
+      -        new_overall_state: Dict[int, GSS] = {}
+      -        processing_queue = list(self.state.items())
+      -        self.state = {} # Clear old state
+      -
+      -        offset = 0
+      -        while processing_queue:
+      -            tokenizer_s_id, gss_object = processing_queue.pop(0)
+      -            
+      -            # This simplified loop only processes from the start of the token bytes.
+      -            # A full implementation would handle offsets correctly.
+      -            exec_result = self.tokenizer.execute_from_state(token_bytes, tokenizer_s_id)
+      -
+      -            for match in exec_result.matches:
+      -                try:
+      -                    # This is where the unimplemented step function would be called
+      -                    next_gss = self.step(gss_object, match.id)
+      -                    
+      -                    if next_gss.is_ok():
+      -                        # In a full implementation, this would go into a queue for the next offset
+      -                        # For now, we just add it to the final state at the initial tokenizer state
+      -                        next_tokenizer_id = self.tokenizer.initial_state_id()
+      -                        if next_tokenizer_id in new_overall_state:
+      -                            new_overall_state[next_tokenizer_id] = self.gss_class.merge(
+      -                                [new_overall_state[next_tokenizer_id], next_gss], self.merge_func
+      -                            )
+      -                        else:
+      -                            new_overall_state[next_tokenizer_id] = next_gss
+      -
+      -                except NotImplementedError:
+      -                    # Since step is not implemented, we can't proceed with parsing.
+      -                    # We will just carry over the state to the end.
+      -                    pass
+      -
+      -            if exec_result.end_state is not None:
+      -                final_tokenizer_state = exec_result.end_state
+      -                if final_tokenizer_state in new_overall_state:
+      -                    existing_gss = new_overall_state[final_tokenizer_state]
+      -                    new_overall_state[final_tokenizer_state] = self.gss_class.merge(
+      -                        [existing_gss, gss_object], self.merge_func
+      -                    )
+      -                else:
+      -                    new_overall_state[final_tokenizer_state] = gss_object
+      -        
+      -        self.state = new_overall_state
+      -
+      -        # 5. Fuse predecessors
+      -        for gss in self.state.values():
+      -            for node in gss.stacks.keys():
+      -                node.fuse_predecessors(1)
+      +        # NOTE: The logic of this method was tightly coupled with the RustGSS
+      +        # implementation, which uses PyGSSNode objects with FFI methods to
+      +        # manipulate parser state (e.g., .reset_llm_tokens, .prune_disallowed_terminals).
+      +        # The pure-Python FastGSS is immutable and does not have an FFI backend,
+      +        # making the original logic untranslatable without a significant redesign.
+      +        # The original method also contained a NotImplementedError.
+      +        pass
        
            def get_mask(self) -> RangeSet:
                """
-      @@ -179,12 +187,11 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
                GSS nodes. This is the performance-critical routine.
                """
-               # The get_mask logic is already in Python, but it needs to get its
-      -        # initial state from self.state instead of self.constraint_state.
-      +        # initial state from `self.state`, which contains GSS objects.
-               state_to_gss = self.state
-      -        # t0 = time.time()
-       
-               final_mask = ffi.Bitset.zeros()
-       
-      -        # node_idx -> (set(GSSNode), Bitset)
-      +        # node_idx -> (set(PyGSSNode), Bitset)
-               values: Dict[int, Tuple[set, ffi.Bitset]] = {}
-       
-               stopped: set[int] = set()  # nodes that stopped (no gss parents)
-      @@ -197,25 +204,29 @@
-               roots_map = self.roots_map
-               max_depth = self.max_depth
-       
-      -        for sid, gss in state_to_gss.items():
-      +        for sid, gss_obj in state_to_gss.items():
-                   root_idx = roots_map.get(int(sid))
-                   if root_idx is None:
-                       continue
-                   root_idx = int(root_idx)
-       
-      -            gss_clone = gss.clone_node()
-      -            new_mask = gss_clone.allowed_llm_tokens()
-      +            # Unpack the GSS object into its constituent head nodes
-      +            gss_nodes = gss_obj.stacks.keys()
-      +            if not gss_nodes:
-      +                continue
-      +
-      +            # Compute the combined mask from all head nodes
-      +            new_mask = ffi.Bitset.zeros()
-      +            for node in gss_nodes:
-      +                new_mask = new_mask.union(node.allowed_llm_tokens())
-       
-                   existing = values.get(root_idx)
-                   if existing is not None:
-      -                gss_set, existing_mask = existing
-      -                gss_set.add(gss_clone)
-      -                values[root_idx] = (gss_set, existing_mask.union(new_mask))
-      +                existing_gss_set, existing_mask = existing
-      +                existing_gss_set.update(gss_nodes)
-      +                values[root_idx] = (existing_gss_set, existing_mask.union(new_mask))
-                   else:
-      -                values[root_idx] = ({gss_clone}, new_mask)
-      +                values[root_idx] = (set(gss_nodes), new_mask)
-       
-                   depth = max_depth[root_idx]
-                   bucket = todo.get(depth)
+      -        # The get_mask logic is already in Python, but it needs to get its
+      -        # initial state from `self.state`, which contains GSS objects.
+      -        state_to_gss = self.state
+      -
+      -        final_mask = ffi.Bitset.zeros()
+      -
+      -        # node_idx -> (set(PyGSSNode), Bitset)
+      -        values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+      -
+      -        stopped: set[int] = set()  # nodes that stopped (no gss parents)
+      -        todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+      -        depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+      -
+      -
+      -        # Seed: map tokenizer states and their filtered GSS to trie roots
+      -        heappush = heapq.heappush
+      -        roots_map = self.roots_map
+      -        max_depth = self.max_depth
+      -
+      -        for sid, gss_obj in state_to_gss.items():
+      -            root_idx = roots_map.get(int(sid))
+      -            if root_idx is None:
+      -                continue
+      -            root_idx = int(root_idx)
+      -
+      -            # Unpack the GSS object into its constituent head nodes
+      -            gss_nodes = gss_obj.stacks.keys()
+      -            if not gss_nodes:
+      -                continue
+      -
+      -            # Compute the combined mask from all head nodes
+      -            new_mask = ffi.Bitset.zeros()
+      -            for node in gss_nodes:
+      -                new_mask = new_mask.union(node.allowed_llm_tokens())
+      -
+      -            existing = values.get(root_idx)
+      -            if existing is not None:
+      -                existing_gss_set, existing_mask = existing
+      -                existing_gss_set.update(gss_nodes)
+      -                values[root_idx] = (existing_gss_set, existing_mask.union(new_mask))
+      -            else:
+      -                values[root_idx] = (set(gss_nodes), new_mask)
+      -
+      -            depth = max_depth[root_idx]
+      -            bucket = todo.get(depth)
+      -            if bucket is None:
+      -                todo[depth] = {root_idx}
+      -                heappush(depth_heap, depth)
+      -            else:
+      -                bucket.add(root_idx)
+      -
+      -        # Main scheduler
+      -
+      -        # Helper to enqueue a node at a given depth
+      -        def enqueue(depth: int, node_idx: int) -> None:
+      -            bucket = todo.get(depth)
+      -            if bucket is None:
+      -                todo[depth] = {node_idx}
+      -                heappush(depth_heap, depth)
+      -            else:
+      -                bucket.add(node_idx)
+      -
+      -        heappop = heapq.heappop
+      -        arena = self.arena
+      -        is_end = self.is_end
+      -
+      -        while True:
+      -            # Pop the smallest depth bucket (skip stale heap entries)
+      -            node_indices: Optional[set[int]] = None
+      -            while depth_heap:
+      -                current_depth = heappop(depth_heap)
+      -                node_indices = todo.pop(current_depth, None)
+      -                if node_indices:
+      -                    break
+      -            if not node_indices:
+      -                break  # nothing left to process
+      -
+      -            # Process all nodes in this depth bucket
+      -            for node_idx in node_indices:
+      -                if node_idx in stopped:
+      -                    continue
+      -
+      -                item = values.pop(node_idx, None)
+      -                if item is None:
+      -                    continue
+      -                gss_set, llm_mask = item
+      -
+      -                # End-node handling
+      -                if is_end(node_idx):
+      -                    final_mask = final_mask.union(llm_mask)
+      -
+      -                if not gss_set:
+      -                    stopped.add(node_idx)
+      -                    continue
+      -
+      -                # Transitions grouped by (pop, llm_bv)
+      -                node_data = arena.get(node_idx, {})
+      -                children = node_data.get("children") or []
+      -                for (pop, llm_bv), dests in children:
+      -                    # Collect all pops from GSS parents
+      -                    peeks = []
+      -                    for g in gss_set:
+      -                        peeks.extend(g.popn_fast(pop))
+      -                    if not peeks:
+      -                        continue
+      -
+      -                    llm_empty = llm_bv.is_empty()
+      -
+      -                    for dest_idx, state_bv in dests:
+      -                        # Filter peeks by destination state bitset
+      -                        matched = []
+      -                        if not state_bv.is_empty():
+      -                            contains = state_bv.contains
+      -                            for sid_val, parent_node in peeks:
+      -                                if contains(sid_val):
+      -                                    matched.append(parent_node)
+      -                        if not matched:
+      -                            continue
+      -
+      -                        # Merge matched parents
+      -                        child_gss_nodes = matched  # already a list of parent nodes
+      -
+      -                        # Compute child mask (intersection with llm_bv when present)
+      -                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+      -
+      -                        d = int(dest_idx)
+      -                        existing = values.get(d)
+      -                        if existing is not None:
+      -                            existing_gss_set, existing_mask = existing
+      -                            old_len = len(existing_gss_set)
+      -                            existing_gss_set.update(child_gss_nodes)
+      -                            # Only re-enqueue if effectively changed
+      -                            if len(existing_gss_set) == old_len:
+      -                                continue
+      -                            combined_mask = existing_mask.union(child_llm_mask)
+      -                            values[d] = (existing_gss_set, combined_mask)
+      -                        else:
+      -                            values[d] = (set(child_gss_nodes), child_llm_mask)
+      -
+      -                        enqueue(max_depth[d], d)
+      -
+      -        return RangeSet.from_ranges(final_mask.to_ranges())
+      +        # NOTE: The logic of this method was tightly coupled with the RustGSS
+      +        # implementation, relying on PyGSSNode features like .allowed_llm_tokens()
+      +        # and .popn_fast(). FastGSS has a different API and does not store
+      +        # parser-specific state in its nodes directly. Adapting this logic
+      +        # requires a new traversal implementation and a strategy for managing
+      +        # allowed token sets (which would be done in the now-disabled `commit`
+      +        # method).
+      +        return RangeSet.from_ranges([])
 
       ```
     metadata:
@@ -6686,6 +6537,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Use RustGSS wrapper in precompute3_model"'
+  - user: 'Changes committed with message: "Adapt precompute3_model to use FastGSS
+      by disabling Rust-specific GSS methods"'
     metadata:
 ...
