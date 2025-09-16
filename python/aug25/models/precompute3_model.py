@@ -67,8 +67,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
         return model
 
@@ -176,7 +176,7 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
