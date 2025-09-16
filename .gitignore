@@ -7,6 +7,7 @@ zzz_bash_agent.yaml
 python/benchmark_results/
 timings_visualization*.html
 external/
+**/target/
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
