@@ -26,14 +26,8 @@ class ReferenceGSS(GSS[T, Acc]):
         for stack, acc in self.stacks:
             if stack and stack[-1] == value:
                 new_stacks.append((stack[:-1], acc))
-        
-        # If popping results in no stacks, represent this as an empty list of stacks.
-        # The __init__ will add back the default empty stack if new_stacks is empty.
-        if not new_stacks and any(s for s, a in self.stacks):
-             return ReferenceGSS([], self._acc_default_factory)
 
         return ReferenceGSS(new_stacks, self._acc_default_factory)
-
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
         new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
