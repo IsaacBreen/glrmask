@@ -118,7 +118,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
         return model
 
     def get_root(self, state_id: int) -> int:

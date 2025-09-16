@@ -138,7 +138,8 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
         model = Model(roots_map, arena, max_state_id)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
         return model
 
     def get_root(self, state_id: int) -> int:

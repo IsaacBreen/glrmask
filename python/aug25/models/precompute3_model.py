@@ -21,7 +21,6 @@ class Model(GraphProvider):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
 
@@ -67,8 +66,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         return model
 

@@ -22,7 +22,7 @@ local_system:
     - python/aug25/models/precompute3_fast_model.py
     - python/aug25/models/precompute3_model.py
     - python/aug25/models/rust_model.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/src/lib.rs: |-
@@ -8242,7 +8242,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -8488,7 +8489,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -8793,7 +8795,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -9095,7 +9098,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -9389,7 +9393,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -9824,7 +9829,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -10324,7 +10330,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -10680,7 +10687,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -10954,7 +10962,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -11279,7 +11288,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -11575,7 +11585,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -11904,7 +11915,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -12239,7 +12251,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -12707,7 +12720,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -13028,7 +13042,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -13215,7 +13230,7 @@ local_system:
 
                   for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       if llm_rs.is_empty():
                           continue
 
@@ -13248,7 +13263,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -13454,7 +13470,7 @@ local_system:
                   for edge_key, dest_map in children:
                       pop_raw, llm_bv_json = edge_key
                       pop = int(pop_raw)
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       # Create a hashable key for grouping identical LLM token BVs
                       llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
 
@@ -13510,7 +13526,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -13705,7 +13722,6 @@ local_system:
               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
               self.arena: Dict[int, dict] = arena
               self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-              self.constraint: Optional[ffi.GrammarConstraint] = None
               self.id_to_token: Dict[int, bytes] = {}
               self.max_depth: Dict[int, int] = {}
 
@@ -13751,8 +13767,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
               return model
 
@@ -21234,5 +21250,608 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct initialization of RangeSet
       and GrammarConstraintState"'
+    metadata:
+  - user: |-
+      Diff of python/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/deepseek-1.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gemini-1.py since previous turn:
+      ```diff
+      --- original version of python/aug25/models/gemini-1.py+++ current version of python/aug25/models/gemini-1.py@@ -86,7 +86,8 @@         arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gemini-2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gemini-3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gemini-4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gemini-5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-10.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-11.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-12.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-2.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-4.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-5.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-7.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-8.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/gpt-5-9.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/opus-41-1.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute2_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_fast_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/rust_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      Fix all other similar issues in other models.
+    metadata:
+  - assistant: |-
+      Of course. I've scanned the other model files and found the same two issues in multiple places. I've corrected the incorrect method call for `RangeSet` and fixed the instantiation logic for `GrammarConstraintState` across all affected files. I also performed a minor refactoring on `precompute3_model.py` for consistency.
+
+      Here are the step-by-step instructions and the corresponding git diffs.
+
+      ### Step-by-Step Instructions
+
+      #### 1. Fix `RangeSet` and `GrammarConstraintState` Creation
+
+      For the following files, I will make two types of changes:
+      1.  **`RangeSet.from_json` -> `RangeSet.from_ranges`**: In the `__init__` method, I'll correct the method name used to create `RangeSet` objects.
+      2.  **`GrammarConstraintState` instantiation**: In the `from_json_string` method, I'll replace the direct (and incorrect) call to `ffi.GrammarConstraintState.from_json_string(s)` with the correct two-step process: first creating a `GrammarConstraint`, then using it to initialize the `GrammarConstraintState`.
+
+      -   **File**: `python/aug25/models/precompute2_model.py`
+      -   **File**: `python/aug25/models/precompute3_fast_model.py`
+
+      #### 2. Fix `GrammarConstraintState` Creation Only
+
+      For the following list of files, the only issue was the incorrect `GrammarConstraintState` instantiation. I will apply the same fix as described in step 1.2.
+
+      -   `python/aug25/models/gemini-2.py`
+      -   `python/aug25/models/gemini-3.py`
+      -   `python/aug25/models/gemini-4.py`
+      -   `python/aug25/models/gemini-5.py`
+      -   `python/aug25/models/gpt-5-2.py`
+      -   `python/aug25/models/gpt-5-3.py`
+      -   `python/aug25/models/gpt-5-4.py`
+      -   `python/aug25/models/gpt-5-5.py`
+      -   `python/aug25/models/gpt-5-7.py`
+      -   `python/aug25/models/gpt-5-8.py`
+      -   `python/aug25/models/gpt-5-9.py`
+      -   `python/aug25/models/gpt-5-10.py`
+      -   `python/aug25/models/gpt-5-11.py`
+      -   `python/aug25/models/gpt-5-12.py`
+      -   `python/aug25/models/opus-41-1.py`
+
+      #### 3. Refactor `precompute3_model.py` for Consistency
+
+      -   **File**: `python/aug25/models/precompute3_model.py`
+          -   In the `__init__` method, I will remove the unused `self.constraint` attribute.
+          -   In the `from_json_string` method, I will change `model.constraint` to a local variable `constraint` to align with the other fixes.
+
+      ### Git Diffs
+
+      Here are the git diffs for all the changes.
+
+      ```diff
+      diff --git a/python/aug25/models/gemini-2.py b/python/aug25/models/gemini-2.py
+      --- a/python/aug25/models/gemini-2.py
+      +++ b/python/aug25/models/gemini-2.py
+      @@ -107,7 +107,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-3.py b/python/aug25/models/gemini-3.py
+      --- a/python/aug25/models/gemini-3.py
+      +++ b/python/aug25/models/gemini-3.py
+      @@ -109,7 +109,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-4.py b/python/aug25/models/gemini-4.py
+      --- a/python/aug25/models/gemini-4.py
+      +++ b/python/aug25/models/gemini-4.py
+      @@ -124,7 +124,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-5.py b/python/aug25/models/gemini-5.py
+      --- a/python/aug25/models/gemini-5.py
+      +++ b/python/aug25/models/gemini-5.py
+      @@ -129,7 +129,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-10.py b/python/aug25/models/gpt-5-10.py
+      --- a/python/aug25/models/gpt-5-10.py
+      +++ b/python/aug25/models/gpt-5-10.py
+      @@ -124,7 +124,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-11.py b/python/aug25/models/gpt-5-11.py
+      --- a/python/aug25/models/gpt-5-11.py
+      +++ b/python/aug25/models/gpt-5-11.py
+      @@ -142,7 +142,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-12.py b/python/aug25/models/gpt-5-12.py
+      --- a/python/aug25/models/gpt-5-12.py
+      +++ b/python/aug25/models/gpt-5-12.py
+      @@ -158,7 +158,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-2.py b/python/aug25/models/gpt-5-2.py
+      --- a/python/aug25/models/gpt-5-2.py
+      +++ b/python/aug25/models/gpt-5-2.py
+      @@ -62,7 +62,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-3.py b/python/aug25/models/gpt-5-3.py
+      --- a/python/aug25/models/gpt-5-3.py
+      +++ b/python/aug25/models/gpt-5-3.py
+      @@ -73,7 +73,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-4.py b/python/aug25/models/gpt-5-4.py
+      --- a/python/aug25/models/gpt-5-4.py
+      +++ b/python/aug25/models/gpt-5-4.py
+      @@ -107,7 +107,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-5.py b/python/aug25/models/gpt-5-5.py
+      --- a/python/aug25/models/gpt-5-5.py
+      +++ b/python/aug25/models/gpt-5-5.py
+      @@ -74,7 +74,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-7.py b/python/aug25/models/gpt-5-7.py
+      --- a/python/aug25/models/gpt-5-7.py
+      +++ b/python/aug25/models/gpt-5-7.py
+      @@ -104,7 +104,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-8.py b/python/aug25/models/gpt-5-8.py
+      --- a/python/aug25/models/gpt-5-8.py
+      +++ b/python/aug25/models/gpt-5-8.py
+      @@ -106,7 +106,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-9.py b/python/aug25/models/gpt-5-9.py
+      --- a/python/aug25/models/gpt-5-9.py
+      +++ b/python/aug25/models/gpt-5-9.py
+      @@ -137,7 +137,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/opus-41-1.py b/python/aug25/models/opus-41-1.py
+      --- a/python/aug25/models/opus-41-1.py
+      +++ b/python/aug25/models/opus-41-1.py
+      @@ -69,7 +69,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/precompute2_model.py b/python/aug25/models/precompute2_model.py
+      --- a/python/aug25/models/precompute2_model.py
+      +++ b/python/aug25/models/precompute2_model.py
+      @@ -21,7 +21,7 @@
+       
+                   for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
+                       pop, llm_bv_json = edge_key
+      -                llm_rs = RangeSet.from_json(llm_bv_json)
+      +                llm_rs = RangeSet.from_ranges(llm_bv_json)
+                       if llm_rs.is_empty():
+                           continue
+       
+      @@ -51,7 +51,8 @@
+               arena = {int(k): v for k, v in arena_values}
+               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
+               model = Model(roots_map, arena, max_state_id)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/precompute3_fast_model.py b/python/aug25/models/precompute3_fast_model.py
+      --- a/python/aug25/models/precompute3_fast_model.py
+      +++ b/python/aug25/models/precompute3_fast_model.py
+      @@ -55,7 +55,7 @@
+                   for edge_key, dest_map in children:
+                       pop_raw, llm_bv_json = edge_key
+                       pop = int(pop_raw)
+      -                llm_rs = RangeSet.from_json(llm_bv_json)
+      +                llm_rs = RangeSet.from_ranges(llm_bv_json)
+                       # Create a hashable key for grouping identical LLM token BVs
+                       llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
+       
+      @@ -107,7 +107,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               return model
+       
+           def get_root(self, state_id: int) -> int:
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      --- a/python/aug25/models/precompute3_model.py
+      +++ b/python/aug25/models/precompute3_model.py
+      @@ -17,7 +17,6 @@
+               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+               self.arena: Dict[int, dict] = arena
+               self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+      -        self.constraint: Optional[ffi.GrammarConstraint] = None
+               self.id_to_token: Dict[int, bytes] = {}
+               self.max_depth: Dict[int, int] = {}
+       
+      @@ -58,8 +57,8 @@
+               arena_values = arena_json.get("values", [])
+               arena = {int(k): v for k, v in arena_values}
+               model = Model(roots_map, arena)
+      -        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+      -        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
+               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+               return model
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 18 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/gemini-2.py
+      Applying patch to 'python/aug25/models/gemini-2.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gemini-2.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/gemini-3.py
+      Applying patch to 'python/aug25/models/gemini-3.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gemini-3.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/aug25/models/gemini-4.py
+      Applying patch to 'python/aug25/models/gemini-4.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gemini-4.py.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: python/aug25/models/gemini-5.py
+      Applying patch to 'python/aug25/models/gemini-5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gemini-5.py.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: python/aug25/models/gpt-5-10.py
+      Applying patch to 'python/aug25/models/gpt-5-10.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-10.py.
+
+      --- Processing Diff Block 6 ---
+      Identified target file: python/aug25/models/gpt-5-11.py
+      Applying patch to 'python/aug25/models/gpt-5-11.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-11.py.
+
+      --- Processing Diff Block 7 ---
+      Identified target file: python/aug25/models/gpt-5-12.py
+      Applying patch to 'python/aug25/models/gpt-5-12.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-12.py.
+
+      --- Processing Diff Block 8 ---
+      Identified target file: python/aug25/models/gpt-5-2.py
+      Applying patch to 'python/aug25/models/gpt-5-2.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-2.py.
+
+      --- Processing Diff Block 9 ---
+      Identified target file: python/aug25/models/gpt-5-3.py
+      Applying patch to 'python/aug25/models/gpt-5-3.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-3.py.
+
+      --- Processing Diff Block 10 ---
+      Identified target file: python/aug25/models/gpt-5-4.py
+      Applying patch to 'python/aug25/models/gpt-5-4.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-4.py.
+
+      --- Processing Diff Block 11 ---
+      Identified target file: python/aug25/models/gpt-5-5.py
+      Applying patch to 'python/aug25/models/gpt-5-5.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-5.py.
+
+      --- Processing Diff Block 12 ---
+      Identified target file: python/aug25/models/gpt-5-7.py
+      Applying patch to 'python/aug25/models/gpt-5-7.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-7.py.
+
+      --- Processing Diff Block 13 ---
+      Identified target file: python/aug25/models/gpt-5-8.py
+      Applying patch to 'python/aug25/models/gpt-5-8.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-8.py.
+
+      --- Processing Diff Block 14 ---
+      Identified target file: python/aug25/models/gpt-5-9.py
+      Applying patch to 'python/aug25/models/gpt-5-9.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-9.py.
+
+      --- Processing Diff Block 15 ---
+      Identified target file: python/aug25/models/opus-41-1.py
+      Applying patch to 'python/aug25/models/opus-41-1.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/opus-41-1.py.
+
+      --- Processing Diff Block 16 ---
+      Identified target file: python/aug25/models/precompute2_model.py
+      Applying patch to 'python/aug25/models/precompute2_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute2_model.py.
+
+      --- Processing Diff Block 17 ---
+      Identified target file: python/aug25/models/precompute3_fast_model.py
+      Applying patch to 'python/aug25/models/precompute3_fast_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_fast_model.py.
+
+      --- Processing Diff Block 18 ---
+      Identified target file: python/aug25/models/precompute3_model.py
+      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct RangeSet initialization and
+      GrammarConstraintState creation"'
     metadata:
 ...

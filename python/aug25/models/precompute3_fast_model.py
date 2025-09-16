@@ -96,7 +96,7 @@ class Model(GraphProvider):
             for edge_key, dest_map in children:
                 pop_raw, llm_bv_json = edge_key
                 pop = int(pop_raw)
-                llm_rs = RangeSet.from_json(llm_bv_json)
+                llm_rs = RangeSet.from_ranges(llm_bv_json)
                 # Create a hashable key for grouping identical LLM token BVs
                 llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
 
@@ -152,7 +152,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
