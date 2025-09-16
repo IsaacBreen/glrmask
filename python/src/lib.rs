@@ -650,6 +650,16 @@ impl PyGSSNode {
         PyHybridBitset::from(self.inner.allowed_llm_tokens())
     }
 
+    fn push(&self, value: usize) -> PyResult<PyGSSNode> {
+        let edge = sep1::glr::parser::ParseStateEdgeContent { state_id: sep1::glr::table::StateID(value) };
+        let new_node = self.inner.as_ref().push(edge);
+        Ok(PyGSSNode { inner: std::sync::Arc::new(new_node) })
+    }
+
+    fn max_depth(&self) -> usize {
+        self.inner.max_depth()
+    }
+
     fn clone_node(&self) -> PyGSSNode {
         self.clone()
     }
