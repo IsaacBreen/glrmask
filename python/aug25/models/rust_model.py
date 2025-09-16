@@ -14,7 +14,8 @@ class Model:
 
     @staticmethod
     def from_json_string(s: str) -> "Model":
-        constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        constraint_state = ffi.GrammarConstraintState(constraint)
         return Model(constraint_state)
 
     def get_mask(self) -> RangeSet:

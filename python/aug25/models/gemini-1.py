@@ -62,7 +62,7 @@ class Model(GraphProvider):
             new_children = []
             for edge_key, dest_map in original_children:
                 pop, llm_bv_json = edge_key
-                llm_rs = RangeSet.from_json(llm_bv_json)
+                llm_rs = RangeSet.from_ranges(llm_bv_json)
                 llm_mask = ffi.Bitset.from_ranges(llm_rs.intervals)
 
                 destinations = []
