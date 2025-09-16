@@ -1,9 +1,10 @@
 import json
 import time
 import heapq
+import collections
 from typing import Dict, List, Tuple, Optional
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
@@ -19,6 +20,9 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+        self.constraint: Optional[ffi.GrammarConstraint] = None
+        self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
 
         # Normalize arena children bitsets and cache max_depth
@@ -56,13 +60,17 @@ class Model(GraphProvider):
             node["children"] = new_children
 
     @staticmethod
-    def from_json_string(s: str) -> "Model":
+    def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+        model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -86,13 +94,16 @@ class Model(GraphProvider):
                             for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
         t0 = time.time()
-        print(f"[{time.time() - t0:.4f}] get_mask: start")
 
         final_mask = ffi.Bitset.zeros()
 
@@ -103,10 +114,8 @@ class Model(GraphProvider):
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
         depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
 
-        print(f"[{time.time() - t0:.4f}] get_mask: after init")
 
         # Seed: map tokenizer states and their filtered GSS to trie roots
-        t_seed_start = time.time()
         heappush = heapq.heappush
         roots_map = self.roots_map
         max_depth = self.max_depth
@@ -135,29 +144,8 @@ class Model(GraphProvider):
                 heappush(depth_heap, depth)
             else:
                 bucket.add(root_idx)
-        t_seed_end = time.time()
-        print(f"[{time.time() - t0:.4f}] get_mask: seed loop took {t_seed_end - t_seed_start:.4f}s")
 
         # Main scheduler
-        t_loop_start = time.time()
-
-        # Timing accumulators
-        time_pop_bucket = 0.0
-        time_node_setup = 0.0
-        time_end_check = 0.0
-        time_popn_collect = 0.0
-        time_filter_peeks = 0.0
-        time_merge_matched = 0.0
-        time_merge_values = 0.0
-        hits_pop_bucket = 0
-        hits_node_setup = 0
-        hits_end_check = 0
-        hits_popn_collect = 0
-        hits_filter_peeks = 0
-        hits_merge_matched = 0
-        hits_merge_values = 0
-
-        loop_count = 0
 
         # Helper to enqueue a node at a given depth
         def enqueue(depth: int, node_idx: int) -> None:
@@ -174,22 +162,17 @@ class Model(GraphProvider):
 
         while True:
             # Pop the smallest depth bucket (skip stale heap entries)
-            t1 = time.time()
             node_indices: Optional[set[int]] = None
             while depth_heap:
                 current_depth = heappop(depth_heap)
                 node_indices = todo.pop(current_depth, None)
                 if node_indices:
                     break
-            time_pop_bucket += time.time() - t1
             if not node_indices:
                 break  # nothing left to process
-            hits_pop_bucket += 1
-            loop_count += 1
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
-                t1 = time.time()
                 if node_idx in stopped:
                     continue
 
@@ -197,15 +180,10 @@ class Model(GraphProvider):
                 if item is None:
                     continue
                 gss_set, llm_mask = item
-                time_node_setup += time.time() - t1
-                hits_node_setup += 1
 
                 # End-node handling
-                t1 = time.time()
                 if is_end(node_idx):
                     final_mask = final_mask.union(llm_mask)
-                time_end_check += time.time() - t1
-                hits_end_check += 1
 
                 if not gss_set:
                     stopped.add(node_idx)
@@ -216,12 +194,9 @@ class Model(GraphProvider):
                 children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
                     # Collect all pops from GSS parents
-                    t1 = time.time()
                     peeks = []
                     for g in gss_set:
                         peeks.extend(g.popn_fast(pop))
-                    time_popn_collect += time.time() - t1
-                    hits_popn_collect += 1
                     if not peeks:
                         continue
 
@@ -229,29 +204,22 @@ class Model(GraphProvider):
 
                     for dest_idx, state_bv in dests:
                         # Filter peeks by destination state bitset
-                        t1 = time.time()
                         matched = []
                         if not state_bv.is_empty():
                             contains = state_bv.contains
                             for sid_val, parent_node in peeks:
                                 if contains(sid_val):
                                     matched.append(parent_node)
-                        time_filter_peeks += time.time() - t1
-                        hits_filter_peeks += 1
                         if not matched:
                             continue
 
                         # Merge matched parents
-                        t1 = time.time()
                         child_gss_nodes = matched  # already a list of parent nodes
-                        time_merge_matched += time.time() - t1
-                        hits_merge_matched += 1
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
 
-                        d = dest_idx
-                        t1 = time.time()
+                        d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss_set, existing_mask = existing
@@ -259,27 +227,12 @@ class Model(GraphProvider):
                             existing_gss_set.update(child_gss_nodes)
                             # Only re-enqueue if effectively changed
                             if len(existing_gss_set) == old_len:
-                                time_merge_values += time.time() - t1
-                                hits_merge_values += 1
                                 continue
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (existing_gss_set, combined_mask)
                         else:
                             values[d] = (set(child_gss_nodes), child_llm_mask)
-                        time_merge_values += time.time() - t1
-                        hits_merge_values += 1
 
                         enqueue(max_depth[d], d)
 
-        t_loop_end = time.time()
-        print(f"[{time.time() - t0:.4f}] get_mask: scheduler loop finished in {t_loop_end - t_loop_start:.4f}s ({loop_count} iterations)")
-        print(f"    - 1. Pop bucket:        {time_pop_bucket:9.4f}s ({hits_pop_bucket:8d} hits)")
-        print(f"    - 2. Node setup:        {time_node_setup:9.4f}s ({hits_node_setup:8d} hits)")
-        print(f"    - 3. End check:         {time_end_check:9.4f}s ({hits_end_check:8d} hits)")
-        print(f"    - 4. Pop'n'collect:     {time_popn_collect:9.4f}s ({hits_popn_collect:8d} hits)")
-        print(f"    - 5. Filter peeks:      {time_filter_peeks:9.4f}s ({hits_filter_peeks:8d} hits)")
-        print(f"    - 6. Merge matched:     {time_merge_matched:9.4f}s ({hits_merge_matched:8d} hits)")
-        print(f"    - 7. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
-
-        print(f"[{time.time() - t0:.4f}] get_mask: returning")
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())

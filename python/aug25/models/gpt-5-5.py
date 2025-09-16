@@ -2,8 +2,8 @@ import json
 from typing import Dict, List, Tuple, Optional, Iterable
 from collections import deque
 from dataclasses import dataclass
-from ..common_interface import GraphProvider
-import _sep1 as ffi  # compiled module: provides Bitset and GSSNode, optimized in C/C++
+from ..common_interface import GraphProvider, RangeSet
+import _sep1 as ffi
 
 
 @dataclass
@@ -42,6 +42,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         # Map tokenizer state -> trie root
         self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Per-node "end" flags
         self.end_flags: Dict[int, bool] = {}
@@ -86,13 +87,15 @@ class Model(GraphProvider):
             self.children_by_pop[uid] = pop_map
 
     @staticmethod
-    def from_json_string(s: str) -> "Model":
+    def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -120,7 +123,11 @@ class Model(GraphProvider):
                                 for sid in range(int(start), int(end)):
                                     yield (int(pop), sid, int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         # Final mask to return
         final_mask = ffi.Bitset.zeros()
 
@@ -289,4 +296,4 @@ class Model(GraphProvider):
                             dst_state.in_queue = True
                             q.append(d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())

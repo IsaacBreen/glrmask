@@ -2,7 +2,7 @@ import json
 from typing import Dict, List, Tuple, Optional, Iterable
 from collections import defaultdict
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # compiled module (provides Bitset and GSS primitives)
 
 
@@ -45,6 +45,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         # Roots map from tokenizer state id -> trie node id
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Global interner for all bitsets seen in the arena
         interner = _BitsetInterner()
@@ -114,13 +115,15 @@ class Model(GraphProvider):
             }
 
     @staticmethod
-    def from_json_string(s: str) -> "Model":
+    def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -179,7 +182,10 @@ class Model(GraphProvider):
         return out
 
     # --------- Core routine ---------
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
         """
         Fast mask computation:
           - Values accumulator per node holds (GSSNode, allowed_bv).
@@ -187,6 +193,7 @@ class Model(GraphProvider):
           - When reaching end nodes, we add (gss.allowed_llm_tokens() ∩ allowed_bv) to final mask.
           - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
         """
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         final_mask = ffi.Bitset.zeros()
 
         # values[node_idx] = (aggregated_gss, allowed_bv)
@@ -313,4 +320,4 @@ class Model(GraphProvider):
                                 child_depth = self.max_depth.get(d, 0)
                                 todo[child_depth].add(d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())

@@ -2,7 +2,7 @@ import json
 import heapq
 from typing import Dict, List, Tuple, Optional, DefaultDict
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # compiled module with Bitset and GSSNode
 from tqdm.auto import tqdm
 
@@ -36,6 +36,7 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.max_depth: Dict[int, int] = {}
 
         # children normalized as in precompute3_model, plus build pop-index for fast lookup
@@ -121,7 +122,9 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-        return Model(roots_map, arena, max_state_id)
+        model = Model(roots_map, arena, max_state_id)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -147,12 +150,16 @@ class Model(GraphProvider):
                             for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This version uses the per-pop, per-state fast index to avoid
         scanning all destination bitsets on every transition.
         """
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         Bitset = ffi.Bitset
 
         final_mask: ffi.Bitset = Bitset.zeros()
@@ -319,7 +326,7 @@ class Model(GraphProvider):
                             new_mask = existing_mask.union(child_llm_mask)
                             values[d] = (existing_gss_set, new_mask)
 
-                            # Re-enqueue if either set size grew or mask may have changed.
+                            # Re-enqueue if either set size grew or new_mask is different (not just identity)
                             if len(existing_gss_set) != old_len or new_mask is not existing_mask:
                                 enqueue(max_depth[d], d)
                         else:
@@ -328,7 +335,7 @@ class Model(GraphProvider):
                             values[d] = (set(child_nodes), child_llm_mask)
                             enqueue(max_depth[d], d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())
 
     @staticmethod
     def _enqueue_helper(todo: Dict[int, set], depth_heap: List[int]):
@@ -343,3 +350,4 @@ class Model(GraphProvider):
                 bucket.add(node_idx)
 
         return enqueue
+

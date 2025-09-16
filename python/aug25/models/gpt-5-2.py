@@ -2,7 +2,7 @@ import json
 from typing import Dict, List, Tuple, Optional, Iterable
 from collections import defaultdict
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
 
 
@@ -29,6 +29,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         # Roots: tokenizer_state_id -> trie_root_id
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         # Internal arena representation:
         # arena[node_id] = {
         #   "value": dict or None,
@@ -81,14 +82,16 @@ class Model(GraphProvider):
             }
 
     @staticmethod
-    def from_json_string(s: str) -> 'Model':
+    def from_json_string(s: str) -> "Model":
         data = json.loads(s)
         # Graph comes in "precompute3" format
         roots_map = data['precomputed3']
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -118,7 +121,11 @@ class Model(GraphProvider):
                     for sid in range(int(start), int(end)):
                         yield (int(pop), int(sid), int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         # Local aliases for speed
         gss_merge_many = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
@@ -258,4 +265,4 @@ class Model(GraphProvider):
                                 child_depth = self.max_depth.get(d, 0)
                                 todo[child_depth].add(d)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())

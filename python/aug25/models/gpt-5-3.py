@@ -3,7 +3,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Iterable
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # compiled module
 
 
@@ -38,6 +38,7 @@ class Model(GraphProvider):
         # Roots of tries mapped by tokenizer state ID
         self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
         self.arena: Dict[int, dict] = arena
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Per-node max depth
         self.max_depth: Dict[int, int] = {}
@@ -87,13 +88,15 @@ class Model(GraphProvider):
         _ = t0  # silence linter in case debug prints are off
 
     @staticmethod
-    def from_json_string(s: str) -> 'Model':
+    def from_json_string(s: str) -> "Model":
         data = json.loads(s)
         roots_map = data['precomputed3']
         arena_json = data['trie3_god']
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -122,11 +125,15 @@ class Model(GraphProvider):
                             for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> RangeSet:
         """
         Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
         """
         # Aliases to avoid repeated global lookups
+        state_to_gss = self.constraint_state.get_state_to_gss_map()
         Bitset = ffi.Bitset
         gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
@@ -287,4 +294,4 @@ class Model(GraphProvider):
                         heapq.heappush(active_depths_heap, child_depth)
                         active_depths_in_heap.add(child_depth)
 
-        return final_mask
+        return RangeSet.from_ranges(final_mask.to_ranges())
