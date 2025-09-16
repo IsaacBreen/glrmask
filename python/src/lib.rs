@@ -1,11 +1,11 @@
 use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
 use sep1::finite_automata::Regex;
-use pyo3::{prelude::*, pyclass};
+use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
-use sep1::glr::table::{generate_glr_parser, StateID, TerminalID, Stage7ShiftsAndReducesLookaheadValue, Goto};
+use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
 use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,9 +20,7 @@ use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast, reset_llm_tokens, disallow_terminals_and_prune_arc, map_allowed_terminals_tokenizer_states, prune_disallowed_terminals, fuse_predecessors_recursive};
-use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::tokenizer::{MatchInfo, ExecutionResult};
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -194,24 +192,6 @@ impl PyRegexGroups {
     }
 }
 
-#[pyclass(name = "MatchInfo")]
-#[derive(Clone)]
-pub struct PyMatchInfo {
-    #[pyo3(get)]
-    id: usize,
-    #[pyo3(get)]
-    width: usize,
-}
-
-#[pyclass(name = "ExecutionResult")]
-#[derive(Clone)]
-pub struct PyExecutionResult {
-    #[pyo3(get)]
-    matches: Vec<PyMatchInfo>,
-    #[pyo3(get)]
-    end_state: Option<usize>,
-}
-
 #[pyclass(name = "Regex")]
 #[derive(Clone)]
 pub struct PyRegex {
@@ -220,26 +200,7 @@ pub struct PyRegex {
 
 #[pymethods]
 impl PyRegex {
-    fn initial_state_id(&self) -> usize {
-        self.inner.initial_state_id().0
-    }
-
-    fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyExecutionResult {
-        let result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
-        PyExecutionResult {
-            matches: result.matches.into_iter().map(|m| PyMatchInfo { id: m.id, width: m.width }).collect(),
-            end_state: result.end_state.map(|s| s.0),
-        }
-    }
-
-    fn tokens_accessible_from_state(&self, state_id: usize) -> PyHybridBitset {
-        let terminals = self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
-        let mut bv = RustHybridBitset::zeros();
-        for t in terminals {
-            bv.insert(t.0);
-        }
-        PyHybridBitset { inner: bv }
-    }
+    // Python methods for PyRegex if needed
 }
 
 #[pyclass(name = "GrammarDefinition")]
@@ -346,13 +307,6 @@ impl PyCompiledGrammar {
 //     }
 // }
 
-#[pyclass(name = "GLRParser")]
-#[derive(Clone)]
-pub struct PyGLRParser {
-    inner: Arc<GLRParser>,
-}
-
-
 #[pyclass(name = "GrammarConstraint")]
 #[derive(Clone)]
 pub struct PyGrammarConstraint {
@@ -456,30 +410,6 @@ impl PyGrammarConstraint {
             m.insert(*intl, *orig);
         }
         Ok(m)
-    }
-
-    fn tokenizer(&self) -> PyRegex {
-        PyRegex { inner: self.inner.tokenizer.clone() }
-    }
-
-    fn possible_matches(&self, py: Python) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
-        for (sid, map) in &self.inner.possible_matches {
-            let inner_dict = PyDict::new_bound(py);
-            for (tid, bv) in map {
-                inner_dict.set_item(tid.0, PyHybridBitset { inner: bv.clone() })?;
-            }
-            dict.set_item(sid.0, inner_dict)?;
-        }
-        Ok(dict.into())
-    }
-
-    fn get_parser(&self) -> PyGLRParser {
-        PyGLRParser { inner: Arc::new(self.inner.parser.clone()) }
-    }
-
-    fn get_token_bytes(&self, token_id: usize) -> Option<Vec<u8>> {
-        self.inner.llm_vocab.llm_token_map.get_by_right(&LLMTokenID(token_id)).cloned()
     }
 
     fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
@@ -613,26 +543,6 @@ impl From<PyHybridBitset> for RustHybridBitset {
     fn from(p: PyHybridBitset) -> Self { p.inner }
 }
 
-#[pyclass(name = "HybridL2Bitset")]
-#[derive(Clone)]
-pub struct PyHybridL2Bitset {
-    inner: RustHybridL2Bitset,
-}
-
-#[pymethods]
-impl PyHybridL2Bitset {
-    #[new]
-    fn new() -> Self {
-        Self { inner: RustHybridL2Bitset::new() }
-    }
-
-    fn insert_l2_bitset(&mut self, l1_key: usize, l2_bitset: &PyHybridBitset) {
-        self.inner.insert_l2_bitset(l1_key, l2_bitset.inner.clone());
-    }
-}
-
-
-
 #[pyclass(name = "GSSNode")]
 #[derive(Clone)]
 pub struct PyGSSNode {
@@ -644,16 +554,6 @@ impl PyGSSNode {
     #[new]
     fn new() -> Self {
         PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-    }
-
-    fn push(&self, value: usize) -> PyGSSNode {
-        let edge = sep1::glr::parser::ParseStateEdgeContent { state_id: StateID(value) };
-        let new_node = self.inner.as_ref().push(edge);
-        PyGSSNode { inner: Arc::new(new_node) }
-    }
-
-    fn is_root(&self) -> bool {
-        self.inner.is_root()
     }
 
     fn ptr(&self) -> usize {
@@ -703,41 +603,6 @@ impl PyGSSNode {
             _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
         }
     }
-
-    fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
-    }
-
-    fn reset_llm_tokens(&mut self) {
-        reset_llm_tokens(&mut self.inner, &mut std::collections::HashMap::new());
-    }
-
-    fn disallow_terminals_and_prune_arc(&mut self, disallowed: &PyHybridL2Bitset) {
-        disallow_terminals_and_prune_arc(&mut self.inner, &disallowed.inner, &mut std::collections::HashMap::new());
-    }
-
-    fn map_allowed_terminals_tokenizer_states(&mut self, py: Python, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
-        let mut map = BTreeMap::new();
-        for (k, v) in state_map.iter() {
-            map.insert(sep1::tokenizer::TokenizerStateID(k.extract()?), sep1::tokenizer::TokenizerStateID(v.extract()?));
-        }
-        map_allowed_terminals_tokenizer_states(&mut self.inner, &map, &mut std::collections::HashMap::new());
-        Ok(())
-    }
-
-    fn prune_disallowed_terminals(&mut self, py: Python, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
-        let mut map = BTreeMap::new();
-        for (k, v) in terminals_map.iter() {
-            let bv: PyHybridBitset = v.extract()?;
-            map.insert(sep1::tokenizer::TokenizerStateID(k.extract()?), bv.inner);
-        }
-        prune_disallowed_terminals(&mut self.inner, &map, &mut std::collections::HashMap::new());
-        Ok(())
-    }
-
-    fn fuse_predecessors(&mut self, levels: usize) {
-        self.inner = fuse_predecessors_recursive(&self.inner, levels, &mut std::collections::HashMap::new());
-    }
 }
 
 #[pyfunction]
@@ -760,74 +625,6 @@ fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
     pairs.into_iter()
         .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
         .collect()
-}
-
-#[pymethods]
-impl PyGLRParser {
-    fn init_state(&self) -> PyGSSNode {
-        let state = self.inner.init_glr_parser(None);
-        PyGSSNode { inner: state.active_state.stack }
-    }
-
-    fn export_parse_table(&self, py: Python) -> PyResult<PyObject> {
-        let table_dict = PyDict::new_bound(py);
-        for (state_id, row) in &self.inner.table {
-            let row_dict = PyDict::new_bound(py);
-            
-            let actions_dict = PyDict::new_bound(py);
-            for (terminal_id, action) in &row.shifts_and_reduces_full {
-                let action_py = match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                        let d = PyDict::new_bound(py);
-                        d.set_item("type", "Shift")?;
-                        d.set_item("to", to.0)?;
-                        d
-                    },
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                        let d = PyDict::new_bound(py);
-                        d.set_item("type", "Reduce")?;
-                        d.set_item("nt", nonterminal_id.0)?;
-                        d.set_item("len", *len)?;
-                        d.set_item("prods", production_ids.iter().map(|p| p.0).collect::<Vec<_>>())?;
-                        d
-                    },
-                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                        let d = PyDict::new_bound(py);
-                        d.set_item("type", "Split")?;
-                        d.set_item("shift", shift.map(|s| s.0))?;
-                        let reduces_py = PyDict::new_bound(py);
-                        for (len, nts) in reduces {
-                            let nts_py = PyDict::new_bound(py);
-                            for (nt_id, pids) in nts {
-                                nts_py.set_item(nt_id.0, pids.iter().map(|p| p.0).collect::<Vec<_>>())?;
-                            }
-                            reduces_py.set_item(*len, nts_py)?;
-                        }
-                        d.set_item("reduces", reduces_py)?;
-                        d
-                    }
-                };
-                actions_dict.set_item(terminal_id.0, action_py)?;
-            }
-            row_dict.set_item("shifts_and_reduces_full", actions_dict)?;
-
-            let gotos_dict = PyDict::new_bound(py);
-            for (nt_id, goto) in &row.gotos {
-                let goto_py = PyDict::new_bound(py);
-                goto_py.set_item("state_id", goto.state_id.map(|s| s.0))?;
-                goto_py.set_item("accept", goto.accept)?;
-                gotos_dict.set_item(nt_id.0, goto_py)?;
-            }
-            row_dict.set_item("gotos", gotos_dict)?;
-
-            table_dict.set_item(state_id.0, row_dict)?;
-        }
-
-        let result = PyDict::new_bound(py);
-        result.set_item("start_state_id", self.inner.start_state_id.0)?;
-        result.set_item("table", table_dict)?;
-        Ok(result.into())
-    }
 }
 
 #[self_referencing]
@@ -957,15 +754,12 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRegexGroup>()?;
     m.add_class::<PyRegexGroups>()?;
     m.add_class::<PyRegex>()?;
-    m.add_class::<PyMatchInfo>()?;
-    m.add_class::<PyExecutionResult>()?;
     m.add_class::<PyGrammarDefinition>()?;
     m.add_class::<PyCompiledGrammar>()?;
-    m.add_class::<PyGLRParser>()?;
+    // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitset>()?;
-    m.add_class::<PyHybridL2Bitset>()?;
     m.add_class::<PyGSSNode>()?;
     m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
