@@ -170,7 +170,7 @@ class Model(GraphProvider):
         GSS nodes. Highly optimized scheduler that minimizes per-dest membership checks
         by using: pop-grouped peeks, sid-indexed parent lists, and range-vs-sorted-sids scanning.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)

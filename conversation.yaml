@@ -22,7 +22,7 @@ local_system:
     - python/aug25/models/precompute3_fast_model.py
     - python/aug25/models/precompute3_model.py
     - python/aug25/models/rust_model.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/src/lib.rs: |-
@@ -1007,7 +1007,7 @@ local_system:
                   new_children = []
                   for edge_key, dest_map in original_children:
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       llm_mask = ffi.Bitset.from_ranges(llm_rs.intervals)
 
                       destinations = []
@@ -1031,7 +1031,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -1278,7 +1279,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -1524,7 +1526,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -1829,7 +1832,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -2131,7 +2135,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -2425,7 +2430,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -2860,7 +2866,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -3360,7 +3367,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -3716,7 +3724,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -3990,7 +3999,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -4315,7 +4325,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -4611,7 +4622,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -4940,7 +4952,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -5275,7 +5288,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -5743,7 +5757,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -6064,7 +6079,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -6251,7 +6267,7 @@ local_system:
 
                   for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       if llm_rs.is_empty():
                           continue
 
@@ -6284,7 +6300,8 @@ local_system:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -6490,7 +6507,7 @@ local_system:
                   for edge_key, dest_map in children:
                       pop_raw, llm_bv_json = edge_key
                       pop = int(pop_raw)
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       # Create a hashable key for grouping identical LLM token BVs
                       llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
 
@@ -6546,7 +6563,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -6741,7 +6759,6 @@ local_system:
               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
               self.arena: Dict[int, dict] = arena
               self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-              self.constraint: Optional[ffi.GrammarConstraint] = None
               self.id_to_token: Dict[int, bytes] = {}
               self.max_depth: Dict[int, int] = {}
 
@@ -6787,8 +6804,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
               return model
 
@@ -6973,7 +6990,8 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> "Model":
-              constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              constraint_state = ffi.GrammarConstraintState(constraint)
               return Model(constraint_state)
 
           def get_mask(self) -> RangeSet:
@@ -7995,7 +8013,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -8024,7 +8043,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
               values: Dict[int, ffi.GSSNode] = {}
               stopped: set[int] = set()
@@ -8275,7 +8294,7 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
               todo: Dict[int, set[int]] = defaultdict(set)
@@ -8527,7 +8546,7 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
 
               final_mask = ffi.Bitset.zeros()
               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
@@ -8830,7 +8849,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
               # {node_idx: ({gss_parents}, llm_mask)}
               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
@@ -9133,7 +9152,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
               # {node_idx: ({gss_parents}, llm_mask)}
               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
@@ -9437,7 +9456,7 @@ local_system:
               GSS nodes. Highly optimized scheduler that minimizes per-dest membership checks
               by using: pop-grouped peeks, sid-indexed parent lists, and range-vs-sorted-sids scanning.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # node_idx -> (set(GSSNode), Bitset)
@@ -9878,7 +9897,7 @@ local_system:
               GSS nodes. Optimized to avoid per-destination filtering by using
               precomputed SID->ArcBundle mapping per pop group and cache-friendly data layout.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # node_idx -> (set(GSSNode), Bitset)
@@ -10380,7 +10399,7 @@ local_system:
               precomputed SID->ArcBundle mapping per pop group and grouping peeks by
               ArcBundle to minimize repeated work.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # node_idx -> (set(GSSNode), Bitset)
@@ -10723,7 +10742,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               # Local aliases for speed
               gss_merge_many = ffi.gss_merge_many_with_depth
               gss_popn_collect = ffi.gss_popn_collect
@@ -11001,7 +11020,7 @@ local_system:
               Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
               """
               # Aliases to avoid repeated global lookups
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               Bitset = ffi.Bitset
               gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
               gss_popn_collect = ffi.gss_popn_collect
@@ -11360,7 +11379,7 @@ local_system:
                 - When reaching end nodes, we add (gss.allowed_llm_tokens() ∩ allowed_bv) to final mask.
                 - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # values[node_idx] = (aggregated_gss, allowed_bv)
@@ -11619,7 +11638,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               # Final mask to return
               final_mask = ffi.Bitset.zeros()
 
@@ -11952,7 +11971,7 @@ local_system:
               GSS nodes. This version uses the per-pop, per-state fast index to avoid
               scanning all destination bitsets on every transition.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               Bitset = ffi.Bitset
 
               final_mask: ffi.Bitset = Bitset.zeros()
@@ -12371,7 +12390,7 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. Uses the per-pop dispatch index to avoid repeated O(dests * peeks) filters.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # Node -> (set(GSSNode), Bitset)
@@ -12762,7 +12781,7 @@ local_system:
               GSS nodes. Optimized to avoid per-destination filtering by using
               precomputed SID->arcs mapping per pop group.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # node_idx -> (set(GSSNode), Bitset)
@@ -13080,7 +13099,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
 
               # Use arrays instead of dicts where possible
@@ -13284,7 +13303,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               final_mask = ffi.Bitset.zeros()
               values: Dict[int, ffi.GSSNode] = {}
               stopped: set[int] = set()
@@ -13561,7 +13580,7 @@ local_system:
               self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.get_state_map()
               # Local bindings for speed
               depths = self.depths
               node_pop_map = self.node_pop_map
@@ -15005,7 +15024,7 @@ messages:
                   new_children = []
                   for edge_key, dest_map in original_children:
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       llm_mask = ffi.Bitset.from_ranges(llm_rs.intervals)
 
                       destinations = []
@@ -15029,7 +15048,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -15281,7 +15301,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -15532,7 +15553,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -15842,7 +15864,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -16149,7 +16172,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -16448,7 +16472,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -16888,7 +16913,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -17393,7 +17419,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -17754,7 +17781,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -18033,7 +18061,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -18363,7 +18392,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -18664,7 +18694,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -18998,7 +19029,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -19338,7 +19370,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -19811,7 +19844,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -20137,7 +20171,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -20329,7 +20364,7 @@ messages:
 
                   for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
                       pop, llm_bv_json = edge_key
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       if llm_rs.is_empty():
                           continue
 
@@ -20362,7 +20397,8 @@ messages:
               arena = {int(k): v for k, v in arena_values}
               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
               model = Model(roots_map, arena, max_state_id)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -20573,7 +20609,7 @@ messages:
                   for edge_key, dest_map in children:
                       pop_raw, llm_bv_json = edge_key
                       pop = int(pop_raw)
-                      llm_rs = RangeSet.from_json(llm_bv_json)
+                      llm_rs = RangeSet.from_ranges(llm_bv_json)
                       # Create a hashable key for grouping identical LLM token BVs
                       llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
 
@@ -20629,7 +20665,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               return model
 
           def get_root(self, state_id: int) -> int:
@@ -20829,7 +20866,6 @@ messages:
               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
               self.arena: Dict[int, dict] = arena
               self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-              self.constraint: Optional[ffi.GrammarConstraint] = None
               self.id_to_token: Dict[int, bytes] = {}
               self.max_depth: Dict[int, int] = {}
 
@@ -20875,8 +20911,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
               return model
 
@@ -21066,7 +21102,8 @@ messages:
 
           @staticmethod
           def from_json_string(s: str) -> "Model":
-              constraint_state = ffi.GrammarConstraintState.from_json_string(s)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              constraint_state = ffi.GrammarConstraintState(constraint)
               return Model(constraint_state)
 
           def get_mask(self) -> RangeSet:
@@ -21087,7 +21124,7 @@ messages:
       filename: python/aug25/models/rust_model.py
   - user: |-
       bash run_benchmarks.sh aug25/models/gemini-1.py
-      Benchmark results will be saved in: benchmark_results/2025-09-16_20-31-05
+      Benchmark results will be saved in: benchmark_results/2025-09-16_20-40-06
       ---
       Baseline Model: aug25/models/gemini-1.py
       Other Models: (none)
@@ -21097,42 +21134,16 @@ messages:
       Starting benchmark runs...
 
       >>> Running benchmark for: gemini-1.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/gemini-1.py --output benchmark_results/2025-09-16_20-31-05
+      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/gemini-1.py --output benchmark_results/2025-09-16_20-40-06
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: aug25/models/gemini-1.py
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 304, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 300, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 200, in run_benchmark
-          model = ModelClass.from_json_string(constraint_json_str)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-1.py", line 88, in from_json_string
-          model = Model(roots_map, arena)
-                  ^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-1.py", line 65, in __init__
-          llm_rs = RangeSet.from_json(llm_bv_json)
-                   ^^^^^^^^^^^^^^^^^^
-      AttributeError: type object 'RangeSet' has no attribute 'from_json'
-      bash run_benchmarks.sh aug25/models/rust_model.py
-      Benchmark results will be saved in: benchmark_results/2025-09-16_20-31-35
-      ---
-      Baseline Model: aug25/models/rust_model.py
-      Other Models: (none)
-      Constraint File: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ../src/example_code.js
-      ---
-      Starting benchmark runs...
+      Model loaded in 13.9414 seconds.
+      Loading and tokenizing code from: ../src/example_code.js
+      Tokenized into 2386 tokens.
 
-      >>> Running benchmark for: rust_model.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/rust_model.py --output benchmark_results/2025-09-16_20-31-35
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/rust_model.py
+      --- Running benchmark (2386 steps) ---
+      Benchmarking steps:   0%|                                                                                                                                                      | 0/2386 [00:00<?, ?it/s, get_mask]
       Traceback (most recent call last):
         File "<frozen runpy>", line 198, in _run_module_as_main
         File "<frozen runpy>", line 88, in _run_code
@@ -21140,13 +21151,15 @@ messages:
           main()
         File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 300, in main
           run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 200, in run_benchmark
-          model = ModelClass.from_json_string(constraint_json_str)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/rust_model.py", line 17, in from_json_string
-          constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      AttributeError: type object 'builtins.GrammarConstraintState' has no attribute 'from_json_string'
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 224, in run_benchmark
+          mask_rs = model.get_mask()
+                    ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-1.py", line 119, in get_mask
+          state_to_gss = self.constraint_state.get_state_to_gss_map()
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      AttributeError: 'NoneType' object has no attribute 'get_state_to_gss_map'
+    metadata:
+  - user: Fix this and all similar issues in other models.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -21165,595 +21178,375 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've identified and fixed two separate `AttributeError` issues that were causing your benchmarks to fail. The first was due to an incorrect method name for creating a `RangeSet` object, and the second was related to the incorrect procedure for creating a `GrammarConstraintState` from a JSON string.
+      I've identified two issues that caused the error you're seeing. First, the `gemini-1.py` model was not correctly initializing its `constraint_state`. Second, a method name in the Rust bindings appears to have changed from `get_state_to_gss_map` to `get_state_map`, and this change was not reflected in most of the model files.
 
-      Here are the step-by-step instructions to fix these issues, followed by the corresponding git diffs.
+      Here are the step-by-step instructions to fix these issues across all affected models.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      1.  **Fix `AttributeError` in `gemini-1.py`**:
-          *   Open the file `python/aug25/models/gemini-1.py`.
-          *   In the `__init__` method, locate line 65.
-          *   The method to create a `RangeSet` from a list of intervals is `from_ranges`, not `from_json`.
-          *   Change the line:
-              ```python
-              llm_rs = RangeSet.from_json(llm_bv_json)
-              ```
-              to:
-              ```python
-              llm_rs = RangeSet.from_ranges(llm_bv_json)
-              ```
+      1.  **File: `python/aug25/models/gemini-1.py`**
+          -   In the `from_json_string` method, add a line to assign the newly created `constraint_state` to the `model` instance before returning it.
+          -   In the `get_mask` method, rename the call from `get_state_to_gss_map()` to `get_state_map()`.
 
-      2.  **Fix `AttributeError` in `rust_model.py`**:
-          *   Open the file `python/aug25/models/rust_model.py`.
-          *   In the `from_json_string` static method, you'll see an attempt to create a `GrammarConstraintState` directly from JSON. This is incorrect; you must first create a `GrammarConstraint` and then use it to initialize the state object.
-          *   Replace this line:
-              ```python
-              constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-              ```
-              with these two lines:
-              ```python
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              constraint_state = ffi.GrammarConstraintState(constraint)
-              ```
+      2.  **File: `python/aug25/models/gemini-2.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      3.  **File: `python/aug25/models/gemini-3.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      4.  **File: `python/aug25/models/gemini-4.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      5.  **File: `python/aug25/models/gemini-5.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      6.  **File: `python/aug25/models/gpt-5-10.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      7.  **File: `python/aug25/models/gpt-5-11.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      8.  **File: `python/aug25/models/gpt-5-12.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      9.  **File: `python/aug25/models/gpt-5-2.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      10. **File: `python/aug25/models/gpt-5-3.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      11. **File: `python/aug25/models/gpt-5-4.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      12. **File: `python/aug25/models/gpt-5-5.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      13. **File: `python/aug25/models/gpt-5-7.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      14. **File: `python/aug25/models/gpt-5-8.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      15. **File: `python/aug25/models/gpt-5-9.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      16. **File: `python/aug25/models/opus-41-1.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      17. **File: `python/aug25/models/precompute2_model.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
+
+      18. **File: `python/aug25/models/precompute3_fast_model.py`**
+          -   In the `get_mask` method, rename `get_state_to_gss_map()` to `get_state_map()`.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here are the git patches to apply these changes:
 
       ```diff
       diff --git a/python/aug25/models/gemini-1.py b/python/aug25/models/gemini-1.py
       --- a/python/aug25/models/gemini-1.py
       +++ b/python/aug25/models/gemini-1.py
-      @@ -62,7 +62,7 @@
-                   new_children = []
-                   for edge_key, dest_map in original_children:
-                       pop, llm_bv_json = edge_key
-      -                llm_rs = RangeSet.from_json(llm_bv_json)
-      +                llm_rs = RangeSet.from_ranges(llm_bv_json)
-                       llm_mask = ffi.Bitset.from_ranges(llm_rs.intervals)
-       
-                       destinations = []
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/models/rust_model.py b/python/aug25/models/rust_model.py
-      --- a/python/aug25/models/rust_model.py
-      +++ b/python/aug25/models/rust_model.py
-      @@ -14,8 +14,9 @@
-       
-           @staticmethod
-           def from_json_string(s: str) -> "Model":
-      -        constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        constraint_state = ffi.GrammarConstraintState(constraint)
-               return Model(constraint_state)
-       
-           def get_mask(self) -> RangeSet:
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/gemini-1.py
-      Applying patch to 'python/aug25/models/gemini-1.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/gemini-1.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/models/rust_model.py
-      Applying patch to 'python/aug25/models/rust_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/rust_model.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Correct initialization of RangeSet
-      and GrammarConstraintState"'
-    metadata:
-  - user: |-
-      Diff of python/src/lib.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/deepseek-1.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gemini-1.py since previous turn:
-      ```diff
-      --- original version of python/aug25/models/gemini-1.py+++ current version of python/aug25/models/gemini-1.py@@ -86,7 +86,8 @@         arena_values = arena_json.get("values", [])
+      @@ -87,14 +87,15 @@
                arena = {int(k): v for k, v in arena_values}
                model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        constraint_state = ffi.GrammarConstraintState(constraint)
+               constraint = ffi.GrammarConstraint.from_json_string(s)
+      -        constraint_state = ffi.GrammarConstraintState(constraint)
+      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
                return model
        
            def get_root(self, state_id: int) -> int:
+               return self.roots_map[state_id]
+       
+           def is_end(self, node: int) -> bool:
+               return node in self.end_nodes
+       
+           def iter_edges(self, node: int, token: int):
+               # This method remains for validation against the GraphProvider interface.
+      @@ -113,7 +114,7 @@
+               self.constraint_state.commit(token_id)
+       
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, ffi.GSSNode] = {}
+               stopped: set[int] = set()
 
       ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gemini-2.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gemini-3.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gemini-4.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gemini-5.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-10.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-11.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-12.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-2.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-3.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-4.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-5.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-7.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-8.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/gpt-5-9.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/opus-41-1.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute2_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_fast_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/rust_model.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |
-      Fix all other similar issues in other models.
-    metadata:
-  - assistant: |-
-      Of course. I've scanned the other model files and found the same two issues in multiple places. I've corrected the incorrect method call for `RangeSet` and fixed the instantiation logic for `GrammarConstraintState` across all affected files. I also performed a minor refactoring on `precompute3_model.py` for consistency.
-
-      Here are the step-by-step instructions and the corresponding git diffs.
-
-      ### Step-by-Step Instructions
-
-      #### 1. Fix `RangeSet` and `GrammarConstraintState` Creation
-
-      For the following files, I will make two types of changes:
-      1.  **`RangeSet.from_json` -> `RangeSet.from_ranges`**: In the `__init__` method, I'll correct the method name used to create `RangeSet` objects.
-      2.  **`GrammarConstraintState` instantiation**: In the `from_json_string` method, I'll replace the direct (and incorrect) call to `ffi.GrammarConstraintState.from_json_string(s)` with the correct two-step process: first creating a `GrammarConstraint`, then using it to initialize the `GrammarConstraintState`.
-
-      -   **File**: `python/aug25/models/precompute2_model.py`
-      -   **File**: `python/aug25/models/precompute3_fast_model.py`
-
-      #### 2. Fix `GrammarConstraintState` Creation Only
-
-      For the following list of files, the only issue was the incorrect `GrammarConstraintState` instantiation. I will apply the same fix as described in step 1.2.
-
-      -   `python/aug25/models/gemini-2.py`
-      -   `python/aug25/models/gemini-3.py`
-      -   `python/aug25/models/gemini-4.py`
-      -   `python/aug25/models/gemini-5.py`
-      -   `python/aug25/models/gpt-5-2.py`
-      -   `python/aug25/models/gpt-5-3.py`
-      -   `python/aug25/models/gpt-5-4.py`
-      -   `python/aug25/models/gpt-5-5.py`
-      -   `python/aug25/models/gpt-5-7.py`
-      -   `python/aug25/models/gpt-5-8.py`
-      -   `python/aug25/models/gpt-5-9.py`
-      -   `python/aug25/models/gpt-5-10.py`
-      -   `python/aug25/models/gpt-5-11.py`
-      -   `python/aug25/models/gpt-5-12.py`
-      -   `python/aug25/models/opus-41-1.py`
-
-      #### 3. Refactor `precompute3_model.py` for Consistency
-
-      -   **File**: `python/aug25/models/precompute3_model.py`
-          -   In the `__init__` method, I will remove the unused `self.constraint` attribute.
-          -   In the `from_json_string` method, I will change `model.constraint` to a local variable `constraint` to align with the other fixes.
-
-      ### Git Diffs
-
-      Here are the git diffs for all the changes.
 
       ```diff
       diff --git a/python/aug25/models/gemini-2.py b/python/aug25/models/gemini-2.py
       --- a/python/aug25/models/gemini-2.py
       +++ b/python/aug25/models/gemini-2.py
-      @@ -107,7 +107,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
-       
-           def get_root(self, state_id: int) -> int:
+      @@ -107,7 +107,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This is the performance-critical routine.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
+               todo: Dict[int, set[int]] = defaultdict(set)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gemini-3.py b/python/aug25/models/gemini-3.py
       --- a/python/aug25/models/gemini-3.py
       +++ b/python/aug25/models/gemini-3.py
-      @@ -109,7 +109,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -128,7 +128,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This is the performance-critical routine.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
        
-           def get_root(self, state_id: int) -> int:
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gemini-4.py b/python/aug25/models/gemini-4.py
       --- a/python/aug25/models/gemini-4.py
       +++ b/python/aug25/models/gemini-4.py
-      @@ -124,7 +124,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -99,7 +99,7 @@
+               self.constraint_state.commit(token_id)
        
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+               # {node_idx: ({gss_parents}, llm_mask)}
+               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gemini-5.py b/python/aug25/models/gemini-5.py
       --- a/python/aug25/models/gemini-5.py
       +++ b/python/aug25/models/gemini-5.py
-      @@ -129,7 +129,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -123,7 +123,7 @@
+               self.constraint_state.commit(token_id)
        
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+               # {node_idx: ({gss_parents}, llm_mask)}
+               values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-10.py b/python/aug25/models/gpt-5-10.py
       --- a/python/aug25/models/gpt-5-10.py
       +++ b/python/aug25/models/gpt-5-10.py
-      @@ -124,7 +124,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -155,7 +155,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Highly optimized scheduler that minimizes per-dest membership checks
+               by using: pop-grouped peeks, sid-indexed parent lists, and range-vs-sorted-sids scanning.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # node_idx -> (set(GSSNode), Bitset)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-11.py b/python/aug25/models/gpt-5-11.py
       --- a/python/aug25/models/gpt-5-11.py
       +++ b/python/aug25/models/gpt-5-11.py
-      @@ -142,7 +142,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -194,7 +194,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Optimized to avoid per-destination filtering by using
+               precomputed SID->ArcBundle mapping per pop group and cache-friendly data layout.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # node_idx -> (set(GSSNode), Bitset)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-12.py b/python/aug25/models/gpt-5-12.py
       --- a/python/aug25/models/gpt-5-12.py
       +++ b/python/aug25/models/gpt-5-12.py
-      @@ -158,7 +158,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data["parser"]["stage_7_table"]).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -214,7 +214,7 @@
+               precomputed SID->ArcBundle mapping per pop group and grouping peeks by
+               ArcBundle to minimize repeated work.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # node_idx -> (set(GSSNode), Bitset)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-2.py b/python/aug25/models/gpt-5-2.py
       --- a/python/aug25/models/gpt-5-2.py
       +++ b/python/aug25/models/gpt-5-2.py
-      @@ -62,7 +62,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -102,7 +102,7 @@
+               self.constraint_state.commit(token_id)
        
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               # Local aliases for speed
+               gss_merge_many = ffi.gss_merge_many_with_depth
+               gss_popn_collect = ffi.gss_popn_collect
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-3.py b/python/aug25/models/gpt-5-3.py
       --- a/python/aug25/models/gpt-5-3.py
       +++ b/python/aug25/models/gpt-5-3.py
-      @@ -73,7 +73,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
-       
-           def get_root(self, state_id: int) -> int:
+      @@ -113,7 +113,7 @@
+               Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+               """
+               # Aliases to avoid repeated global lookups
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               Bitset = ffi.Bitset
+               gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
+               gss_popn_collect = ffi.gss_popn_collect
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-4.py b/python/aug25/models/gpt-5-4.py
       --- a/python/aug25/models/gpt-5-4.py
       +++ b/python/aug25/models/gpt-5-4.py
-      @@ -107,7 +107,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -157,7 +157,7 @@
+                 - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # values[node_idx] = (aggregated_gss, allowed_bv)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-5.py b/python/aug25/models/gpt-5-5.py
       --- a/python/aug25/models/gpt-5-5.py
       +++ b/python/aug25/models/gpt-5-5.py
-      @@ -74,7 +74,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -107,7 +107,7 @@
+               self.constraint_state.commit(token_id)
        
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               # Final mask to return
+               final_mask = ffi.Bitset.zeros()
+       
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-7.py b/python/aug25/models/gpt-5-7.py
       --- a/python/aug25/models/gpt-5-7.py
       +++ b/python/aug25/models/gpt-5-7.py
-      @@ -104,7 +104,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -124,7 +124,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This version uses the per-pop, per-state fast index to avoid
+               scanning all destination bitsets on every transition.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               Bitset = ffi.Bitset
        
-           def get_root(self, state_id: int) -> int:
+               final_mask: ffi.Bitset = Bitset.zeros()
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-8.py b/python/aug25/models/gpt-5-8.py
       --- a/python/aug25/models/gpt-5-8.py
       +++ b/python/aug25/models/gpt-5-8.py
-      @@ -106,7 +106,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -183,7 +183,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Uses the per-pop dispatch index to avoid repeated O(dests * peeks) filters.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # Node -> (set(GSSNode), Bitset)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/gpt-5-9.py b/python/aug25/models/gpt-5-9.py
       --- a/python/aug25/models/gpt-5-9.py
       +++ b/python/aug25/models/gpt-5-9.py
-      @@ -137,7 +137,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -165,7 +165,7 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Optimized to avoid per-destination filtering by using
+               precomputed SID->arcs mapping per pop group.
+               """
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
        
-           def get_root(self, state_id: int) -> int:
+               # node_idx -> (set(GSSNode), Bitset)
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/opus-41-1.py b/python/aug25/models/opus-41-1.py
       --- a/python/aug25/models/opus-41-1.py
       +++ b/python/aug25/models/opus-41-1.py
-      @@ -69,7 +69,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
+      @@ -107,7 +107,7 @@
+               self.constraint_state.commit(token_id)
        
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+       
+               # Use arrays instead of dicts where possible
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/precompute2_model.py b/python/aug25/models/precompute2_model.py
       --- a/python/aug25/models/precompute2_model.py
       +++ b/python/aug25/models/precompute2_model.py
-      @@ -21,7 +21,7 @@
+      @@ -69,7 +69,7 @@
+               self.constraint_state.commit(token_id)
        
-                   for edge_key, dest_map in tqdm(p3_children, desc="Aggregating children", leave=False, disable=True):
-                       pop, llm_bv_json = edge_key
-      -                llm_rs = RangeSet.from_json(llm_bv_json)
-      +                llm_rs = RangeSet.from_ranges(llm_bv_json)
-                       if llm_rs.is_empty():
-                           continue
-       
-      @@ -51,7 +51,8 @@
-               arena = {int(k): v for k, v in arena_values}
-               max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
-               model = Model(roots_map, arena, max_state_id)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
-       
-           def get_root(self, state_id: int) -> int:
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, ffi.GSSNode] = {}
+               stopped: set[int] = set()
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/precompute3_fast_model.py b/python/aug25/models/precompute3_fast_model.py
       --- a/python/aug25/models/precompute3_fast_model.py
       +++ b/python/aug25/models/precompute3_fast_model.py
-      @@ -55,7 +55,7 @@
-                   for edge_key, dest_map in children:
-                       pop_raw, llm_bv_json = edge_key
-                       pop = int(pop_raw)
-      -                llm_rs = RangeSet.from_json(llm_bv_json)
-      +                llm_rs = RangeSet.from_ranges(llm_bv_json)
-                       # Create a hashable key for grouping identical LLM token BVs
-                       llm_key = tuple((int(a), int(b)) for a, b in (llm_rs.intervals or []))
+      @@ -148,7 +148,7 @@
+               self.constraint_state.commit(token_id)
        
-      @@ -107,7 +107,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               return model
-       
-           def get_root(self, state_id: int) -> int:
-
-      ```
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
-      --- a/python/aug25/models/precompute3_model.py
-      +++ b/python/aug25/models/precompute3_model.py
-      @@ -17,7 +17,6 @@
-               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-               self.arena: Dict[int, dict] = arena
-               self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-      -        self.constraint: Optional[ffi.GrammarConstraint] = None
-               self.id_to_token: Dict[int, bytes] = {}
-               self.max_depth: Dict[int, int] = {}
-       
-      @@ -58,8 +57,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint = ffi.GrammarConstraint.from_json_string(s)
-      -        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-      +        constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(constraint)
-               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-               return model
-       
+           def get_mask(self) -> RangeSet:
+      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
+      +        state_to_gss = self.constraint_state.get_state_map()
+               # Local bindings for speed
+               depths = self.depths
+               node_pop_map = self.node_pop_map
 
       ```
     metadata:
@@ -21762,96 +21555,96 @@ messages:
       Found 18 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/gemini-1.py
+      Applying patch to 'python/aug25/models/gemini-1.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gemini-1.py.
+
+      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/gemini-2.py
       Applying patch to 'python/aug25/models/gemini-2.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gemini-2.py.
 
-      --- Processing Diff Block 2 ---
+      --- Processing Diff Block 3 ---
       Identified target file: python/aug25/models/gemini-3.py
       Applying patch to 'python/aug25/models/gemini-3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gemini-3.py.
 
-      --- Processing Diff Block 3 ---
+      --- Processing Diff Block 4 ---
       Identified target file: python/aug25/models/gemini-4.py
       Applying patch to 'python/aug25/models/gemini-4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gemini-4.py.
 
-      --- Processing Diff Block 4 ---
+      --- Processing Diff Block 5 ---
       Identified target file: python/aug25/models/gemini-5.py
       Applying patch to 'python/aug25/models/gemini-5.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gemini-5.py.
 
-      --- Processing Diff Block 5 ---
+      --- Processing Diff Block 6 ---
       Identified target file: python/aug25/models/gpt-5-10.py
       Applying patch to 'python/aug25/models/gpt-5-10.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-10.py.
 
-      --- Processing Diff Block 6 ---
+      --- Processing Diff Block 7 ---
       Identified target file: python/aug25/models/gpt-5-11.py
       Applying patch to 'python/aug25/models/gpt-5-11.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-11.py.
 
-      --- Processing Diff Block 7 ---
+      --- Processing Diff Block 8 ---
       Identified target file: python/aug25/models/gpt-5-12.py
       Applying patch to 'python/aug25/models/gpt-5-12.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-12.py.
 
-      --- Processing Diff Block 8 ---
+      --- Processing Diff Block 9 ---
       Identified target file: python/aug25/models/gpt-5-2.py
       Applying patch to 'python/aug25/models/gpt-5-2.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-2.py.
 
-      --- Processing Diff Block 9 ---
+      --- Processing Diff Block 10 ---
       Identified target file: python/aug25/models/gpt-5-3.py
       Applying patch to 'python/aug25/models/gpt-5-3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-3.py.
 
-      --- Processing Diff Block 10 ---
+      --- Processing Diff Block 11 ---
       Identified target file: python/aug25/models/gpt-5-4.py
       Applying patch to 'python/aug25/models/gpt-5-4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-4.py.
 
-      --- Processing Diff Block 11 ---
+      --- Processing Diff Block 12 ---
       Identified target file: python/aug25/models/gpt-5-5.py
       Applying patch to 'python/aug25/models/gpt-5-5.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-5.py.
 
-      --- Processing Diff Block 12 ---
+      --- Processing Diff Block 13 ---
       Identified target file: python/aug25/models/gpt-5-7.py
       Applying patch to 'python/aug25/models/gpt-5-7.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-7.py.
 
-      --- Processing Diff Block 13 ---
+      --- Processing Diff Block 14 ---
       Identified target file: python/aug25/models/gpt-5-8.py
       Applying patch to 'python/aug25/models/gpt-5-8.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-8.py.
 
-      --- Processing Diff Block 14 ---
+      --- Processing Diff Block 15 ---
       Identified target file: python/aug25/models/gpt-5-9.py
       Applying patch to 'python/aug25/models/gpt-5-9.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gpt-5-9.py.
 
-      --- Processing Diff Block 15 ---
+      --- Processing Diff Block 16 ---
       Identified target file: python/aug25/models/opus-41-1.py
       Applying patch to 'python/aug25/models/opus-41-1.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/opus-41-1.py.
 
-      --- Processing Diff Block 16 ---
+      --- Processing Diff Block 17 ---
       Identified target file: python/aug25/models/precompute2_model.py
       Applying patch to 'python/aug25/models/precompute2_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute2_model.py.
 
-      --- Processing Diff Block 17 ---
+      --- Processing Diff Block 18 ---
       Identified target file: python/aug25/models/precompute3_fast_model.py
       Applying patch to 'python/aug25/models/precompute3_fast_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_fast_model.py.
-
-      --- Processing Diff Block 18 ---
-      Identified target file: python/aug25/models/precompute3_model.py
-      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct RangeSet initialization and
-      GrammarConstraintState creation"'
+  - user: 'Changes committed with message: "Fix: Correct constraint_state initialization
+      and update get_mask method name across models"'
     metadata:
 ...

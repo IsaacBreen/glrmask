@@ -194,7 +194,7 @@ class Model(GraphProvider):
           - When reaching end nodes, we add (gss.allowed_llm_tokens() ∩ allowed_bv) to final mask.
           - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # values[node_idx] = (aggregated_gss, allowed_bv)

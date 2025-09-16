@@ -160,7 +160,7 @@ class Model(GraphProvider):
         GSS nodes. This version uses the per-pop, per-state fast index to avoid
         scanning all destination bitsets on every transition.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         Bitset = ffi.Bitset
 
         final_mask: ffi.Bitset = Bitset.zeros()

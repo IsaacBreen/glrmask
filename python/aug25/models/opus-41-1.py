@@ -116,7 +116,7 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # Use arrays instead of dicts where possible

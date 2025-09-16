@@ -148,7 +148,7 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
         values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
         todo: Dict[int, set[int]] = defaultdict(set)

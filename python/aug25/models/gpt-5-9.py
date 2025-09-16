@@ -220,7 +220,7 @@ class Model(GraphProvider):
         GSS nodes. Optimized to avoid per-destination filtering by using
         precomputed SID->arcs mapping per pop group.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)

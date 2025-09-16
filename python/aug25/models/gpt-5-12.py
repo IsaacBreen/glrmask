@@ -292,7 +292,7 @@ class Model(GraphProvider):
         precomputed SID->ArcBundle mapping per pop group and grouping peeks by
         ArcBundle to minimize repeated work.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)

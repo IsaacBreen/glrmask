@@ -224,7 +224,7 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. Uses the per-pop dispatch index to avoid repeated O(dests * peeks) filters.
         """
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
 
         # Node -> (set(GSSNode), Bitset)

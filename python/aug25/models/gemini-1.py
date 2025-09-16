@@ -87,7 +87,7 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -116,7 +116,7 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
         values: Dict[int, ffi.GSSNode] = {}
         stopped: set[int] = set()

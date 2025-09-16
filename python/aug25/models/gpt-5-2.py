@@ -126,7 +126,7 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_to_gss_map()
+        state_to_gss = self.constraint_state.get_state_map()
         # Local aliases for speed
         gss_merge_many = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
