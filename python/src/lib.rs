@@ -314,9 +314,7 @@ impl PyGLRParser {
             let actions_dict = PyDict::new_bound(py);
             for (&terminal_id, action) in &row.shifts_and_reduces_full {
                 let py_action = match action {
-                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
-                        PyTuple::new_bound(py, &["shift", to_state.0]).to_object(py)
-                    }
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => PyTuple::new_bound(py, ("shift", to_state.0)).to_object(py),
                     sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                         let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
                         PyTuple::new_bound(py, &[
@@ -349,7 +347,7 @@ impl PyGLRParser {
 
             let gotos_dict = PyDict::new_bound(py);
             for (&nonterminal_id, goto) in &row.gotos {
-                let py_goto = PyTuple::new_bound(py, &[goto.state_id.map(|s| s.0), goto.accept]);
+                let py_goto = PyTuple::new_bound(py, (goto.state_id.map(|s| s.0), goto.accept));
                 gotos_dict.set_item(nonterminal_id.0, py_goto)?;
             }
             row_dict.set_item("gotos", gotos_dict)?;
