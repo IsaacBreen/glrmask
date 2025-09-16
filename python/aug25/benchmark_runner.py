@@ -187,7 +187,10 @@ def run_benchmark(args):
     # 2. Extract vocabulary for tokenizer
     constraint_json = json.loads(constraint_json_str)
     # The vocabulary maps token strings to integer IDs. We need ID -> token bytes.
-    id_to_token = {v: k.encode('utf-8') for k, v in constraint_json['vocabulary'].items()}
+    llm_token_map: tuple[list[int], int] = constraint_json['llm_token_map']
+    id_to_token: dict[int, bytes] = {}
+    for token_bytes, token_id in llm_token_map:
+        id_to_token[token_id] = bytes(token_bytes)
 
     # 3. Load model
     print(f"Loading model from: {args.model}")
