@@ -820,6 +820,10 @@ impl PyGrammarConstraintState {
         Ok(())
     }
 
+    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        self.inner.borrow_constraint().internal_bv_to_original(bv)
+    }
+
     fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
         let mut out = std::collections::BTreeMap::new();
         self.inner.with_inner(|state| {

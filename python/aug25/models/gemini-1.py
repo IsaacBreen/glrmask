@@ -214,5 +214,6 @@ class Model(GraphProvider):
                             heapq.heappush(depth_heap, child_depth)
                         todo[child_depth].add(dest_idx)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint_state.internal_bv_to_original(final_mask)
+        return RangeSet.from_ranges(original_mask.to_ranges())
 
