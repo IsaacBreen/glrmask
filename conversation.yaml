@@ -1660,8 +1660,8 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
               model.constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
               model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
               return model
 
@@ -1769,7 +1769,7 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
@@ -3579,81 +3579,7 @@ local_system:
                                       yield (int(pop), sid, int(dest_idx))
 
           def commit(self, token_id: int):
-              token_bytes = self.id_to_token.get(token_id)
-              if token_bytes:
-                  self.commit_bytes(token_bytes)
-
-          def python_step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
-              """
-              This should implement the GLR parser step logic in Python.
-              It takes a GSS node and a terminal ID, and returns a new GSS node
-              representing the state after processing the token.
-              """
-              raise NotImplementedError("Python GLR parser step is not implemented.")
-
-          def commit_bytes(self, llm_token_bytes: bytes):
-              if not llm_token_bytes:
-                  return
-
-              state = self.constraint_state
-              tokenizer = self.constraint.tokenizer()
-              
-              current_state_map = state.get_state_map()
-
-              for gss in current_state_map.values():
-                  ffi.gss_reset_llm_tokens(gss)
-
-              state_map = {}
-              terminals_map = {}
-              for tokenizer_state_id in current_state_map.keys():
-                  end_state, matches = tokenizer.execute_from_state(llm_token_bytes, tokenizer_state_id)
-                  if end_state is not None:
-                      state_map[tokenizer_state_id] = end_state
-                  
-                  terminals = ffi.Bitset.zeros()
-                  for term_id, _ in matches:
-                      terminals.insert(term_id)
-                  terminals_map[tokenizer_state_id] = terminals
-
-              for gss in current_state_map.values():
-                  ffi.gss_prune_disallowed_terminals(gss, terminals_map)
-                  ffi.gss_map_allowed_terminals_tokenizer_states(gss, state_map)
-
-              new_overall_state = {}
-              
-              processing_queue = collections.defaultdict(dict)
-              processing_queue[0] = current_state_map
-
-              sorted_offsets = sorted(processing_queue.keys())
-              
-              while sorted_offsets:
-                  offset = sorted_offsets.pop(0)
-                  states_to_process = processing_queue.pop(offset)
-
-                  for tokenizer_s_id_at_offset, gss_at_offset in states_to_process.items():
-                      if offset >= len(llm_token_bytes):
-                          continue
-
-                      end_state, matches = tokenizer.execute_from_state(llm_token_bytes[offset:], tokenizer_s_id_at_offset)
-
-                      # Placeholder for Python parser logic
-
-                      if end_state is not None:
-                          final_tokenizer_state = end_state
-                          if final_tokenizer_state in new_overall_state:
-                              new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth([new_overall_state[final_tokenizer_state], gss_at_offset], 1)
-                          else:
-                              new_overall_state[final_tokenizer_state] = gss_at_offset
-              
-              for gss in new_overall_state.values():
-                  ffi.gss_reset_llm_tokens(gss)
-              
-              final_state = {sid: gss for sid, gss in new_overall_state.items() if gss.is_ok()}
-
-              for gss in final_state.values():
-                  ffi.gss_fuse_predecessors(gss, 1)
-
-              state.set_state_map(final_state)
+              self.constraint_state.commit(token_id)
 
           def get_mask(self) -> RangeSet:
               """
@@ -3804,10 +3730,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - Modify this code to use the Python wrapper for the Rust (maturin) GSS rather
-      than using the Rust GSS directly. There are other implementations of the Python
-      GSS that I want it swap in and try later. This should mean that we don't need
-      to store the original constraint or constraint state in this model at all.
+    - Swap in the fast pure-Python GSS implementation.
   code_completion_model:
     - gf
   commit_message_model:
@@ -5533,8 +5456,8 @@ messages:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
               model.constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
               model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
               return model
 
@@ -5642,7 +5565,7 @@ messages:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
@@ -5797,69 +5720,128 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I'm here to help you with your code. Here are the step-by-step instructions and the corresponding git diff to address the issues.
+      Of course. Here are the step-by-step instructions to simplify the `commit` logic, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for the file `python/aug25/models/precompute3_model.py`.
+      I will refactor the `precompute3_model.py` file to delegate the token commit logic to the more efficient Rust implementation. This involves removing a complex and incomplete Python method and replacing it with a direct call to the FFI boundary.
 
-      1.  **In `python/aug25/models/precompute3_model.py`:**
+      1.  **Open the file `python/aug25/models/precompute3_model.py`**.
 
-          a. In the `from_json_string` static method, the `GrammarConstraintState` is being incorrectly initialized from a JSON string. It should be created from a `GrammarConstraint` instance. I'll correct the instantiation order and method.
+      2.  **Simplify the `commit` method**:
+          Locate the `commit` method definition around line 110. Replace its current body:
+          ```python
+          def commit(self, token_id: int):
+              token_bytes = self.id_to_token.get(token_id)
+              if token_bytes:
+                  self.commit_bytes(token_bytes)
+          ```
+          with a single line that calls the underlying Rust implementation:
+          ```python
+          def commit(self, token_id: int):
+              self.constraint_state.commit(token_id)
+          ```
 
-          -   Locate these lines around line 64:
-              ```python
-              model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              ```
-          -   Replace them with the following to correctly initialize the constraint and then the state:
-              ```python
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-              ```
+      3.  **Remove unused and redundant methods**:
+          *   Delete the entire `python_step` method (starting around line 115), as it is not implemented or used.
+          *   Delete the entire `commit_bytes` method (starting around line 123). Its logic is now handled correctly by the `self.constraint_state.commit()` call you just added.
 
-          b. In the `get_mask` method, there is a call to a non-existent method `get_state_to_gss_map`. The correct method is `filtered_state_gss_map`.
+      These changes will make the model correctly use the performant Rust backend for state updates.
 
-          -   Find this line around line 168:
-              ```python
-              state_to_gss = self.constraint_state.get_state_to_gss_map()
-              ```
-          -   Change it to:
-              ```python
-              state_to_gss = self.constraint_state.filtered_state_gss_map()
-              ```
+      ### Git Diff
 
-      ### Git Diffs
-
-      Here is the git diff that applies the changes described above.
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      index 4552467..270e59a 100644
       --- a/python/aug25/models/precompute3_model.py
       +++ b/python/aug25/models/precompute3_model.py
-      @@ -62,8 +62,8 @@
-               arena_values = arena_json.get("values", [])
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-      -        model.constraint_state = ffi.GrammarConstraintState.from_json_string(s)
-               model.constraint = ffi.GrammarConstraint.from_json_string(s)
-      +        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-               model.id_to_token = {v: k.encode('utf-8') for k, v in data['llm_token_map'].items()}
-               return model
+      @@ -107,85 +107,7 @@
+                                       yield (int(pop), sid, int(dest_idx))
        
-      @@ -165,7 +165,7 @@
-               Compute the final LLM token mask given a mapping from tokenizer state to
-               GSS nodes. This is the performance-critical routine.
+           def commit(self, token_id: int):
+      -        token_bytes = self.id_to_token.get(token_id)
+      -        if token_bytes:
+      -            self.commit_bytes(token_bytes)
+      -
+      -    def python_step(self, gss_node: ffi.GSSNode, terminal_id: int) -> ffi.GSSNode:
+      -        """
+      -        This should implement the GLR parser step logic in Python.
+      -        It takes a GSS node and a terminal ID, and returns a new GSS node
+      -        representing the state after processing the token.
+      -        """
+      -        raise NotImplementedError("Python GLR parser step is not implemented.")
+      -
+      -    def commit_bytes(self, llm_token_bytes: bytes):
+      -        if not llm_token_bytes:
+      -            return
+      -
+      -        state = self.constraint_state
+      -        tokenizer = self.constraint.tokenizer()
+      -        
+      -        current_state_map = state.get_state_map()
+      -
+      -        for gss in current_state_map.values():
+      -            ffi.gss_reset_llm_tokens(gss)
+      -
+      -        state_map = {}
+      -        terminals_map = {}
+      -        for tokenizer_state_id in current_state_map.keys():
+      -            end_state, matches = tokenizer.execute_from_state(llm_token_bytes, tokenizer_state_id)
+      -            if end_state is not None:
+      -                state_map[tokenizer_state_id] = end_state
+      -            
+      -            terminals = ffi.Bitset.zeros()
+      -            for term_id, _ in matches:
+      -                terminals.insert(term_id)
+      -            terminals_map[tokenizer_state_id] = terminals
+      -
+      -        for gss in current_state_map.values():
+      -            ffi.gss_prune_disallowed_terminals(gss, terminals_map)
+      -            ffi.gss_map_allowed_terminals_tokenizer_states(gss, state_map)
+      -
+      -        new_overall_state = {}
+      -        
+      -        processing_queue = collections.defaultdict(dict)
+      -        processing_queue[0] = current_state_map
+      -
+      -        sorted_offsets = sorted(processing_queue.keys())
+      -        
+      -        while sorted_offsets:
+      -            offset = sorted_offsets.pop(0)
+      -            states_to_process = processing_queue.pop(offset)
+      -
+      -            for tokenizer_s_id_at_offset, gss_at_offset in states_to_process.items():
+      -                if offset >= len(llm_token_bytes):
+      -                    continue
+      -
+      -                end_state, matches = tokenizer.execute_from_state(llm_token_bytes[offset:], tokenizer_s_id_at_offset)
+      -
+      -                # Placeholder for Python parser logic
+      -
+      -                if end_state is not None:
+      -                    final_tokenizer_state = end_state
+      -                    if final_tokenizer_state in new_overall_state:
+      -                        new_overall_state[final_tokenizer_state] = ffi.gss_merge_many_with_depth([new_overall_state[final_tokenizer_state], gss_at_offset], 1)
+      -                    else:
+      -                        new_overall_state[final_tokenizer_state] = gss_at_offset
+      -        
+      -        for gss in new_overall_state.values():
+      -            ffi.gss_reset_llm_tokens(gss)
+      -        
+      -        final_state = {sid: gss for sid, gss in new_overall_state.items() if gss.is_ok()}
+      -
+      -        for gss in final_state.values():
+      -            ffi.gss_fuse_predecessors(gss, 1)
+      -
+      -        state.set_state_map(final_state)
+      +        self.constraint_state.commit(token_id)
+       
+           def get_mask(self) -> RangeSet:
                """
-      -        state_to_gss = self.constraint_state.get_state_to_gss_map()
-      +        state_to_gss = self.constraint_state.filtered_state_gss_map()
-               t0 = time.time()
-       
-               final_mask = ffi.Bitset.zeros()
 
       ```
-
-      These changes should resolve the errors you're encountering. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -5870,7 +5852,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct constraint state initialization
-      and GSS map method name"'
+  - user: 'Changes committed with message: "Refactor: Delegate token commit to FFI
+      in precompute3_model"'
     metadata:
 ...
