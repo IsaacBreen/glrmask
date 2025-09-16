@@ -1410,7 +1410,16 @@ pub(crate) fn disallow_terminals_and_prune_arc(
             let mut new_acc = (*root.acc).clone();
             new_acc.terminals_union -= disallowed_terminals;
             GSSNode::new(new_acc)
-    }
+        }
+        GSSNode::Internal(internal) => {
+            let mut new_acc = (*internal.acc).clone();
+            new_acc.terminals_union -= disallowed_terminals;
+            GSSNode::new_with_map(Arc::new(new_acc), internal.predecessors.clone())
+        }
+    };
+    let new_arc = Arc::new(new_node);
+    memo.insert(node_ptr, Some(new_arc.clone()));
+    *root_arc = new_arc;
 }
 
 pub fn prune_disallowed_terminals(
