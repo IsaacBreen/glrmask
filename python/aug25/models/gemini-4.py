@@ -1,5 +1,6 @@
 import json
 import heapq
+import time
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set
 
@@ -175,6 +176,11 @@ class Model(GraphProvider):
 
     def get_mask(self) -> RangeSet:
         state_to_gss = self.constraint_state.get_state_map()
+        print("\n--- get_mask START ---")
+        print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
         final_mask = ffi.Bitset.zeros()
         # {node_idx: ({gss_parents}, llm_mask)}
         values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
@@ -186,6 +192,7 @@ class Model(GraphProvider):
         # --- Seeding Phase ---
         # Initialize the traversal from the root nodes corresponding to the
         # current tokenizer states.
+        print("\n--- Seeding work queue ---")
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(sid)
             if root_idx is None:
@@ -193,12 +200,16 @@ class Model(GraphProvider):
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing:
                 existing_gss, existing_mask = existing
+                print(f"    - MERGE: gss1_ptr={existing_gss.ptr()}, mask1={existing_mask.to_ranges()} WITH gss2_ptr={gss_clone.ptr()}, mask2={new_mask.to_ranges()}")
                 merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
-                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                merged_mask = existing_mask.union(new_mask)
+                values[root_idx] = (merged_gss, merged_mask)
+                print(f"      - Merged result: gss_ptr={merged_gss.ptr()}, mask={merged_mask.to_ranges()}")
             else:
                 values[root_idx] = (gss_clone, new_mask)
                 depth = self.max_depth.get(root_idx, 0)
@@ -209,33 +220,46 @@ class Model(GraphProvider):
         # --- Main Scheduler Loop ---
         # Process nodes in increasing order of max_depth. This is a heuristic
         # that tends to explore shorter paths first.
+        print("\n--- Main loop ---")
+        iter_count = 0
         while depth_heap:
+            iter_count += 1
             current_depth = heapq.heappop(depth_heap)
             node_indices = todo.pop(current_depth, set())
+            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
             if not node_indices:
                 continue
 
             for node_idx in node_indices:
                 item = values.pop(node_idx, None)
                 if not item:
+                    print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
+                print(f"  - PROCESS: node_ptr={node_idx}, gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
                 node_data = self.nodes.get(node_idx)
                 if not node_data:
                     continue
 
                 if node_data.is_end:
+                    print(f"    - END NODE found. Updating final_mask.")
+                    print(f"      - final_mask before: {final_mask.to_ranges()}")
                     gss_active_tokens = gss_node.allowed_llm_tokens()
                     tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    print(f"      - glr_active_tokens to union: {tokens_to_add.to_ranges()}")
                     final_mask = final_mask.union(tokens_to_add)
+                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 if not gss_node.is_alive():
+                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
                 # --- Process Transitions for the Current Node ---
                 for pop, group in node_data.groups.items():
+                    print(f"    - Edge group: pop={pop}")
                     peeks = gss_node.popn_fast(pop)
+                    print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
 
@@ -250,6 +274,7 @@ class Model(GraphProvider):
 
                     # Process SID-specific transitions
                     for sid, parents in sid_to_parents.items():
+                        # print(f"      - Peek group: sid={sid}, num_parents={len(parents)}")
                         arcs = group.sid_to_arcs.get(sid)
                         if not arcs:
                             continue
@@ -257,6 +282,8 @@ class Model(GraphProvider):
                             child_mask = llm_mask if llm_bv is None else llm_mask.intersection(llm_bv)
                             if not child_mask.is_empty():
                                 next_gss[dest_idx].extend(parents)
+                                # print(f"        - Edge: dest={dest_idx}, llm_bv={'None' if llm_bv is None else llm_bv.to_ranges()}")
+                                # print(f"          - Child mask: {child_mask.to_ranges()}")
                                 next_mask[dest_idx] = next_mask[dest_idx].union(child_mask)
 
                     # Process epsilon transitions (not dependent on SID)
@@ -267,10 +294,14 @@ class Model(GraphProvider):
                                 child_mask = llm_mask if llm_bv is None else llm_mask.intersection(llm_bv)
                                 if not child_mask.is_empty():
                                     next_gss[dest_idx].extend(all_parents)
+                                    # print(f"        - Epsilon Edge: dest={dest_idx}, llm_bv={'None' if llm_bv is None else llm_bv.to_ranges()}")
+                                    # print(f"          - Child mask: {child_mask.to_ranges()}")
                                     next_mask[dest_idx] = next_mask[dest_idx].union(child_mask)
 
                     # --- Flush accumulated children to the main queue ---
                     for dest_idx, parents_list in next_gss.items():
+                        print(f"      - Dest: idx={dest_idx}")
+                        print(f"        - Matched {len(parents_list)} parent GSS nodes")
                         if not parents_list:
                             continue
                         child_gss = ffi.gss_merge_many_with_depth(parents_list, 1)
@@ -282,18 +313,24 @@ class Model(GraphProvider):
                         existing = values.get(dest_idx)
                         if existing:
                             existing_gss, existing_mask = existing
+                            print(f"        - Enqueue {dest_idx}: MERGING gss1_ptr={existing_gss.ptr()}, mask1={existing_mask.to_ranges()} WITH gss2_ptr={child_gss.ptr()}, mask2={child_llm_mask.to_ranges()}")
                             merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 1)
                             new_mask = existing_mask.union(child_llm_mask)
                             if merged_gss.ptr() == existing_gss.ptr() and new_mask == existing_mask:
                                 continue
                             values[dest_idx] = (merged_gss, new_mask)
+                            print(f"          - Merged result: gss_ptr={merged_gss.ptr()}, mask={new_mask.to_ranges()}")
                         else:
                             values[dest_idx] = (child_gss, child_llm_mask)
+                            print(f"        - Enqueue {dest_idx}: CREATING gss_ptr={child_gss.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                         depth = self.max_depth.get(dest_idx, 0)
                         if not todo[depth]:
                             heapq.heappush(depth_heap, depth)
                         todo[depth].add(dest_idx)
                         
+        print("\n--- get_mask END ---")
+        print(f"Final mask internal: {final_mask.to_ranges()}")
         original_mask = self.constraint.internal_bv_to_original(final_mask)
+        print(f"Final mask mapped: {original_mask.to_ranges()}")
         return RangeSet.from_ranges(original_mask.to_ranges())

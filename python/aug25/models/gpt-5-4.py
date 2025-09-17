@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Dict, List, Tuple, Optional, Iterable
 from collections import defaultdict
 
@@ -195,7 +196,12 @@ class Model(GraphProvider):
           - When reaching end nodes, we add (gss.allowed_llm_tokens() ∩ allowed_bv) to final mask.
           - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
         """
-        state_to_gss = self.constraint_state.get_state_map()
+        print("\n--- get_mask START ---")
+        print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
+        t0 = time.time()
         final_mask = ffi.Bitset.zeros()
 
         # values[node_idx] = (aggregated_gss, allowed_bv)
@@ -208,6 +214,7 @@ class Model(GraphProvider):
         todo: Dict[int, set[int]] = defaultdict(set)
 
         # Seed from tokenizer states
+        print("\n--- Seeding work queue ---")
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(int(sid))
             if root_idx is None:
@@ -216,12 +223,15 @@ class Model(GraphProvider):
 
             # Initial allowed_bv for this root is what current GSS allows
             allowed_bv = gss.allowed_llm_tokens()
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={allowed_bv.to_ranges()}")
 
             if root_idx in values:
                 prev_gss, prev_allowed = values[root_idx]
+                print(f"    - MERGE: gss1_ptr={prev_gss.ptr()}, mask1={prev_allowed.to_ranges()} WITH gss2_ptr={gss.ptr()}, mask2={allowed_bv.to_ranges()}")
                 merged_gss = ffi.gss_merge_many_with_depth([prev_gss, gss.clone_node()], 999999999)
                 merged_allowed = self._bv_union(prev_allowed, allowed_bv)
                 values[root_idx] = (merged_gss, merged_allowed)
+                print(f"      - Merged result: gss_ptr={merged_gss.ptr()}, mask={merged_allowed.to_ranges()}")
             else:
                 values[root_idx] = (gss.clone_node(), allowed_bv)
 
@@ -229,30 +239,42 @@ class Model(GraphProvider):
             todo[depth].add(root_idx)
 
         # Main scheduler loop
+        print("\n--- Main loop ---")
+        iter_count = 0
         while todo:
+            iter_count += 1
             current_depth = min(todo.keys())
             node_indices = todo.pop(current_depth)
+            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
             for node_idx in list(node_indices):
                 if node_idx in stopped:
+                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 agg: Optional[Tuple[ffi.GSSNode, ffi.Bitset]] = values.pop(node_idx, None)
                 if agg is None:
+                    print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
 
                 agg_gss, allowed_bv = agg
+                print(f"  - PROCESS: node_ptr={node_idx}, gss_ptr={agg_gss.ptr()}, mask={allowed_bv.to_ranges()}")
 
                 # End-node contribution
                 if self.is_end(node_idx):
+                    print(f"    - END NODE found. Updating final_mask.")
+                    print(f"      - final_mask before: {final_mask.to_ranges()}")
                     end_tokens = agg_gss.allowed_llm_tokens()
                     end_tokens = self._bv_intersect(end_tokens, allowed_bv)
                     if not end_tokens.is_empty():
+                        print(f"      - glr_active_tokens to union: {end_tokens.to_ranges()}")
                         final_mask = final_mask.union(end_tokens)
+                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 keep_going = agg_gss.is_ok() and not allowed_bv.is_empty()
                 if not keep_going:
                     stopped.add(node_idx)
+                    print(f"    - STOPPING node {node_idx} (GSS not alive or mask empty)")
                     continue
 
                 node_info = self.nodes.get(node_idx)
@@ -263,7 +285,9 @@ class Model(GraphProvider):
 
                 # For each pop-value bucket: compute peeks once, cache per state_bv
                 for pop, edges in pops.items():
+                    print(f"    - Edge group: pop={pop}")
                     peeks = ffi.gss_popn_collect(agg_gss, int(pop))
+                    print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
 
@@ -273,15 +297,18 @@ class Model(GraphProvider):
 
                     # Process each edge under this pop
                     for edge in edges:
+                        print(f"    - Edge: llm_bv={edge['llm_bv'].to_ranges()}")
                         llm_bv = edge["llm_bv"]
                         # Propagate allowed_bv by intersecting with this edge's llm_bv
                         new_allowed_bv = self._bv_intersect(allowed_bv, llm_bv)
+                        print(f"      - Child mask: {new_allowed_bv.to_ranges()}")
                         if new_allowed_bv.is_empty():
                             # Nothing can pass through this edge
                             continue
 
                         # For each (state_bv -> dest_ids) group within this edge
                         for state_key, (state_bv, dest_ids) in edge["groups"].items():
+                            print(f"      - Dest group: state_bv={state_bv.to_ranges()}, dests={dest_ids}")
                             # Build matched parents for this state_bv (once per state_bv per pop)
                             matched = matched_cache.get(state_key)
                             if matched is None:
@@ -296,6 +323,7 @@ class Model(GraphProvider):
                                 matched_cache[state_key] = matched
 
                             if not matched:
+                                print(f"        - No matched parents")
                                 continue
 
                             # Merge matched parents (once per state_bv per pop)
@@ -305,22 +333,30 @@ class Model(GraphProvider):
                                 merged_cache[state_key] = child_gss
 
                             if not child_gss.is_ok():
+                                print(f"        - Child GSS not OK after merge")
                                 continue
 
                             # Propagate to each destination, merging values and union-ing allowed_bv
                             for dest_idx in dest_ids:
+                                print(f"        - Matched {len(matched)} parent GSS nodes for dest {dest_idx}")
                                 d = int(dest_idx)
                                 prev = values.get(d)
                                 if prev is None:
                                     values[d] = (child_gss, new_allowed_bv)
+                                    print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss.ptr()}, mask={new_allowed_bv.to_ranges()}")
                                 else:
                                     prev_gss, prev_allowed = prev
+                                    print(f"        - Enqueue {d}: MERGING gss1_ptr={prev_gss.ptr()}, mask1={prev_allowed.to_ranges()} WITH gss2_ptr={child_gss.ptr()}, mask2={new_allowed_bv.to_ranges()}")
                                     combined = ffi.gss_merge_many_with_depth([prev_gss, child_gss], 1)
                                     combined_allowed = self._bv_union(prev_allowed, new_allowed_bv)
                                     values[d] = (combined, combined_allowed)
+                                    print(f"          - Merged result: gss_ptr={combined.ptr()}, mask={combined_allowed.to_ranges()}")
 
                                 child_depth = self.max_depth.get(d, 0)
                                 todo[child_depth].add(d)
 
+        print(f"\n--- get_mask END (took {time.time() - t0:.4f}s) ---")
+        print(f"Final mask internal: {final_mask.to_ranges()}")
         original_mask = self.constraint.internal_bv_to_original(final_mask)
+        print(f"Final mask mapped: {original_mask.to_ranges()}")
         return RangeSet.from_ranges(original_mask.to_ranges())

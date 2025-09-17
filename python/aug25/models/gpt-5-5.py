@@ -1,5 +1,6 @@
 import json
 from typing import Dict, List, Tuple, Optional, Iterable
+import time
 from collections import deque
 from dataclasses import dataclass
 from ..common_interface import GraphProvider, RangeSet
@@ -129,7 +130,12 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_map()
+        print("\n--- get_mask START ---")
+        print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
+        t0 = time.time()
         # Final mask to return
         final_mask = ffi.Bitset.zeros()
 
@@ -140,6 +146,7 @@ class Model(GraphProvider):
         q: deque[int] = deque()
 
         # Seed: map each tokenizer state to its trie root, aggregate GSS clones and llm masks
+        print("\n--- Seeding work queue ---")
         for sid_raw, gss in state_to_gss.items():
             sid = int(sid_raw)
             root_idx = self.roots_map.get(sid)
@@ -149,6 +156,7 @@ class Model(GraphProvider):
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
             new_hash = _bitset_fingerprint(new_mask)
 
             st = values.get(root)
@@ -157,6 +165,7 @@ class Model(GraphProvider):
                 values[root] = st
                 q.append(root)
             else:
+                print(f"    - MERGE: gss1_ptr={st.gss_node.ptr()}, mask1={st.mask.to_ranges()} WITH gss2_ptr={gss_clone.ptr()}, mask2={new_mask.to_ranges()}")
                 # Merge GSS set
                 merged_gss = ffi.gss_merge_many_with_depth([st.gss_node, gss_clone], 1)
                 gss_changed = merged_gss.ptr() != st.gss_node.ptr()
@@ -170,28 +179,40 @@ class Model(GraphProvider):
                 if mask_changed:
                     st.mask = merged_mask
                     st.mask_hash = merged_hash
+                print(f"      - Merged result: gss_ptr={st.gss_node.ptr()}, mask={st.mask.to_ranges()}")
 
                 if (gss_changed or mask_changed) and not st.in_queue:
                     st.in_queue = True
                     q.append(root)
 
         # Main propagation loop (fixpoint)
+        print("\n--- Main loop ---")
+        iter_count = 0
         while q:
+            iter_count += 1
             node_idx = q.popleft()
+            print(f"\n[{iter_count}] Processing node={node_idx}")
             st = values.get(node_idx)
             if st is None:
+                print(f"  - Node {node_idx}: SKIPPING (no value)")
                 # Node got cleared somehow; skip
                 continue
             st.in_queue = False
+            print(f"  - PROCESS: node_ptr={node_idx}, gss_ptr={st.gss_node.ptr()}, mask={st.mask.to_ranges()}")
 
             # If end node, accumulate its mask
             if self.end_flags.get(node_idx, False):
+                print(f"    - END NODE found. Updating final_mask.")
+                print(f"      - final_mask before: {final_mask.to_ranges()}")
                 gss_active_tokens = st.gss_node.allowed_llm_tokens()
                 tokens_to_add = st.mask.intersection(gss_active_tokens)
+                print(f"      - glr_active_tokens to union: {tokens_to_add.to_ranges()}")
                 final_mask = final_mask.union(tokens_to_add)
+                print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
             # If node has no viable GSS nodes, skip propagation
             if not st.gss_node.is_alive():
+                print(f"    - STOPPING node {node_idx} (GSS not alive)")
                 continue
 
             pop_map = self.children_by_pop.get(node_idx)
@@ -200,6 +221,7 @@ class Model(GraphProvider):
 
             # For each unique pop under this node, collect peeks once and reuse for all llm groups for this pop.
             for pop, groups in pop_map.items():
+                print(f"    - Edge group: pop={pop}")
                 # Precompute child masks for groups, and track if any group is relevant
                 child_masks: List[ffi.Bitset] = []
                 any_relevant = False
@@ -222,6 +244,7 @@ class Model(GraphProvider):
                 # sid -> list[parent_nodes]
                 sid_to_parents: Dict[int, List[ffi.GSSNode]] = {}
                 peeks = st.gss_node.popn_fast(int(pop))
+                print(f"      - Found {len(peeks)} peeks from GSS")
                 if not peeks:
                     # No possible transitions for this pop
                     continue
@@ -236,6 +259,8 @@ class Model(GraphProvider):
 
                 # Now fan out to each (llm_bv group, dests)
                 for (llm_bv, dests), child_mask in zip(groups, child_masks):
+                    print(f"    - Edge: llm_bv={llm_bv.to_ranges()}")
+                    print(f"      - Child mask: {child_mask.to_ranges()}")
                     if child_mask.is_empty():
                         continue  # nothing to propagate for this group
 
@@ -245,6 +270,7 @@ class Model(GraphProvider):
                     all_parents_list = [p for _, p in peeks]
 
                     for dest_idx, state_bv in dests:
+                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         d = int(dest_idx)
                         dst_state = values.get(d)
                         if dst_state is None:
@@ -262,6 +288,7 @@ class Model(GraphProvider):
                                 if state_bv.contains(sid):
                                     parents_for_dest.extend(parents)
 
+                        print(f"        - Matched {len(parents_for_dest)} parent GSS nodes")
                         if not parents_for_dest:
                             continue
 
@@ -270,6 +297,7 @@ class Model(GraphProvider):
                             continue
 
                         # 1) Update GSS for destination
+                        print(f"        - Enqueue {d}: MERGING gss1_ptr={dst_state.gss_node.ptr()}, mask1={dst_state.mask.to_ranges()} WITH gss2_ptr={child_gss.ptr()}, mask2={child_mask.to_ranges()}")
                         if not dst_state.gss_node.is_alive(): # Was placeholder
                             merged_gss = child_gss
                         else:
@@ -285,11 +313,15 @@ class Model(GraphProvider):
                         if mask_changed:
                             dst_state.mask = merged_mask
                             dst_state.mask_hash = merged_hash
+                        print(f"          - Merged result: gss_ptr={dst_state.gss_node.ptr()}, mask={dst_state.mask.to_ranges()}")
 
                         # 3) Enqueue destination if anything changed
                         if (gss_changed or mask_changed) and not dst_state.in_queue:
                             dst_state.in_queue = True
                             q.append(d)
 
+        print(f"\n--- get_mask END (took {time.time() - t0:.4f}s) ---")
+        print(f"Final mask internal: {final_mask.to_ranges()}")
         original_mask = self.constraint.internal_bv_to_original(final_mask)
+        print(f"Final mask mapped: {original_mask.to_ranges()}")
         return RangeSet.from_ranges(original_mask.to_ranges())
