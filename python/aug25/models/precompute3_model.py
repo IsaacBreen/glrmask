@@ -102,6 +102,8 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        print("GSS at start of get_mask:")
+        print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
         print("state_to_gss:", state_to_gss)
         t0 = time.time()
