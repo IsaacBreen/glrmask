@@ -66,8 +66,14 @@ def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
     result = []
     for head in current_heads:
         if head in gss._child_to_parents:
-            for state_id, parent_node in gss._child_to_parents[head]:
-                isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
+            for state_id, _ in gss._child_to_parents[head]:
+                isolated_gss = FastGSS(
+                    heads=frozenset([head]),
+                    acc_default_factory=gss._acc_default_factory,
+                    root=gss._root,
+                    child_to_parents=gss._child_to_parents,
+                    path_cache=gss._path_cache,
+                )
                 result.append((state_id, isolated_gss))
     return result
 
