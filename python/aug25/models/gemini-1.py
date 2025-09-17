@@ -216,5 +216,10 @@ class Model(GraphProvider):
                         todo[child_depth].add(dest_idx)
 
         original_mask = self.constraint.internal_bv_to_original(final_mask)
-        return RangeSet.from_ranges(original_mask.to_ranges())
+        temp = RangeSet.from_ranges(original_mask.to_ranges())
+        ref = self.constraint_state.get_mask()
+        print("Final computed mask:", temp)
+        print("Reference mask from Rust state:", ref)
+        assert (temp == ref).all()
+        return temp
 
