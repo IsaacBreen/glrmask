@@ -10653,10 +10653,6 @@ local_system:
           fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
               PyHybridL2Bitset { inner: &self.inner | &other.inner }
           }
-
-          pub fn complement(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.complement() }
-          }
       }
 
 
@@ -11371,88 +11367,11 @@ local_system:
       import time
       import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Set
-      from dataclasses import dataclass
+      from typing import Dict, List, Tuple, Optional
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
-      from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
-
-
-      def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-          return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-
-      def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-          memo_nodes: Dict[int, PyGSSNodeInternal] = {}
-          child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
-          q = collections.deque([rust_gss_node])
-          visited_rust_ptrs = {rust_gss_node.ptr()}
-          while q:
-              rust_node = q.popleft()
-              py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
-              py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
-              memo_nodes[rust_node.ptr()] = py_node
-              for _, pred_rust_node in rust_node.predecessors():
-                  if pred_rust_node.ptr() not in visited_rust_ptrs:
-                      visited_rust_ptrs.add(pred_rust_node.ptr())
-                      q.append(pred_rust_node)
-          q = collections.deque([rust_gss_node])
-          visited_rust_ptrs = {rust_gss_node.ptr()}
-          while q:
-              rust_node = q.popleft()
-              py_node = memo_nodes[rust_node.ptr()]
-              for state_id, pred_rust_node in rust_node.predecessors():
-                  py_pred_node = memo_nodes[pred_rust_node.ptr()]
-                  child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
-                  if pred_rust_node.ptr() not in visited_rust_ptrs:
-                      visited_rust_ptrs.add(pred_rust_node.ptr())
-                      q.append(pred_rust_node)
-          py_head_node = memo_nodes[rust_gss_node.ptr()]
-          def acc_factory():
-              return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-          py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
-          return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-
-
-      def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-          current_heads = gss._heads
-          for _ in range(n):
-              next_heads = set()
-              for head in current_heads:
-                  if head in gss._child_to_parents:
-                      for _, parent in gss._child_to_parents[head]:
-                          next_heads.add(parent)
-              current_heads = next_heads
-              if not current_heads:
-                  return []
-          result = []
-          for head in current_heads:
-              if head in gss._child_to_parents:
-                  for state_id, parent_node in gss._child_to_parents[head]:
-                      isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
-                      result.append((state_id, isolated_gss))
-          return result
-
-
-      def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
-          if not gss._heads:
-              return ffi.HybridL2Bitset.all().complement()
-          it_heads = iter(gss._heads)
-          try:
-              first_head = next(it_heads)
-              allowed_terminals = first_head.acc.terminals_union
-              for head in it_heads:
-                  allowed_terminals = allowed_terminals.union(head.acc.terminals_union)
-          except StopIteration:
-              return ffi.HybridL2Bitset.all().complement()
-          return allowed_terminals.complement()
 
 
       class Model(GraphProvider):
@@ -11552,21 +11471,20 @@ local_system:
               """
               print("\n--- get_mask START ---")
               print("GSS at start of get_mask:")
-              rust_state_map = self.constraint_state.get_state_map()
-              state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-
+              state_map = self.constraint_state.get_state_map()
               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> (FastGSS, Bitset)
-              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
               depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
 
               # Seed: map tokenizer states and their filtered GSS to trie roots
               heappush = heapq.heappush
@@ -11581,12 +11499,12 @@ local_system:
                       continue
                   root_idx = int(root_idx)
 
-                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
+                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
                   existing = values.get(root_idx)
                   if existing is not None:
                       existing_gss, existing_mask = existing
-                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
                       values[root_idx] = (gss, new_mask)
@@ -11643,7 +11561,7 @@ local_system:
                           print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
                       gss_node, llm_mask = item
-                      print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
+                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
                       # End-node handling
                       if is_end(node_idx):
@@ -11652,7 +11570,7 @@ local_system:
 
                           # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                           forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
+                          disallowed_terminals_l2 = gss_node.disallowed_terminals()
                           possible_matches = self.possible_matches_cache
 
                           for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
@@ -11669,7 +11587,7 @@ local_system:
                                       if disallowed_bv.contains(terminal_id):
                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                          gss_active_tokens = all_ones_mask
+                          gss_active_tokens = gss_node.allowed_llm_tokens()
                           glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                           tokens_to_add = final_allowed_tokens
@@ -11681,7 +11599,7 @@ local_system:
                           final_mask = final_mask.union(tokens_to_add)
                           print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                      if llm_mask.is_empty():
+                      if not gss_node.is_alive():
                           stopped.add(node_idx)
                           print(f"    - STOPPING node {node_idx} (GSS not alive)")
                           continue
@@ -11694,7 +11612,7 @@ local_system:
                       for (pop, llm_bv), dests in children:
                           print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                           # Collect all pops from GSS parents
-                          peeks = popn_fast_py(gss_node, pop)
+                          peeks = gss_node.popn_fast(pop)
                           print(f"      - Found {len(peeks)} peeks from GSS set")
                           if not peeks:
                               continue
@@ -11715,7 +11633,7 @@ local_system:
                                   continue
 
                               # Merge matched parent GSS nodes
-                              child_gss_node = FastGSS.merge(matched, merge_acc)
+                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
 
                               # Compute child mask (intersection with llm_bv when present)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -11725,22 +11643,18 @@ local_system:
                               existing = values.get(d)
                               if existing is not None:
                                   existing_gss, existing_mask = existing
-                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                                   combined_mask = existing_mask.union(child_llm_mask)
                                   values[d] = (merged_gss, combined_mask)
-                                  print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
+                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
                                   values[d] = (child_gss_node, child_llm_mask)
-                                  print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
+                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
               original_mask = self.constraint.internal_bv_to_original(final_mask)
-              temp = RangeSet.from_ranges(original_mask.to_ranges())
-              print(f"\n--- get_mask END ---")
-              print(f"Mask before mapping: final_mask={final_mask.to_ranges()}")
-              print(f"Final mask: {temp.to_ranges()}")
-              return temp
+              return RangeSet.from_ranges(original_mask.to_ranges())
   prev_file_contents:
     src/constraint.rs: |
       // src/constraint.rs
@@ -22382,10 +22296,6 @@ local_system:
           fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
               PyHybridL2Bitset { inner: &self.inner | &other.inner }
           }
-
-          pub fn complement(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.complement() }
-          }
       }
 
 
@@ -22953,8 +22863,8 @@ local_system:
                           new_heads.add(parent)
 
               if not new_heads:
-                  # A pop resulting in no stacks should yield an empty GSS.
-                  return FastGSS(frozenset(), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
+                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
@@ -23151,15 +23061,6 @@ local_system:
 
 
       def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-          if n == 0:
-              result = []
-              for head in gss._heads:
-                  if head in gss._child_to_parents:
-                      for state_id, parent_node in gss._child_to_parents[head]:
-                          isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
-                          result.append((state_id, isolated_gss))
-              return result
-
           current_heads = gss._heads
           for _ in range(n):
               next_heads = set()
@@ -23474,10 +23375,7 @@ local_system:
                               enqueue(max_depth[d], d)
 
               original_mask = self.constraint.internal_bv_to_original(final_mask)
-              temp = RangeSet.from_ranges(original_mask.to_ranges())
-              print(f"\n--- get_mask END ---")
-              print(f"Final mask: {temp.to_ranges()}")
-              return temp
+              return RangeSet.from_ranges(original_mask.to_ranges())
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -34188,10 +34086,6 @@ messages:
           fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
               PyHybridL2Bitset { inner: &self.inner | &other.inner }
           }
-
-          pub fn complement(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.complement() }
-          }
       }
 
 
@@ -34926,88 +34820,11 @@ messages:
       import time
       import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Set
-      from dataclasses import dataclass
+      from typing import Dict, List, Tuple, Optional
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
-      from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
-
-
-      def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-          return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-
-      def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-          memo_nodes: Dict[int, PyGSSNodeInternal] = {}
-          child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
-          q = collections.deque([rust_gss_node])
-          visited_rust_ptrs = {rust_gss_node.ptr()}
-          while q:
-              rust_node = q.popleft()
-              py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
-              py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
-              memo_nodes[rust_node.ptr()] = py_node
-              for _, pred_rust_node in rust_node.predecessors():
-                  if pred_rust_node.ptr() not in visited_rust_ptrs:
-                      visited_rust_ptrs.add(pred_rust_node.ptr())
-                      q.append(pred_rust_node)
-          q = collections.deque([rust_gss_node])
-          visited_rust_ptrs = {rust_gss_node.ptr()}
-          while q:
-              rust_node = q.popleft()
-              py_node = memo_nodes[rust_node.ptr()]
-              for state_id, pred_rust_node in rust_node.predecessors():
-                  py_pred_node = memo_nodes[pred_rust_node.ptr()]
-                  child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
-                  if pred_rust_node.ptr() not in visited_rust_ptrs:
-                      visited_rust_ptrs.add(pred_rust_node.ptr())
-                      q.append(pred_rust_node)
-          py_head_node = memo_nodes[rust_gss_node.ptr()]
-          def acc_factory():
-              return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-          py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
-          return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-
-
-      def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-          current_heads = gss._heads
-          for _ in range(n):
-              next_heads = set()
-              for head in current_heads:
-                  if head in gss._child_to_parents:
-                      for _, parent in gss._child_to_parents[head]:
-                          next_heads.add(parent)
-              current_heads = next_heads
-              if not current_heads:
-                  return []
-          result = []
-          for head in current_heads:
-              if head in gss._child_to_parents:
-                  for state_id, parent_node in gss._child_to_parents[head]:
-                      isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
-                      result.append((state_id, isolated_gss))
-          return result
-
-
-      def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
-          if not gss._heads:
-              return ffi.HybridL2Bitset.all().complement()
-          it_heads = iter(gss._heads)
-          try:
-              first_head = next(it_heads)
-              allowed_terminals = first_head.acc.terminals_union
-              for head in it_heads:
-                  allowed_terminals = allowed_terminals.union(head.acc.terminals_union)
-          except StopIteration:
-              return ffi.HybridL2Bitset.all().complement()
-          return allowed_terminals.complement()
 
 
       class Model(GraphProvider):
@@ -35107,21 +34924,20 @@ messages:
               """
               print("\n--- get_mask START ---")
               print("GSS at start of get_mask:")
-              rust_state_map = self.constraint_state.get_state_map()
-              state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-
+              state_map = self.constraint_state.get_state_map()
               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> (FastGSS, Bitset)
-              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
               depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
 
               # Seed: map tokenizer states and their filtered GSS to trie roots
               heappush = heapq.heappush
@@ -35136,12 +34952,12 @@ messages:
                       continue
                   root_idx = int(root_idx)
 
-                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
+                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
                   existing = values.get(root_idx)
                   if existing is not None:
                       existing_gss, existing_mask = existing
-                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
                       values[root_idx] = (gss, new_mask)
@@ -35198,7 +35014,7 @@ messages:
                           print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
                       gss_node, llm_mask = item
-                      print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
+                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
                       # End-node handling
                       if is_end(node_idx):
@@ -35207,7 +35023,7 @@ messages:
 
                           # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                           forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
+                          disallowed_terminals_l2 = gss_node.disallowed_terminals()
                           possible_matches = self.possible_matches_cache
 
                           for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
@@ -35224,7 +35040,7 @@ messages:
                                       if disallowed_bv.contains(terminal_id):
                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                          gss_active_tokens = all_ones_mask
+                          gss_active_tokens = gss_node.allowed_llm_tokens()
                           glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                           tokens_to_add = final_allowed_tokens
@@ -35236,7 +35052,7 @@ messages:
                           final_mask = final_mask.union(tokens_to_add)
                           print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                      if llm_mask.is_empty():
+                      if not gss_node.is_alive():
                           stopped.add(node_idx)
                           print(f"    - STOPPING node {node_idx} (GSS not alive)")
                           continue
@@ -35249,7 +35065,7 @@ messages:
                       for (pop, llm_bv), dests in children:
                           print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                           # Collect all pops from GSS parents
-                          peeks = popn_fast_py(gss_node, pop)
+                          peeks = gss_node.popn_fast(pop)
                           print(f"      - Found {len(peeks)} peeks from GSS set")
                           if not peeks:
                               continue
@@ -35270,7 +35086,7 @@ messages:
                                   continue
 
                               # Merge matched parent GSS nodes
-                              child_gss_node = FastGSS.merge(matched, merge_acc)
+                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
 
                               # Compute child mask (intersection with llm_bv when present)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -35280,214 +35096,32 @@ messages:
                               existing = values.get(d)
                               if existing is not None:
                                   existing_gss, existing_mask = existing
-                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                                   combined_mask = existing_mask.union(child_llm_mask)
                                   values[d] = (merged_gss, combined_mask)
-                                  print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
+                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
                                   values[d] = (child_gss_node, child_llm_mask)
-                                  print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
+                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
               original_mask = self.constraint.internal_bv_to_original(final_mask)
-              temp = RangeSet.from_ranges(original_mask.to_ranges())
-              print(f"\n--- get_mask END ---")
-              print(f"Mask before mapping: final_mask={final_mask.to_ranges()}")
-              print(f"Final mask: {temp.to_ranges()}")
-              return temp
+              return RangeSet.from_ranges(original_mask.to_ranges())
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
   - user: |-
-      bash run_benchmarks.sh aug25/models/rust_model.py aug25/models/precompute3_model_pure_python.py
-      Benchmark results will be saved in: benchmark_results/2025-09-17_16-07-02
-      ---
-      Baseline Model: aug25/models/rust_model.py
-      Other Models: aug25/models/precompute3_model_pure_python.py
-      Constraint File: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ../src/example_code.js
-      ---
-      Starting benchmark runs...
+      I want to progressively reduce precompute3_model_pure_python.py's reliance on Rust code down to just ffi.Bitset and ffi.HybridL2Bitset.
 
-      >>> Running benchmark for: rust_model.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/rust_model.py --output benchmark_results/2025-09-17_16-07-02
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/rust_model.py
-      Model loaded in 0.0124 seconds.
-      Loading and tokenizing code from: ../src/example_code.js
-      Tokenized into 1 tokens.
-
-      --- Running benchmark (1 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/1 [00:00<?, ?it/s, get_mask]
-      --- get_mask START (rust_model.py) ---
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2525: 
-      --- get_mask3 START ---
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2526: GSS at start of get_mask3:
-      [DEBUG] 2] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2527: Getting mask 1 states: [0]
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2531: Initial GSS stats: GSSStats {
-          num_roots: 1,
-          num_root_predecessors: 1,
-          num_unique_root_predecessor_keys: 1,
-          total_edges: 1,
-          unique_nodes: 2,
-          num_leaves: 1,
-          structurally_unique_nodes: 2,
-          structural_redundancy: 0.0,
-          num_redundant_nodes: 0,
-          max_depth: 1,
-          average_depth: 0.5,
-          merge_points: 0,
-          max_predecessors_with_values: 1,
-          average_predecessors_with_values: 0.5,
-      }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2570: 
-      --- Seeding work queue ---
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2578:   SEED: sid=0, root_idx=Trie2Index(0), gss_ptr=0x600000c98990, mask=HybridBitset { inner: 0..=18446744073709551615 }
-      after initial_values_for_map:       577.875µs
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2658:   - PROCESS: node_ptr=0x13a7e01f0, gss_ptr=0x600000c98990, mask=HybridBitset { inner: 0..=18446744073709551615 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2609:   - STEP: gss_ptr=0x600000c98990, allowed_bv=HybridBitset { inner: 0..=18446744073709551615 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2610:     - Edge: pop=0, llm_bv=HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2613:       - Found 1 peeks from GSS
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2617:       - Dest: idx=Trie2Index(4), state_bv=HybridBitset { inner: 0..=3 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:         - Matched 1 parent GSS nodes
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2637:         - Child mask: HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2640:         - Enqueue Trie2Index(4): CREATING gss_ptr=0x600000c9f4d0, mask=HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2658:   - PROCESS: node_ptr=0x13a7e02b0, gss_ptr=0x600000c9f4d0, mask=HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2609:   - STEP: gss_ptr=0x600000c9f4d0, allowed_bv=HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2610:     - Edge: pop=0, llm_bv=HybridBitset { inner: 5..=5 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2613:       - Found 1 peeks from GSS
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2617:       - Dest: idx=Trie2Index(3), state_bv=HybridBitset { inner: 0..=0 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:         - Matched 0 parent GSS nodes
-      Traversing edges: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:00<00:00, 29423.88it/s][DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2609:   - STEP: gss_ptr=0x600000c9f4d0, allowed_bv=HybridBitset { inner: 5..=5, 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2610:     - Edge: pop=0, llm_bv=HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2613:       - Found 1 peeks from GSS
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2617:       - Dest: idx=Trie2Index(3), state_bv=HybridBitset { inner: 2..=2 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:         - Matched 1 parent GSS nodes
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2637:         - Child mask: HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2640:         - Enqueue Trie2Index(3): CREATING gss_ptr=0x600000c9f510, mask=HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2658:   - PROCESS: node_ptr=0x13a7e0280, gss_ptr=0x600000c9f510, mask=HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2683:     - END NODE found. Updating final_mask.
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2684:       - final_mask before: HybridBitset { inner:  }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2685:       - glr_active_tokens to union: HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2687:       - final_mask after:  HybridBitset { inner: 66..=66 }
-      after special_map:       953.833µs
-      --- Profiler Summary (Flat) ---
-      No data collected.
-      --- End Profiler Summary (Flat) ---
-      --- Profiler Summary ---
-      No data collected.
-      --- End Profiler Summary ---
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2700: 
-      --- get_mask3 END ---
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2701: Final mask internal: HybridBitset { inner: 66..=66 }
-      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2704: Final mask mapped: HybridBitset { inner: 64..=64 }
-      get_mask took:       967.958µs
-
-      --- get_mask END (rust_model.py) ---
-      Benchmarking steps: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 507.11it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-17_16-07-02/rust_model_results.json
-      >>> Finished benchmark for: rust_model.py
-
-      >>> Running benchmark for: precompute3_model_pure_python.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-17_16-07-02
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/precompute3_model_pure_python.py
-      Normalizing precompute3 BVs: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 20510.04it/s]
-      Model loaded in 0.0098 seconds.
-      Loading and tokenizing code from: ../src/example_code.js
-      Tokenized into 1 tokens.
-
-      --- Running benchmark (1 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/1 [00:00<?, ?it/s, get_mask]
-      --- get_mask START ---
-      GSS at start of get_mask:
-
-      --- Seeding work queue ---
-        SEED: sid=0, root_idx=0, gss_heads=[0], mask=[(0, 18446744073709551615)]
-
-      --- Main loop ---
-
-      [1] Processing depth=0, nodes={0}
-        - Node 0: Popped gss_heads=[0], mask=[(0, 18446744073709551615)]
-          - Edge: pop=0, llm_bv=[(5, 5), (66, 66)]
-            - Found 1 peeks from GSS set
-            - Dest: idx=4, state_bv=[(0, 3)]
-              - Matched 1 parent GSS nodes
-              - Child mask: [(5, 5), (66, 66)]
-              - Enqueue 4: CREATING gss_heads=[1], mask=[(5, 5), (66, 66)]
-
-      [2] Processing depth=1, nodes={4}
-        - Node 4: Popped gss_heads=[1], mask=[(5, 5), (66, 66)]
-          - Edge: pop=0, llm_bv=[(5, 5)]
-            - Found 0 peeks from GSS set
-          - Edge: pop=0, llm_bv=[(66, 66)]
-            - Found 0 peeks from GSS set
-      [3] Loop finished: no more nodes to process.
-
-      --- get_mask END ---
-      Final mask: []
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 2730.67it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-17_16-07-02/precompute3_model_pure_python_results.json
-      >>> Finished benchmark for: precompute3_model_pure_python.py
-
-      All benchmark runs completed.
-      ---
-      Analyzing results and generating plots...
-      python -m aug25.benchmark_analyzer benchmark_results/2025-09-17_16-07-02/precompute3_model_pure_python_results.json benchmark_results/2025-09-17_16-07-02/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-17_16-07-02/analysis
-      Selected baseline: rust_model
-      Mask mismatch at token index 0 for model precompute3_model_pure_python
-      Baseline: ((64, 64),)
-      Current:  ()
-      --- Benchmark Summary ---
-                                    equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                                      
-      precompute3_model_pure_python          ❌                    1      1     0.2380       NaN    0.2380    0.2380    0.2380    0.2380    0.2380
-      rust_model                             ✅                    0      1     1.5432       NaN    1.5432    1.5432    1.5432    1.5432    1.5432
-
-      Baseline: rust_model
-      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
-
-      Saving plots to benchmark_results/2025-09-17_16-07-02/analysis...
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      Saved linear scale plot to benchmark_results/2025-09-17_16-07-02/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-17_16-07-02/analysis/timings_per_token_log.png
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/categorical.py:632: FutureWarning: SeriesGroupBy.grouper is deprecated and will be removed in a future version of pandas.
-        positions = grouped.grouper.result_index.to_numpy(dtype=float)
-      Saved box plot to benchmark_results/2025-09-17_16-07-02/analysis/timings_distribution_boxplot.png
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      Saved commit linear scale plot to benchmark_results/2025-09-17_16-07-02/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-17_16-07-02/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-17_16-07-02/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-17_16-07-02/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-17_16-07-02/analysis/timings_stacked_area.png
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/seaborn/_base.py:948: FutureWarning: When grouping with a length-1 list-like, you will need to pass a length-1 tuple to get_group in a future version of pandas. Pass `(name,)` instead of `name` to silence this warning.
-        data_subset = grouped_data.get_group(pd_key)
-      Saved total time linear scale plot to benchmark_results/2025-09-17_16-07-02/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-17_16-07-02/analysis/total_timings_per_token_log.png
-
-      ---
-      Benchmark analysis complete.
-      Baseline: rust_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-17_16-07-02/analysis
-      Full JSON results are in: benchmark_results/2025-09-17_16-07-02
+      - [ ] Next up is to replace the Rust GSS in get_mask with python/gss_tester/fast_impl.py.
+          To do this, we'll need to be able to convert a Rust GSS into a Python GSS. Do this.
+          The Python GSS's acc will be simpler than Rust's. It'll just have `terminals_union`, not `llm_tokens_union` or `stored_trie_nodes`.
+          Note that it doesn't have popn, but we can easily replicate popn using `isolate` followed by calling `pop` n times.
+          Don't modify fast_impl.py. No modifications to it should be neceessary.
     metadata:
-  - user: What's causing this mismatch? Fix it.
+  - user: Fix this
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -35506,119 +35140,289 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've identified the issue. The Python implementation of the GSS traversal logic in `precompute3_model_pure_python.py` has a subtle bug that causes it to incorrectly prune valid parse paths, leading to the mask mismatch.
-
-      The core of the problem lies in the `popn_fast_py` function. When `pop=0`, the Rust implementation effectively performs a "peek" operation, inspecting the predecessors of the current GSS heads. The Python version, however, was not correctly handling the `pop=0` case, leading it to find no predecessors (`Found 0 peeks from GSS set`) where there should have been one. This prematurely terminated paths that should have continued.
-
-      Here are the step-by-step instructions to fix the bug.
+      Of course. Here are the step-by-step instructions to refactor the `get_mask` method to use a pure Python GSS implementation, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open `python/gss_tester/fast_impl.py`:**
-          Locate the `pop` method in the `FastGSS` class. The current implementation incorrectly returns a GSS with just the root node when a pop results in no stacks. It should instead return a GSS with an empty set of heads, which correctly represents a failed parse path.
+      The goal is to replace the use of the Rust-backed `ffi.GSSNode` within the `get_mask` computation with the pure Python `FastGSS` implementation. This involves converting the initial GSS states from Rust to Python, and then performing the graph traversal and logic using the Python GSS objects.
 
-      2.  **Modify `FastGSS.pop`:**
-          Change the `pop` method to return a new `FastGSS` instance with an empty `heads` set when the pop operation results in no valid parent nodes.
+      #### File: `python/aug25/models/precompute3_model_pure_python.py`
 
-          *   **Find this code block:**
+      1.  **Add Imports and Helper Definitions:**
+
+          At the top of the file, add the necessary imports for the Python GSS implementation and `dataclasses`. Then, define a new `PyAcc` class to hold accumulator data for the Python GSS, and several helper functions to manage the new GSS objects.
+
+          *   Add these imports:
               ```python
-              if not new_heads:
-                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+              from dataclasses import dataclass
+              from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
               ```
-          *   **Replace it with:**
+          *   After the imports, add the following class and function definitions:
               ```python
-              if not new_heads:
-                  # A pop resulting in no stacks should yield an empty GSS.
-                  return FastGSS(frozenset(), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-              ```
+              @dataclass(frozen=True)
+              class PyAcc:
+                  terminals_union: ffi.HybridL2Bitset
 
-      3.  **Open `python/aug25/models/precompute3_model_pure_python.py`:**
-          Locate the `popn_fast_py` function. The logic for handling `pop=0` needs to be explicitly separated to correctly implement a "peek" operation, which is what the Rust code does in this scenario.
+              def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+                  return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
-      4.  **Modify `popn_fast_py`:**
-          Add a special case for `n=0` at the beginning of the function. This will handle the "peek" operation correctly by iterating through the current heads and collecting their parents without performing any pops.
+              def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+                  # ... (full function body will be in the diff) ...
 
-          *   **Find this function:**
-              ```python
               def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-                  current_heads = gss._heads
-                  for _ in range(n):
-              ```
-          *   **Insert the following code at the beginning of the function:**
-              ```python
-                  if n == 0:
-                      result = []
-                      for head in gss._heads:
-                          if head in gss._child_to_parents:
-                              for state_id, parent_node in gss._child_to_parents[head]:
-                                  isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
-                                  result.append((state_id, isolated_gss))
-                      return result
+                  # ... (full function body will be in the diff) ...
+
+              def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+                  # ... (full function body will be in the diff) ...
               ```
 
-      These changes align the Python GSS logic with the Rust implementation, ensuring that parse paths are correctly explored and the final token mask is accurate.
+      2.  **Update the `get_mask` Method:**
+
+          The core of the change is within the `get_mask` method. You will replace the logic that manipulates `ffi.GSSNode` with logic that manipulates `FastGSS`.
+
+          *   **Initial State Conversion:** At the beginning of the method, after getting the `state_map` from the `constraint_state`, iterate over it and convert each `ffi.GSSNode` into a `FastGSS` using your new `convert_rust_gss_to_python_gss` function.
+
+          *   **Seeding the Work Queue:** In the seeding loop, the `values` dictionary will now store `(FastGSS, ffi.Bitset)` tuples. When merging GSS objects for an existing trie node, use `FastGSS.merge(..., merge_acc)`.
+
+          *   **Main Loop Logic:**
+              *   The `gss_node` variable will now be a `FastGSS` object.
+              *   Replace the call to `gss_node.disallowed_terminals()` with `get_disallowed_terminals_py(gss_node)`.
+              *   The concept of `gss_node.allowed_llm_tokens()` is now fully represented by the `llm_mask` variable. Replace `gss_node.allowed_llm_tokens()` with `all_ones_mask`.
+              *   The check `if not gss_node.is_alive():` should be replaced with `if llm_mask.is_empty():`, as the liveness is determined by whether any LLM tokens are permitted on the path.
+              *   Replace the call to `gss_node.popn_fast(pop)` with `popn_fast_py(gss_node, pop)`.
+              *   When merging GSS nodes for a child trie node (e.g., `child_gss_node` and `existing_gss`), use `FastGSS.merge(..., merge_acc)` instead of `ffi.gss_merge_many_with_depth`.
+
+      These changes will effectively swap out the GSS implementation used during the mask computation while keeping the rest of the model's interaction with the Rust backend intact.
 
       ### Git Diffs
 
-      Here are the git diffs for the required changes.
+      Here are the git diffs to apply the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -48,6 +48,16 @@
+      @@ -1,10 +1,48 @@
+       import json
+       import time
+       import heapq
+       import collections
+      -from typing import Dict, List, Tuple, Optional
+      +from typing import Dict, List, Tuple, Optional, Set
+      +from dataclasses import dataclass
        
-       
-       def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-      +    if n == 0:
-      +        result = []
-      +        for head in gss._heads:
-      +            if head in gss._child_to_parents:
-      +                for state_id, parent_node in gss._child_to_parents[head]:
-      +                    isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
-      +                    result.append((state_id, isolated_gss))
-      +        return result
+       from ..common_interface import GraphProvider, RangeSet
+       import _sep1 as ffi  # the compiled module
+       from tqdm.auto import tqdm
+      +from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
       +
-           current_heads = gss._heads
-           for _ in range(n):
-               next_heads = set()
-
-      ```
-
-      ```diff
-      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
-      --- a/python/gss_tester/fast_impl.py
-      +++ b/python/gss_tester/fast_impl.py
-      @@ -90,8 +90,8 @@
-                           new_heads.add(parent)
+      +
+      +@dataclass(frozen=True)
+      +class PyAcc:
+      +    terminals_union: ffi.HybridL2Bitset
+      +
+      +
+      +def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+      +    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+      +
+      +
+      +def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+      +    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
+      +    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
+      +    q = collections.deque([rust_gss_node])
+      +    visited_rust_ptrs = {rust_gss_node.ptr()}
+      +    while q:
+      +        rust_node = q.popleft()
+      +        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+      +        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
+      +        memo_nodes[rust_node.ptr()] = py_node
+      +        for _, pred_rust_node in rust_node.predecessors():
+      +            if pred_rust_node.ptr() not in visited_rust_ptrs:
+      +                visited_rust_ptrs.add(pred_rust_node.ptr())
+      +                q.append(pred_rust_node)
+      +    q = collections.deque([rust_gss_node])
+      +    visited_rust_ptrs = {rust_gss_node.ptr()}
+      +    while q:
+      +        rust_node = q.popleft()
+      +        py_node = memo_nodes[rust_node.ptr()]
+      +        for state_id, pred_rust_node in rust_node.predecessors():
+      +            py_pred_node = memo_nodes[pred_rust_node.ptr()]
+      +            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
+      +            if pred_rust_node.ptr() not in visited_rust_ptrs:
+      +                visited_rust_ptrs.add(pred_rust_node.ptr())
+      +                q.append(pred_rust_node)
+      +    py_head_node = memo_nodes[rust_gss_node.ptr()]
+      +    def acc_factory():
+      +        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+      +    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
+      +    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+      +
+      +
+      +def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
+      +    current_heads = gss._heads
+      +    for _ in range(n):
+      +        next_heads = set()
+      +        for head in current_heads:
+      +            if head in gss._child_to_parents:
+      +                for _, parent in gss._child_to_parents[head]:
+      +                    next_heads.add(parent)
+      +        current_heads = next_heads
+      +        if not current_heads:
+      +            return []
+      +    result = []
+      +    for head in current_heads:
+      +        if head in gss._child_to_parents:
+      +            for state_id, parent_node in gss._child_to_parents[head]:
+      +                isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
+      +                result.append((state_id, isolated_gss))
+      +    return result
+      +
+      +
+      +def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+      +    if not gss._heads:
+      +        return ffi.HybridL2Bitset.all().complement()
+      +    it_heads = iter(gss._heads)
+      +    try:
+      +        first_head = next(it_heads)
+      +        allowed_terminals = first_head.acc.terminals_union
+      +        for head in it_heads:
+      +            allowed_terminals = allowed_terminals.union(head.acc.terminals_union)
+      +    except StopIteration:
+      +        return ffi.HybridL2Bitset.all().complement()
+      +    return allowed_terminals.complement()
        
-               if not new_heads:
-      -            # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-      -            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-      +            # A pop resulting in no stacks should yield an empty GSS.
-      +            return FastGSS(frozenset(), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
        
-               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+       class Model(GraphProvider):
+      @@ -101,20 +139,24 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This is the performance-critical routine.
+               """
+               print("\n--- get_mask START ---")
+               print("GSS at start of get_mask:")
+      -        state_map = self.constraint_state.get_state_map()
+      +        rust_state_map = self.constraint_state.get_state_map()
+      +        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
+      +
+               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+       
+               t0 = time.time()
+       
+               final_mask = ffi.Bitset.zeros()
+       
+      -        # node_idx -> (GSSNode, Bitset)
+      -        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+      +        # node_idx -> (FastGSS, Bitset)
+      +        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+       
+               stopped: set[int] = set()  # nodes that stopped (no gss parents)
+               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+               depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+       
+      -
+               # Seed: map tokenizer states and their filtered GSS to trie roots
+               heappush = heapq.heappush
+               roots_map = self.roots_map
+      @@ -127,11 +169,11 @@
+                       continue
+                   root_idx = int(root_idx)
+       
+      -            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+      +            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
+       
+                   existing = values.get(root_idx)
+                   if existing is not None:
+                       existing_gss, existing_mask = existing
+      -                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+      +                merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                   else:
+                       values[root_idx] = (gss, new_mask)
+      @@ -181,7 +223,7 @@
+                       if item is None:
+                           print(f"  - Node {node_idx}: SKIPPING (no value)")
+                           continue
+                       gss_node, llm_mask = item
+      -                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+      +                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
+       
+                       # End-node handling
+                       if is_end(node_idx):
+      @@ -189,7 +231,7 @@
+                           print(f"      - final_mask before: {final_mask.to_ranges()}")
+       
+                           # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                           forbidden_llm_tokens = ffi.Bitset.zeros()
+      -                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+      +                    disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
+                           possible_matches = self.possible_matches_cache
+       
+                           for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+      @@ -206,7 +248,7 @@
+                                       if disallowed_bv.contains(terminal_id):
+                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+       
+      -                    gss_active_tokens = gss_node.allowed_llm_tokens()
+      +                    gss_active_tokens = all_ones_mask
+                           glr_active_tokens = llm_mask.intersection(gss_active_tokens)
+                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                           tokens_to_add = final_allowed_tokens
+      @@ -218,7 +260,7 @@
+                           final_mask = final_mask.union(tokens_to_add)
+                           print(f"      - final_mask after:  {final_mask.to_ranges()}")
+       
+      -                if not gss_node.is_alive():
+      +                if llm_mask.is_empty():
+                           stopped.add(node_idx)
+                           print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                           continue
+      @@ -230,7 +272,7 @@
+                       for (pop, llm_bv), dests in children:
+                           print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                           # Collect all pops from GSS parents
+      -                    peeks = gss_node.popn_fast(pop)
+      +                    peeks = popn_fast_py(gss_node, pop)
+                           print(f"      - Found {len(peeks)} peeks from GSS set")
+                           if not peeks:
+                               continue
+      @@ -250,7 +292,7 @@
+                                   continue
+       
+                               # Merge matched parent GSS nodes
+      -                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+      +                        child_gss_node = FastGSS.merge(matched, merge_acc)
+       
+                               # Compute child mask (intersection with llm_bv when present)
+                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+      @@ -260,12 +302,12 @@
+                               existing = values.get(d)
+                               if existing is not None:
+                                   existing_gss, existing_mask = existing
+      -                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+      +                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                                   combined_mask = existing_mask.union(child_llm_mask)
+                                   values[d] = (merged_gss, combined_mask)
+      -                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+      +                            print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
+                               else:
+                                   values[d] = (child_gss_node, child_llm_mask)
+      -                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+      +                            print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
+       
+                               enqueue(max_depth[d], d)
        
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/fast_impl.py
-      Applying patch to 'python/gss_tester/fast_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/fast_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix GSS traversal logic for peek and empty
-      pop results"'
+  - user: "Changes committed with message: \"Refactor: Replace Rust GSS with Python
+      FastGSS in precompute3 model's get_mask\""
     metadata:
 ...

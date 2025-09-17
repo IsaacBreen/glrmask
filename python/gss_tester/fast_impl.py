@@ -89,8 +89,8 @@ class FastGSS(GSS[T, Acc]):
                     new_heads.add(parent)
 
         if not new_heads:
-            # A pop resulting in no stacks should yield an empty GSS.
-            return FastGSS(frozenset(), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
+            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
