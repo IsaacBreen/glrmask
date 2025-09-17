@@ -24,6 +24,7 @@ class Model(GraphProvider):
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -70,6 +71,7 @@ class Model(GraphProvider):
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        model.possible_matches_cache = model.constraint.possible_matches()
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -104,9 +106,9 @@ class Model(GraphProvider):
         """
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
-        # print(self.constraint_state)
-        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
+        state_map = self.constraint_state.get_state_map()
+        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
@@ -125,12 +127,13 @@ class Model(GraphProvider):
         max_depth = self.max_depth
 
         print("\n--- Seeding work queue ---")
-        for sid, (gss, new_mask) in state_to_gss_and_mask.items():
+        for sid, gss in state_map.items():
+            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
-
+            
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
@@ -200,10 +203,29 @@ class Model(GraphProvider):
                     print(f"    - END NODE found. Updating final_mask.")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
 
-                    # Correct logic: intersect propagated mask with GSS active tokens
-                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                    forbidden_llm_tokens = ffi.Bitset.zeros()
+                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                    possible_matches = self.possible_matches_cache
 
-                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                        if disallowed_bv.is_empty():
+                            continue
+                        
+                        for tsid in range(start, end + 1):
+                            possible_matches_for_state = possible_matches.get(tsid)
+                            if not possible_matches_for_state:
+                                continue
+                            
+                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                terminal_id = int(terminal_id_str)
+                                if disallowed_bv.contains(terminal_id):
+                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    glr_active_tokens = llm_mask.intersection(gss_active_tokens)
+                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                    tokens_to_add = final_allowed_tokens
 
                     print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
                     print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")

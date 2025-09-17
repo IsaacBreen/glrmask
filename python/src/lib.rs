@@ -20,6 +20,7 @@ use sep1::datastructures::u8set::U8Set;
 use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
+use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
 use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast};
 
 #[pyclass(name = "GrammarExpr")]
@@ -476,6 +477,10 @@ impl PyGrammarConstraint {
         PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
     }
 
+    fn all_internal_llm_tokens_bitset(&self) -> PyHybridBitset {
+        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset() }
+    }
+
     fn tokenizer(&self) -> PyRegex {
         PyRegex { inner: self.inner.tokenizer.clone() }
     }
@@ -619,6 +624,24 @@ impl From<PyHybridBitset> for RustHybridBitset {
     fn from(p: PyHybridBitset) -> Self { p.inner }
 }
 
+#[pyclass(name = "HybridL2Bitset")]
+#[derive(Clone)]
+pub struct PyHybridL2Bitset {
+    inner: RustHybridL2Bitset,
+}
+
+#[pymethods]
+impl PyHybridL2Bitset {
+    fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
+        self.inner.range_values().map(|(range, bv)| {
+            let py_range = (*range.start(), *range.end());
+            let py_bv = PyHybridBitset { inner: bv.clone() };
+            (py_range, py_bv)
+        }).collect()
+    }
+}
+
+
 #[pyclass(name = "GSSNode")]
 #[derive(Clone)]
 pub struct PyGSSNode {
@@ -648,6 +671,10 @@ impl PyGSSNode {
 
     fn allowed_llm_tokens(&self) -> PyHybridBitset {
         PyHybridBitset::from(self.inner.allowed_llm_tokens())
+    }
+
+    fn disallowed_terminals(&self) -> PyHybridL2Bitset {
+        PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
     }
 
     fn clone_node(&self) -> PyGSSNode {
@@ -831,20 +858,6 @@ impl PyGrammarConstraintState {
     fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
         self.inner.borrow_constraint().internal_bv_to_original(bv)
     }
-
-    fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, (PyGSSNode, PyHybridBitset)>> {
-        let mut out = std::collections::BTreeMap::new();
-        self.inner.with_inner(|state| {
-            // Use the new helper that returns filtered GSS entries together with their allowed bitsets.
-            let filtered_map = state.get_filtered_gss_map();
-            for (tokenizer_state_id, (glr_state, allowed_bv)) in filtered_map {
-                let gss_node = PyGSSNode { inner: glr_state.active_state.stack.clone() };
-                let bitset = PyHybridBitset { inner: allowed_bv };
-                out.insert(tokenizer_state_id.0, (gss_node, bitset));
-            }
-        });
-        Ok(out)
-    }
 }
 
 #[self_referencing]
@@ -894,6 +907,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyHybridBitset>()?;
+    m.add_class::<PyHybridL2Bitset>()?;
     m.add_class::<PyGSSNode>()?;
     m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
