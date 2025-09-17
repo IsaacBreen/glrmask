@@ -2,135 +2,11 @@ import json
 import time
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
-
-from gss_tester.fast_impl import FastGSS, _Node
-
-
-def merge_acc(acc1, acc2):
-    term1, llm1 = acc1
-    term2, llm2 = acc2
-    return (term1.union(term2), llm1.union(llm2))
-
-
-def rust_gss_to_fast_gss(rust_gss_head: ffi.GSSNode) -> FastGSS:
-    memo = {}  # rust_ptr -> python _Node
-    child_to_parents = {}
-
-    q = collections.deque([rust_gss_head])
-    visited_ptrs = {rust_gss_head.ptr()}
-
-    while q:
-        rust_node = q.popleft()
-        ptr = rust_node.ptr()
-
-        if ptr not in memo:
-            memo[ptr] = _Node(
-                acc=(rust_node.local_acc_terminals_union(), rust_node.local_acc_llm_tokens_union()),
-                depth=rust_node.depth()
-            )
-        py_node = memo[ptr]
-
-        if not rust_node.is_root():
-            parents = set()
-            for state_id, pred_rust_node in rust_node.predecessors():
-                pred_ptr = pred_rust_node.ptr()
-                if pred_ptr not in memo:
-                    memo[pred_ptr] = _Node(
-                        acc=(pred_rust_node.local_acc_terminals_union(), pred_rust_node.local_acc_llm_tokens_union()),
-                        depth=pred_rust_node.depth()
-                    )
-                py_pred_node = memo[pred_ptr]
-                parents.add((state_id, py_pred_node))
-
-                if pred_ptr not in visited_ptrs:
-                    q.append(pred_rust_node)
-                    visited_ptrs.add(pred_ptr)
-
-            child_to_parents[py_node] = parents
-
-    py_head = memo[rust_gss_head.ptr()]
-    py_root = next((node for node in memo.values() if node.depth == 0), None)
-    if py_root is None:
-        raise ValueError("Could not find root of GSS graph")
-
-    return FastGSS(
-        heads=frozenset([py_head]),
-        acc_default_factory=lambda: py_root.acc,
-        root=py_root,
-        child_to_parents=child_to_parents,
-        path_cache={}
-    )
-
-
-def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-    current_heads = gss._heads
-    for _ in range(n):
-        next_heads = set()
-        for head in current_heads:
-            if head in gss._child_to_parents:
-                for _, parent in gss._child_to_parents[head]:
-                    next_heads.add(parent)
-        current_heads = next_heads
-        if not current_heads:
-            break
-
-    nodes_at_n_heads = current_heads
-
-    peeks = []
-    for node in nodes_at_n_heads:
-        if node in gss._child_to_parents:
-            for value, parent in gss._child_to_parents[node]:
-                isolated_parent_gss = FastGSS(
-                    heads=frozenset([parent]),
-                    acc_default_factory=gss._acc_default_factory,
-                    root=gss._root,
-                    child_to_parents=gss._child_to_parents,
-                    path_cache=gss._path_cache
-                )
-                peeks.append((value, isolated_parent_gss))
-    return peeks
-
-
-def get_allowed_llm_tokens(gss: FastGSS) -> ffi.Bitset:
-    q = collections.deque(list(gss._heads))
-    visited = set()
-    root_accs_llm = []
-
-    while q:
-        node = q.popleft()
-        if node in visited:
-            continue
-        visited.add(node)
-
-        if node.depth == 0:
-            root_accs_llm.append(node.acc[1])
-
-        if node in gss._child_to_parents:
-            for _, parent in gss._child_to_parents[node]:
-                q.append(parent)
-
-    if not root_accs_llm:
-        aggregated_llm = ffi.Bitset.zeros()
-    else:
-        aggregated_llm = root_accs_llm[0]
-        for i in range(1, len(root_accs_llm)):
-            aggregated_llm = aggregated_llm.union(root_accs_llm[i])
-
-    final_llm = ffi.Bitset.zeros()
-    for head in gss._heads:
-        local_llm = head.acc[1]
-        final_llm = final_llm.union(local_llm.intersection(aggregated_llm))
-
-    return final_llm
-
-
-def is_alive_py(gss: FastGSS) -> bool:
-    return not get_allowed_llm_tokens(gss).is_empty()
 
 
 class Model(GraphProvider):
@@ -148,6 +24,7 @@ class Model(GraphProvider):
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -194,6 +71,7 @@ class Model(GraphProvider):
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        model.possible_matches_cache = model.constraint.possible_matches()
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -226,57 +104,74 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        print("\n--- get_mask START ---")
+        print("GSS at start of get_mask:")
+        state_map = self.constraint_state.get_state_map()
+        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
-        stopped: Set[int] = set()
-        todo: Dict[int, Set[int]] = {}
-        depth_heap: List[int] = []
 
+        # node_idx -> (GSSNode, Bitset)
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+
+        stopped: set[int] = set()  # nodes that stopped (no gss parents)
+        todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+        depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+
+        # Seed: map tokenizer states and their filtered GSS to trie roots
         heappush = heapq.heappush
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-
-        py_gss_map = {}
-        for sid, (gss, new_mask) in state_to_gss_and_mask.items():
-            py_gss_map[sid] = (rust_gss_to_fast_gss(gss), new_mask)
-
-        for sid, (gss, new_mask) in py_gss_map.items():
+        print("\n--- Seeding work queue ---")
+        for sid, gss in state_map.items():
+            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
 
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
 
             depth = max_depth[root_idx]
-            if depth not in todo:
-                todo[depth] = set()
+            bucket = todo.get(depth)
+            if bucket is None:
+                todo[depth] = {root_idx}
                 heappush(depth_heap, depth)
-            todo[depth].add(root_idx)
+            else:
+                bucket.add(root_idx)
 
+        # Main scheduler
+
+        # Helper to enqueue a node at a given depth
         def enqueue(depth: int, node_idx: int) -> None:
-            if depth not in todo:
-                todo[depth] = set()
+            bucket = todo.get(depth)
+            if bucket is None:
+                todo[depth] = {node_idx}
                 heappush(depth_heap, depth)
-            todo[depth].add(node_idx)
+            else:
+                bucket.add(node_idx)
 
         heappop = heapq.heappop
         arena = self.arena
         is_end = self.is_end
 
+        print("\n--- Main loop ---")
         iter_count = 0
         while True:
             iter_count += 1
+            # Pop the smallest depth bucket (skip stale heap entries)
             node_indices: Optional[set[int]] = None
             current_depth = -1
             while depth_heap:
@@ -285,57 +180,111 @@ class Model(GraphProvider):
                 if node_indices:
                     break
             if not node_indices:
-                break
+                print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                break  # nothing left to process
 
+            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+            # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
+                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 item = values.pop(node_idx, None)
                 if item is None:
+                    print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
+                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
+                # End-node handling
                 if is_end(node_idx):
-                    gss_active_tokens = get_allowed_llm_tokens(gss_node)
-                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
-                    final_mask = final_mask.union(tokens_to_add)
+                    print(f"    - END NODE found. Updating final_mask.")
+                    print(f"      - final_mask before: {final_mask.to_ranges()}")
 
-                if not is_alive_py(gss_node):
+                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                    forbidden_llm_tokens = ffi.Bitset.zeros()
+                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                    possible_matches = self.possible_matches_cache
+
+                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                        if disallowed_bv.is_empty():
+                            continue
+
+                        for tsid in range(start, end + 1):
+                            possible_matches_for_state = possible_matches.get(tsid)
+                            if not possible_matches_for_state:
+                                continue
+
+                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                terminal_id = int(terminal_id_str)
+                                if disallowed_bv.contains(terminal_id):
+                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    glr_active_tokens = llm_mask.intersection(gss_active_tokens)
+                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                    tokens_to_add = final_allowed_tokens
+
+                    print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                    print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                    print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+
+                    final_mask = final_mask.union(tokens_to_add)
+                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
+
+                if not gss_node.is_alive():
                     stopped.add(node_idx)
+                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
+                # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
+                # if not children:
+                #     print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
-                    peeks = popn_fast_py(gss_node, pop)
+                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                    # Collect all pops from GSS parents
+                    peeks = gss_node.popn_fast(pop)
+                    print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
 
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
+                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                        # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
                             contains = state_bv.contains
                             for sid_val, parent_node in peeks:
                                 if contains(sid_val):
                                     matched.append(parent_node)
+                        print(f"        - Matched {len(matched)} parent GSS nodes")
                         if not matched:
                             continue
 
-                        child_gss_node = FastGSS.merge(matched, merge_acc)
+                        # Merge matched parent GSS nodes
+                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+
+                        # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
+                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
+                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                         enqueue(max_depth[d], d)
 
