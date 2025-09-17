@@ -22927,25 +22927,56 @@ local_system:
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
+              # Map each original node to its transformed counterpart
               memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
 
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
+              def transform(node: _Node[T, Acc]) -> _Node[T, Acc]:
+                  """Recursively transform a node and its ancestors."""
+                  if node in memo:
+                      return memo[node]
 
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+                  # Determine whether any parent changes after transformation
+                  parents_changed = False
+                  if node in self._child_to_parents:
+                      for _, parent in self._child_to_parents[node]:
+                          new_parent = transform(parent)
+                          if new_parent is not parent:
+                              parents_changed = True
+
+                  # Apply the accumulator function to this node
+                  new_acc = func(node.acc)
+
+                  # If nothing changed, reuse the original node
+                  if not parents_changed and new_acc == node.acc:
+                      memo[node] = node
+                      return node
+
+                  # Otherwise create a new node
+                  new_node = _Node(acc=new_acc, depth=node.depth)
+                  memo[node] = new_node
+                  return new_node
+
+              # Transform all head nodes
+              new_heads = frozenset(transform(h) for h in self._heads)
+
+              # Rebuild the child‑to‑parents mapping using the transformed nodes
+              new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+              for old_child, parents in self._child_to_parents.items():
+                  new_child = memo[old_child]
+                  new_set: Set[Tuple[T, _Node[T, Acc]]] = set()
+                  for value, old_parent in parents:
+                      new_parent = memo[old_parent]
+                      new_set.add((value, new_parent))
+                  new_child_to_parents[new_child] = new_set
+
+              # Preserve the (possibly) transformed root node
+              new_root = memo.get(self._root, self._root)
+
+              return FastGSS(new_heads,
+                             self._acc_default_factory,
+                             new_root,
+                             new_child_to_parents,
+                             self._path_cache.copy())
 
           def peek(self) -> Set[T]:
               peek_values: Set[T] = set()
@@ -23041,7 +23072,7 @@ local_system:
               if node.id in cache:
                   return cache[node.id]
 
-              if node == self._root:
+              if node.depth == 0:
                   return frozenset([tuple()])
 
               if node not in child_to_parents:
@@ -23309,11 +23340,94 @@ local_system:
 
           def commit(self, token_id: int):
               self.constraint_state.commit(token_id)
-              new_rust_state_map = self.constraint_state.get_state_map()
-              self.state = {
-                  sid: convert_rust_gss_to_python_gss(rust_gss)
-                  for sid, rust_gss in new_rust_state_map.items()
+              token_bytes = self.id_to_token.get(token_id)
+              if not token_bytes:
+                  self.state = {}
+                  return
+
+              new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+
+              q = collections.deque()
+              for tokenizer_sid, gss in self.state.items():
+                  q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
+
+              visited_q_items = set()
+
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+
+                  # GSS is not hashable, use its serializable form for visited check
+                  q_item = (offset, tokenizer_sid, gss)
+                  if q_item in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item)
+
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+
+                  for terminal_id, width in matches:
+                      processed_gss = self._process_token(gss, terminal_id)
+                      if any(h is not processed_gss._root for h in processed_gss._heads):
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged_states = {
+                  sid: FastGSS.merge(gss_list, merge_acc)
+                  for sid, gss_list in new_states.items()
+                  if gss_list
               }
+
+              self.state = merged_states
+
+          def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+              heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+              for head in gss._heads:
+                  for state_id in gss.peek_from_head(head):
+                      heads_by_state[state_id].append(head)
+
+              shifted_gsses = []
+              reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
+
+              for state_id, heads in heads_by_state.items():
+                  state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if not action: continue
+
+                  def handle_shift(shift_to_state_id, gss_to_shift):
+                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+                  def handle_reduce(reduce_action, gss_to_reduce):
+                      popped_gss = gss_to_reduce.popn(reduce_action.len)
+                      if any(h is not popped_gss._root for h in popped_gss._heads):
+                          reductions_to_do[reduce_action].append(popped_gss)
+
+                  if isinstance(action, int):
+                      handle_shift(action, state_gss)
+                  elif isinstance(action, Reduce):
+                      handle_reduce(action, state_gss)
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          handle_shift(action.shift, state_gss)
+                      for length, nts in action.reduces.items():
+                          for nt_id, pids in nts.items():
+                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+              for reduce_action, gss_list in reductions_to_do.items():
+                  merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+                  for from_state_id in merged_popped_gss.peek():
+                      goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+                      if goto_state_id is not None:
+                          shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+
+              return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
 
           def get_mask(self) -> RangeSet:
               """
@@ -35522,143 +35636,424 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The error you're seeing is due to a divergence between the state management logic in the Python `commit` method and the reference Rust implementation. The Python version of `commit` was a simplified reimplementation that didn't correctly handle terminal constraints, leading to an incorrect GSS state.
-
-      The fix is to replace the Python `commit` logic with a call to the Rust backend via the existing FFI, and then convert the resulting Rust GSS state back into the Python `FastGSS` representation. This ensures the Python model's state remains synchronized with the correct reference implementation.
-
-      Here are the step-by-step instructions to apply the fix:
+      Here are the step-by-step instructions to fix the issue, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`**.
+      **1. File: `python/src/lib.rs`**
 
-      2.  **Locate the `commit` method** inside the `Model` class. It starts around line 214.
+      *   **Expose `tokens_accessible_from_state` for `PyRegex`**: In the `#[pymethods]` block for `PyRegex`, add the `tokens_accessible_from_state` method. This is needed to check for possible longest-match conflicts in the Python `commit` logic.
 
-      3.  **Replace the entire `commit` method** with the following code. This new version delegates the commit logic to the Rust `GrammarConstraintState` and then updates the Python state to match the result.
-
-          ```python
-          def commit(self, token_id: int):
-              self.constraint_state.commit(token_id)
-              new_rust_state_map = self.constraint_state.get_state_map()
-              self.state = {
-                  sid: convert_rust_gss_to_python_gss(rust_gss)
-                  for sid, rust_gss in new_rust_state_map.items()
-              }
+          ```rust
+          // In #[pymethods] for PyRegex, after initial_state_id()
+          fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<BTreeSet<usize>> {
+              let accessible = self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
+              Ok(accessible.into_iter().map(|tid| tid.0).collect())
+          }
           ```
 
-      4.  **Delete the `_process_token` method**. This helper function was only used by the old `commit` method and is no longer needed. It starts around line 271.
+      *   **Expose set operations for `PyHybridL2Bitset`**: In the `#[pymethods]` block for `PyHybridL2Bitset`, add `intersection` and `difference` methods. These are required to implement the terminal disallowing logic in Python.
 
-      These changes will ensure your Python model's state transitions are consistent with the Rust implementation, resolving the assertion error.
+          ```rust
+          // In #[pymethods] for PyHybridL2Bitset, after union()
+          fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: &self.inner & &other.inner }
+          }
+
+          fn difference(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: &self.inner - &other.inner }
+          }
+          ```
+
+      **2. File: `python/gss_tester/fast_impl.py`**
+
+      *   **Correct the `apply` method in `FastGSS`**: Replace the current, flawed `apply` method with a version that correctly performs a deep copy and transformation of the entire GSS graph. This ensures that modifications to node accumulators are correctly reflected throughout the structure.
+
+      *   **Make `_reconstruct_paths` more robust**: In the `_reconstruct_paths` method, change the base case of the recursion from `if node == self._root:` to `if node.depth == 0:`. This prevents errors if the root node object is replaced during transformations.
+
+      **3. File: `python/aug25/models/precompute3_model_pure_python.py`**
+
+      *   **Implement terminal-disallowing logic in `Model.commit`**: In the `commit` method, inside the `for terminal_id, width in matches:` loop, add logic that mirrors the Rust implementation. After processing a token match (`_process_token`), check if the tokenizer could immediately match the same terminal again. If so, apply a transformation to the resulting GSS to disallow that terminal for the new tokenizer state, preventing incorrect shortest-match behavior.
 
       ### Git Diffs
-
-      Here is the git diff for the required changes.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -212,83 +212,13 @@
-                                       yield (int(pop), sid, int(dest_idx))
+      @@ -262,6 +262,21 @@
        
-           def commit(self, token_id: int):
-               self.constraint_state.commit(token_id)
-      -        token_bytes = self.id_to_token.get(token_id)
-      -        if not token_bytes:
-      -            self.state = {}
-      -            return
+                   for terminal_id, width in matches:
+                       processed_gss = self._process_token(gss, terminal_id)
+      +
+      +                # Disallow this terminal from being matched again immediately to enforce longest match.
+      +                # This mirrors the logic in the Rust implementation.
+      +                if end_state is not None:
+      +                    terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
+      +                    if terminal_id in terminals_accessible:
+      +                        disallowed_terminals_for_end_state = ffi.Bitset.from_indices([terminal_id])
+      +                        # Create an L2 bitset that is empty everywhere except for the end_state.
+      +                        disallowed_l2 = ffi.HybridL2Bitset.all().complement()
+      +                        disallowed_l2.insert_l2_bitset(end_state, disallowed_terminals_for_end_state)
+      +
+      +                        def apply_disallow(acc: PyAcc) -> PyAcc:
+      +                            return PyAcc(terminals_union=acc.terminals_union.difference(disallowed_l2))
+      +                        
+      +                        processed_gss = processed_gss.apply(apply_disallow)
+      +
+                       if any(h is not processed_gss._root for h in processed_gss._heads):
+                           new_offset = offset + width
+                           next_tokenizer_sid = self.tokenizer_initial_state
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
+      --- a/python/gss_tester/fast_impl.py
+      +++ b/python/gss_tester/fast_impl.py
+      @@ -102,23 +102,46 @@
+               return peek_values
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+      -        new_heads: Set[_Node[T, Acc]] = set()
+      -        new_child_to_parents = self._child_to_parents.copy()
+      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
       -
-      -        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-      -
-      -        q = collections.deque()
-      -        for tokenizer_sid, gss in self.state.items():
-      -            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
-      -
-      -        visited_q_items = set()
-      -
-      -        while q:
-      -            offset, tokenizer_sid, gss = q.popleft()
-      -
-      -            # GSS is not hashable, use its serializable form for visited check
-      -            q_item = (offset, tokenizer_sid, gss)
-      -            if q_item in visited_q_items:
+      -        for head in self._heads:
+      -            if head in memo:
+      -                new_heads.add(memo[head])
       -                continue
-      -            visited_q_items.add(q_item)
       -
-      -            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-      -
-      -            for terminal_id, width in matches:
-      -                processed_gss = self._process_token(gss, terminal_id)
-      -                if any(h is not processed_gss._root for h in processed_gss._heads):
-      -                    new_offset = offset + width
-      -                    next_tokenizer_sid = self.tokenizer_initial_state
-      -                    if new_offset == len(token_bytes):
-      -                        new_states[next_tokenizer_sid].append(processed_gss)
-      -                    else:
-      -                        q.append((new_offset, next_tokenizer_sid, processed_gss))
-      -
-      -            if end_state is not None:
-      -                new_states[end_state].append(gss)
-      -
-      -        merged_states = {
-      -            sid: FastGSS.merge(gss_list, merge_acc)
-      -            for sid, gss_list in new_states.items()
-      -            if gss_list
-      +        new_rust_state_map = self.constraint_state.get_state_map()
-      +        self.state = {
-      +            sid: convert_rust_gss_to_python_gss(rust_gss)
-      +            for sid, rust_gss in new_rust_state_map.items()
-               }
+      -            new_acc = func(head.acc)
+      -            new_node = _Node(acc=new_acc, depth=head.depth)
+      -            
+      -            if head in self._child_to_parents:
+      -                new_child_to_parents[new_node] = self._child_to_parents[head]
+      -            
+      -            new_heads.add(new_node)
+      -            memo[head] = new_node
+      -            
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+      +        memo: Dict[_Node, _Node] = {}
+      +
+      +        def transform_node(node: _Node) -> _Node:
+      +            if node in memo:
+      +                return memo[node]
+      +
+      +            # Recurse to parents first to see if they change
+      +            new_parents = set()
+      +            parents_changed = False
+      +            if node in self._child_to_parents:
+      +                for value, parent_node in self._child_to_parents[node]:
+      +                    new_parent = transform_node(parent_node)
+      +                    if new_parent is not parent_node:
+      +                        parents_changed = True
+      +                    new_parents.add((value, new_parent))
+      +
+      +            new_acc = func(node.acc)
+      +
+      +            if not parents_changed and new_acc == node.acc:
+      +                memo[node] = node
+      +                return node
+      +
+      +            new_node = _Node(acc=new_acc, depth=node.depth)
+      +            memo[node] = new_node
+      +            return new_node
+      +
+      +        new_heads_list = [transform_node(h) for h in self._heads]
+      +        new_heads = frozenset(new_heads_list)
+      +        
+      +        new_child_to_parents = {}
+      +        for old_node, new_node in memo.items():
+      +            if old_node in self._child_to_parents:
+      +                parents_set = set()
+      +                for value, old_parent in self._child_to_parents[old_node]:
+      +                    new_parent = memo[old_parent]
+      +                    parents_set.add((value, new_parent))
+      +                if parents_set:
+      +                    new_child_to_parents[new_node] = parents_set
+      +        
+      +        new_root = memo.get(self._root, self._root)
+      +        return FastGSS(new_heads, self._acc_default_factory, new_root, new_child_to_parents, {})
        
-      -        self.state = merged_states
+           def peek(self) -> Set[T]:
+               peek_values: Set[T] = set()
+      @@ -216,7 +239,7 @@
+               if node.id in cache:
+                   return cache[node.id]
+       
+      -        if node == self._root:
+      +        if node.depth == 0:
+                   return frozenset([tuple()])
+       
+               if node not in child_to_parents:
+
+      ```
+      ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -141,6 +141,11 @@
+           fn initial_state_id(&self) -> usize {
+               self.inner.initial_state_id().0
+           }
+      +
+      +    fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<BTreeSet<usize>> {
+      +        let accessible = self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
+      +        Ok(accessible.into_iter().map(|tid| tid.0).collect())
+      +    }
+       }
+       
+       #[pyclass(name = "GrammarDefinition")]
+      @@ -421,6 +426,14 @@
+               PyHybridL2Bitset { inner: &self.inner | &other.inner }
+           }
+       
+      +    fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+      +        PyHybridL2Bitset { inner: &self.inner & &other.inner }
+      +    }
+      +
+      +    fn difference(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+      +        PyHybridL2Bitset { inner: &self.inner - &other.inner }
+      +    }
+      +
+           pub fn complement(&self) -> PyHybridL2Bitset {
+               PyHybridL2Bitset { inner: self.inner.complement() }
+           }
+
+      ```
+    metadata:
+  - user: |-
+      Failed Hunk:
+
+      ```diff
+      @@ -102,23 +102,46 @@
+               return peek_values
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+      -        new_heads: Set[_Node[T, Acc]] = set()
+      -        new_child_to_parents = self._child_to_parents.copy()
+      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
       -
-      -    def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-      -        heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
-      -        for head in gss._heads:
-      -            for state_id in gss.peek_from_head(head):
-      -                heads_by_state[state_id].append(head)
+      -        for head in self._heads:
+      -            if head in memo:
+      -                new_heads.add(memo[head])
+      -                continue
       -
-      -        shifted_gsses = []
-      -        reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
+      -            new_acc = func(head.acc)
+      -            new_node = _Node(acc=new_acc, depth=head.depth)
+      -            
+      -            if head in self._child_to_parents:
+      -                new_child_to_parents[new_node] = self._child_to_parents[head]
+      -            
+      -            new_heads.add(new_node)
+      -            memo[head] = new_node
+      -            
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+      +        memo: Dict[_Node, _Node] = {}
+      +
+      +        def transform_node(node: _Node) -> _Node:
+      +            if node in memo:
+      +                return memo[node]
+      +
+      +            # Recurse to parents first to see if they change
+      +            new_parents = set()
+      +            parents_changed = False
+      +            if node in self._child_to_parents:
+      +                for value, parent_node in self._child_to_parents[node]:
+      +                    new_parent = transform_node(parent_node)
+      +                    if new_parent is not parent_node:
+      +                        parents_changed = True
+      +                    new_parents.add((value, new_parent))
+      +
+      +            new_acc = func(node.acc)
+      +
+      +            if not parents_changed and new_acc == node.acc:
+      +                memo[node] = node
+      +                return node
+      +
+      +            new_node = _Node(acc=new_acc, depth=node.depth)
+      +            memo[node] = new_node
+      +            return new_node
+      +
+      +        new_heads_list = [transform_node(h) for h in self._heads]
+      +        new_heads = frozenset(new_heads_list)
+      +        
+      +        new_child_to_parents = {}
+      +        for old_node, new_node in memo.items():
+      +            if old_node in self._child_to_parents:
+      +                parents_set = set()
+      +                for value, old_parent in self._child_to_parents[old_node]:
+      +                    new_parent = memo[old_parent]
+      +                    parents_set.add((value, new_parent))
+      +                if parents_set:
+      +                    new_child_to_parents[new_node] = parents_set
+      +        
+      +        new_root = memo.get(self._root, self._root)
+      +        return FastGSS(new_heads, self._acc_default_factory, new_root, new_child_to_parents, {})
+       
+           def peek(self) -> Set[T]:
+               peek_values: Set[T] = set()
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+              return peek_values
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              new_child_to_parents = self._child_to_parents.copy()
+              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+
+              for head in self._heads:
+                  if head in memo:
+                      new_heads.add(memo[head])
+                      continue
+
+                  new_acc = func(head.acc)
+                  new_node = _Node(acc=new_acc, depth=head.depth)
+                  
+                  if head in self._child_to_parents:
+                      new_child_to_parents[new_node] = self._child_to_parents[head]
+                  
+                  new_heads.add(new_node)
+                  memo[head] = new_node
+                  
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+
+          def peek(self) -> Set[T]:
+              peek_values: Set[T] = set()
+      ```
+
+      Nearest Match in `python/gss_tester/fast_impl.py` (found at line 116 with 96.00% similarity, shown with padding):
+
+      ```python
+                          new_heads.add(head)
+
+              if not new_heads:
+                  # If no stacks match, the result is an empty GSS (represented by the root).
+                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              new_child_to_parents = self._child_to_parents.copy()
+              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+
+              for head in self._heads:
+                  if head in memo:
+                      new_heads.add(memo[head])
+                      continue
+
+                  new_acc = func(head.acc)
+                  new_node = _Node(acc=new_acc, depth=head.depth)
+                  
+                  if head in self._child_to_parents:
+                      new_child_to_parents[new_node] = self._child_to_parents[head]
+                  
+                  new_heads.add(new_node)
+                  memo[head] = new_node
+                  
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+
+          def peek(self) -> Set[T]:
+              peek_values: Set[T] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      for value, _ in self._child_to_parents[head]:
+                          peek_values.add(value)
+              return peek_values
+      ```
+
+      The git diff hunk above failed to apply to the file `python/gss_tester/fast_impl.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
+      --- a/python/gss_tester/fast_impl.py
+      +++ b/python/gss_tester/fast_impl.py
+      @@
+      -    def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+      -        new_heads: Set[_Node[T, Acc]] = set()
+      -        new_child_to_parents = self._child_to_parents.copy()
+      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
       -
-      -        for state_id, heads in heads_by_state.items():
-      -            state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
-      -            row = self.parser_table.table.get(state_id)
-      -            if not row: continue
-      -            action = row.actions.get(terminal_id)
-      -            if not action: continue
+      -        for head in self._heads:
+      -            if head in memo:
+      -                new_heads.add(memo[head])
+      -                continue
       -
-      -            def handle_shift(shift_to_state_id, gss_to_shift):
-      -                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-      -
-      -            def handle_reduce(reduce_action, gss_to_reduce):
-      -                popped_gss = gss_to_reduce.popn(reduce_action.len)
-      -                if any(h is not popped_gss._root for h in popped_gss._heads):
-      -                    reductions_to_do[reduce_action].append(popped_gss)
-      -
-      -            if isinstance(action, int):
-      -                handle_shift(action, state_gss)
-      -            elif isinstance(action, Reduce):
-      -                handle_reduce(action, state_gss)
-      -            elif isinstance(action, Split):
-      -                if action.shift is not None:
-      -                    handle_shift(action.shift, state_gss)
-      -                for length, nts in action.reduces.items():
-      -                    for nt_id, pids in nts.items():
-      -                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
-      -
-      -        for reduce_action, gss_list in reductions_to_do.items():
-      -            merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
-      -            for from_state_id in merged_popped_gss.peek():
-      -                goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
-      -                if goto_state_id is not None:
-      -                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
-      -
-      -        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
-      -
-           def get_mask(self) -> RangeSet:
-               """
-               Compute the final LLM token mask given a mapping from tokenizer state to
+      -            new_acc = func(head.acc)
+      -            new_node = _Node(acc=new_acc, depth=head.depth)
+      -            
+      -            if head in self._child_to_parents:
+      -                new_child_to_parents[new_node] = self._child_to_parents[head]
+      -            
+      -            new_heads.add(new_node)
+      -            memo[head] = new_node
+      -            
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+      +    def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+      +        # Map each original node to its transformed counterpart
+      +        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+      +
+      +        def transform(node: _Node[T, Acc]) -> _Node[T, Acc]:
+      +            """Recursively transform a node and its ancestors."""
+      +            if node in memo:
+      +                return memo[node]
+      +
+      +            # Determine whether any parent changes after transformation
+      +            parents_changed = False
+      +            if node in self._child_to_parents:
+      +                for _, parent in self._child_to_parents[node]:
+      +                    new_parent = transform(parent)
+      +                    if new_parent is not parent:
+      +                        parents_changed = True
+      +
+      +            # Apply the accumulator function to this node
+      +            new_acc = func(node.acc)
+      +
+      +            # If nothing changed, reuse the original node
+      +            if not parents_changed and new_acc == node.acc:
+      +                memo[node] = node
+      +                return node
+      +
+      +            # Otherwise create a new node
+      +            new_node = _Node(acc=new_acc, depth=node.depth)
+      +            memo[node] = new_node
+      +            return new_node
+      +
+      +        # Transform all head nodes
+      +        new_heads = frozenset(transform(h) for h in self._heads)
+      +
+      +        # Rebuild the child‑to‑parents mapping using the transformed nodes
+      +        new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+      +        for old_child, parents in self._child_to_parents.items():
+      +            new_child = memo[old_child]
+      +            new_set: Set[Tuple[T, _Node[T, Acc]]] = set()
+      +            for value, old_parent in parents:
+      +                new_parent = memo[old_parent]
+      +                new_set.add((value, new_parent))
+      +            new_child_to_parents[new_child] = new_set
+      +
+      +        # Preserve the (possibly) transformed root node
+      +        new_root = memo.get(self._root, self._root)
+      +
+      +        return FastGSS(new_heads,
+      +                       self._acc_default_factory,
+      +                       new_root,
+      +                       new_child_to_parents,
+      +                       self._path_cache.copy())
+      @@ -216,7 +239,7 @@
+               if node.id in cache:
+                   return cache[node.id]
+       
+      -        if node == self._root:
+      +        if node.depth == 0:
+                   return frozenset([tuple()])
+       
+               if node not in child_to_parents:
 
       ```
     metadata:
@@ -35667,11 +36062,8 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-    metadata:
-  - user: 'Changes committed with message: "Refactor: Delegate GSS state updates in
-      commit to Rust backend"'
+      Identified target file: python/gss_tester/fast_impl.py
+      Applying patch to 'python/gss_tester/fast_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/fast_impl.py.
     metadata:
 ...
