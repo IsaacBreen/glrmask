@@ -275,5 +275,5 @@ class Model(GraphProvider):
         print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()).to_ranges())
         print("Final computed mask:", temp.to_ranges())
         print("Reference mask from Rust state:", RangeSet.from_numpy(ref).to_ranges())
-        assert (temp == RangeSet.from_numpy(ref)).all()
+        assert temp == RangeSet.from_numpy(ref)
         return temp
