@@ -210,6 +210,26 @@ class Model(GraphProvider):
 
         return model
 
+    def _disallow_terminal_in_state(self, gss: FastGSS, state_id: int, terminal_id: int) -> FastGSS:
+        """
+        Mirror Rust: disallow_terminals_and_prune_arc over a single tokenizer state
+        by clearing 'terminal_id' for that specific 'state_id' in the L2 bitset of the GSS acc.
+        We clone the L2 bitset first (union with itself) to avoid in-place aliasing.
+        """
+        def apply_disallow(acc: PyAcc) -> PyAcc:
+            current_l2 = acc.terminals_union
+            # Clone the L2 bitset by OR-ing with itself (returns a new object)
+            new_l2 = current_l2.union(current_l2)
+            # Fetch current allowed terminals for this tokenizer state
+            curr_bv = current_l2.get_l2_bitset(state_id)
+            # Remove the matched terminal id from that state's allowed set if present
+            if curr_bv.contains(terminal_id):
+                to_remove = ffi.Bitset.from_indices([terminal_id])
+                new_bv = curr_bv.difference(to_remove)
+                new_l2.insert_l2_bitset(state_id, new_bv)
+            return PyAcc(terminals_union=new_l2)
+        return gss.apply(apply_disallow)
+
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
 
@@ -244,6 +264,7 @@ class Model(GraphProvider):
         q = collections.deque()
         for tokenizer_sid, gss in self.state.items():
             q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
+        pm_cache = self.possible_matches_cache
 
         visited_q_items = set()
 
@@ -260,6 +281,16 @@ class Model(GraphProvider):
 
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
+                # Mirror Rust's immediate re-match disallow:
+                # If after consuming the remainder from this offset we end in a tokenizer state
+                # that can produce this same terminal immediately, forbid it for that state.
+                if end_state is not None:
+                    # possible_matches_cache maps tokenizer_state_id -> { terminal_id -> Bitset }
+                    possible_for_end = pm_cache.get(end_state)
+                    # Keys are ints in the dict returned by ffi; a straight `in` check is fine.
+                    if possible_for_end is not None and terminal_id in possible_for_end:
+                        processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+
                 if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
