@@ -53,15 +53,6 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
 
 
 def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-    """
-    Python-side popn for FastGSS.
-    - Primary path: walk up n levels by following child_to_parents from the current heads.
-    - Collect peeks (state_id, isolated_parent_gss) from the resulting heads.
-    - Fallback for identity mismatch: if n == 0 and the primary path yields no peeks,
-      we look up peeks by matching on depth (structural proxy) instead of identity.
-      This compensates for new _Node identities created by merges that don't exist
-      as keys in child_to_parents, mirroring Rust's structural behavior.
-    """
     current_heads = gss._heads
     for _ in range(n):
         next_heads = set()
@@ -72,37 +63,18 @@ def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
         current_heads = next_heads
         if not current_heads:
             return []
-
-    result: List[Tuple[int, FastGSS]] = []
+    result = []
     for head in current_heads:
         if head in gss._child_to_parents:
-            for state_id, parent_node in gss._child_to_parents[head]:
+            for state_id, _ in gss._child_to_parents[head]:
                 isolated_gss = FastGSS(
-                    heads=frozenset([parent_node]),
+                    heads=frozenset([head]),
                     acc_default_factory=gss._acc_default_factory,
                     root=gss._root,
                     child_to_parents=gss._child_to_parents,
                     path_cache=gss._path_cache,
                 )
                 result.append((state_id, isolated_gss))
-
-    # Fallback: if n == 0 and there are no peeks, try matching structurally by depth.
-    # This handles the case where heads were created during merges and don't exist
-    # as keys in child_to_parents (identity mismatch), but are structurally equivalent.
-    if not result and n == 0:
-        target_depths = {h.depth for h in current_heads}
-        for child_node, parents in gss._child_to_parents.items():
-            if child_node.depth in target_depths:
-                for state_id, parent_node in parents:
-                    isolated_gss = FastGSS(
-                        heads=frozenset([parent_node]),
-                        acc_default_factory=gss._acc_default_factory,
-                        root=gss._root,
-                        child_to_parents=gss._child_to_parents,
-                        path_cache=gss._path_cache,
-                    )
-                    result.append((state_id, isolated_gss))
-
     return result
 
 
