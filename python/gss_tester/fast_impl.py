@@ -116,56 +116,25 @@ class FastGSS(GSS[T, Acc]):
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-        # Map each original node to its transformed counterpart
+        new_heads: Set[_Node[T, Acc]] = set()
+        new_child_to_parents = self._child_to_parents.copy()
         memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
 
-        def transform(node: _Node[T, Acc]) -> _Node[T, Acc]:
-            """Recursively transform a node and its ancestors."""
-            if node in memo:
-                return memo[node]
+        for head in self._heads:
+            if head in memo:
+                new_heads.add(memo[head])
+                continue
 
-            # Determine whether any parent changes after transformation
-            parents_changed = False
-            if node in self._child_to_parents:
-                for _, parent in self._child_to_parents[node]:
-                    new_parent = transform(parent)
-                    if new_parent is not parent:
-                        parents_changed = True
-
-            # Apply the accumulator function to this node
-            new_acc = func(node.acc)
-
-            # If nothing changed, reuse the original node
-            if not parents_changed and new_acc == node.acc:
-                memo[node] = node
-                return node
-
-            # Otherwise create a new node
-            new_node = _Node(acc=new_acc, depth=node.depth)
-            memo[node] = new_node
-            return new_node
-
-        # Transform all head nodes
-        new_heads = frozenset(transform(h) for h in self._heads)
-
-        # Rebuild the child‑to‑parents mapping using the transformed nodes
-        new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-        for old_child, parents in self._child_to_parents.items():
-            new_child = memo[old_child]
-            new_set: Set[Tuple[T, _Node[T, Acc]]] = set()
-            for value, old_parent in parents:
-                new_parent = memo[old_parent]
-                new_set.add((value, new_parent))
-            new_child_to_parents[new_child] = new_set
-
-        # Preserve the (possibly) transformed root node
-        new_root = memo.get(self._root, self._root)
-
-        return FastGSS(new_heads,
-                       self._acc_default_factory,
-                       new_root,
-                       new_child_to_parents,
-                       self._path_cache.copy())
+            new_acc = func(head.acc)
+            new_node = _Node(acc=new_acc, depth=head.depth)
+            
+            if head in self._child_to_parents:
+                new_child_to_parents[new_node] = self._child_to_parents[head]
+            
+            new_heads.add(new_node)
+            memo[head] = new_node
+            
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
@@ -261,7 +230,7 @@ class FastGSS(GSS[T, Acc]):
         if node.id in cache:
             return cache[node.id]
 
-        if node.depth == 0:
+        if node == self._root:
             return frozenset([tuple()])
 
         if node not in child_to_parents:

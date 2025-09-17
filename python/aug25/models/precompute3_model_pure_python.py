@@ -260,22 +260,6 @@ class Model(GraphProvider):
 
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
-
-                # Disallow this terminal from being matched again immediately to enforce longest match.
-                # This mirrors the logic in the Rust implementation.
-                if end_state is not None:
-                    terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
-                    if terminal_id in terminals_accessible:
-                        disallowed_terminals_for_end_state = ffi.Bitset.from_indices([terminal_id])
-                        # Create an L2 bitset that is empty everywhere except for the end_state.
-                        disallowed_l2 = ffi.HybridL2Bitset.all().complement()
-                        disallowed_l2.insert_l2_bitset(end_state, disallowed_terminals_for_end_state)
-
-                        def apply_disallow(acc: PyAcc) -> PyAcc:
-                            return PyAcc(terminals_union=acc.terminals_union.difference(disallowed_l2))
-                        
-                        processed_gss = processed_gss.apply(apply_disallow)
-
                 if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state

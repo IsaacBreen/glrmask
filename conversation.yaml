@@ -11559,7 +11559,9 @@ local_system:
                   if gss_list
               }
 
-              self.state = merged_states
+              final_states = {}
+
+              self.state = final_states
 
           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
@@ -22927,56 +22929,25 @@ local_system:
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              # Map each original node to its transformed counterpart
+              new_heads: Set[_Node[T, Acc]] = set()
+              new_child_to_parents = self._child_to_parents.copy()
               memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
 
-              def transform(node: _Node[T, Acc]) -> _Node[T, Acc]:
-                  """Recursively transform a node and its ancestors."""
-                  if node in memo:
-                      return memo[node]
+              for head in self._heads:
+                  if head in memo:
+                      new_heads.add(memo[head])
+                      continue
 
-                  # Determine whether any parent changes after transformation
-                  parents_changed = False
-                  if node in self._child_to_parents:
-                      for _, parent in self._child_to_parents[node]:
-                          new_parent = transform(parent)
-                          if new_parent is not parent:
-                              parents_changed = True
-
-                  # Apply the accumulator function to this node
-                  new_acc = func(node.acc)
-
-                  # If nothing changed, reuse the original node
-                  if not parents_changed and new_acc == node.acc:
-                      memo[node] = node
-                      return node
-
-                  # Otherwise create a new node
-                  new_node = _Node(acc=new_acc, depth=node.depth)
-                  memo[node] = new_node
-                  return new_node
-
-              # Transform all head nodes
-              new_heads = frozenset(transform(h) for h in self._heads)
-
-              # Rebuild the child‑to‑parents mapping using the transformed nodes
-              new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-              for old_child, parents in self._child_to_parents.items():
-                  new_child = memo[old_child]
-                  new_set: Set[Tuple[T, _Node[T, Acc]]] = set()
-                  for value, old_parent in parents:
-                      new_parent = memo[old_parent]
-                      new_set.add((value, new_parent))
-                  new_child_to_parents[new_child] = new_set
-
-              # Preserve the (possibly) transformed root node
-              new_root = memo.get(self._root, self._root)
-
-              return FastGSS(new_heads,
-                             self._acc_default_factory,
-                             new_root,
-                             new_child_to_parents,
-                             self._path_cache.copy())
+                  new_acc = func(head.acc)
+                  new_node = _Node(acc=new_acc, depth=head.depth)
+                  
+                  if head in self._child_to_parents:
+                      new_child_to_parents[new_node] = self._child_to_parents[head]
+                  
+                  new_heads.add(new_node)
+                  memo[head] = new_node
+                  
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
           def peek(self) -> Set[T]:
               peek_values: Set[T] = set()
@@ -23072,7 +23043,7 @@ local_system:
               if node.id in cache:
                   return cache[node.id]
 
-              if node.depth == 0:
+              if node == self._root:
                   return frozenset([tuple()])
 
               if node not in child_to_parents:
@@ -35255,7 +35226,9 @@ messages:
                   if gss_list
               }
 
-              self.state = merged_states
+              final_states = {}
+
+              self.state = final_states
 
           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
@@ -35508,8 +35481,8 @@ messages:
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: aug25/models/precompute3_model_pure_python.py
-      Normalizing precompute3 BVs: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1462/1462 [00:00<00:00, 72429.19it/s]
-      Model loaded in 0.0964 seconds.
+      Normalizing precompute3 BVs: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1462/1462 [00:00<00:00, 83313.94it/s]
+      Model loaded in 0.0602 seconds.
       Loading and tokenizing code from: ../src/example_code.js
       Tokenized into 6 tokens.
 
@@ -35523,70 +35496,70 @@ messages:
       FastGSS([{'stack': [108], 'acc': PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })}])
 
       --- Seeding work queue ---
-        SEED: sid=0, root_idx=0, gss_heads=[1], mask=<builtins.Bitset object at 0x115bbe470>
+        SEED: sid=0, root_idx=0, gss_heads=[1], mask=<builtins.Bitset object at 0x1267ca190>
 
       --- Main loop ---
 
       [1] Processing depth=0, nodes={0}
-        - Node 0: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x115bbe470>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115bcadd0>
-            - Dest: idx=90, state_bv=<builtins.Bitset object at 0x115bcae70>, matched=1, child_mask=<builtins.Bitset object at 0x1157afaf0>
-              -> CREATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157afaf0>
+        - Node 0: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x1267ca190>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d6af0>
+            - Dest: idx=90, state_bv=<builtins.Bitset object at 0x1267d6b90>, matched=1, child_mask=<builtins.Bitset object at 0x116b839f0>
+              -> CREATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b839f0>
 
       [2] Processing depth=1, nodes={90}
-        - Node 90: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x1157afaf0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157be050>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x1157be110>, matched=1, child_mask=<builtins.Bitset object at 0x1157afcd0>
-              -> CREATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157afcd0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157bd310>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157bc770>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x1157bc4b0>, matched=1, child_mask=<builtins.Bitset object at 0x1157afeb0>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157ac030>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157bc4f0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157bc450>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1157bd2f0>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x1157afd90>, matched=1, child_mask=<builtins.Bitset object at 0x1157af610>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157afeb0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115bcb9f0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115bcbdf0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115bcbf70>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115bcbfd0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c24230>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c245b0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c24b70>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c24c70>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c25230>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c253b0>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x115c253d0>, matched=1, child_mask=<builtins.Bitset object at 0x1157afcd0>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157af610>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c25990>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c25cd0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c25f50>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x115c25f70>, matched=1, child_mask=<builtins.Bitset object at 0x1157ac030>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157afcd0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c26490>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c269d0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c26c50>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c27210>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x115c27230>, matched=1, child_mask=<builtins.Bitset object at 0x1157afeb0>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157ac030>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c27270>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c27750>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c27c30>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c30130>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c30610>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c30af0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c310b0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c31590>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c31b50>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c32110>
-            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x115c32130>, matched=1, child_mask=<builtins.Bitset object at 0x1157af610>
-              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x1157afeb0>
-          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x115c32610>
+        - Node 90: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x116b839f0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8dd70>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x116b8de30>, matched=1, child_mask=<builtins.Bitset object at 0x116b834d0>
+              -> CREATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b834d0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8d030>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8c490>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x116b8c1d0>, matched=1, child_mask=<builtins.Bitset object at 0x116b83eb0>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b801b0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8c210>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8c170>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x116b8d010>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x116b83ab0>, matched=1, child_mask=<builtins.Bitset object at 0x116b83330>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b83eb0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d7710>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d7b10>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d7c90>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d7cf0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1267d7f10>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268302d0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126830890>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126830990>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126830f50>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268310d0>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x1268310f0>, matched=1, child_mask=<builtins.Bitset object at 0x116b834d0>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b83330>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268316b0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268319f0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126831c70>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x126831c90>, matched=1, child_mask=<builtins.Bitset object at 0x116b801b0>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b834d0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268321b0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x1268326f0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126832970>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126832f30>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x126832f50>, matched=1, child_mask=<builtins.Bitset object at 0x116b83eb0>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b801b0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126832f90>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126833470>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126833950>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x126833e10>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683c330>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683c810>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683cdd0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683d2b0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683d870>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683de30>
+            - Dest: idx=89, state_bv=<builtins.Bitset object at 0x12683de50>, matched=1, child_mask=<builtins.Bitset object at 0x116b83330>
+              -> UPDATING gss_heads=[1], mask=<builtins.Bitset object at 0x116b83eb0>
+          - Edge: pop=0, llm_bv=<builtins.Bitset object at 0x12683e330>
 
       [3] Processing depth=17, nodes={89}
-        - Node 89: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x1157afeb0>
-          - END NODE. final_mask len: 0 -> 96 (+96) with tokens <builtins.Bitset object at 0x1157afcd0>
+        - Node 89: Popped gss_heads=[1], mask=<builtins.Bitset object at 0x116b83eb0>
+          - END NODE. final_mask len: 0 -> 96 (+96) with tokens <builtins.Bitset object at 0x116b834d0>
       [4] Loop finished: no more nodes to process.
 
       --- get_mask END ---
@@ -35595,12 +35568,10 @@ messages:
       --- get_mask START ---
       GSS at start of get_mask:
       state_map:
-      FastGSS([{'stack': [108, 92], 'acc': PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })}])
-      FastGSS([{'stack': [108], 'acc': PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })}])
       expected_state_map:
       FastGSS([{'stack': [108, 92], 'acc': PyAcc(HybridL2Bitset { inner: (0..=41, HybridBitset { inner: 0..=18446744073709551615 }), (42..=42, HybridBitset { inner: 0..=0, 2..=18446744073709551615 }), (43..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })}])
       FastGSS([{'stack': [108], 'acc': PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })}])
-      Benchmarking steps:  17%|████████████████████████                                                                                                                        | 1/6 [00:00<00:00, 374.12it/s, get_mask]
+      Benchmarking steps:  17%|████████████████████████                                                                                                                        | 1/6 [00:00<00:00, 555.54it/s, get_mask]
       Traceback (most recent call last):
         File "<frozen runpy>", line 198, in _run_module_as_main
         File "<frozen runpy>", line 88, in _run_code
@@ -35611,13 +35582,11 @@ messages:
         File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 224, in run_benchmark
           mask_rs = model.get_mask()
                     ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 346, in get_mask
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 348, in get_mask
           assert state_map == expected_state_map, f"state_map != expected_state_map: {state_map.keys() ^ expected_state_map.keys()}"
-      AssertionError: state_map != expected_state_map: set()
+      AssertionError: state_map != expected_state_map: {0, 42}
     metadata:
-  - user: What causes this mismatch? Fix it. Try to anticipate any further mismatches
-      and avoid them. The Python version should be consistent with the Rust version.
-      We hope to reduce dependency on the Rust code.
+  - user: What causes this mismatch?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -35636,424 +35605,63 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to fix the issue, followed by the git diffs.
+      Of course. The error you're seeing is due to a bug in the Python reimplementation of the token commit logic, which causes the parser's state to be incorrectly cleared after each step. Here are the instructions to fix it, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      **1. File: `python/src/lib.rs`**
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`**.
 
-      *   **Expose `tokens_accessible_from_state` for `PyRegex`**: In the `#[pymethods]` block for `PyRegex`, add the `tokens_accessible_from_state` method. This is needed to check for possible longest-match conflicts in the Python `commit` logic.
+      2.  **Navigate to the `commit` method**. This method is responsible for updating the Python model's state after processing a token.
 
-          ```rust
-          // In #[pymethods] for PyRegex, after initial_state_id()
-          fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<BTreeSet<usize>> {
-              let accessible = self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
-              Ok(accessible.into_iter().map(|tid| tid.0).collect())
-          }
+      3.  **Locate the end of the method**. You will find the following block of code:
+          ```python
+                  merged_states = {
+                      sid: FastGSS.merge(gss_list, merge_acc)
+                      for sid, gss_list in new_states.items()
+                      if gss_list
+                  }
+          
+                  final_states = {}
+          
+                  self.state = final_states
           ```
 
-      *   **Expose set operations for `PyHybridL2Bitset`**: In the `#[pymethods]` block for `PyHybridL2Bitset`, add `intersection` and `difference` methods. These are required to implement the terminal disallowing logic in Python.
+      4.  **Correct the bug**. The line `final_states = {}` incorrectly creates an empty dictionary, which then wipes the parser's state. The fix is to remove this line and assign the correctly computed `merged_states` to `self.state`.
+          *   Delete the line `final_states = {}`.
+          *   Change `self.state = final_states` to `self.state = merged_states`.
 
-          ```rust
-          // In #[pymethods] for PyHybridL2Bitset, after union()
-          fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: &self.inner & &other.inner }
-          }
-
-          fn difference(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: &self.inner - &other.inner }
-          }
+      5.  After your changes, the end of the `commit` method should look like this:
+          ```python
+                  merged_states = {
+                      sid: FastGSS.merge(gss_list, merge_acc)
+                      for sid, gss_list in new_states.items()
+                      if gss_list
+                  }
+          
+                  self.state = merged_states
           ```
 
-      **2. File: `python/gss_tester/fast_impl.py`**
+      6.  **Save the file**. This will ensure the Python model's state is correctly updated, resolving the assertion error.
 
-      *   **Correct the `apply` method in `FastGSS`**: Replace the current, flawed `apply` method with a version that correctly performs a deep copy and transformation of the entire GSS graph. This ensures that modifications to node accumulators are correctly reflected throughout the structure.
+      ### Git Diff
 
-      *   **Make `_reconstruct_paths` more robust**: In the `_reconstruct_paths` method, change the base case of the recursion from `if node == self._root:` to `if node.depth == 0:`. This prevents errors if the root node object is replaced during transformations.
-
-      **3. File: `python/aug25/models/precompute3_model_pure_python.py`**
-
-      *   **Implement terminal-disallowing logic in `Model.commit`**: In the `commit` method, inside the `for terminal_id, width in matches:` loop, add logic that mirrors the Rust implementation. After processing a token match (`_process_token`), check if the tokenizer could immediately match the same terminal again. If so, apply a transformation to the resulting GSS to disallow that terminal for the new tokenizer state, preventing incorrect shortest-match behavior.
-
-      ### Git Diffs
+      Here is the git patch to apply the fix:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -262,6 +262,21 @@
+      @@ -260,9 +260,7 @@
+                   if gss_list
+               }
        
-                   for terminal_id, width in matches:
-                       processed_gss = self._process_token(gss, terminal_id)
-      +
-      +                # Disallow this terminal from being matched again immediately to enforce longest match.
-      +                # This mirrors the logic in the Rust implementation.
-      +                if end_state is not None:
-      +                    terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
-      +                    if terminal_id in terminals_accessible:
-      +                        disallowed_terminals_for_end_state = ffi.Bitset.from_indices([terminal_id])
-      +                        # Create an L2 bitset that is empty everywhere except for the end_state.
-      +                        disallowed_l2 = ffi.HybridL2Bitset.all().complement()
-      +                        disallowed_l2.insert_l2_bitset(end_state, disallowed_terminals_for_end_state)
-      +
-      +                        def apply_disallow(acc: PyAcc) -> PyAcc:
-      +                            return PyAcc(terminals_union=acc.terminals_union.difference(disallowed_l2))
-      +                        
-      +                        processed_gss = processed_gss.apply(apply_disallow)
-      +
-                       if any(h is not processed_gss._root for h in processed_gss._heads):
-                           new_offset = offset + width
-                           next_tokenizer_sid = self.tokenizer_initial_state
-
-      ```
-      ```diff
-      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
-      --- a/python/gss_tester/fast_impl.py
-      +++ b/python/gss_tester/fast_impl.py
-      @@ -102,23 +102,46 @@
-               return peek_values
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-      -        new_heads: Set[_Node[T, Acc]] = set()
-      -        new_child_to_parents = self._child_to_parents.copy()
-      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+      -        final_states = {}
       -
-      -        for head in self._heads:
-      -            if head in memo:
-      -                new_heads.add(memo[head])
-      -                continue
-      -
-      -            new_acc = func(head.acc)
-      -            new_node = _Node(acc=new_acc, depth=head.depth)
-      -            
-      -            if head in self._child_to_parents:
-      -                new_child_to_parents[new_node] = self._child_to_parents[head]
-      -            
-      -            new_heads.add(new_node)
-      -            memo[head] = new_node
-      -            
-      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-      +        memo: Dict[_Node, _Node] = {}
-      +
-      +        def transform_node(node: _Node) -> _Node:
-      +            if node in memo:
-      +                return memo[node]
-      +
-      +            # Recurse to parents first to see if they change
-      +            new_parents = set()
-      +            parents_changed = False
-      +            if node in self._child_to_parents:
-      +                for value, parent_node in self._child_to_parents[node]:
-      +                    new_parent = transform_node(parent_node)
-      +                    if new_parent is not parent_node:
-      +                        parents_changed = True
-      +                    new_parents.add((value, new_parent))
-      +
-      +            new_acc = func(node.acc)
-      +
-      +            if not parents_changed and new_acc == node.acc:
-      +                memo[node] = node
-      +                return node
-      +
-      +            new_node = _Node(acc=new_acc, depth=node.depth)
-      +            memo[node] = new_node
-      +            return new_node
-      +
-      +        new_heads_list = [transform_node(h) for h in self._heads]
-      +        new_heads = frozenset(new_heads_list)
-      +        
-      +        new_child_to_parents = {}
-      +        for old_node, new_node in memo.items():
-      +            if old_node in self._child_to_parents:
-      +                parents_set = set()
-      +                for value, old_parent in self._child_to_parents[old_node]:
-      +                    new_parent = memo[old_parent]
-      +                    parents_set.add((value, new_parent))
-      +                if parents_set:
-      +                    new_child_to_parents[new_node] = parents_set
-      +        
-      +        new_root = memo.get(self._root, self._root)
-      +        return FastGSS(new_heads, self._acc_default_factory, new_root, new_child_to_parents, {})
+      -        self.state = final_states
+      +        self.state = merged_states
        
-           def peek(self) -> Set[T]:
-               peek_values: Set[T] = set()
-      @@ -216,7 +239,7 @@
-               if node.id in cache:
-                   return cache[node.id]
-       
-      -        if node == self._root:
-      +        if node.depth == 0:
-                   return frozenset([tuple()])
-       
-               if node not in child_to_parents:
-
-      ```
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -141,6 +141,11 @@
-           fn initial_state_id(&self) -> usize {
-               self.inner.initial_state_id().0
-           }
-      +
-      +    fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<BTreeSet<usize>> {
-      +        let accessible = self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
-      +        Ok(accessible.into_iter().map(|tid| tid.0).collect())
-      +    }
-       }
-       
-       #[pyclass(name = "GrammarDefinition")]
-      @@ -421,6 +426,14 @@
-               PyHybridL2Bitset { inner: &self.inner | &other.inner }
-           }
-       
-      +    fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-      +        PyHybridL2Bitset { inner: &self.inner & &other.inner }
-      +    }
-      +
-      +    fn difference(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-      +        PyHybridL2Bitset { inner: &self.inner - &other.inner }
-      +    }
-      +
-           pub fn complement(&self) -> PyHybridL2Bitset {
-               PyHybridL2Bitset { inner: self.inner.complement() }
-           }
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -102,23 +102,46 @@
-               return peek_values
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-      -        new_heads: Set[_Node[T, Acc]] = set()
-      -        new_child_to_parents = self._child_to_parents.copy()
-      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-      -
-      -        for head in self._heads:
-      -            if head in memo:
-      -                new_heads.add(memo[head])
-      -                continue
-      -
-      -            new_acc = func(head.acc)
-      -            new_node = _Node(acc=new_acc, depth=head.depth)
-      -            
-      -            if head in self._child_to_parents:
-      -                new_child_to_parents[new_node] = self._child_to_parents[head]
-      -            
-      -            new_heads.add(new_node)
-      -            memo[head] = new_node
-      -            
-      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-      +        memo: Dict[_Node, _Node] = {}
-      +
-      +        def transform_node(node: _Node) -> _Node:
-      +            if node in memo:
-      +                return memo[node]
-      +
-      +            # Recurse to parents first to see if they change
-      +            new_parents = set()
-      +            parents_changed = False
-      +            if node in self._child_to_parents:
-      +                for value, parent_node in self._child_to_parents[node]:
-      +                    new_parent = transform_node(parent_node)
-      +                    if new_parent is not parent_node:
-      +                        parents_changed = True
-      +                    new_parents.add((value, new_parent))
-      +
-      +            new_acc = func(node.acc)
-      +
-      +            if not parents_changed and new_acc == node.acc:
-      +                memo[node] = node
-      +                return node
-      +
-      +            new_node = _Node(acc=new_acc, depth=node.depth)
-      +            memo[node] = new_node
-      +            return new_node
-      +
-      +        new_heads_list = [transform_node(h) for h in self._heads]
-      +        new_heads = frozenset(new_heads_list)
-      +        
-      +        new_child_to_parents = {}
-      +        for old_node, new_node in memo.items():
-      +            if old_node in self._child_to_parents:
-      +                parents_set = set()
-      +                for value, old_parent in self._child_to_parents[old_node]:
-      +                    new_parent = memo[old_parent]
-      +                    parents_set.add((value, new_parent))
-      +                if parents_set:
-      +                    new_child_to_parents[new_node] = parents_set
-      +        
-      +        new_root = memo.get(self._root, self._root)
-      +        return FastGSS(new_heads, self._acc_default_factory, new_root, new_child_to_parents, {})
-       
-           def peek(self) -> Set[T]:
-               peek_values: Set[T] = set()
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-              return peek_values
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-
-          def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
-      ```
-
-      Nearest Match in `python/gss_tester/fast_impl.py` (found at line 116 with 96.00% similarity, shown with padding):
-
-      ```python
-                          new_heads.add(head)
-
-              if not new_heads:
-                  # If no stacks match, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-
-          def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for value, _ in self._child_to_parents[head]:
-                          peek_values.add(value)
-              return peek_values
-      ```
-
-      The git diff hunk above failed to apply to the file `python/gss_tester/fast_impl.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
-      --- a/python/gss_tester/fast_impl.py
-      +++ b/python/gss_tester/fast_impl.py
-      @@
-      -    def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-      -        new_heads: Set[_Node[T, Acc]] = set()
-      -        new_child_to_parents = self._child_to_parents.copy()
-      -        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-      -
-      -        for head in self._heads:
-      -            if head in memo:
-      -                new_heads.add(memo[head])
-      -                continue
-      -
-      -            new_acc = func(head.acc)
-      -            new_node = _Node(acc=new_acc, depth=head.depth)
-      -            
-      -            if head in self._child_to_parents:
-      -                new_child_to_parents[new_node] = self._child_to_parents[head]
-      -            
-      -            new_heads.add(new_node)
-      -            memo[head] = new_node
-      -            
-      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-      +    def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-      +        # Map each original node to its transformed counterpart
-      +        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-      +
-      +        def transform(node: _Node[T, Acc]) -> _Node[T, Acc]:
-      +            """Recursively transform a node and its ancestors."""
-      +            if node in memo:
-      +                return memo[node]
-      +
-      +            # Determine whether any parent changes after transformation
-      +            parents_changed = False
-      +            if node in self._child_to_parents:
-      +                for _, parent in self._child_to_parents[node]:
-      +                    new_parent = transform(parent)
-      +                    if new_parent is not parent:
-      +                        parents_changed = True
-      +
-      +            # Apply the accumulator function to this node
-      +            new_acc = func(node.acc)
-      +
-      +            # If nothing changed, reuse the original node
-      +            if not parents_changed and new_acc == node.acc:
-      +                memo[node] = node
-      +                return node
-      +
-      +            # Otherwise create a new node
-      +            new_node = _Node(acc=new_acc, depth=node.depth)
-      +            memo[node] = new_node
-      +            return new_node
-      +
-      +        # Transform all head nodes
-      +        new_heads = frozenset(transform(h) for h in self._heads)
-      +
-      +        # Rebuild the child‑to‑parents mapping using the transformed nodes
-      +        new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-      +        for old_child, parents in self._child_to_parents.items():
-      +            new_child = memo[old_child]
-      +            new_set: Set[Tuple[T, _Node[T, Acc]]] = set()
-      +            for value, old_parent in parents:
-      +                new_parent = memo[old_parent]
-      +                new_set.add((value, new_parent))
-      +            new_child_to_parents[new_child] = new_set
-      +
-      +        # Preserve the (possibly) transformed root node
-      +        new_root = memo.get(self._root, self._root)
-      +
-      +        return FastGSS(new_heads,
-      +                       self._acc_default_factory,
-      +                       new_root,
-      +                       new_child_to_parents,
-      +                       self._path_cache.copy())
-      @@ -216,7 +239,7 @@
-               if node.id in cache:
-                   return cache[node.id]
-       
-      -        if node == self._root:
-      +        if node.depth == 0:
-                   return frozenset([tuple()])
-       
-               if node not in child_to_parents:
+           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
 
       ```
     metadata:
@@ -36062,8 +35670,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/fast_impl.py
-      Applying patch to 'python/gss_tester/fast_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/fast_impl.py.
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correctly update parser state after
+      token commit"'
     metadata:
 ...
