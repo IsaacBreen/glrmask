@@ -2,7 +2,7 @@ import json
 import time
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Union
 from dataclasses import dataclass
 
 from ..common_interface import GraphProvider, RangeSet
@@ -12,45 +12,40 @@ from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
 
 
 @dataclass(frozen=True)
+class Shift:
+    state_id: int
+
+@dataclass(frozen=True)
+class Reduce:
+    nonterminal_id: int
+    len: int
+    production_ids: Tuple[int, ...]
+
+@dataclass(frozen=True)
+class Split:
+    shift: Optional[int]
+    reduces: Tuple[Reduce, ...]
+
+Action = Union[Shift, Reduce, Split]
+
+@dataclass(frozen=True)
+class Goto:
+    state_id: Optional[int]
+    accept: bool
+
+@dataclass
+class Row:
+    actions: Dict[int, Action]  # terminal_id -> Action
+    gotos: Dict[int, Goto]      # nonterminal_id -> Goto
+
+
+@dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
     return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-
-def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
-    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
-    q = collections.deque([rust_gss_node])
-    visited_rust_ptrs = {rust_gss_node.ptr()}
-    while q:
-        rust_node = q.popleft()
-        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
-        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
-        memo_nodes[rust_node.ptr()] = py_node
-        for _, pred_rust_node in rust_node.predecessors():
-            if pred_rust_node.ptr() not in visited_rust_ptrs:
-                visited_rust_ptrs.add(pred_rust_node.ptr())
-                q.append(pred_rust_node)
-    q = collections.deque([rust_gss_node])
-    visited_rust_ptrs = {rust_gss_node.ptr()}
-    while q:
-        rust_node = q.popleft()
-        py_node = memo_nodes[rust_node.ptr()]
-        for state_id, pred_rust_node in rust_node.predecessors():
-            py_pred_node = memo_nodes[pred_rust_node.ptr()]
-            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
-            if pred_rust_node.ptr() not in visited_rust_ptrs:
-                visited_rust_ptrs.add(pred_rust_node.ptr())
-                q.append(pred_rust_node)
-    py_head_node = memo_nodes[rust_gss_node.ptr()]
-    def acc_factory():
-        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
-    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-
 
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     for _ in range(n):
@@ -74,8 +69,7 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
-        self.constraint: Optional[ffi.GrammarConstraint] = None
-        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+        self.constraint: Optional[ffi.GrammarConstraint] = None 
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
@@ -123,10 +117,77 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
+
+        # Load parse table
+        glr_parser = model.constraint.glr_parser()
+        raw_table_data = glr_parser.get_parse_table()
+        model.start_state_id = raw_table_data['start_state_id']
+        model.parse_table = model._parse_table_data(raw_table_data['table'])
+
+        # Initialize state_map
+        def acc_factory():
+            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        initial_gss = FastGSS.initial(acc_factory).push(model.start_state_id)
+        model.state_map = {0: initial_gss} # tokenizer state 0 -> initial GSS
+
         return model
+
+    def _parse_table_data(self, raw_table: Dict) -> Dict[int, Row]:
+        parsed_table = {}
+        for state_id_str, raw_row in raw_table.items():
+            state_id = int(state_id_str)
+            
+            # Parse actions
+            actions = {}
+            for term_id_str, raw_action in raw_row['shifts_and_reduces'].items():
+                term_id = int(term_id_str)
+                action_type = raw_action[0]
+                if action_type == 'shift':
+                    actions[term_id] = Shift(state_id=raw_action[1])
+                elif action_type == 'reduce':
+                    _, nt_id, length, pids = raw_action
+                    actions[term_id] = Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids))
+                elif action_type == 'split':
+                    _, shift_id, reduces_dict = raw_action
+                    reduces = []
+                    for length, nts_dict in reduces_dict.items():
+                        for nt_id, pids in nts_dict.items():
+                            reduces.append(Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids)))
+                    actions[term_id] = Split(shift=shift_id, reduces=tuple(reduces))
+            
+            # Parse gotos
+            gotos = {}
+            for nt_id_str, raw_goto in raw_row['gotos'].items():
+                nt_id = int(nt_id_str)
+                goto_state_id, accept = raw_goto
+                gotos[nt_id] = Goto(state_id=goto_state_id, accept=accept)
+
+            parsed_table[state_id] = Row(actions=actions, gotos=gotos)
+        return parsed_table
+
+    def _handle_reduce(self, gss_after_pop: FastGSS, reduce: Reduce) -> FastGSS:
+        gss_after_full_pop = gss_after_pop
+        for _ in range(reduce.len - 1):
+            gss_after_full_pop = gss_after_full_pop.pop()
+            
+        goto_gsses = []
+        for top_state_id in gss_after_full_pop.peek():
+            gss_with_top_state = gss_after_full_pop.isolate(top_state_id)
+            
+            row = self.parse_table.get(top_state_id)
+            if not row: continue
+            
+            goto = row.gotos.get(reduce.nonterminal_id)
+            if not goto or goto.state_id is None: continue
+            
+            goto_gsses.append(gss_with_top_state.push(goto.state_id))
+            
+        if not goto_gsses:
+            return FastGSS.initial(gss_after_pop._acc_default_factory)
+        return FastGSS.merge(goto_gsses, merge_acc)
+
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -151,7 +212,69 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        self.constraint_state.commit(token_id)
+        token_bytes = self.id_to_token.get(token_id)
+        if not token_bytes:
+            self.state_map = {}
+            return
+
+        final_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+        queue_map: Dict[int, Dict[int, List[FastGSS]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+        
+        for sid, gss in self.state_map.items():
+            queue_map[0][sid].append(gss)
+
+        sorted_offsets = [0] if 0 in queue_map else []
+
+        while sorted_offsets:
+            offset = sorted_offsets.pop(0)
+            states_at_offset = queue_map.pop(offset)
+
+            for sid, gss_list in states_at_offset.items():
+                gss = FastGSS.merge(gss_list, merge_acc)
+
+                end_state, matches = self.constraint.tokenizer().execute_from_state(token_bytes[offset:], sid)
+
+                for terminal_id, width in matches:
+                    new_gss = self._process_terminal(gss, terminal_id)
+                    if any(h is not new_gss._root for h in new_gss._heads):
+                        new_offset = offset + width
+                        next_sid = 0  # tokenizer resets
+                        
+                        if new_offset == len(token_bytes):
+                            final_states[next_sid].append(new_gss)
+                        else:
+                            if new_offset not in queue_map and new_offset not in [o for o, _ in enumerate(sorted_offsets)]:
+                                sorted_offsets.append(new_offset)
+                                sorted_offsets.sort()
+                            queue_map[new_offset][next_sid].append(new_gss)
+                
+                if end_state is not None:
+                    final_states[end_state].append(gss)
+
+        self.state_map = {
+            sid: FastGSS.merge(gss_list, merge_acc)
+            for sid, gss_list in final_states.items()
+            if gss_list
+        }
+
+    def _process_terminal(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+        shifted_gsses, reduced_gsses = [], []
+        for top_state_id in gss.peek():
+            gss_for_state = gss.isolate(top_state_id)
+            if not any(h is not gss_for_state._root for h in gss_for_state._heads): continue
+            
+            popped_gss = gss_for_state.pop()
+            row = self.parse_table.get(top_state_id)
+            if not row or terminal_id not in row.actions: continue
+            action = row.actions[terminal_id]
+
+            if isinstance(action, (Shift, Split)) and (shift_to := getattr(action, 'shift', action.state_id)) is not None:
+                shifted_gsses.append(popped_gss.push(shift_to))
+            if isinstance(action, (Reduce, Split)):
+                reductions = (action,) if isinstance(action, Reduce) else action.reduces
+                for r in reductions: reduced_gsses.append(self._handle_reduce(popped_gss, r))
+
+        return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
 
     def get_mask(self) -> RangeSet:
         """
@@ -159,9 +282,7 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         print("\n--- get_mask START ---")
-        print("GSS at start of get_mask:")
-        rust_state_map = self.constraint_state.get_state_map()
-        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
+        state_map = self.state_map
 
         all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
