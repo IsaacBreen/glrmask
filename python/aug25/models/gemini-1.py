@@ -45,6 +45,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         self.roots_map = dict(roots_map)
         self.arena = arena
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.max_depth: Dict[int, int] = {}
         self.end_nodes: set[int] = set()
@@ -86,8 +87,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -214,6 +215,6 @@ class Model(GraphProvider):
                             heapq.heappush(depth_heap, child_depth)
                         todo[child_depth].add(dest_idx)
 
-        original_mask = self.constraint_state.internal_bv_to_original(final_mask)
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
         return RangeSet.from_ranges(original_mask.to_ranges())
 
