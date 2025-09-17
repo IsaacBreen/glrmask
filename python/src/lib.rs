@@ -648,6 +648,10 @@ impl PyHybridL2Bitset {
     fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: &self.inner | &other.inner }
     }
+
+    pub fn complement(&self) -> PyHybridL2Bitset {
+        PyHybridL2Bitset { inner: self.inner.complement() }
+    }
 }
 
 
