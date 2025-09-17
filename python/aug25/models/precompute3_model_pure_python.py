@@ -335,7 +335,7 @@ class Model(GraphProvider):
         print("GSS at start of get_mask:")
         state_map = self.state
 
-        state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+        # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
