@@ -263,7 +263,7 @@ class Model(GraphProvider):
                 if any(h is not gss_after_step._root for h in gss_after_step._heads):
                     # After a grammar token is consumed, disallow it from being matched again immediately
                     # if the tokenizer could produce it from its new state.
-                    disallowed_terminals = ffi.HybridL2Bitset.new()
+                    disallowed_terminals = ffi.HybridL2Bitset()
                     if end_state is not None:
                         terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
                         if terminal_id in terminals_accessible:
