@@ -607,6 +607,10 @@ impl PyHybridBitset {
         PyHybridBitset { inner: &self.inner ^ &other.inner }
     }
 
+    fn is_subset(&self, other: &PyHybridBitset) -> bool {
+        self.inner.is_subset(&other.inner)
+    }
+
     fn to_json_string(&self) -> String {
         self.inner.to_json().to_json_string()
     }
