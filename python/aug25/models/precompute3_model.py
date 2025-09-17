@@ -104,9 +104,9 @@ class Model(GraphProvider):
         """
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
-        print(self.constraint_state)
-        state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+        # print(self.constraint_state)
+        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
@@ -125,23 +125,21 @@ class Model(GraphProvider):
         max_depth = self.max_depth
 
         print("\n--- Seeding work queue ---")
-        for sid, gss in state_to_gss.items():
+        for sid, (gss, new_mask) in state_to_gss_and_mask.items():
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
 
-            gss_clone = gss.clone_node()
-            new_mask = gss_clone.allowed_llm_tokens()
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = (gss_clone, new_mask)
+                values[root_idx] = (gss, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)

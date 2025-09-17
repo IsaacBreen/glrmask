@@ -832,32 +832,16 @@ impl PyGrammarConstraintState {
         self.inner.borrow_constraint().internal_bv_to_original(bv)
     }
 
-    fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, PyGSSNode>> {
+    fn filtered_state_gss_map(&self) -> PyResult<std::collections::BTreeMap<usize, (PyGSSNode, PyHybridBitset)>> {
         let mut out = std::collections::BTreeMap::new();
         self.inner.with_inner(|state| {
-            for (tokenizer_state_id, glr_state) in &state.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
+            // Use the new helper that returns filtered GSS entries together with their allowed bitsets.
+            let filtered_map = state.get_filtered_gss_map();
+            for (tokenizer_state_id, (glr_state, allowed_bv)) in filtered_map {
+                let gss_node = PyGSSNode { inner: glr_state.active_state.stack.clone() };
+                let bitset = PyHybridBitset { inner: allowed_bv };
+                out.insert(tokenizer_state_id.0, (gss_node, bitset));
             }
-            let disallowed_l2 = glr_state.active_state.stack.disallowed_terminals();
-            let mut forbidden = RustHybridBitset::zeros();
-
-            for (range, disallowed_terminals_for_range) in disallowed_l2.range_values() {
-                if disallowed_terminals_for_range.is_empty() { continue; }
-                let possible_matches = &state.parent.possible_matches;
-                let slice = possible_matches.range(sep1::tokenizer::TokenizerStateID(*range.start())..=sep1::tokenizer::TokenizerStateID(*range.end()));
-                for (_sid, per_state) in slice {
-                    for (terminal_id, llm_bv) in per_state {
-                        if disallowed_terminals_for_range.contains(terminal_id.0) {
-                            forbidden |= llm_bv.clone();
-                        }
-                    }
-                }
-                }
-
-            let mut gss_arc = glr_state.active_state.stack.clone();
-            out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
-        }
         });
         Ok(out)
     }
