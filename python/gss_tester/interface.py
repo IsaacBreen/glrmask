@@ -20,10 +20,18 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def pop(self, value: T) -> 'GSS[T, Acc]':
+    def pop(self) -> 'GSS[T, Acc]':
         """
-        For all stacks ending in `value`, creates new stacks by removing that value.
-        Returns a new GSS state containing only these popped stacks.
+        For all active stacks, creates new stacks by removing the top value.
+        Returns a new GSS state containing the popped stacks.
+        """
+        pass
+
+    @abstractmethod
+    def isolate(self, value: T) -> 'GSS[T, Acc]':
+        """
+        Keeps only the stacks that have `value` at the top.
+        Returns a new GSS state containing only these stacks.
         """
         pass
 

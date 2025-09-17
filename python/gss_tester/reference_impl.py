@@ -21,11 +21,19 @@ class ReferenceGSS(GSS[T, Acc]):
         new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
         return ReferenceGSS(new_stacks, self._acc_default_factory)
 
-    def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+    def pop(self) -> 'ReferenceGSS[T, Acc]':
+        new_stacks = []
+        for stack, acc in self.stacks:
+            if stack:
+                new_stacks.append((stack[:-1], acc))
+
+        return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+    def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
         new_stacks = []
         for stack, acc in self.stacks:
             if stack and stack[-1] == value:
-                new_stacks.append((stack[:-1], acc))
+                new_stacks.append((stack, acc))
 
         return ReferenceGSS(new_stacks, self._acc_default_factory)
 

@@ -31,10 +31,10 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     gss1 = gss1.push(20)
     yield from _yield_state(gss1)
 
-    gss_popped_20 = gss1.pop(20)
+    gss_popped_20 = gss1.isolate(20).pop()
     yield from _yield_state(gss_popped_20)
 
-    gss_popped_10 = gss_popped_20.pop(10)
+    gss_popped_10 = gss_popped_20.isolate(10).pop()
     yield from _yield_state(gss_popped_10)
 
     # --- Test 2: Forking and Merging ---
@@ -56,7 +56,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
 
     # --- Test 4: Pop with no match ---
     gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
-    gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+    gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
     yield from _yield_state(gss_after_failed_pop)
 
     # --- Test 5: Complex sequence (diamond pattern) ---
@@ -70,11 +70,11 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     s5 = s4.push(4)
     yield from _yield_state(s5)
     
-    s6 = s5.pop(4)
+    s6 = s5.isolate(4).pop()
     yield from _yield_state(s6) # should be same as s4
     
-    s7 = s6.pop(2)
-    s8 = s6.pop(3)
+    s7 = s6.isolate(2).pop()
+    s8 = s6.isolate(3).pop()
     yield from _yield_state(s7)
     yield from _yield_state(s8)
     
@@ -83,7 +83,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     
     # --- Test 6: Merging empty GSS ---
     gss_d = gss_class.initial(acc_factory).push(1)
-    gss_empty = gss_d.pop(2) # creates an empty GSS
+    gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
     yield from _yield_state(gss_empty)
     
     merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
