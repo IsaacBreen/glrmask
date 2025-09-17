@@ -201,6 +201,11 @@ pub struct PyRegex {
 
 #[pymethods]
 impl PyRegex {
+    fn tokens_accessible_from_state(&self, state_id: usize) -> Vec<usize> {
+        self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id))
+            .into_iter().map(|tid| tid.0).collect()
+    }
+
     fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
         let exec_result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
         let end_state = exec_result.end_state;
@@ -210,11 +215,6 @@ impl PyRegex {
 
     fn initial_state_id(&self) -> usize {
         self.inner.initial_state_id().0
-    }
-
-    fn tokens_accessible_from_state(&self, state_id: usize) -> Vec<usize> {
-        self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id))
-            .into_iter().map(|tid| tid.0).collect()
     }
 }
 
@@ -645,6 +645,11 @@ pub struct PyHybridL2Bitset {
 
 #[pymethods]
 impl PyHybridL2Bitset {
+    #[new]
+    fn new() -> Self {
+        Self { inner: RustHybridL2Bitset::new() }
+    }
+
     fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
         self.inner.range_values().map(|(range, bv)| {
             let py_range = (*range.start(), *range.end());
@@ -662,8 +667,8 @@ impl PyHybridL2Bitset {
         PyHybridL2Bitset { inner: &self.inner | &other.inner }
     }
 
-    fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: &self.inner & &other.inner }
+    fn __sub__(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+        PyHybridL2Bitset { inner: &self.inner - &other.inner }
     }
 
     pub fn complement(&self) -> PyHybridL2Bitset {

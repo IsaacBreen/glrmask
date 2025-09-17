@@ -136,6 +136,36 @@ class FastGSS(GSS[T, Acc]):
             
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
+    def apply_to_all(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+        memo: Dict[_Node, _Node] = {}
+        new_child_to_parents: Dict[_Node, Set[Tuple[T, _Node]]] = {}
+
+        def transform_recursive(node: _Node) -> _Node:
+            if node in memo:
+                return memo[node]
+
+            new_acc = func(node.acc)
+            
+            new_node = _Node(acc=new_acc, depth=node.depth)
+            memo[node] = new_node
+
+            if node in self._child_to_parents:
+                new_parents_set: Set[Tuple[T, _Node]] = set()
+                for value, parent in self._child_to_parents[node]:
+                    new_parents_set.add((value, transform_recursive(parent)))
+                new_child_to_parents[new_node] = new_parents_set
+            
+            return new_node
+
+        if not self._heads:
+            return self
+
+        new_heads = {transform_recursive(head) for head in self._heads}
+        
+        new_root = transform_recursive(self._root)
+
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, new_root, new_child_to_parents, {})
+
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
         for head in self._heads:
