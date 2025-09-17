@@ -60,7 +60,7 @@ def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     allowed_terminals = gss.get_acc(merge_acc)
-    return allowed_terminals.complement()
+    return allowed_terminals.terminals_union.complement()
 
 
 class Model(GraphProvider):
