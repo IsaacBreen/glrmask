@@ -3893,7 +3893,7 @@ local_system:
           m.add_class::<PyIncrementalParser>()?;
           Ok(())
       }
-    python/aug25/models/deepseek-1.py: |
+    python/aug25/models/deepseek-1.py: |+
       import json
       from typing import Dict, List, Tuple, Optional
 
@@ -3933,12 +3933,16 @@ local_system:
               if self.constraint_state:
                   self.constraint_state.commit(token_id)
 
+
           def get_mask(self) -> RangeSet:
               print("\n--- get_mask START (deepseek-1.py) ---")
-              print("deepseek-1.py get_mask is not implemented.")
               print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              print("deepseek-1.py get_mask is not implemented.")
               # Return an empty mask as a fallback
               return RangeSet.empty()
+
     python/aug25/models/gemini-1.py: |
       import json
       import heapq
@@ -10843,7 +10847,14 @@ local_system:
 
           def get_mask(self) -> RangeSet:
               """Calls the underlying Rust implementation for get_mask."""
+              print("\n--- get_mask START (rust_model.py) ---")
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
               mask_bv = self.constraint_state.get_mask_bv()
+
+              print("\n--- get_mask END (rust_model.py) ---")
               return RangeSet.from_ranges(mask_bv.to_ranges())
 
           def commit(self, token_id: int):
@@ -17541,9 +17552,7 @@ local_system:
 
           def get_mask(self) -> RangeSet:
               print("\n--- get_mask START ---")
-              print(self.constraint_state)
               state_to_gss = self.constraint_state.filtered_state_gss_map()
-              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
               """
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. Optimized to avoid per-destination filtering by using
@@ -25653,12 +25662,16 @@ messages:
               if self.constraint_state:
                   self.constraint_state.commit(token_id)
 
+
           def get_mask(self) -> RangeSet:
               print("\n--- get_mask START (deepseek-1.py) ---")
-              print("deepseek-1.py get_mask is not implemented.")
               print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              print("deepseek-1.py get_mask is not implemented.")
               # Return an empty mask as a fallback
               return RangeSet.empty()
+
 
       ```
     metadata:
@@ -32663,7 +32676,14 @@ messages:
 
           def get_mask(self) -> RangeSet:
               """Calls the underlying Rust implementation for get_mask."""
+              print("\n--- get_mask START (rust_model.py) ---")
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
               mask_bv = self.constraint_state.get_mask_bv()
+
+              print("\n--- get_mask END (rust_model.py) ---")
               return RangeSet.from_ranges(mask_bv.to_ranges())
 
           def commit(self, token_id: int):
@@ -32678,11 +32698,8 @@ messages:
     metadata:
       filename: python/aug25/models/rust_model.py
   - user: |-
-      We're getting mismatches on all the models (with rust_model.py as the reference) except precompute3_model.py, which I've already verified.
-      I fixed precompute3_model.py in part with the help of useful print statements in `get_mask`. There are similar prints in constraint.rs.
-      Now I want to debug the other models. Add similar prints to those. Anything that might be useful.
-
-      Note: I've already done the work for a bunch of models, we just need to do the few files left.
+      For a bunch of the models, the prints at the start of get_mask will be exactly the same. I'm thinking in particular about those that just passthrough the commit function, and then have at the beginning of get_mask this: `print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")`. And then maybe the same code seeding the work queue.
+      In my benchmark, I run all of these models one after the other. The total print output is super long contains a lot of redundancy for this reason. Reduce this redundancy. precompute3_model.py is the first to run, so if there's stuff printed there that'll be repeated verbatim later in other models, just print it there, and omit the prints in other models.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -32701,15 +32718,174 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I will add detailed, consistent logging to the `get_mask` methods in the specified model files to aid in debugging. The new logging will match the format used in the reference implementations, showing the initial state, the filtered GSS map, and clear start/end markers for the operation.
+      To reduce redundant logging, I will remove the initial `print(self.constraint_state)` and `print(f"Filtered state_to_gss: ...")` calls from the `get_mask` method in all models except for `precompute3_model.py`, which serves as the baseline.
+
+      Here are the step-by-step instructions to apply these changes:
 
       ### Step-by-step Instructions
 
-      1.  **File: `python/aug25/models/deepseek-1.py`**
-          -   In the `get_mask` method of the `Model` class, I will add logging to print the current `constraint_state` and the result of `filtered_state_gss_map`. This will provide the necessary initial state information for debugging, consistent with other models.
+      1.  **`python/aug25/models/deepseek-1.py`**:
+          -   Open the file `python/aug25/models/deepseek-1.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
 
-      2.  **File: `python/aug25/models/rust_model.py`**
-          -   In the `get_mask` method of the `Model` class, I will add logging before and after the call to the underlying Rust implementation (`self.constraint_state.get_mask_bv()`). This will print the initial state and clearly frame the output from the Rust backend, which produces its own detailed logs.
+      2.  **`python/aug25/models/gemini-1.py`**:
+          -   Open the file `python/aug25/models/gemini-1.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      3.  **`python/aug25/models/gemini-2.py`**:
+          -   Open the file `python/aug25/models/gemini-2.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      4.  **`python/aug25/models/gemini-3.py`**:
+          -   Open the file `python/aug25/models/gemini-3.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      5.  **`python/aug25/models/gemini-4.py`**:
+          -   Open the file `python/aug25/models/gemini-4.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      6.  **`python/aug25/models/gemini-5.py`**:
+          -   Open the file `python/aug25/models/gemini-5.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      7.  **`python/aug25/models/gpt-5-2.py`**:
+          -   Open the file `python/aug25/models/gpt-5-2.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      8.  **`python/aug25/models/gpt-5-3.py`**:
+          -   Open the file `python/aug25/models/gpt-5-3.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      9.  **`python/aug25/models/gpt-5-4.py`**:
+          -   Open the file `python/aug25/models/gpt-5-4.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      10. **`python/aug25/models/gpt-5-5.py`**:
+          -   Open the file `python/aug25/models/gpt-5-5.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      11. **`python/aug25/models/gpt-5-7.py`**:
+          -   Open the file `python/aug25/models/gpt-5-7.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      12. **`python/aug25/models/gpt-5-8.py`**:
+          -   Open the file `python/aug25/models/gpt-5-8.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      13. **`python/aug25/models/gpt-5-9.py`**:
+          -   Open the file `python/aug25/models/gpt-5-9.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      14. **`python/aug25/models/gpt-5-10.py`**:
+          -   Open the file `python/aug25/models/gpt-5-10.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      15. **`python/aug25/models/gpt-5-11.py`**:
+          -   Open the file `python/aug25/models/gpt-5-11.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      16. **`python/aug25/models/gpt-5-12.py`**:
+          -   Open the file `python/aug25/models/gpt-5-12.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      17. **`python/aug25/models/opus-41-1.py`**:
+          -   Open the file `python/aug25/models/opus-41-1.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      18. **`python/aug25/models/precompute2_model.py`**:
+          -   Open the file `python/aug25/models/precompute2_model.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      19. **`python/aug25/models/precompute3_fast_model.py`**:
+          -   Open the file `python/aug25/models/precompute3_fast_model.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
+
+      20. **`python/aug25/models/rust_model.py`**:
+          -   Open the file `python/aug25/models/rust_model.py`.
+          -   In the `get_mask` method, delete the following lines:
+              ```python
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              ```
 
       ### Git Diffs
 
@@ -32717,58 +32893,417 @@ messages:
       diff --git a/python/aug25/models/deepseek-1.py b/python/aug25/models/deepseek-1.py
       --- a/python/aug25/models/deepseek-1.py
       +++ b/python/aug25/models/deepseek-1.py
-      @@ -30,9 +30,11 @@
+      @@ -28,10 +28,7 @@
        
            def get_mask(self) -> RangeSet:
                print("\n--- get_mask START (deepseek-1.py) ---")
-      +        print(self.constraint_state)
-      +        state_to_gss = self.constraint_state.filtered_state_gss_map()
-      +        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
-               print("deepseek-1.py get_mask is not implemented.")
       -        print(self.constraint_state)
+      -        state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+               print("deepseek-1.py get_mask is not implemented.")
                # Return an empty mask as a fallback
                return RangeSet.empty()
        
 
       ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-1.py b/python/aug25/models/gemini-1.py
+      --- a/python/aug25/models/gemini-1.py
+      +++ b/python/aug25/models/gemini-1.py
+      @@ -100,10 +100,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-2.py b/python/aug25/models/gemini-2.py
+      --- a/python/aug25/models/gemini-2.py
+      +++ b/python/aug25/models/gemini-2.py
+      @@ -120,10 +120,8 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This is the performance-critical routine.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-3.py b/python/aug25/models/gemini-3.py
+      --- a/python/aug25/models/gemini-3.py
+      +++ b/python/aug25/models/gemini-3.py
+      @@ -148,11 +148,8 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. This is the performance-critical routine.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-4.py b/python/aug25/models/gemini-4.py
+      --- a/python/aug25/models/gemini-4.py
+      +++ b/python/aug25/models/gemini-4.py
+      @@ -168,10 +168,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               final_mask = ffi.Bitset.zeros()
+               # {node_idx: ({gss_parents}, llm_mask)}
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gemini-5.py b/python/aug25/models/gemini-5.py
+      --- a/python/aug25/models/gemini-5.py
+      +++ b/python/aug25/models/gemini-5.py
+      @@ -173,10 +173,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               final_mask = ffi.Bitset.zeros()
+               # {node_idx: ({gss_parents}, llm_mask)}
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-10.py b/python/aug25/models/gpt-5-10.py
+      --- a/python/aug25/models/gpt-5-10.py
+      +++ b/python/aug25/models/gpt-5-10.py
+      @@ -148,11 +148,8 @@
+               by using: pop-grouped peeks, sid-indexed parent lists, and range-vs-sorted-sids scanning.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-11.py b/python/aug25/models/gpt-5-11.py
+      --- a/python/aug25/models/gpt-5-11.py
+      +++ b/python/aug25/models/gpt-5-11.py
+      @@ -198,11 +198,8 @@
+               precomputed SID->ArcBundle mapping per pop group and cache-friendly data layout.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-12.py b/python/aug25/models/gpt-5-12.py
+      --- a/python/aug25/models/gpt-5-12.py
+      +++ b/python/aug25/models/gpt-5-12.py
+      @@ -211,11 +211,8 @@
+               ArcBundle to minimize repeated work.
+               """
+       
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+               """
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Optimized to avoid per-destination filtering by using
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-2.py b/python/aug25/models/gpt-5-2.py
+      --- a/python/aug25/models/gpt-5-2.py
+      +++ b/python/aug25/models/gpt-5-2.py
+      @@ -100,10 +100,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               # Local aliases for speed
+               gss_merge_many = ffi.gss_merge_many_with_depth
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-3.py b/python/aug25/models/gpt-5-3.py
+      --- a/python/aug25/models/gpt-5-3.py
+      +++ b/python/aug25/models/gpt-5-3.py
+      @@ -141,11 +141,8 @@
+               Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               # Aliases to avoid repeated global lookups
+               Bitset = ffi.Bitset
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-4.py b/python/aug25/models/gpt-5-4.py
+      --- a/python/aug25/models/gpt-5-4.py
+      +++ b/python/aug25/models/gpt-5-4.py
+      @@ -128,11 +128,8 @@
+                 - No token-pruning over GSS on every edge; we only restrict via carried allowed_bv.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-5.py b/python/aug25/models/gpt-5-5.py
+      --- a/python/aug25/models/gpt-5-5.py
+      +++ b/python/aug25/models/gpt-5-5.py
+      @@ -128,10 +128,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               # Final mask to return
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-7.py b/python/aug25/models/gpt-5-7.py
+      --- a/python/aug25/models/gpt-5-7.py
+      +++ b/python/aug25/models/gpt-5-7.py
+      @@ -121,11 +121,8 @@
+               GSS nodes. This version uses the per-pop, per-state fast index to avoid
+               scanning all destination bitsets on every transition.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+      -        state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               state_to_gss = self.constraint_state.get_state_map()
+               Bitset = ffi.Bitset
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-8.py b/python/aug25/models/gpt-5-8.py
+      --- a/python/aug25/models/gpt-5-8.py
+      +++ b/python/aug25/models/gpt-5-8.py
+      @@ -178,11 +178,8 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Uses the per-pop dispatch index to avoid repeated O(dests * peeks) filters.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-9.py b/python/aug25/models/gpt-5-9.py
+      --- a/python/aug25/models/gpt-5-9.py
+      +++ b/python/aug25/models/gpt-5-9.py
+      @@ -158,11 +158,8 @@
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Optimized to avoid per-destination filtering by using
+               precomputed SID->arcs mapping per pop group.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/opus-41-1.py b/python/aug25/models/opus-41-1.py
+      --- a/python/aug25/models/opus-41-1.py
+      +++ b/python/aug25/models/opus-41-1.py
+      @@ -91,11 +91,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               t0 = time.time()
+               final_mask = ffi.Bitset.zeros()
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/precompute2_model.py b/python/aug25/models/precompute2_model.py
+      --- a/python/aug25/models/precompute2_model.py
+      +++ b/python/aug25/models/precompute2_model.py
+      @@ -68,11 +68,8 @@
+       
+           def get_mask(self) -> RangeSet:
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               final_mask = ffi.Bitset.zeros()
+               values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+
+      ```
+      ```diff
+      diff --git a/python/aug25/models/precompute3_fast_model.py b/python/aug25/models/precompute3_fast_model.py
+      --- a/python/aug25/models/precompute3_fast_model.py
+      +++ b/python/aug25/models/precompute3_fast_model.py
+      @@ -148,11 +148,8 @@
+               Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
+               """
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+       
+               # Local bindings for speed
+               depths = self.depths
+
+      ```
       ```diff
       diff --git a/python/aug25/models/rust_model.py b/python/aug25/models/rust_model.py
       --- a/python/aug25/models/rust_model.py
       +++ b/python/aug25/models/rust_model.py
-      @@ -19,7 +19,14 @@
-       
+      @@ -18,11 +18,7 @@
            def get_mask(self) -> RangeSet:
                """Calls the underlying Rust implementation for get_mask."""
-      +        print("\n--- get_mask START (rust_model.py) ---")
-      +        print(self.constraint_state)
-      +        state_to_gss = self.constraint_state.filtered_state_gss_map()
-      +        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
-      +
-               mask_bv = self.constraint_state.get_mask_bv()
-      +
-      +        print("\n--- get_mask END (rust_model.py) ---")
-               return RangeSet.from_ranges(mask_bv.to_ranges())
+               print("\n--- get_mask START (rust_model.py) ---")
+      -        print(self.constraint_state)
+      -        state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
        
-           def commit(self, token_id: int):
+               mask_bv = self.constraint_state.get_mask_bv()
+       
+               print("\n--- get_mask END (rust_model.py) ---")
+
+      ```
+    metadata:
+  - user: |-
+      Failed Hunk:
+
+      ```diff
+      @@ -211,11 +211,8 @@
+               ArcBundle to minimize repeated work.
+               """
+       
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+               state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+               """
+               Compute the final LLM token mask given a mapping from tokenizer state to
+               GSS nodes. Optimized to avoid per-destination filtering by using
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+              ArcBundle to minimize repeated work.
+              """
+
+              print("\n--- get_mask START ---")
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. Optimized to avoid per-destination filtering by using
+      ```
+
+      Nearest Match in `python/aug25/models/gpt-5-12.py` (found at line 288 with 80.00% similarity, shown with padding):
+
+      ```python
+                          llm_bv = masks[i]
+                          if (llm_bv is None) or llm_bv.contains(t):
+                              yield (group.pop, int(sid_val), int(dest_idx))
+
+          def commit(self, token_id: int):
+              self.constraint_state.commit(token_id)
+
+          def get_mask(self) -> RangeSet:
+              print("\n--- get_mask START ---")
+              print(self.constraint_state)
+              state_to_gss = self.constraint_state.filtered_state_gss_map()
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. Optimized to avoid per-destination filtering by using
+              precomputed SID->ArcBundle mapping per pop group and grouping peeks by
+              ArcBundle to minimize repeated work.
+              """
+
+              t0 = time.time()
+      ```
+
+      The git diff hunk above failed to apply to the file `python/aug25/models/gpt-5-12.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/python/aug25/models/gpt-5-12.py b/python/aug25/models/gpt-5-12.py
+      --- a/python/aug25/models/gpt-5-12.py
+      +++ b/python/aug25/models/gpt-5-12.py
+      @@ -212,5 +212,3 @@
+               print("\n--- get_mask START ---")
+      -        print(self.constraint_state)
+      -        state_to_gss = self.constraint_state.filtered_state_gss_map()
+      -        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+      +        state_to_gss = self.constraint_state.filtered_state_gss_map()
+               """
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/deepseek-1.py
-      Applying patch to 'python/aug25/models/deepseek-1.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/deepseek-1.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/models/rust_model.py
-      Applying patch to 'python/aug25/models/rust_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/rust_model.py.
+      Identified target file: python/aug25/models/gpt-5-12.py
+      Applying patch to 'python/aug25/models/gpt-5-12.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/gpt-5-12.py.
     metadata:
-  - user: 'Changes committed with message: "Add debugging logs to get_mask in deepseek-1.py
-      and rust_model.py"'
+  - user: 'Changes committed with message: "Refactor: Remove redundant logging from
+      gpt-5-12.py get_mask"'
     metadata:
 ...
