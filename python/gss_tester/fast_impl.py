@@ -135,6 +135,11 @@ class FastGSS(GSS[T, Acc]):
                     peek_values.add(value)
         return peek_values
 
+    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+        """Merges the accumulators of all active stacks into a single value."""
+        accumulators = [head.acc for head in self._heads]
+        return reduce(merge_func, accumulators)
+
     @staticmethod
     def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
         gss_list = list(gss_list)

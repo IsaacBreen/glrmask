@@ -226,18 +226,29 @@ local_system:
 
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
-          def pop(self, value: T) -> 'FastGSS[T, Acc]':
+          def pop(self) -> 'FastGSS[T, Acc]':
               new_heads: Set[_Node[T, Acc]] = set()
               for head in self._heads:
                   if head in self._child_to_parents:
-                      for v, parent in self._child_to_parents[head]:
-                          if v == value:
-                              new_heads.add(parent)
+                      for _, parent in self._child_to_parents[head]:
+                          new_heads.add(parent)
 
               if not new_heads:
                   # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
                   return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
+          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      if any(v == value for v, _ in self._child_to_parents[head]):
+                          new_heads.add(head)
+
+              if not new_heads:
+                  # If no stacks match, the result is an empty GSS (represented by the root).
+                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
@@ -383,10 +394,18 @@ local_system:
               pass
 
           @abstractmethod
-          def pop(self, value: T) -> 'GSS[T, Acc]':
+          def pop(self) -> 'GSS[T, Acc]':
               """
-              For all stacks ending in `value`, creates new stacks by removing that value.
-              Returns a new GSS state containing only these popped stacks.
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def isolate(self, value: T) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              Returns a new GSS state containing only these stacks.
               """
               pass
 
@@ -448,11 +467,19 @@ local_system:
               new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
               return ReferenceGSS(new_stacks, self._acc_default_factory)
 
-          def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack:
+                      new_stacks.append((stack[:-1], acc))
+
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
               new_stacks = []
               for stack, acc in self.stacks:
                   if stack and stack[-1] == value:
-                      new_stacks.append((stack[:-1], acc))
+                      new_stacks.append((stack, acc))
 
               return ReferenceGSS(new_stacks, self._acc_default_factory)
 
@@ -591,10 +618,10 @@ local_system:
           gss1 = gss1.push(20)
           yield from _yield_state(gss1)
 
-          gss_popped_20 = gss1.pop(20)
+          gss_popped_20 = gss1.isolate(20).pop()
           yield from _yield_state(gss_popped_20)
 
-          gss_popped_10 = gss_popped_20.pop(10)
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
           yield from _yield_state(gss_popped_10)
 
           # --- Test 2: Forking and Merging ---
@@ -616,7 +643,7 @@ local_system:
 
           # --- Test 4: Pop with no match ---
           gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
           yield from _yield_state(gss_after_failed_pop)
 
           # --- Test 5: Complex sequence (diamond pattern) ---
@@ -630,11 +657,11 @@ local_system:
           s5 = s4.push(4)
           yield from _yield_state(s5)
           
-          s6 = s5.pop(4)
+          s6 = s5.isolate(4).pop()
           yield from _yield_state(s6) # should be same as s4
           
-          s7 = s6.pop(2)
-          s8 = s6.pop(3)
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
           yield from _yield_state(s7)
           yield from _yield_state(s8)
           
@@ -643,7 +670,7 @@ local_system:
           
           # --- Test 6: Merging empty GSS ---
           gss_d = gss_class.initial(acc_factory).push(1)
-          gss_empty = gss_d.pop(2) # creates an empty GSS
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
           yield from _yield_state(gss_empty)
           
           merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
@@ -919,6 +946,11 @@ local_system:
                           peek_values.add(value)
               return peek_values
 
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              accumulators = [head.acc for head in self._heads]
+              return reduce(merge_func, accumulators)
+
           @staticmethod
           def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
               gss_list = list(gss_list)
@@ -1058,6 +1090,11 @@ local_system:
               """Returns the set of all values at the top of any stack."""
               pass
 
+          @abstractmethod
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              pass
+
           @staticmethod
           @abstractmethod
           def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
@@ -1084,6 +1121,7 @@ local_system:
               return self.to_json_serializable() == other.to_json_serializable()
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from functools import reduce
       from .interface import GSS, T, Acc
 
       class ReferenceGSS(GSS[T, Acc]):
@@ -1128,6 +1166,11 @@ local_system:
 
           def peek(self) -> Set[T]:
               return {stack[-1] for stack, acc in self.stacks if stack}
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              accumulators = [acc for _, acc in self.stacks]
+              return reduce(merge_func, accumulators)
 
           @staticmethod
           def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
@@ -1585,18 +1628,29 @@ messages:
 
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
-          def pop(self, value: T) -> 'FastGSS[T, Acc]':
+          def pop(self) -> 'FastGSS[T, Acc]':
               new_heads: Set[_Node[T, Acc]] = set()
               for head in self._heads:
                   if head in self._child_to_parents:
-                      for v, parent in self._child_to_parents[head]:
-                          if v == value:
-                              new_heads.add(parent)
+                      for _, parent in self._child_to_parents[head]:
+                          new_heads.add(parent)
 
               if not new_heads:
                   # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
                   return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
+              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
+          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      if any(v == value for v, _ in self._child_to_parents[head]):
+                          new_heads.add(head)
+
+              if not new_heads:
+                  # If no stacks match, the result is an empty GSS (represented by the root).
+                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
@@ -1747,10 +1801,18 @@ messages:
               pass
 
           @abstractmethod
-          def pop(self, value: T) -> 'GSS[T, Acc]':
+          def pop(self) -> 'GSS[T, Acc]':
               """
-              For all stacks ending in `value`, creates new stacks by removing that value.
-              Returns a new GSS state containing only these popped stacks.
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def isolate(self, value: T) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              Returns a new GSS state containing only these stacks.
               """
               pass
 
@@ -1817,11 +1879,19 @@ messages:
               new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
               return ReferenceGSS(new_stacks, self._acc_default_factory)
 
-          def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack:
+                      new_stacks.append((stack[:-1], acc))
+
+              return ReferenceGSS(new_stacks, self._acc_default_factory)
+
+          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
               new_stacks = []
               for stack, acc in self.stacks:
                   if stack and stack[-1] == value:
-                      new_stacks.append((stack[:-1], acc))
+                      new_stacks.append((stack, acc))
 
               return ReferenceGSS(new_stacks, self._acc_default_factory)
 
@@ -1970,10 +2040,10 @@ messages:
           gss1 = gss1.push(20)
           yield from _yield_state(gss1)
 
-          gss_popped_20 = gss1.pop(20)
+          gss_popped_20 = gss1.isolate(20).pop()
           yield from _yield_state(gss_popped_20)
 
-          gss_popped_10 = gss_popped_20.pop(10)
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
           yield from _yield_state(gss_popped_10)
 
           # --- Test 2: Forking and Merging ---
@@ -1995,7 +2065,7 @@ messages:
 
           # --- Test 4: Pop with no match ---
           gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
           yield from _yield_state(gss_after_failed_pop)
 
           # --- Test 5: Complex sequence (diamond pattern) ---
@@ -2009,11 +2079,11 @@ messages:
           s5 = s4.push(4)
           yield from _yield_state(s5)
           
-          s6 = s5.pop(4)
+          s6 = s5.isolate(4).pop()
           yield from _yield_state(s6) # should be same as s4
           
-          s7 = s6.pop(2)
-          s8 = s6.pop(3)
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
           yield from _yield_state(s7)
           yield from _yield_state(s8)
           
@@ -2022,7 +2092,7 @@ messages:
           
           # --- Test 6: Merging empty GSS ---
           gss_d = gss_class.initial(acc_factory).push(1)
-          gss_empty = gss_d.pop(2) # creates an empty GSS
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
           yield from _yield_state(gss_empty)
           
           merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
@@ -2033,9 +2103,7 @@ messages:
       filename: python/gss_tester/test_spec.py
   - user: |-
       We need to modify the Python GSS - interface and impls.
-      Remove the T parameter from `pop`. Now it just takes self and pops off all stacks unconditionally on their top item.
-      Add a method `isolate` that takes T and keeps only those stacks that have T on top. (The old `pop` is equivalent to `isolate` followed by the new `pop`.)
-      Make all changes.
+      Add a method `get_acc` that takes Self and `merge_func: Callable[[Acc, Acc], Acc]` and returns a single Acc.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2054,38 +2122,54 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor the GSS interface and implementations, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to add the `get_acc` method, followed by the corresponding git diffs.
 
       ### Step-by-Step Instructions
 
-      **1. Update `python/gss_tester/interface.py`**
+      **1. Update the GSS Interface (`python/gss_tester/interface.py`)**
 
-      In the `GSS` abstract base class, you need to change the `pop` method and add the new `isolate` method.
+      First, we'll declare the new `get_acc` abstract method in the `GSS` base class. This ensures all concrete implementations must provide it.
 
-      -   **Modify `pop`:** Change its signature from `pop(self, value: T)` to `pop(self)`. Update the docstring to explain that it unconditionally pops the top item from all active stacks.
-      -   **Add `isolate`:** Add a new abstract method `isolate(self, value: T) -> 'GSS[T, Acc]'` between `pop` and `apply`. Its docstring should state that it returns a new GSS containing only the stacks that end with the given `value`.
+      - Open the file `python/gss_tester/interface.py`.
+      - In the `GSS` class, add the following abstract method definition immediately after the `peek` method:
 
-      **2. Update `python/gss_tester/reference_impl.py`**
+      ```python
+          @abstractmethod
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              pass
+      ```
 
-      Next, implement the interface changes in the `ReferenceGSS` class.
+      **2. Implement `get_acc` in the Reference Implementation (`python/gss_tester/reference_impl.py`)**
 
-      -   **Modify `pop`:** Update the method to match the new signature (no `value` parameter). The implementation should now create new stacks by removing the last element from all non-empty stacks, without checking the value.
-      -   **Add `isolate`:** Implement the new `isolate` method. It will take a `value` and return a new `ReferenceGSS` instance containing only the stacks from `self.stacks` where the last element is equal to `value`.
+      Next, we'll provide the concrete implementation for `ReferenceGSS`. This involves iterating through all stacks, collecting their accumulators, and merging them.
 
-      **3. Update `python/gss_tester/fast_impl.py`**
+      - Open the file `python/gss_tester/reference_impl.py`.
+      - Add an import for `reduce` from `functools` at the top of the file:
+        ```python
+        from functools import reduce
+        ```
+      - In the `ReferenceGSS` class, add the `get_acc` method implementation after the `peek` method:
+        ```python
+        def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+            """Merges the accumulators of all active stacks into a single value."""
+            accumulators = [acc for _, acc in self.stacks]
+            return reduce(merge_func, accumulators)
+        ```
 
-      Now, apply the same changes to the `FastGSS` implementation.
+      **3. Implement `get_acc` in the Fast Implementation (`python/gss_tester/fast_impl.py`)**
 
-      -   **Modify `pop`:** Change the method signature to remove the `value` parameter. In the implementation, remove the condition that checks the edge value (`if v == value`), so that the parents of all current heads are collected.
-      -   **Add `isolate`:** Implement the new `isolate` method after `pop`. This method will filter the `_heads` set. For each head, it will check its incoming edges in `_child_to_parents` and keep the head only if at least one edge has the specified `value`. If no heads match, it should return a GSS with a single empty stack (represented by the `_root` node).
+      Finally, we'll implement the method for the performant `FastGSS`. The logic is similar but operates on the graph's head nodes.
 
-      **4. Update `python/gss_tester/test_spec.py`**
-
-      Finally, update the test suite to use the new API. The previous behavior of `pop(value)` is now achieved by chaining `isolate(value).pop()`.
-
-      -   In `run_test_spec`, find all calls to `gss.pop(some_value)`.
-      -   Replace each instance with `gss.isolate(some_value).pop()`.
-      -   Update the comment in "Test 4" to reflect this new method chain.
+      - Open the file `python/gss_tester/fast_impl.py`.
+      - The `reduce` function is already imported, so no new import is needed.
+      - In the `FastGSS` class, add the `get_acc` method implementation after the `peek` method:
+        ```python
+        def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+            """Merges the accumulators of all active stacks into a single value."""
+            accumulators = [head.acc for head in self._heads]
+            return reduce(merge_func, accumulators)
+        ```
 
       ---
 
@@ -2097,160 +2181,66 @@ messages:
       diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
       --- a/python/gss_tester/fast_impl.py
       +++ b/python/gss_tester/fast_impl.py
-      @@ -80,18 +80,29 @@
+      @@ -142,6 +142,12 @@
+                           peek_values.add(value)
+               return peek_values
        
-               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-       
-      -    def pop(self, value: T) -> 'FastGSS[T, Acc]':
-      +    def pop(self) -> 'FastGSS[T, Acc]':
-               new_heads: Set[_Node[T, Acc]] = set()
-               for head in self._heads:
-                   if head in self._child_to_parents:
-      -                for v, parent in self._child_to_parents[head]:
-      -                    if v == value:
-      -                        new_heads.add(parent)
-      +                for _, parent in self._child_to_parents[head]:
-      +                    new_heads.add(parent)
-       
-               if not new_heads:
-                   # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                   return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-       
-      +        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      +    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+      +        """Merges the accumulators of all active stacks into a single value."""
+      +        accumulators = [head.acc for head in self._heads]
+      +        return reduce(merge_func, accumulators)
       +
-      +    def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-      +        new_heads: Set[_Node[T, Acc]] = set()
-      +        for head in self._heads:
-      +            if head in self._child_to_parents:
-      +                if any(v == value for v, _ in self._child_to_parents[head]):
-      +                    new_heads.add(head)
-      +
-      +        if not new_heads:
-      +            # If no stacks match, the result is an empty GSS (represented by the root).
-      +            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+           @staticmethod
+           def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
+               gss_list = list(gss_list)
 
       ```
       ```diff
       diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
       --- a/python/gss_tester/interface.py
       +++ b/python/gss_tester/interface.py
-      @@ -19,13 +19,21 @@
+      @@ -38,6 +38,12 @@
+               """Returns the set of all values at the top of any stack."""
                pass
        
-           @abstractmethod
-      -    def pop(self, value: T) -> 'GSS[T, Acc]':
-      +    def pop(self) -> 'GSS[T, Acc]':
-               """
-      -        For all stacks ending in `value`, creates new stacks by removing that value.
-      -        Returns a new GSS state containing only these popped stacks.
-      +        For all active stacks, creates new stacks by removing the top value.
-      +        Returns a new GSS state containing the popped stacks.
-               """
-               pass
-       
-           @abstractmethod
-      +    def isolate(self, value: T) -> 'GSS[T, Acc]':
-      +        """
-      +        Keeps only the stacks that have `value` at the top.
-      +        Returns a new GSS state containing only these stacks.
-      +        """
+      +    @abstractmethod
+      +    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+      +        """Merges the accumulators of all active stacks into a single value."""
       +        pass
       +
-      +    @abstractmethod
-           def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
-               """Applies a function to each accumulator, returning a new GSS state."""
-               pass
+           @staticmethod
+           @abstractmethod
+           def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
 
       ```
       ```diff
       diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
       --- a/python/gss_tester/reference_impl.py
       +++ b/python/gss_tester/reference_impl.py
-      @@ -18,13 +18,21 @@
-               new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
-               return ReferenceGSS(new_stacks, self._acc_default_factory)
+      @@ -1,4 +1,5 @@
+       from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      +from functools import reduce
+       from .interface import GSS, T, Acc
        
-      -    def pop(self, value: T) -> 'ReferenceGSS[T, Acc]':
-      +    def pop(self) -> 'ReferenceGSS[T, Acc]':
-               new_stacks = []
-               for stack, acc in self.stacks:
-      -            if stack and stack[-1] == value:
-      +            if stack:
-                       new_stacks.append((stack[:-1], acc))
+       class ReferenceGSS(GSS[T, Acc]):
+      @@ -38,6 +39,11 @@
+           def peek(self) -> Set[T]:
+               return {stack[-1] for stack, acc in self.stacks if stack}
        
-               return ReferenceGSS(new_stacks, self._acc_default_factory)
+      +    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+      +        """Merges the accumulators of all active stacks into a single value."""
+      +        accumulators = [acc for _, acc in self.stacks]
+      +        return reduce(merge_func, accumulators)
       +
-      +    def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-      +        new_stacks = []
-      +        for stack, acc in self.stacks:
-      +            if stack and stack[-1] == value:
-      +                new_stacks.append((stack, acc))
-      +
-      +        return ReferenceGSS(new_stacks, self._acc_default_factory)
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-               new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
-
-      ```
-      ```diff
-      diff --git a/python/gss_tester/test_spec.py b/python/gss_tester/test_spec.py
-      --- a/python/gss_tester/test_spec.py
-      +++ b/python/gss_tester/test_spec.py
-      @@ -28,10 +28,10 @@
-           gss1 = gss1.push(20)
-           yield from _yield_state(gss1)
-       
-      -    gss_popped_20 = gss1.pop(20)
-      +    gss_popped_20 = gss1.isolate(20).pop()
-           yield from _yield_state(gss_popped_20)
-       
-      -    gss_popped_10 = gss_popped_20.pop(10)
-      +    gss_popped_10 = gss_popped_20.isolate(10).pop()
-           yield from _yield_state(gss_popped_10)
-       
-           # --- Test 2: Forking and Merging ---
-      @@ -51,7 +51,7 @@
-       
-           # --- Test 4: Pop with no match ---
-           gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
-      -    gss_after_failed_pop = gss_no_match.pop(1) # This should result in an empty GSS
-      +    gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-           yield from _yield_state(gss_after_failed_pop)
-       
-           # --- Test 5: Complex sequence (diamond pattern) ---
-      @@ -64,11 +64,11 @@
-           s5 = s4.push(4)
-           yield from _yield_state(s5)
-           
-      -    s6 = s5.pop(4)
-      +    s6 = s5.isolate(4).pop()
-           yield from _yield_state(s6) # should be same as s4
-           
-      -    s7 = s6.pop(2)
-      -    s8 = s6.pop(3)
-      +    s7 = s6.isolate(2).pop()
-      +    s8 = s6.isolate(3).pop()
-           yield from _yield_state(s7)
-           yield from _yield_state(s8)
-           
-      @@ -77,7 +77,7 @@
-           
-           # --- Test 6: Merging empty GSS ---
-           gss_d = gss_class.initial(acc_factory).push(1)
-      -    gss_empty = gss_d.pop(2) # creates an empty GSS
-      +    gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-           yield from _yield_state(gss_empty)
-           
-           merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+           @staticmethod
+           def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+               all_stacks: List[Tuple[List[T], Acc]] = []
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/gss_tester/fast_impl.py
@@ -2266,13 +2256,8 @@ messages:
       Identified target file: python/gss_tester/reference_impl.py
       Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: python/gss_tester/test_spec.py
-      Applying patch to 'python/gss_tester/test_spec.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/test_spec.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS pop operation and add isolate
-      method"'
+  - user: 'Changes committed with message: "feat: Add get_acc method to GSS interface
+      and implementations"'
     metadata:
 ...

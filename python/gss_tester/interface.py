@@ -45,6 +45,11 @@ class GSS(ABC, Generic[T, Acc]):
         """Returns the set of all values at the top of any stack."""
         pass
 
+    @abstractmethod
+    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+        """Merges the accumulators of all active stacks into a single value."""
+        pass
+
     @staticmethod
     @abstractmethod
     def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
