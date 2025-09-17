@@ -284,9 +284,7 @@ class Model(GraphProvider):
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
         heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
         for head in gss._heads:
-            peeked = gss.peek_from_head(head)
-            if peeked:
-                state_id = next(iter(peeked))
+            for state_id in gss.peek_from_head(head):
                 heads_by_state[state_id].append(head)
 
         shifted_gsses = []
