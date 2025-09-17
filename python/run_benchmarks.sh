@@ -87,8 +87,19 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         --model "$model_to_benchmark"
         --output "$RESULTS_DIR")
     echo "${cmd[*]}"
-    "${cmd[@]}"
-    echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+    if "${cmd[@]}"; then
+        echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+    else
+        exit_code=$?
+        # Exit code 130 is from SIGINT (Ctrl+C)
+        if [ $exit_code -eq 130 ]; then
+            echo
+            echo ">>> Benchmark for $(basename "$model_to_benchmark") interrupted. Skipping."
+        else
+            echo
+            echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+        fi
+    fi
 done
 echo
 echo "All benchmark runs completed."
