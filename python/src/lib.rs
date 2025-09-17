@@ -776,12 +776,8 @@ impl PyGrammarConstraintState {
         })
     }
 
-    fn __str__(&self) -> String {
+    fn get_gss_string(&self) -> String {
         self.inner.with_inner(|state| format!("{}", state))
-    }
-
-    fn __repr__(&self) -> String {
-        self.__str__()
     }
 
     fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
