@@ -669,7 +669,9 @@ impl PyHybridL2Bitset {
         self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
     }
 
-
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 
