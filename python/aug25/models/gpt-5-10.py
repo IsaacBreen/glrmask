@@ -200,6 +200,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
+
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -253,6 +254,8 @@ class Model(GraphProvider):
                 break  # nothing left to process
 
             # Process all nodes in this depth bucket
+
+            # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
@@ -285,6 +288,8 @@ class Model(GraphProvider):
                     continue
 
                 # For each pop value at this node:
+
+                # For each pop value at this node:
                 for pop, groups in node_by_pop.items():
                     print(f"    - Edge group: pop={pop}")
                     # Collect all pops from GSS parents exactly once per pop
@@ -292,6 +297,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # Group peeks by state id and build sorted sid list
                     # Also build a set of all parent nodes (for epsilon state filters)
@@ -329,6 +335,8 @@ class Model(GraphProvider):
                                     break
                                 yield sid
                                 idx += 1
+
+                    # Process all (llm_bv, dests) groups under this pop
 
                     # Process all (llm_bv, dests) groups under this pop
                     for llm_bv, dests in groups:

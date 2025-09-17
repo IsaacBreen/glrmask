@@ -137,6 +137,7 @@ class Model(GraphProvider):
 
         t0 = time.time()
         # Final mask to return
+        # Final mask to return
         final_mask = ffi.Bitset.zeros()
 
         # Per-node aggregation
@@ -153,6 +154,7 @@ class Model(GraphProvider):
             if root_idx is None:
                 continue
             root = int(root_idx)
+
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
@@ -187,6 +189,9 @@ class Model(GraphProvider):
 
         # Main propagation loop (fixpoint)
         print("\n--- Main loop ---")
+
+        # Main propagation loop (fixpoint)
+        print("\n--- Main loop ---")
         iter_count = 0
         while q:
             iter_count += 1
@@ -199,6 +204,8 @@ class Model(GraphProvider):
                 continue
             st.in_queue = False
             print(f"  - PROCESS: node_ptr={node_idx}, gss_ptr={st.gss_node.ptr()}, mask={st.mask.to_ranges()}")
+
+            # If end node, accumulate its mask
 
             # If end node, accumulate its mask
             if self.end_flags.get(node_idx, False):
@@ -218,6 +225,8 @@ class Model(GraphProvider):
             pop_map = self.children_by_pop.get(node_idx)
             if not pop_map:
                 continue
+
+            # For each unique pop under this node, collect peeks once and reuse for all llm groups for this pop.
 
             # For each unique pop under this node, collect peeks once and reuse for all llm groups for this pop.
             for pop, groups in pop_map.items():
@@ -242,6 +251,8 @@ class Model(GraphProvider):
 
                 # Compute peeks for this pop
                 # sid -> list[parent_nodes]
+                # Compute peeks for this pop
+                # sid -> list[parent_nodes]
                 sid_to_parents: Dict[int, List[ffi.GSSNode]] = {}
                 peeks = st.gss_node.popn_fast(int(pop))
                 print(f"      - Found {len(peeks)} peeks from GSS")
@@ -258,6 +269,8 @@ class Model(GraphProvider):
                         lst.append(parent_node)
 
                 # Now fan out to each (llm_bv group, dests)
+
+                # Now fan out to each (llm_bv group, dests)
                 for (llm_bv, dests), child_mask in zip(groups, child_masks):
                     print(f"    - Edge: llm_bv={llm_bv.to_ranges()}")
                     print(f"      - Child mask: {child_mask.to_ranges()}")
@@ -265,7 +278,10 @@ class Model(GraphProvider):
                         continue  # nothing to propagate for this group
 
                     # This logic is complex; let's simplify by merging parents per destination
+
+                    # This logic is complex; let's simplify by merging parents per destination
                     dest_to_parents = defaultdict(list)
+
 
                     all_parents_list = [p for _, p in peeks]
 
@@ -290,10 +306,6 @@ class Model(GraphProvider):
 
                         print(f"        - Matched {len(parents_for_dest)} parent GSS nodes")
                         if not parents_for_dest:
-                            continue
-
-                        child_gss = ffi.gss_merge_many_with_depth(parents_for_dest, 1)
-                        if not child_gss.is_alive():
                             continue
 
                         # 1) Update GSS for destination

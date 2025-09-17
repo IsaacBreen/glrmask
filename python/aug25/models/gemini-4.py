@@ -175,7 +175,6 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
-        state_to_gss = self.constraint_state.get_state_map()
         print("\n--- get_mask START ---")
         print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
@@ -197,6 +196,7 @@ class Model(GraphProvider):
             root_idx = self.roots_map.get(sid)
             if root_idx is None:
                 continue
+
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
@@ -221,6 +221,10 @@ class Model(GraphProvider):
         # Process nodes in increasing order of max_depth. This is a heuristic
         # that tends to explore shorter paths first.
         print("\n--- Main loop ---")
+        # --- Main Scheduler Loop ---
+        # Process nodes in increasing order of max_depth. This is a heuristic
+        # that tends to explore shorter paths first.
+        print("\n--- Main loop ---")
         iter_count = 0
         while depth_heap:
             iter_count += 1
@@ -229,6 +233,7 @@ class Model(GraphProvider):
             print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
             if not node_indices:
                 continue
+
 
             for node_idx in node_indices:
                 item = values.pop(node_idx, None)
@@ -262,6 +267,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # Accumulators for child nodes to be processed later.
                     next_gss: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
@@ -299,6 +305,8 @@ class Model(GraphProvider):
                                     next_mask[dest_idx] = next_mask[dest_idx].union(child_mask)
 
                     # --- Flush accumulated children to the main queue ---
+
+                    # --- Flush accumulated children to the main queue ---
                     for dest_idx, parents_list in next_gss.items():
                         print(f"      - Dest: idx={dest_idx}")
                         print(f"        - Matched {len(parents_list)} parent GSS nodes")
@@ -309,6 +317,7 @@ class Model(GraphProvider):
                             continue
 
                         child_llm_mask = next_mask[dest_idx]
+                        
                         
                         existing = values.get(dest_idx)
                         if existing:

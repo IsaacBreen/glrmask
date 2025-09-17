@@ -145,6 +145,7 @@ class Model(GraphProvider):
             if root_idx is None:
                 continue
 
+
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -161,6 +162,7 @@ class Model(GraphProvider):
                 print(f"      - Merged result: gss_ptr={node_gss_nodes[root_idx].ptr()}, mask={node_masks[root_idx].to_ranges()}")
 
             node_active[root_idx] = True
+
 
         # Process by depth (but using pre-computed buckets)
         print("\n--- Main loop ---")
@@ -180,11 +182,12 @@ class Model(GraphProvider):
                 continue
 
             # Process all active nodes at this depth
+            # Process all active nodes at this depth
             for idx in self.depth_buckets[depth]:
                 if not node_active[idx] or node_stopped[idx]:
                     if node_active[idx]:
                         print(f"  - Node {idx}: SKIPPING (already stopped)")
-                    continue
+                        continue
 
                 gss_node = node_gss_nodes[idx]
                 llm_mask = node_masks[idx]
@@ -199,6 +202,8 @@ class Model(GraphProvider):
                 node_masks[idx] = None
 
                 # Check if end node
+
+                # Check if end node
                 if self.is_end_node[idx]:
                     print(f"    - END NODE found. Updating final_mask.")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
@@ -211,19 +216,6 @@ class Model(GraphProvider):
                 if not gss_node.is_alive():
                     node_stopped[idx] = True
                     print(f"    - STOPPING node {idx} (GSS not alive)")
-                    continue
-
-                # Process children
-                children = self.node_children[idx]
-                if not children:
-                    continue
-
-                for (pop, llm_bv), dests in children:
-                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
-                    # Batch collect all popn results
-                    all_peeks = gss_node.popn_fast(pop)
-
-                    if not all_peeks:
                         continue
 
                     # Process destinations
@@ -242,6 +234,7 @@ class Model(GraphProvider):
                         print(f"        - Matched {len(matched_parents)} parent GSS nodes")
                         if not matched_parents:
                             continue
+
 
                         # Calculate child mask
                         child_llm_mask = llm_mask

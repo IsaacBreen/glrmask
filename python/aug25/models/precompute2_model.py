@@ -123,6 +123,7 @@ class Model(GraphProvider):
             node_indices = todo.pop(current_depth)
             print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
+
             for node_idx in list(node_indices):
                 if node_idx in stopped:
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
@@ -151,6 +152,8 @@ class Model(GraphProvider):
                     continue
 
                 # Step
+
+                # Step
                 node = self.arena.get(node_idx, {})
                 children = node.get("children") or []
                 for (pop, sid_opt), dests in children:
@@ -159,6 +162,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # Filter peeks by state_id
                     if sid_opt is None:
@@ -171,10 +175,6 @@ class Model(GraphProvider):
                     if not matched_parents:
                         continue
 
-                    child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
-                    if not child_gss.is_ok():
-                        continue
-
                     for dest_idx, llm_rs in dests:
                         print(f"      - Dest: idx={dest_idx}, llm_rs={llm_rs.intervals}")
                         edge_bv = ffi.Bitset.from_ranges(llm_rs.intervals)
@@ -182,6 +182,7 @@ class Model(GraphProvider):
                         print(f"        - Child mask: {child_llm_mask.to_ranges()}")
                         if child_llm_mask.is_empty():
                             continue
+
 
                         if not child_gss.is_alive():
                             continue

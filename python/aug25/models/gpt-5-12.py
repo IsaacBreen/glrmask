@@ -288,16 +288,16 @@ class Model(GraphProvider):
         self.constraint_state.commit(token_id)
 
     def get_mask(self) -> RangeSet:
+        print("\n--- get_mask START ---")
+        print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. Optimized to avoid per-destination filtering by using
         precomputed SID->ArcBundle mapping per pop group and grouping peeks by
         ArcBundle to minimize repeated work.
         """
-        print("\n--- get_mask START ---")
-        print(self.constraint_state)
-        state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
 
         t0 = time.time()
         final_mask = ffi.Bitset.zeros()
@@ -333,6 +333,7 @@ class Model(GraphProvider):
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             # If there are no allowed tokens at the seed, no path can produce tokens later.
+            # If there are no allowed tokens at the seed, no path can produce tokens later.
             if new_mask.is_empty():
                 continue
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -356,6 +357,7 @@ class Model(GraphProvider):
             else:
                 bucket.add(root_idx)
 
+
         nodes = self.nodes
 
         print("\n--- Main loop ---")
@@ -372,6 +374,8 @@ class Model(GraphProvider):
                     break
             if not node_indices:
                 break  # nothing left to process
+
+            # Process all nodes in this depth bucket
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
@@ -412,6 +416,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # Prepare accumulators for next nodes: dest -> (gss_set, child_llm_mask)
                     next_gss: Dict[int, List[ffi.GSSNode]] = {}
@@ -512,6 +517,8 @@ class Model(GraphProvider):
                                     next_mask[dest_idx] = child_mask
                                 else:
                                         next_mask[dest_idx] = m.union(child_mask)
+
+                    # Flush to values and enqueue
 
                     # Flush to values and enqueue
                     for d, parent_list in next_gss.items():

@@ -181,6 +181,7 @@ class Model(GraphProvider):
             if root_idx is None:
                 continue
 
+
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -228,6 +229,7 @@ class Model(GraphProvider):
             if not node_indices:
                 continue
 
+
             for node_idx in node_indices:
                 if node_idx in stopped:
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
@@ -261,6 +263,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     dest_to_gss: Dict[int, List[ffi.GSSNode]] = {}
 

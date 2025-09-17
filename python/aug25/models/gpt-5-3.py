@@ -135,12 +135,12 @@ class Model(GraphProvider):
         """
         Highly optimized scheduler that propagates a frontier of GSS aggregates through the trie.
         """
-        # Aliases to avoid repeated global lookups
         print("\n--- get_mask START ---")
         print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
         print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
 
+        # Aliases to avoid repeated global lookups
         Bitset = ffi.Bitset
         gss_merge_many_with_depth = ffi.gss_merge_many_with_depth
         gss_popn_collect = ffi.gss_popn_collect
@@ -163,6 +163,10 @@ class Model(GraphProvider):
         # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
         # We accumulate merges per root first to minimize redundant merges.
         print("\n--- Seeding work queue ---")
+
+        # Seed: for each tokenizer state, map its filtered GSS to the corresponding trie root
+        # We accumulate merges per root first to minimize redundant merges.
+        print("\n--- Seeding work queue ---")
         per_root_accum: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(int(sid))
@@ -174,6 +178,7 @@ class Model(GraphProvider):
         for root_idx, lst in per_root_accum.items():
             if not lst:
                 continue
+
 
             gss_clone = lst[0] if len(lst) == 1 else gss_merge_many_with_depth(lst, self.MERGE_DEPTH_SEED)
             new_mask = gss_clone.allowed_llm_tokens()
@@ -206,6 +211,8 @@ class Model(GraphProvider):
             print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
             if not node_indices:
                 continue
+
+            # Process each node at this depth bucket
 
             # Process each node at this depth bucket
             for node_idx in list(node_indices):
@@ -251,6 +258,8 @@ class Model(GraphProvider):
 
                 # Pre-collect for each distinct pop exactly once
                 # gss_popn_collect can be costly; we call it once per unique pop
+                # Pre-collect for each distinct pop exactly once
+                # gss_popn_collect can be costly; we call it once per unique pop
                 for pop, groups in children_by_pop.items():
                     print(f"    - Edge group: pop={pop}")
                     peeks = gss_popn_collect(gss_node, int(pop))
@@ -269,6 +278,7 @@ class Model(GraphProvider):
                         # For each destination, filter peeks by state bitset and (if non-empty) merge parents
                         for dest_idx, state_bv in dests:
                             # Fast filter: scan peeks once and check state membership
+                            # Fast filter: scan peeks once and check state membership
                             matched_parents: List[ffi.GSSNode] = []
                             if not state_bv.is_empty():
                                 contains = state_bv.contains  # local alias
@@ -281,6 +291,7 @@ class Model(GraphProvider):
                                 # treat as direct pass; In iter_edges we emitted (pop, None, dest)
                                 # but here we're working with parents already, so matched == all parents.
                                 matched_parents = [p for (_, p) in peeks]
+
 
                             if not matched_parents:
                                 continue
@@ -316,12 +327,14 @@ class Model(GraphProvider):
                     if d in values:
                         existing_gss, existing_mask = values[d]
                         # Merge [existing, new...] at a small depth bound to keep it cheap.
+                        print(f"        - Enqueue {d}: MERGING gss1_ptr={existing_gss.ptr()}, mask1={existing_mask.to_ranges()} WITH {len(lst)} other GSS nodes")
                         merged = gss_merge_many_with_depth([existing_gss, *lst], self.MERGE_DEPTH_INTO_VALUES)
                         # Only re-enqueue if effectively changed
                         if merged.ptr() == existing_gss.ptr():
                             continue
                         # This is incorrect, mask should be unioned.
                         values[d] = (merged, existing_mask)
+                        print(f"          - Merged result: gss_ptr={merged.ptr()}, mask={existing_mask.to_ranges()}")
                     else:
                         if len(lst) == 1:
                             # This is incorrect, needs a mask.
@@ -329,6 +342,7 @@ class Model(GraphProvider):
                         else:
                             values[d] = (gss_merge_many_with_depth(lst, self.MERGE_DEPTH_INTO_VALUES), Bitset.zeros())
 
+                        print(f"        - Enqueue {d}: CREATING gss_ptr={values[d][0].ptr()}, mask={values[d][1].to_ranges()}")
                     child_depth = self.max_depth.get(d, 0)
                     # Insert into depth bucket and heap if needed
                     bset = buckets[child_depth]

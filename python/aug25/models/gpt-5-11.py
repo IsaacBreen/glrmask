@@ -297,6 +297,7 @@ class Model(GraphProvider):
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             # If there are no allowed tokens at the seed, no path can produce tokens later.
+            # If there are no allowed tokens at the seed, no path can produce tokens later.
             if new_mask.is_empty():
                 continue
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -339,6 +340,8 @@ class Model(GraphProvider):
                 break  # nothing left to process
 
             # Process all nodes in this depth bucket
+
+            # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 item = values.pop(node_idx, None)
                 if item is None:
@@ -377,6 +380,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # Prepare accumulators for next nodes: dest -> (gss_set, child_llm_mask)
                     next_gss: Dict[int, List[ffi.GSSNode]] = {}
@@ -474,6 +478,8 @@ class Model(GraphProvider):
                                     next_mask[dest_idx] = m.union(child_mask)
 
                     # Flush to values and enqueue
+
+                    # Flush to values and enqueue
                     for d, parent_list in next_gss.items():
                         print(f"      - Dest: idx={d}")
                         print(f"        - Matched {len(parent_list)} parent GSS nodes")
@@ -492,6 +498,7 @@ class Model(GraphProvider):
                             combined_mask = existing_mask.union(next_mask[d])
                             values[d] = (merged_gss, combined_mask)
                             print(f"          - Merged result: gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                            # Only re-enqueue if gss_set actually changed (fastest policy observed)
                             if merged_gss.ptr() != existing_gss.ptr():
                                 enqueue(depth_d, d)
                         else:

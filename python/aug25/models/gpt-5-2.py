@@ -151,6 +151,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
+
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
@@ -170,12 +171,16 @@ class Model(GraphProvider):
 
         # Main loop; depth-ascending scheduler
         print("\n--- Main loop ---")
+
+        # Main loop; depth-ascending scheduler
+        print("\n--- Main loop ---")
         iter_count = 0
         while todo:
             iter_count += 1
             current_depth = min(todo.keys())
             node_indices = todo.pop(current_depth)
             print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
 
             for node_idx in list(node_indices):
                 if node_idx in stopped:
@@ -209,6 +214,7 @@ class Model(GraphProvider):
                 groups = node.get("groups") or []
 
                 # Process each pop-group once
+                # Process each pop-group once
                 for pop, eps_edges, state_edges in groups:
                     print(f"    - Edge group: pop={pop}")
                     # Pop parents from the GSS
@@ -216,6 +222,7 @@ class Model(GraphProvider):
                     print(f"      - Found {len(peeks)} peeks from GSS")
                     if not peeks:
                         continue
+
 
                     # 1) Epsilon edges: no state filter -> all parents match
                     if eps_edges:
@@ -269,6 +276,8 @@ class Model(GraphProvider):
                             continue
 
                         # For each state-filtered edge, collect matched parents efficiently
+
+                        # For each state-filtered edge, collect matched parents efficiently
                         for dest_idx, state_bv, llm_bv in state_edges:
                             print(f"    - Edge: dest={dest_idx}, state_bv={state_bv.to_ranges()}, llm_bv={llm_bv.to_ranges()}")
                             child_llm_mask = llm_mask.intersection(llm_bv)
@@ -285,6 +294,7 @@ class Model(GraphProvider):
                             print(f"        - Matched {len(matched_parents)} parent GSS nodes")
                             if not matched_parents:
                                 continue
+
 
                             child = gss_merge_many(matched_parents, 1)
                             if not child.is_alive():

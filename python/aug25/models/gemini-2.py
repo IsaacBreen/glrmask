@@ -162,10 +162,14 @@ class Model(GraphProvider):
 
         # Seed: map tokenizer states and their GSS nodes to trie roots
         print("\n--- Seeding work queue ---")
+
+        # Seed: map tokenizer states and their GSS nodes to trie roots
+        print("\n--- Seeding work queue ---")
         for sid, gss in state_to_gss.items():
             root_idx = self.roots_map.get(sid)
             if root_idx is None:
                 continue
+
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
@@ -182,10 +186,13 @@ class Model(GraphProvider):
             else:
                 values[root_idx] = (gss_clone, new_mask)
                 depth = self.max_depth[root_idx]
+
                 if not todo[depth]:
                     heapq.heappush(depth_heap, depth)
                 todo[depth].add(root_idx)
 
+        # Main scheduler loop
+        print("\n--- Main loop ---")
         # Main scheduler loop
         print("\n--- Main loop ---")
         iter_count = 0
@@ -196,6 +203,7 @@ class Model(GraphProvider):
             print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
             if not node_indices:
                 continue
+
 
             for node_idx in node_indices:
                 item = values.pop(node_idx, None)
