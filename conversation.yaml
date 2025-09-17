@@ -10140,6 +10140,14 @@ local_system:
               })
           }
 
+          fn __str__(&self) -> String {
+              self.inner.with_inner(|state| format!("{}", state))
+          }
+
+          fn __repr__(&self) -> String {
+              self.__str__()
+          }
+
           fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
               let bitset = self.inner.with_inner_mut(|state| state.get_mask());
               let bools: Vec<bool> = bitset.iter_bits().collect();
@@ -10386,6 +10394,8 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
+              print("GSS at start of get_mask:")
+              print(self.constraint_state)
               state_to_gss = self.constraint_state.filtered_state_gss_map()
               print("state_to_gss:", state_to_gss)
               t0 = time.time()
@@ -20903,7 +20913,7 @@ local_system:
                               yield (int(pop), None, int(dest_idx))
                           else:
                               for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end):
+                                  for sid in range(start, end + 1):
                                       yield (int(pop), sid, int(dest_idx))
 
           def commit(self, token_id: int):
@@ -20914,10 +20924,11 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
+              print("\n--- get_mask START ---")
               print("GSS at start of get_mask:")
               print(self.constraint_state)
               state_to_gss = self.constraint_state.filtered_state_gss_map()
-              print("state_to_gss:", state_to_gss)
+              print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
@@ -20935,6 +20946,7 @@ local_system:
               roots_map = self.roots_map
               max_depth = self.max_depth
 
+              print("\n--- Seeding work queue ---")
               for sid, gss in state_to_gss.items():
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
@@ -20943,6 +20955,7 @@ local_system:
 
                   gss_clone = gss.clone_node()
                   new_mask = gss_clone.allowed_llm_tokens()
+                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
 
                   existing = values.get(root_idx)
                   if existing is not None:
@@ -20975,49 +20988,72 @@ local_system:
               arena = self.arena
               is_end = self.is_end
 
+              print("\n--- Main loop ---")
+              iter_count = 0
               while True:
+                  iter_count += 1
                   # Pop the smallest depth bucket (skip stale heap entries)
                   node_indices: Optional[set[int]] = None
+                  current_depth = -1
                   while depth_heap:
                       current_depth = heappop(depth_heap)
                       node_indices = todo.pop(current_depth, None)
                       if node_indices:
                           break
                   if not node_indices:
+                      print(f"[{iter_count}] Loop finished: no more nodes to process.")
                       break  # nothing left to process
+
+                  print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
                   # Process all nodes in this depth bucket
                   for node_idx in node_indices:
                       if node_idx in stopped:
+                          print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                           continue
 
                       item = values.pop(node_idx, None)
                       if item is None:
+                          print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
                       gss_set, llm_mask = item
+                      gss_ptrs = {g.ptr() for g in gss_set}
+                      print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
 
                       # End-node handling
                       if is_end(node_idx):
+                          print(f"    - END NODE found. Updating final_mask.")
+                          print(f"      - final_mask before: {final_mask.to_ranges()}")
+                          print(f"      - llm_mask to union: {llm_mask.to_ranges()}")
+                          for i, gss in enumerate(gss_set):
+                              print(f"      - gss[{i}] allowed_llm_tokens: {gss.allowed_llm_tokens().to_ranges()}")
                           final_mask = final_mask.union(llm_mask)
+                          print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                       if not gss_set:
                           stopped.add(node_idx)
+                          print(f"    - STOPPING node {node_idx} (empty gss_set)")
                           continue
 
                       # Transitions grouped by (pop, llm_bv)
                       node_data = arena.get(node_idx, {})
                       children = node_data.get("children") or []
+                      if not children:
+                          print(f"    - No children for node {node_idx}")
                       for (pop, llm_bv), dests in children:
+                          print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                           # Collect all pops from GSS parents
                           peeks = []
                           for g in gss_set:
                               peeks.extend(g.popn_fast(pop))
+                          print(f"      - Found {len(peeks)} peeks from GSS set")
                           if not peeks:
                               continue
 
                           llm_empty = llm_bv.is_empty()
 
                           for dest_idx, state_bv in dests:
+                              print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                               # Filter peeks by destination state bitset
                               matched = []
                               if not state_bv.is_empty():
@@ -21025,6 +21061,7 @@ local_system:
                                   for sid_val, parent_node in peeks:
                                       if contains(sid_val):
                                           matched.append(parent_node)
+                              print(f"        - Matched {len(matched)} parent GSS nodes")
                               if not matched:
                                   continue
 
@@ -21033,6 +21070,7 @@ local_system:
 
                               # Compute child mask (intersection with llm_bv when present)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                              print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                               d = int(dest_idx)
                               existing = values.get(d)
@@ -21042,14 +21080,18 @@ local_system:
                                   existing_gss_set.update(child_gss_nodes)
                                   # Only re-enqueue if effectively changed
                                   if len(existing_gss_set) == old_len:
+                                      print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
                                       continue
                                   combined_mask = existing_mask.union(child_llm_mask)
                                   values[d] = (existing_gss_set, combined_mask)
+                                  print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
                               else:
                                   values[d] = (set(child_gss_nodes), child_llm_mask)
+                                  print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
+              print("\n--- get_mask END ---")
               original_mask = self.constraint.internal_bv_to_original(final_mask)
               temp = RangeSet.from_ranges(original_mask.to_ranges())
               ref = self.constraint_state.get_mask()
@@ -31254,6 +31296,14 @@ messages:
               })
           }
 
+          fn __str__(&self) -> String {
+              self.inner.with_inner(|state| format!("{}", state))
+          }
+
+          fn __repr__(&self) -> String {
+              self.__str__()
+          }
+
           fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
               let bitset = self.inner.with_inner_mut(|state| state.get_mask());
               let bools: Vec<bool> = bitset.iter_bits().collect();
@@ -31504,6 +31554,8 @@ messages:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
+              print("GSS at start of get_mask:")
+              print(self.constraint_state)
               state_to_gss = self.constraint_state.filtered_state_gss_map()
               print("state_to_gss:", state_to_gss)
               t0 = time.time()
@@ -31650,9 +31702,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model.py
-  - user: Modify get_mask in precompute3_model.py to print the GSS, so we can see
-      its structure at the start of the fn. Modify the maturin Rust code in any way
-      needed to make this possible (if at all).
+  - user: Add a bunch of print statements to get_mask in precompute3_model.py so we
+      can see what's going on in the main loop. Something's going wrong. It's not
+      behaving the same as constraint.rs's get_mask.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -31671,107 +31723,208 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and corresponding git diffs to add GSS printing capabilities.
+      Of course. Here are the step-by-step instructions to add detailed logging to the `get_mask` method for debugging, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      **1. Modify `python/src/lib.rs` to Expose GSS Printing to Python**
+      I will add extensive print statements to the `get_mask` method in `python/aug25/models/precompute3_model.py` to trace its execution flow and state at each step. This will help identify any discrepancies with the Rust implementation. I'll also correct a minor off-by-one error in the `iter_edges` method.
 
-      To allow Python code to print the GSS structure, you need to expose the existing `Display` implementation from the Rust `GrammarConstraintState`. You can do this by adding `__str__` and `__repr__` methods to the `PyGrammarConstraintState` class.
+      **File: `python/aug25/models/precompute3_model.py`**
 
-      -   **Open the file:** `python/src/lib.rs`
-      -   **Locate the `#[pymethods]` block** for `impl PyGrammarConstraintState`.
-      -   **Insert the following two methods** right after the `new` function:
+      1.  **In the `iter_edges` method:**
+          -   Locate the line `for sid in range(start, end):`.
+          -   Change it to `for sid in range(start, end + 1):` to correctly handle the inclusive ranges returned by `to_ranges`.
 
-          ```rust
-          fn __str__(&self) -> String {
-              self.inner.with_inner(|state| format!("{}", state))
-          }
+      2.  **In the `get_mask` method:**
+          -   **At the beginning:** Add print statements to log the start of the function, the initial GSS state, and the filtered GSS map.
+          -   **Seeding phase:** Inside the `for sid, gss in state_to_gss.items():` loop, add a print statement to show the details of each item being added to the initial work queue.
+          -   **Main loop start:** Add a print statement to indicate the start of the main processing loop.
+          -   **Inside the `while True:` loop:**
+              -   After popping a depth and a set of nodes, print the current depth and the nodes being processed in this iteration.
+              -   Inside the `for node_idx in node_indices:` loop, add prints to show which node is being processed, its associated GSS nodes, and its LLM mask.
+          -   **End-node handling:** Inside `if is_end(node_idx):`, add detailed logging showing the `final_mask` before the update, the `llm_mask` being unioned, and the `allowed_llm_tokens` for each GSS node in the set. This will help verify if the logic matches the Rust implementation.
+          -   **Edge traversal:**
+              -   Inside the `for (pop, llm_bv), dests in children:` loop, print the details of the current edge (`pop` and `llm_bv`).
+              -   After collecting `peeks`, print the number of peeks found.
+              -   Inside the `for dest_idx, state_bv in dests:` loop, print the destination details and the number of matched parent GSS nodes.
+          -   **Enqueueing:** When updating the `values` dictionary for a destination node, add a print statement detailing whether a new entry is being created or an existing one is updated, including the new GSS set size and mask.
+          -   **At the end:** Before the `return` statement, add a print statement to signify the end of the function.
 
-          fn __repr__(&self) -> String {
-              self.__str__()
-          }
-          ```
-
-      **2. Modify `python/aug25/models/precompute3_model.py` to Print the GSS**
-
-      Now that the Python wrapper can print the GSS, you can call it from your model's `get_mask` method.
-
-      -   **Open the file:** `python/aug25/models/precompute3_model.py`
-      -   **Locate the `get_mask` method** inside the `Model` class.
-      -   **Add two `print` statements** at the very beginning of the method to log the GSS structure before any processing begins:
-
-          ```python
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask given a mapping from tokenizer state to
-              GSS nodes. This is the performance-critical routine.
-              """
-              print("GSS at start of get_mask:")
-              print(self.constraint_state)
-              state_to_gss = self.constraint_state.filtered_state_gss_map()
-              # ...
-          ```
+      These changes will provide a comprehensive trace of the `get_mask` execution.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      index 241114b..1111111 100644
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -450,6 +450,14 @@
-               })
-           }
-       
-      +    fn __str__(&self) -> String {
-      +        self.inner.with_inner(|state| format!("{}", state))
-      +    }
-      +
-      +    fn __repr__(&self) -> String {
-      +        self.__str__()
-      +    }
-      +
-           fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-               let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-               let bools: Vec<bool> = bitset.iter_bits().collect();
-
-      ```
+      Here is the git diff for the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
-      index 2222222..3333333 100644
       --- a/python/aug25/models/precompute3_model.py
       +++ b/python/aug25/models/precompute3_model.py
-      @@ -90,6 +90,8 @@
-               Compute the final LLM token mask given a mapping from tokenizer state to
+      @@ -80,10 +80,10 @@
+                               yield (int(pop), None, int(dest_idx))
+                           else:
+                               for start, end in state_bv.to_ranges():
+      -                            for sid in range(start, end):
+      +                            for sid in range(start, end + 1):
+                                       yield (int(pop), sid, int(dest_idx))
+       
+           def commit(self, token_id: int):
+               self.constraint_state.commit(token_id)
+       
+           def get_mask(self) -> RangeSet:
+      @@ -92,10 +92,11 @@
                GSS nodes. This is the performance-critical routine.
                """
+      -        print("GSS at start of get_mask:")
+      +        print("\n--- get_mask START ---")
       +        print("GSS at start of get_mask:")
-      +        print(self.constraint_state)
+               print(self.constraint_state)
                state_to_gss = self.constraint_state.filtered_state_gss_map()
-               print("state_to_gss:", state_to_gss)
+      -        print("state_to_gss:", state_to_gss)
+      +        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
                t0 = time.time()
+       
+               final_mask = ffi.Bitset.zeros()
+      @@ -113,6 +114,7 @@
+               roots_map = self.roots_map
+               max_depth = self.max_depth
+       
+      +        print("\n--- Seeding work queue ---")
+               for sid, gss in state_to_gss.items():
+                   root_idx = roots_map.get(int(sid))
+                   if root_idx is None:
+      @@ -121,6 +123,7 @@
+       
+                   gss_clone = gss.clone_node()
+                   new_mask = gss_clone.allowed_llm_tokens()
+      +            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
+       
+                   existing = values.get(root_idx)
+                   if existing is not None:
+      @@ -151,50 +154,68 @@
+               arena = self.arena
+               is_end = self.is_end
+       
+      +        print("\n--- Main loop ---")
+      +        iter_count = 0
+               while True:
+      +            iter_count += 1
+                   # Pop the smallest depth bucket (skip stale heap entries)
+                   node_indices: Optional[set[int]] = None
+      +            current_depth = -1
+                   while depth_heap:
+                       current_depth = heappop(depth_heap)
+                       node_indices = todo.pop(current_depth, None)
+                       if node_indices:
+                           break
+                   if not node_indices:
+      +                print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                       break  # nothing left to process
+       
+      +            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+      +
+                   # Process all nodes in this depth bucket
+                   for node_idx in node_indices:
+                       if node_idx in stopped:
+      +                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                           continue
+       
+                       item = values.pop(node_idx, None)
+                       if item is None:
+      +                    print(f"  - Node {node_idx}: SKIPPING (no value)")
+                           continue
+                       gss_set, llm_mask = item
+      +                gss_ptrs = {g.ptr() for g in gss_set}
+      +                print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
+       
+                       # End-node handling
+                       if is_end(node_idx):
+      +                    print(f"    - END NODE found. Updating final_mask.")
+      +                    print(f"      - final_mask before: {final_mask.to_ranges()}")
+      +                    print(f"      - llm_mask to union: {llm_mask.to_ranges()}")
+      +                    for i, gss in enumerate(gss_set):
+      +                        print(f"      - gss[{i}] allowed_llm_tokens: {gss.allowed_llm_tokens().to_ranges()}")
+                           final_mask = final_mask.union(llm_mask)
+      +                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
+       
+                       if not gss_set:
+                           stopped.add(node_idx)
+      +                    print(f"    - STOPPING node {node_idx} (empty gss_set)")
+                           continue
+       
+                       # Transitions grouped by (pop, llm_bv)
+                       node_data = arena.get(node_idx, {})
+                       children = node_data.get("children") or []
+      +                if not children:
+      +                    print(f"    - No children for node {node_idx}")
+                       for (pop, llm_bv), dests in children:
+      +                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                           # Collect all pops from GSS parents
+                           peeks = []
+                           for g in gss_set:
+                               peeks.extend(g.popn_fast(pop))
+      +                    print(f"      - Found {len(peeks)} peeks from GSS set")
+                           if not peeks:
+                               continue
+       
+                           llm_empty = llm_bv.is_empty()
+       
+                           for dest_idx, state_bv in dests:
+      +                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                               # Filter peeks by destination state bitset
+                               matched = []
+                               if not state_bv.is_empty():
+      @@ -202,6 +223,7 @@
+                                   for sid_val, parent_node in peeks:
+                                       if contains(sid_val):
+                                           matched.append(parent_node)
+      +                        print(f"        - Matched {len(matched)} parent GSS nodes")
+                               if not matched:
+                                   continue
+       
+      @@ -210,25 +232,30 @@
+       
+                               # Compute child mask (intersection with llm_bv when present)
+                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+      +                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
+       
+                               d = int(dest_idx)
+                               existing = values.get(d)
+                               if existing is not None:
+                                   existing_gss_set, existing_mask = existing
+                                   old_len = len(existing_gss_set)
+                                   existing_gss_set.update(child_gss_nodes)
+                                   # Only re-enqueue if effectively changed
+                                   if len(existing_gss_set) == old_len:
+      +                                print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
+                                       continue
+                                   combined_mask = existing_mask.union(child_llm_mask)
+                                   values[d] = (existing_gss_set, combined_mask)
+      +                            print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
+                               else:
+                                   values[d] = (set(child_gss_nodes), child_llm_mask)
+      +                            print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
+       
+                               enqueue(max_depth[d], d)
+       
+      +        print("\n--- get_mask END ---")
+               original_mask = self.constraint.internal_bv_to_original(final_mask)
+               temp = RangeSet.from_ranges(original_mask.to_ranges())
+               ref = self.constraint_state.get_mask()
+               print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()))
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/precompute3_model.py
       Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Enable GSS printing and log GSS
-      at start of get_mask"'
+  - user: 'Changes committed with message: "Add debug logging to get_mask and fix
+      range in iter_edges"'
     metadata:
 ...

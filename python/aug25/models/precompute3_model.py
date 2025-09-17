@@ -91,7 +91,7 @@ class Model(GraphProvider):
                         yield (int(pop), None, int(dest_idx))
                     else:
                         for start, end in state_bv.to_ranges():
-                            for sid in range(start, end):
+                            for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
@@ -102,10 +102,11 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
         print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print("state_to_gss:", state_to_gss)
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
@@ -123,6 +124,7 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
+        print("\n--- Seeding work queue ---")
         for sid, gss in state_to_gss.items():
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
@@ -131,6 +133,7 @@ class Model(GraphProvider):
 
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing is not None:
@@ -163,49 +166,72 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
+        print("\n--- Main loop ---")
+        iter_count = 0
         while True:
+            iter_count += 1
             # Pop the smallest depth bucket (skip stale heap entries)
             node_indices: Optional[set[int]] = None
+            current_depth = -1
             while depth_heap:
                 current_depth = heappop(depth_heap)
                 node_indices = todo.pop(current_depth, None)
                 if node_indices:
                     break
             if not node_indices:
+                print(f"[{iter_count}] Loop finished: no more nodes to process.")
                 break  # nothing left to process
+
+            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
+                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 item = values.pop(node_idx, None)
                 if item is None:
+                    print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_set, llm_mask = item
+                gss_ptrs = {g.ptr() for g in gss_set}
+                print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
 
                 # End-node handling
                 if is_end(node_idx):
+                    print(f"    - END NODE found. Updating final_mask.")
+                    print(f"      - final_mask before: {final_mask.to_ranges()}")
+                    print(f"      - llm_mask to union: {llm_mask.to_ranges()}")
+                    for i, gss in enumerate(gss_set):
+                        print(f"      - gss[{i}] allowed_llm_tokens: {gss.allowed_llm_tokens().to_ranges()}")
                     final_mask = final_mask.union(llm_mask)
+                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 if not gss_set:
                     stopped.add(node_idx)
+                    print(f"    - STOPPING node {node_idx} (empty gss_set)")
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
+                if not children:
+                    print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
+                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
                     peeks = []
                     for g in gss_set:
                         peeks.extend(g.popn_fast(pop))
+                    print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
 
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
+                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
@@ -213,6 +239,7 @@ class Model(GraphProvider):
                             for sid_val, parent_node in peeks:
                                 if contains(sid_val):
                                     matched.append(parent_node)
+                        print(f"        - Matched {len(matched)} parent GSS nodes")
                         if not matched:
                             continue
 
@@ -221,6 +248,7 @@ class Model(GraphProvider):
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                         d = int(dest_idx)
                         existing = values.get(d)
@@ -230,14 +258,18 @@ class Model(GraphProvider):
                             existing_gss_set.update(child_gss_nodes)
                             # Only re-enqueue if effectively changed
                             if len(existing_gss_set) == old_len:
+                                print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
                                 continue
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (existing_gss_set, combined_mask)
+                            print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
                         else:
                             values[d] = (set(child_gss_nodes), child_llm_mask)
+                            print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
 
                         enqueue(max_depth[d], d)
 
+        print("\n--- get_mask END ---")
         original_mask = self.constraint.internal_bv_to_original(final_mask)
         temp = RangeSet.from_ranges(original_mask.to_ranges())
         ref = self.constraint_state.get_mask()
