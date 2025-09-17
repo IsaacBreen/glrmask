@@ -37,31 +37,20 @@ class ParserTable:
 @dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
-    llm_tokens_union: ffi.Bitset
 
     def __hash__(self):
-        return hash((self.terminals_union, self.llm_tokens_union.to_json_string()))
+        return hash(self.terminals_union)
 
     def to_json_serializable(self):
-        return {
-            "terminals_union": self.terminals_union.to_json_serializable(),
-            "llm_tokens_union": self.llm_tokens_union.to_json_string()
-        }
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(
-        terminals_union=acc1.terminals_union.union(acc2.terminals_union),
-        llm_tokens_union=acc1.llm_tokens_union.union(acc2.llm_tokens_union)
-    )
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
-
-def get_allowed_llm_tokens_py(gss: FastGSS) -> ffi.Bitset:
-    merged_acc = gss.get_acc(merge_acc)
-    return merged_acc.llm_tokens_union
 
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     result = gss
@@ -173,10 +162,7 @@ class Model(GraphProvider):
         model.parser_table = ParserTable(start_state_id, py_table)
 
         def acc_factory():
-            return PyAcc(
-                terminals_union=ffi.HybridL2Bitset.all(),
-                llm_tokens_union=model.all_internal_llm_tokens_bitset
-            )
+            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
         initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -235,29 +221,6 @@ class Model(GraphProvider):
 
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
-
-                disallowed_terminals = ffi.HybridL2Bitset.new()
-                if end_state is not None:
-                    terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
-                    if terminal_id in terminals_accessible:
-                        disallowed_bv = ffi.Bitset.zeros()
-                        disallowed_bv.insert(terminal_id)
-                        disallowed_terminals.insert_l2_bitset(end_state, disallowed_bv)
-
-                if not disallowed_terminals.is_empty():
-                    def l2_bitset_difference(a: ffi.HybridL2Bitset, b: ffi.HybridL2Bitset) -> ffi.HybridL2Bitset:
-                        # A - B == A & ~B == ~(~A | B)
-                        not_a = a.complement()
-                        not_a_or_b = not_a.union(b)
-                        return not_a_or_b.complement()
-
-                    def update_acc(acc: PyAcc) -> PyAcc:
-                        return PyAcc(
-                            terminals_union=l2_bitset_difference(acc.terminals_union, disallowed_terminals),
-                            llm_tokens_union=acc.llm_tokens_union
-                        )
-                    processed_gss = processed_gss.apply(update_acc)
-
                 if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
@@ -418,13 +381,6 @@ class Model(GraphProvider):
                 gss_node, llm_mask = item
                 print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
 
-                # Check if GSS is alive based on its internal token constraints
-                gss_allowed_tokens = get_allowed_llm_tokens_py(gss_node)
-                if gss_allowed_tokens.is_empty():
-                    stopped.add(node_idx)
-                    print(f"    - STOPPING node {node_idx} (GSS internally dead)")
-                    continue
-
                 # End-node handling
                 if is_end(node_idx):
                     print(f"    - END NODE found. Updating final_mask.")
@@ -449,7 +405,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    gss_active_tokens = get_allowed_llm_tokens_py(gss_node)
+                    gss_active_tokens = all_ones_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
