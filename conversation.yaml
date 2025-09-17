@@ -23201,18 +23201,53 @@ local_system:
 
           def commit(self, token_id: int):
               self.constraint_state.commit(token_id)
-              # The Python state is now stale. Re-sync it from the Rust state.
+              token_bytes = self.id_to_token.get(token_id)
+              if not token_bytes:
+                  self.state = {}
+                  return
+
+              new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+
+              q = collections.deque()
+              for tokenizer_sid, gss in self.state.items():
+                  q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
+
+              visited_q_items = set()
+
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+
+                  # GSS is not hashable, use its serializable form for visited check
+                  q_item = (offset, tokenizer_sid, gss)
+                  if q_item in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item)
+
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+
+                  for terminal_id, width in matches:
+                      processed_gss = self._process_token(gss, terminal_id)
+                      if any(h is not processed_gss._root for h in processed_gss._heads):
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
               self.state = {
-                  sid: convert_rust_gss_to_python_gss(rust_gss)
-                  for sid, rust_gss in self.constraint_state.get_state_map().items()
+                  sid: FastGSS.merge(gss_list, merge_acc)
+                  for sid, gss_list in new_states.items()
+                  if gss_list
               }
 
           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
               for head in gss._heads:
-                  peeked = gss.peek_from_head(head)
-                  if peeked:
-                      state_id = next(iter(peeked))
+                  for state_id in gss.peek_from_head(head):
                       heads_by_state[state_id].append(head)
 
               shifted_gsses = []
@@ -23263,7 +23298,7 @@ local_system:
               print("GSS at start of get_mask:")
               state_map = self.state
 
-              # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+              state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
               all_ones_mask = self.all_internal_llm_tokens_bitset
 
@@ -39114,109 +39149,56 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The discrepancy you're seeing is because your Python implementation of the `commit` logic is diverging from the correct Rust implementation. When you uncomment the line in `get_mask`, you are effectively discarding the incorrect Python state and re-synchronizing from the correct Rust state, which is why it works.
+      Of course. It appears there's a subtle but critical bug in your Python implementation of the GLR parsing logic, specifically in how it handles multiple possible parser states for a single stack. The fix involves correctly iterating over all possible states instead of arbitrarily picking one.
 
-      The root cause is the buggy `commit` method in your Python code. The simplest and most robust fix is to replace its complex, incorrect logic with a simple delegation to the Rust implementation, which you've identified as correct. This will ensure your Python `self.state` is always in sync with the Rust state.
+      Here are the step-by-step instructions to correct the issue, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions to fix your code:
+      ### Step-by-step Instructions
 
-      ### Step-by-Step Instructions
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`**.
 
-      #### File: `python/aug25/models/precompute3_model_pure_python.py`
+      2.  **Navigate to the `_process_token` method** within the `Model` class.
 
-      1.  **Replace the `commit` method's logic:**
-          *   Navigate to the `commit` method within the `Model` class.
-          *   Delete the entire body of the method.
-          *   Replace it with the following code. This new implementation calls the correct Rust `commit` method and then updates the Python `self.state` to match the now-correct Rust state.
-
+      3.  **Locate the incorrect loop for populating `heads_by_state`**. Around line 302, you will find the following code block:
           ```python
-              self.constraint_state.commit(token_id)
-              # The Python state is now stale. Re-sync it from the Rust state.
-              self.state = {
-                  sid: convert_rust_gss_to_python_gss(rust_gss) 
-                  for sid, rust_gss in self.constraint_state.get_state_map().items()
-              }
+                  for head in gss._heads:
+                      peeked = gss.peek_from_head(head)
+                      if peeked:
+                          state_id = next(iter(peeked))
+                          heads_by_state[state_id].append(head)
           ```
+          This code incorrectly processes only one of the possible parent states (`state_id`) for each stack head by using `next(iter(peeked))`.
 
-      2.  **Update the `get_mask` method:**
-          *   Navigate to the `get_mask` method within the `Model` class.
-          *   Locate this line:
-              ```python
-              state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-              ```
-          *   Comment out this line. Since the `commit` method will now keep `self.state` correct, this re-synchronization is no longer necessary. The `state_map = self.state` line just above it will now be sufficient and correct.
+      4.  **Replace the incorrect block with the corrected version**. The fix is to iterate over all states returned by `peek_from_head`:
+          ```python
+                  for head in gss._heads:
+                      for state_id in gss.peek_from_head(head):
+                          heads_by_state[state_id].append(head)
+          ```
+          This ensures that if a stack is in multiple parser states simultaneously (a key feature of GLR parsing), it is correctly processed for each of those states.
 
-      After applying these changes, your Python implementation will correctly delegate state updates to the Rust core, resolving the inconsistency. The version of your code with the line commented out in `get_mask` will now work as expected.
+      This single change corrects the logic for how actions are determined for each stack, which is the likely cause of the divergence you're seeing between your Python and Rust implementations.
 
       ### Git Diffs
 
-      Here is the git patch that applies the changes described above.
+      Here is the git patch that applies the change described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -201,47 +201,13 @@
-                                       yield (int(pop), sid, int(dest_idx))
-       
-           def commit(self, token_id: int):
-               self.constraint_state.commit(token_id)
-      -        token_bytes = self.id_to_token.get(token_id)
-      -        if not token_bytes:
-      -            self.state = {}
-      -            return
-      -
-      -        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-      -
-      -        q = collections.deque()
-      -        for tokenizer_sid, gss in self.state.items():
-      -            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
-      -
-      -        visited_q_items = set()
-      -
-      -        while q:
-      -            offset, tokenizer_sid, gss = q.popleft()
-      -
-      -            # GSS is not hashable, use its serializable form for visited check
-      -            q_item = (offset, tokenizer_sid, gss)
-      -            if q_item in visited_q_items:
-      -                continue
-      -            visited_q_items.add(q_item)
-      -
-      -            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-      -
-      -            for terminal_id, width in matches:
-      -                processed_gss = self._process_token(gss, terminal_id)
-      -                if any(h is not processed_gss._root for h in processed_gss._heads):
-      -                    new_offset = offset + width
-      -                    next_tokenizer_sid = self.tokenizer_initial_state
-      -                    if new_offset == len(token_bytes):
-      -                        new_states[next_tokenizer_sid].append(processed_gss)
-      -                    else:
-      -                        q.append((new_offset, next_tokenizer_sid, processed_gss))
-      -
-      -            if end_state is not None:
-      -                new_states[end_state].append(gss)
-      -
-      +        # The Python state is now stale. Re-sync it from the Rust state.
-               self.state = {
-      -            sid: FastGSS.merge(gss_list, merge_acc)
-      -            for sid, gss_list in new_states.items()
-      -            if gss_list
-      +            sid: convert_rust_gss_to_python_gss(rust_gss)
-      +            for sid, rust_gss in self.constraint_state.get_state_map().items()
-               }
-       
+      @@ -302,10 +302,8 @@
            def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-      @@ -311,7 +277,7 @@
-               print("GSS at start of get_mask:")
-               state_map = self.state
+               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+               for head in gss._heads:
+      -            peeked = gss.peek_from_head(head)
+      -            if peeked:
+      -                state_id = next(iter(peeked))
+      +            for state_id in gss.peek_from_head(head):
+                       heads_by_state[state_id].append(head)
        
-      -        state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-      +        # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-       
-               all_ones_mask = self.all_internal_llm_tokens_bitset
-       
+               shifted_gsses = []
+               reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
       ```
     metadata:
@@ -39229,7 +39211,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Delegate commit logic to Rust and
-      simplify state synchronization"'
+  - user: 'Changes committed with message: "Fix: Correctly iterate over all parser
+      states in _process_token"'
     metadata:
 ...
