@@ -333,11 +333,9 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
 
-        # return RangeSet.from_ranges(self.constraint_state.get_mask_bv().to_ranges())
-
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
-        # state_map = self.state
+        state_map = self.state
 
         state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
