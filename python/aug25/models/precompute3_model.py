@@ -4,9 +4,48 @@ import heapq
 import collections
 from typing import Dict, List, Tuple, Optional
 
+from ...gss_tester.fast_impl import FastGSS, _Node
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
+
+
+def gss_merge_acc(acc1, acc2):
+    """Merge function for FastGSS accumulators."""
+    # Merge llms
+    merged_llms = acc1['llms'].union(acc2['llms'])
+
+    # Merge terminals
+    merged_terminals = acc1['terminals'].copy()
+    for sid, bv in acc2['terminals'].items():
+        if sid in merged_terminals:
+            merged_terminals[sid] = merged_terminals[sid].union(bv)
+        else:
+            merged_terminals[sid] = bv
+
+    return {'terminals': merged_terminals, 'llms': merged_llms}
+
+
+def convert_rust_gss_to_fast_gss(rust_gss: ffi.GSSNode) -> FastGSS:
+    """Converts an ffi.GSSNode to a FastGSS instance."""
+    graph_data = rust_gss.to_graph()
+    nodes_data = graph_data["nodes"]
+    edges_data = graph_data["edges"]
+    head_ptr = graph_data["head_ptr"]
+
+    py_nodes: Dict[int, _Node] = {
+        ptr: _Node(acc=node_info["acc"], depth=node_info["depth"])
+        for ptr, node_info in nodes_data.items()
+    }
+
+    root_py_node = next(py_nodes[ptr] for ptr, info in nodes_data.items() if info["is_root"])
+
+    child_to_parents: Dict[_Node, Set[Tuple[int, _Node]]] = collections.defaultdict(set)
+    for child_ptr, state_id, parent_ptr in edges_data:
+        child_to_parents[py_nodes[child_ptr]].add((state_id, py_nodes[parent_ptr]))
+
+    head_py_node = py_nodes[head_ptr]
+    return FastGSS(heads=frozenset([head_py_node]), acc_default_factory=dict, root=root_py_node, child_to_parents=dict(child_to_parents), path_cache={})
 
 
 class Model(GraphProvider):
@@ -106,13 +145,13 @@ class Model(GraphProvider):
         print("GSS at start of get_mask:")
         print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+        print(f"Filtered state_to_gss (Rust): { {k: v.ptr() for k, v in state_to_gss.items()} }")
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (GSSNode, Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -125,23 +164,23 @@ class Model(GraphProvider):
         max_depth = self.max_depth
 
         print("\n--- Seeding work queue ---")
-        for sid, gss in state_to_gss.items():
+        for sid, rust_gss in state_to_gss.items():
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
 
-            gss_clone = gss.clone_node()
-            new_mask = gss_clone.allowed_llm_tokens()
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss_clone.ptr()}, mask={new_mask.to_ranges()}")
+            gss = convert_rust_gss_to_fast_gss(rust_gss)
+            new_mask = gss.allowed_llm_tokens()
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                merged_gss = FastGSS.merge([existing_gss, gss], gss_merge_acc)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = (gss_clone, new_mask)
+                values[root_idx] = (gss, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -194,8 +233,8 @@ class Model(GraphProvider):
                 if item is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-                gss_node, llm_mask = item
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+                gss, llm_mask = item
+                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss._heads]}, mask={llm_mask.to_ranges()}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -203,7 +242,7 @@ class Model(GraphProvider):
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
 
                     # Correct logic: intersect propagated mask with GSS active tokens
-                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    gss_active_tokens = gss.allowed_llm_tokens()
 
                     tokens_to_add = llm_mask.intersection(gss_active_tokens)
 
@@ -214,7 +253,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(tokens_to_add)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                if not gss_node.is_alive():
+                if not gss.is_alive():
                     stopped.add(node_idx)
                     print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
@@ -227,7 +266,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
+                    peeks = gss.popn_fast(pop)
                     print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
@@ -248,7 +287,7 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parent GSS nodes
-                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss_node = FastGSS.merge(matched, gss_merge_acc)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -258,13 +297,13 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], gss_merge_acc)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
-                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                            print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
-                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+                            print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
 
                         enqueue(max_depth[d], d)
 

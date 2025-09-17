@@ -1,5 +1,6 @@
 import itertools
 from functools import reduce
+import collections
 from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
 
 from .interface import GSS, T, Acc
@@ -9,7 +10,7 @@ class _Node(Generic[T, Acc]):
     _id_counter = itertools.count()
 
     def __init__(self, acc: Acc, depth: int):
-        self.id = next(self._id_counter)
+        self.id: int = next(self._id_counter)
         self.acc = acc
         self.depth = depth
     
@@ -121,8 +122,84 @@ class FastGSS(GSS[T, Acc]):
         for head in self._heads:
             if head in self._child_to_parents:
                 for value, _ in self._child_to_parents[head]:
-                    peek_values.add(value)
+                peek_values.add(value)
         return peek_values
+
+    def _with_heads(self, new_heads: FrozenSet[_Node]) -> 'FastGSS':
+        return FastGSS(
+            heads=new_heads,
+            acc_default_factory=self._acc_default_factory,
+            root=self._root,
+            child_to_parents=self._child_to_parents,
+            path_cache=self._path_cache
+        )
+
+    def popn_fast(self, n: int) -> List[Tuple[int, 'FastGSS']]:
+        def popn_collect_nodes(gss: 'FastGSS', num_pops: int) -> Set[_Node]:
+            level = gss._heads
+            for _ in range(num_pops):
+                next_level = set()
+                for node in level:
+                    if node in gss._child_to_parents:
+                        for _, parent in gss._child_to_parents[node]:
+                            next_level.add(parent)
+                level = next_level
+                if not level:
+                    break
+            return level
+
+        nodes_at_n = popn_collect_nodes(self, n)
+
+        result = []
+        for node in nodes_at_n:
+            if node in self._child_to_parents:
+                for state_id, parent in self._child_to_parents[node]:
+                    result.append((state_id, self._with_heads(frozenset([parent]))))
+        return result
+
+    def allowed_llm_tokens(self) -> Any:
+        final_mask = self._acc_default_factory()['llms'].__class__.zeros()
+        for head in self._heads:
+            q_roots = collections.deque([head])
+            visited_roots = {head}
+            reachable_roots = set()
+            while q_roots:
+                node = q_roots.popleft()
+                is_a_root = (node == self._root) or (node not in self._child_to_parents) or (not self._child_to_parents[node])
+
+                if is_a_root:
+                    reachable_roots.add(node)
+                else:
+                    for _, parent in self._child_to_parents[node]:
+                        if parent not in visited_roots:
+                            visited_roots.add(parent)
+                            q_roots.append(parent)
+
+            aggregated_llms = reduce(lambda a, b: a.union(b), (r.acc['llms'] for r in reachable_roots), self._acc_default_factory()['llms'].__class__.zeros())
+            head_allowed = head.acc['llms'].intersection(aggregated_llms)
+            final_mask = final_mask.union(head_allowed)
+        return final_mask
+
+    def is_alive(self) -> bool:
+        for head in self._heads:
+            local_llms = head.acc['llms']
+            if local_llms.is_empty():
+                continue
+
+            q_roots = collections.deque([head])
+            visited_roots = {head}
+            while q_roots:
+                node = q_roots.popleft()
+                is_a_root = (node == self._root) or (node not in self._child_to_parents) or (not self._child_to_parents[node])
+                if is_a_root:
+                    if not local_llms.intersection(node.acc['llms']).is_empty():
+                        return True
+                elif node in self._child_to_parents:
+                    for _, parent in self._child_to_parents[node]:
+                        if parent not in visited_roots:
+                            visited_roots.add(parent)
+                            q_roots.append(parent)
+        return False
 
     @staticmethod
     def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
