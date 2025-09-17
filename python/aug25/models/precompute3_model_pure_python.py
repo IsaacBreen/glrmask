@@ -64,6 +64,38 @@ def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
         result = result.pop()
     return result
 
+def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
+    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
+    q = collections.deque([rust_gss_node])
+    visited_rust_ptrs = {rust_gss_node.ptr()}
+    while q:
+        rust_node = q.popleft()
+        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
+        memo_nodes[rust_node.ptr()] = py_node
+        for _, pred_rust_node in rust_node.predecessors():
+            if pred_rust_node.ptr() not in visited_rust_ptrs:
+                visited_rust_ptrs.add(pred_rust_node.ptr())
+                q.append(pred_rust_node)
+    q = collections.deque([rust_gss_node])
+    visited_rust_ptrs = {rust_gss_node.ptr()}
+    while q:
+        rust_node = q.popleft()
+        py_node = memo_nodes[rust_node.ptr()]
+        for state_id, pred_rust_node in rust_node.predecessors():
+            py_pred_node = memo_nodes[pred_rust_node.ptr()]
+            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
+            if pred_rust_node.ptr() not in visited_rust_ptrs:
+                visited_rust_ptrs.add(pred_rust_node.ptr())
+                q.append(pred_rust_node)
+    py_head_node = memo_nodes[rust_gss_node.ptr()]
+    def acc_factory():
+        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
+    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+
+
 class Model(GraphProvider):
     """
     Precomputed trie model (third-generation).
@@ -305,7 +337,9 @@ class Model(GraphProvider):
 
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
-        state_map = self.state
+        # state_map = self.state
+
+        state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
