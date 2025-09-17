@@ -1,7 +1,7 @@
 import heapq
 import json
 from collections import defaultdict
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Optional
 from tqdm.auto import tqdm
 
 import _sep1 as ffi
@@ -30,6 +30,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict], max_state_id: int):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.max_depth: Dict[int, int] = {}
 
@@ -115,8 +116,8 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         max_state_id = int(max(dict(data['parser']['stage_7_table']).keys()))
         model = Model(roots_map, arena, max_state_id)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -240,4 +241,5 @@ class Model(GraphProvider):
                                 heapq.heappush(depth_heap, depth)
                             todo[depth].add(dest_idx)
                             
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        return RangeSet.from_ranges(original_mask.to_ranges())

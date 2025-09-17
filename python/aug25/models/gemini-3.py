@@ -29,6 +29,7 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.max_depth: Dict[int, int] = {}
 
@@ -118,8 +119,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -282,4 +283,5 @@ class Model(GraphProvider):
 
                         enqueue(max_depth[d], d)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        return RangeSet.from_ranges(original_mask.to_ranges())

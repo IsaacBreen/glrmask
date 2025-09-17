@@ -24,6 +24,7 @@ class Model(GraphProvider):
     def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Node -> max trie depth (for scheduling)
@@ -126,8 +127,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -350,4 +351,5 @@ class Model(GraphProvider):
 
                             enqueue(max_depth.get(d, 0), d)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        return RangeSet.from_ranges(original_mask.to_ranges())

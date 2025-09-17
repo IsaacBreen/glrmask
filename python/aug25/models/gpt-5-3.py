@@ -38,6 +38,7 @@ class Model(GraphProvider):
         # Roots of tries mapped by tokenizer state ID
         self.roots_map: Dict[int, int] = dict((int(s), int(r)) for s, r in roots_map)
         self.arena: Dict[int, dict] = arena
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Per-node max depth
@@ -95,8 +96,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -295,4 +296,5 @@ class Model(GraphProvider):
                         heapq.heappush(active_depths_heap, child_depth)
                         active_depths_in_heap.add(child_depth)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        return RangeSet.from_ranges(original_mask.to_ranges())
