@@ -53,6 +53,7 @@ echo "---"
 
 # --- Run Tests ---
 echo "Starting test runs..."
+REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
 for full_impl_path in "${ALL_IMPLS[@]}"; do
     echo
     echo ">>> Running test spec for: $full_impl_path"
@@ -62,10 +63,11 @@ for full_impl_path in "${ALL_IMPLS[@]}"; do
     # file paths (e.g., python/gss_tester/reference_impl.py).
     if [[ "$full_impl_path" == *.py ]]; then
         # Handle file path: derive module and class name by convention.
-        # Module name: strip path up to 'python/', remove '.py', replace '/' with '.'
-        module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\.py$##' -e 's#/#.#g')
+        # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
+        module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
         # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
-        base_name=$(basename "$full_impl_path" .py)
+        # Use sed to robustly strip one or more '.py' suffixes.
+        base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
         class_name_base=$(echo "$base_name" | sed 's/_impl$//')
         class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
         full_impl_name="${module_name}.${class_name}"
@@ -75,6 +77,12 @@ for full_impl_path in "${ALL_IMPLS[@]}"; do
         module_name="${full_impl_name%.*}"
         class_name="${full_impl_name##*.}"
     fi
+
+    # The first implementation is the reference; capture its canonical name.
+    if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
+        REFERENCE_IMPL_CANONICAL="$full_impl_name"
+    fi
+
     output_file="${RESULTS_DIR}/${full_impl_name}.json"
 
     cmd=(python -m gss_tester.runner
@@ -102,7 +110,7 @@ echo "---"
 
 # --- Analyze Results ---
 echo "Analyzing results for consistency..."
-REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL}.json"
+REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
 
 # Check if the reference file was actually created
 if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
