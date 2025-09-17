@@ -45,7 +45,8 @@ class PyAcc:
         return {"terminals_union": self.terminals_union.to_json_serializable()}
 
     def __repr__(self):
-        return f"PyAcc({format_bv_py(self.terminals_union)})"
+        # return f"PyAcc({format_bv_py(self.terminals_union)})"
+        return f"PyAcc(...)"
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
