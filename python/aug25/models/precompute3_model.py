@@ -238,6 +238,7 @@ class Model(GraphProvider):
         original_mask = self.constraint.internal_bv_to_original(final_mask)
         temp = RangeSet.from_ranges(original_mask.to_ranges())
         ref = self.constraint_state.get_mask()
+        print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()))
         print("Final computed mask:", temp)
         print("Reference mask from Rust state:", ref)
         assert (temp == ref).all()
