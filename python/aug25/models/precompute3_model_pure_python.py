@@ -367,4 +367,7 @@ class Model(GraphProvider):
                         enqueue(max_depth[d], d)
 
         original_mask = self.constraint.internal_bv_to_original(final_mask)
-        return RangeSet.from_ranges(original_mask.to_ranges())
+        temp = RangeSet.from_ranges(original_mask.to_ranges())
+        print(f"\n--- get_mask END ---")
+        print(f"Final mask: {temp.to_ranges()}")
+        return temp
