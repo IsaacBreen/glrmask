@@ -59,16 +59,7 @@ def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
 
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
-    if not gss._heads:
-        return ffi.HybridL2Bitset.all().complement()
-    it_heads = iter(gss._heads)
-    try:
-        first_head = next(it_heads)
-        allowed_terminals = first_head.acc.terminals_union
-        for head in it_heads:
-            allowed_terminals = allowed_terminals.union(head.acc.terminals_union)
-    except StopIteration:
-        return ffi.HybridL2Bitset.all().complement()
+    allowed_terminals = gss.get_acc(merge_acc)
     return allowed_terminals.complement()
 
 
