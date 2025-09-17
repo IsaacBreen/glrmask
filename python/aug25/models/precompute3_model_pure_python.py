@@ -52,30 +52,10 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
 
 
-def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-    current_heads = gss._heads
+def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     for _ in range(n):
-        next_heads = set()
-        for head in current_heads:
-            if head in gss._child_to_parents:
-                for _, parent in gss._child_to_parents[head]:
-                    next_heads.add(parent)
-        current_heads = next_heads
-        if not current_heads:
-            return []
-    result = []
-    for head in current_heads:
-        if head in gss._child_to_parents:
-            for state_id, _ in gss._child_to_parents[head]:
-                isolated_gss = FastGSS(
-                    heads=frozenset([head]),
-                    acc_default_factory=gss._acc_default_factory,
-                    root=gss._root,
-                    child_to_parents=gss._child_to_parents,
-                    path_cache=gss._path_cache,
-                )
-                result.append((state_id, isolated_gss))
-    return result
+        gss = gss.pop()
+    return gss
 
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
@@ -331,10 +311,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = popn_fast_py(gss_node, pop)
-                    print(f"      - Found {len(peeks)} peeks from GSS set")
-                    if not peeks:
-                        continue
+                    popped = popn_fast_py(gss_node, pop)
 
                     llm_empty = llm_bv.is_empty()
 
@@ -343,10 +320,9 @@ class Model(GraphProvider):
                         # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
-                            contains = state_bv.contains
-                            for sid_val, parent_node in peeks:
-                                if contains(sid_val):
-                                    matched.append(parent_node)
+                            for sid_val in popped.peek():
+                                if state_bv.contains(sid_val):
+                                    matched.append(popped.isolate(sid_val))
                         print(f"        - Matched {len(matched)} parent GSS nodes")
                         if not matched:
                             continue
