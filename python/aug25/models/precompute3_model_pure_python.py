@@ -83,6 +83,7 @@ class Model(GraphProvider):
         self.state: Dict[int, FastGSS] = {}
         self.internal_to_original_map: Dict[int, int] = {}
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -176,6 +177,9 @@ class Model(GraphProvider):
         model.possible_matches_cache = constraint.possible_matches()
         model.internal_to_original_map = constraint.internal_to_original_map()
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
+
+        model.constraint_state = ffi.GrammarConstraintState(constraint)
+
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -201,6 +205,7 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
             self.state = {}
@@ -295,6 +300,9 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+
+        # return RangeSet.from_ranges(self.constraint_state.get_mask_bv().to_ranges())
+
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
         state_map = self.state
