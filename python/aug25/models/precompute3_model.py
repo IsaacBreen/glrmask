@@ -20,6 +20,7 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
+        self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
@@ -66,8 +67,8 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         return model
 
@@ -234,4 +235,10 @@ class Model(GraphProvider):
 
                         enqueue(max_depth[d], d)
 
-        return RangeSet.from_ranges(final_mask.to_ranges())
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        temp = RangeSet.from_ranges(original_mask.to_ranges())
+        ref = self.constraint_state.get_mask()
+        print("Final computed mask:", temp)
+        print("Reference mask from Rust state:", ref)
+        assert (temp == ref).all()
+        return temp
