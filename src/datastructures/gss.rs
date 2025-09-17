@@ -2465,7 +2465,7 @@ pub(crate) fn format_acc(
             let ptrs: Vec<String> = acc
                 .stored_trie_nodes
                 .iter()
-                .map(|wrapper| format!("{}", wrapper.as_arc()))
+                .map(|wrapper| format!("{:p}", wrapper.as_arc()))
                 .collect();
             Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
         } else {
@@ -2473,7 +2473,7 @@ pub(crate) fn format_acc(
                 .stored_trie_nodes
                 .iter()
                 .take(MAX_PTRS_TO_SHOW)
-                .map(|wrapper| format!("{}", wrapper.as_arc()))
+                .map(|wrapper| format!("{:p}", wrapper.as_arc()))
                 .collect();
             let remaining = n - MAX_PTRS_TO_SHOW;
             Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
