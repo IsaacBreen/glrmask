@@ -676,9 +676,15 @@ impl PyHybridL2Bitset {
     fn len(&self) -> usize {
         self.inner.len()
     }
+
+    fn __str__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("HybridL2Bitset({:?})", self.inner)
+    }
 }
-
-
 
 
 #[pyclass(name = "GSSNode")]

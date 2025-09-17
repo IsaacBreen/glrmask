@@ -45,8 +45,7 @@ class PyAcc:
         return {"terminals_union": self.terminals_union.to_json_serializable()}
 
     def __repr__(self):
-        # return f"PyAcc({format_bv_py(self.terminals_union)})"
-        return f"PyAcc(...)"
+        return f"PyAcc({self.terminals_union})"
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
@@ -55,12 +54,6 @@ def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
-
-def format_bv_py(bv):
-    if bv.is_empty():
-        return "[]"
-    # No easy way to check for ALL in python side
-    return f"[len={bv.len()}]"
 
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     result = gss
