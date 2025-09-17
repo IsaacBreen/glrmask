@@ -111,8 +111,8 @@ class Model(GraphProvider):
 
         final_mask = ffi.Bitset.zeros()
 
-        # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+        # node_idx -> (GSSNode, Bitset)
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -137,11 +137,11 @@ class Model(GraphProvider):
 
             existing = values.get(root_idx)
             if existing is not None:
-                gss_set, existing_mask = existing
-                gss_set.add(gss_clone)
-                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = ({gss_clone}, new_mask)
+                values[root_idx] = (gss_clone, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -194,9 +194,8 @@ class Model(GraphProvider):
                 if item is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-                gss_set, llm_mask = item
-                gss_ptrs = {g.ptr() for g in gss_set}
-                print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
+                gss_node, llm_mask = item
+                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -204,9 +203,7 @@ class Model(GraphProvider):
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
 
                     # Correct logic: intersect propagated mask with GSS active tokens
-                    gss_active_tokens = ffi.Bitset.zeros()
-                    for gss in gss_set:
-                        gss_active_tokens = gss_active_tokens.union(gss.allowed_llm_tokens())
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
 
                     tokens_to_add = llm_mask.intersection(gss_active_tokens)
 
@@ -217,9 +214,9 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(tokens_to_add)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                if not gss_set:
+                if not gss_node.is_alive():
                     stopped.add(node_idx)
-                    print(f"    - STOPPING node {node_idx} (empty gss_set)")
+                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
@@ -230,9 +227,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = []
-                    for g in gss_set:
-                        peeks.extend(g.popn_fast(pop))
+                    peeks = gss_node.popn_fast(pop)
                     print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
@@ -252,8 +247,8 @@ class Model(GraphProvider):
                         if not matched:
                             continue
 
-                        # Merge matched parents
-                        child_gss_nodes = matched  # already a list of parent nodes
+                        # Merge matched parent GSS nodes
+                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -262,19 +257,14 @@ class Model(GraphProvider):
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
-                            existing_gss_set, existing_mask = existing
-                            old_len = len(existing_gss_set)
-                            existing_gss_set.update(child_gss_nodes)
-                            # Only re-enqueue if effectively changed
-                            if len(existing_gss_set) == old_len:
-                                print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
-                                continue
+                            existing_gss, existing_mask = existing
+                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                             combined_mask = existing_mask.union(child_llm_mask)
-                            values[d] = (existing_gss_set, combined_mask)
-                            print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
+                            values[d] = (merged_gss, combined_mask)
+                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                         else:
-                            values[d] = (set(child_gss_nodes), child_llm_mask)
-                            print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
+                            values[d] = (child_gss_node, child_llm_mask)
+                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                         enqueue(max_depth[d], d)
 
@@ -285,5 +275,5 @@ class Model(GraphProvider):
         print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()).to_ranges())
         print("Final computed mask:", temp.to_ranges())
         print("Reference mask from Rust state:", RangeSet.from_numpy(ref).to_ranges())
-        assert (temp == ref).all()
+        assert (temp == RangeSet.from_numpy(ref)).all()
         return temp

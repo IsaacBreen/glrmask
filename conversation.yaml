@@ -5,7 +5,7 @@ local_system:
     - src/datastructures/gss.rs
     - python/src/lib.rs
     - python/aug25/models/precompute3_model.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint.rs: |
@@ -17750,8 +17750,8 @@ local_system:
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> (set(GSSNode), Bitset)
-              values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -17776,11 +17776,11 @@ local_system:
 
                   existing = values.get(root_idx)
                   if existing is not None:
-                      gss_set, existing_mask = existing
-                      gss_set.add(gss_clone)
-                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                      existing_gss, existing_mask = existing
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
-                      values[root_idx] = ({gss_clone}, new_mask)
+                      values[root_idx] = (gss_clone, new_mask)
 
                   depth = max_depth[root_idx]
                   bucket = todo.get(depth)
@@ -17833,9 +17833,8 @@ local_system:
                       if item is None:
                           print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
-                      gss_set, llm_mask = item
-                      gss_ptrs = {g.ptr() for g in gss_set}
-                      print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
+                      gss_node, llm_mask = item
+                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
                       # End-node handling
                       if is_end(node_idx):
@@ -17843,9 +17842,7 @@ local_system:
                           print(f"      - final_mask before: {final_mask.to_ranges()}")
 
                           # Correct logic: intersect propagated mask with GSS active tokens
-                          gss_active_tokens = ffi.Bitset.zeros()
-                          for gss in gss_set:
-                              gss_active_tokens = gss_active_tokens.union(gss.allowed_llm_tokens())
+                          gss_active_tokens = gss_node.allowed_llm_tokens()
 
                           tokens_to_add = llm_mask.intersection(gss_active_tokens)
 
@@ -17856,9 +17853,9 @@ local_system:
                           final_mask = final_mask.union(tokens_to_add)
                           print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                      if not gss_set:
+                      if not gss_node.is_alive():
                           stopped.add(node_idx)
-                          print(f"    - STOPPING node {node_idx} (empty gss_set)")
+                          print(f"    - STOPPING node {node_idx} (GSS not alive)")
                           continue
 
                       # Transitions grouped by (pop, llm_bv)
@@ -17869,9 +17866,7 @@ local_system:
                       for (pop, llm_bv), dests in children:
                           print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                           # Collect all pops from GSS parents
-                          peeks = []
-                          for g in gss_set:
-                              peeks.extend(g.popn_fast(pop))
+                          peeks = gss_node.popn_fast(pop)
                           print(f"      - Found {len(peeks)} peeks from GSS set")
                           if not peeks:
                               continue
@@ -17891,8 +17886,8 @@ local_system:
                               if not matched:
                                   continue
 
-                              # Merge matched parents
-                              child_gss_nodes = matched  # already a list of parent nodes
+                              # Merge matched parent GSS nodes
+                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
 
                               # Compute child mask (intersection with llm_bv when present)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -17901,19 +17896,14 @@ local_system:
                               d = int(dest_idx)
                               existing = values.get(d)
                               if existing is not None:
-                                  existing_gss_set, existing_mask = existing
-                                  old_len = len(existing_gss_set)
-                                  existing_gss_set.update(child_gss_nodes)
-                                  # Only re-enqueue if effectively changed
-                                  if len(existing_gss_set) == old_len:
-                                      print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
-                                      continue
+                                  existing_gss, existing_mask = existing
+                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                                   combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (existing_gss_set, combined_mask)
-                                  print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
+                                  values[d] = (merged_gss, combined_mask)
+                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
-                                  values[d] = (set(child_gss_nodes), child_llm_mask)
-                                  print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
@@ -17924,7 +17914,7 @@ local_system:
               print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()).to_ranges())
               print("Final computed mask:", temp.to_ranges())
               print("Reference mask from Rust state:", RangeSet.from_numpy(ref).to_ranges())
-              assert (temp == ref).all()
+              assert (temp == RangeSet.from_numpy(ref)).all()
               return temp
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -27248,5 +27238,512 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct end node detection and mask
       update logic in precompute3_model"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash run_benchmarks.sh aug25/models/precompute3_model.py
+      Benchmark results will be saved in: benchmark_results/2025-09-17_11-36-08
+      ---
+      Baseline Model: aug25/models/precompute3_model.py
+      Other Models: (none)
+      Constraint File: ../.cache/test_vocabs/js_grammar_constraint.json.gz
+      Code: ../src/example_code.js
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: precompute3_model.py
+      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model.py --output benchmark_results/2025-09-17_11-36-08
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
+      Loading model from: aug25/models/precompute3_model.py
+      Normalizing precompute3 BVs: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 1666.06it/s]
+      Model loaded in 0.0165 seconds.
+      Loading and tokenizing code from: ../src/example_code.js
+      Tokenized into 473 tokens.
+
+      --- Running benchmark (473 steps) ---
+      Benchmarking steps:   0%|                                                                                                                                                       | 0/473 [00:00<?, ?it/s, get_mask]
+      --- get_mask START ---
+      GSS at start of get_mask:
+      GrammarConstraintState (1 active tokenizer states):
+        - Tokenizer State   0: GSS Root (1 predecessors)
+
+      Combined GSS Forest (showing up to 50 nodes):
+      GSS Forest (Max Edges: 50):
+      Root 0: Node 0
+        └── edge 2 -> Node 1
+
+      Filtered state_to_gss: {0: 105553131507216}
+
+      --- Seeding work queue ---
+        SEED: sid=0, root_idx=0, gss_ptr=105553131507216, mask=[(0, 18446744073709551615)]
+
+      --- Main loop ---
+
+      [1] Processing depth=0, nodes={0}
+        - Node 0: Popped |gss|=1 (ptrs={105553131507216}), mask=[(0, 18446744073709551615)]
+          - Edge: pop=0, llm_bv=[(5, 5), (66, 66)]
+            - Found 1 peeks from GSS set
+            - Dest: idx=4, state_bv=[(0, 3)]
+              - Matched 1 parent GSS nodes
+              - Child mask: [(5, 5), (66, 66)]
+              - Enqueue 4: CREATING |gss|=1, mask=[(5, 5), (66, 66)]
+
+      [2] Processing depth=1, nodes={4}
+        - Node 4: Popped |gss|=1 (ptrs={105553131569168}), mask=[(5, 5), (66, 66)]
+          - Edge: pop=0, llm_bv=[(5, 5)]
+            - Found 1 peeks from GSS set
+            - Dest: idx=3, state_bv=[(0, 0)]
+              - Matched 0 parent GSS nodes
+          - Edge: pop=0, llm_bv=[(66, 66)]
+            - Found 1 peeks from GSS set
+            - Dest: idx=3, state_bv=[(2, 2)]
+              - Matched 1 parent GSS nodes
+              - Child mask: [(66, 66)]
+              - Enqueue 3: CREATING |gss|=1, mask=[(66, 66)]
+
+      [3] Processing depth=2, nodes={3}
+        - Node 3: Popped |gss|=1 (ptrs={105553131569296}), mask=[(66, 66)]
+          - END NODE found. Updating final_mask.
+            - final_mask before: []
+            - llm_mask (propagated): [(66, 66)]
+            - gss_active_tokens (from GSS): [(0, 18446744073709551615)]
+            - tokens_to_add (intersection): [(66, 66)]
+            - final_mask after:  [(66, 66)]
+          - No children for node 3
+      [4] Loop finished: no more nodes to process.
+
+      --- get_mask END ---
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2525: 
+      --- get_mask3 START ---
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2526: GSS at start of get_mask3:
+      [DEBUG] 2] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2527: Getting mask 1 states: [0]
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2531: Initial GSS stats: GSSStats {
+          num_roots: 1,
+          num_root_predecessors: 1,
+          num_unique_root_predecessor_keys: 1,
+          total_edges: 1,
+          unique_nodes: 2,
+          num_leaves: 1,
+          structurally_unique_nodes: 2,
+          structural_redundancy: 0.0,
+          num_redundant_nodes: 0,
+          max_depth: 1,
+          average_depth: 0.5,
+          merge_points: 0,
+          max_predecessors_with_values: 1,
+          average_predecessors_with_values: 0.5,
+      }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2570: 
+      --- Seeding work queue ---
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2599:   SEED: sid=0, root_idx=Trie2Index(0), gss_ptr=0x600000e88e10, mask=HybridBitset { inner: 0..=18446744073709551615 }
+      after initial_values_for_map:       420.833µs
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2671:   - PROCESS: node_ptr=0x13cf75520, gss_ptr=0x600000e88e10, mask=HybridBitset { inner: 0..=18446744073709551615 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2622:   - STEP: gss_ptr=0x600000e88e10, allowed_bv=HybridBitset { inner: 0..=18446744073709551615 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2623:     - Edge: pop=0, llm_bv=HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:       - Found 1 peeks from GSS
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2630:       - Dest: idx=Trie2Index(4), state_bv=HybridBitset { inner: 0..=3 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2639:         - Matched 1 parent GSS nodes
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2650:         - Child mask: HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2653:         - Enqueue Trie2Index(4): CREATING gss_ptr=0x600000e804d0, mask=HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2671:   - PROCESS: node_ptr=0x13cf755e0, gss_ptr=0x600000e804d0, mask=HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2622:   - STEP: gss_ptr=0x600000e804d0, allowed_bv=HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2623:     - Edge: pop=0, llm_bv=HybridBitset { inner: 5..=5 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:       - Found 1 peeks from GSS
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2630:       - Dest: idx=Trie2Index(3), state_bv=HybridBitset { inner: 0..=0 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2639:         - Matched 0 parent GSS nodes
+      Traversing edges: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:00<00:00, 51835.85it/s][DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2622:   - STEP: gss_ptr=0x600000e804d0, allowed_bv=HybridBitset { inner: 5..=5, 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2623:     - Edge: pop=0, llm_bv=HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2626:       - Found 1 peeks from GSS
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2630:       - Dest: idx=Trie2Index(3), state_bv=HybridBitset { inner: 2..=2 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2639:         - Matched 1 parent GSS nodes
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2650:         - Child mask: HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2653:         - Enqueue Trie2Index(3): CREATING gss_ptr=0x600000e80550, mask=HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2671:   - PROCESS: node_ptr=0x13cf755b0, gss_ptr=0x600000e80550, mask=HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2675:     - END NODE found. Updating final_mask.
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2676:       - final_mask before: HybridBitset { inner:  }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2677:       - glr_active_tokens to union: HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2679:       - final_mask after:  HybridBitset { inner: 66..=66 }
+      after special_map:       704.417µs
+      --- Profiler Summary (Flat) ---
+
+      [Flat Timings]
+            Hits      Total Time       Total/Hit        Own Time         Own/Hit      % Own  Name
+               1       252.000µs       252.000µs       249.167µs       249.167µs      98.9%  sep1::datastructures::trie::special_map_grouped
+               2         2.833µs         1.416µs         2.833µs         1.416µs     100.0%  GSSNode::merge_many_with_depth(1)
+
+      --- End Profiler Summary (Flat) ---
+      --- Profiler Summary ---
+
+      [Hierarchical Timings]
+            Hits      Total Time       Total/Hit        Own Time         Own/Hit      % Own     % of Parent  Name
+               1       252.000µs       252.000µs       249.167µs       249.167µs      98.9%          100.0%  sep1::datastructures::trie::special_map_grouped
+               2         2.833µs         1.416µs         2.833µs         1.416µs     100.0%            1.1%    GSSNode::merge_many_with_depth(1)
+
+      --- End Profiler Summary ---
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2692: 
+      --- get_mask3 END ---
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2693: Final mask internal: HybridBitset { inner: 66..=66 }
+      [DEBUG] 1] /Users/isaacbreen/Projects2/grammars2024/src/constraint.rs:2696: Final mask mapped: HybridBitset { inner: 64..=64 }
+      get_mask took:        731.25µs
+      Final mask before mapping: [[66, 66]]
+      Final computed mask: [[64, 64]]
+      Reference mask from Rust state: [[64, 64]]
+      Benchmarking steps:   0%|                                                                                                                                                       | 0/473 [00:00<?, ?it/s, get_mask]
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 304, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 300, in main
+          run_benchmark(args)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 224, in run_benchmark
+          mask_rs = model.get_mask()
+                    ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model.py", line 288, in get_mask
+          assert (temp == ref).all()
+      AssertionError
+    metadata:
+  - assistant: |-
+      It appears there are two issues causing the `AssertionError`.
+
+      1.  **Incorrect GSS Node Handling:** Your Python implementation accumulates a `set` of `GSSNode` objects at each point in the trie. The correct approach, mirroring the Rust implementation, is to *merge* these nodes into a single representative `GSSNode`. This is a fundamental difference in logic that causes the behavior to diverge from the reference implementation, especially in more complex scenarios.
+      2.  **Incorrect Assertion Comparison:** The final `assert` statement compares a `RangeSet` object (`temp`) with a raw NumPy array (`ref`). This comparison is not well-defined and is the direct cause of the `AssertionError` even when the printed values appear identical.
+
+      Here are the step-by-step instructions to fix both issues.
+
+      ### Step-by-step Instructions
+
+      **File to edit:** `python/aug25/models/precompute3_model.py`
+
+      1.  **Change `values` Dictionary Structure:**
+          In the `get_mask` method, change the type annotation and initialization of the `values` dictionary. It should store a single merged `GSSNode` per trie node, not a `set` of them.
+
+          *   **Around line 96:**
+              *   **From:**
+                  ```python
+                  # node_idx -> (set(GSSNode), Bitset)
+                  values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+                  ```
+              *   **To:**
+                  ```python
+                  # node_idx -> (GSSNode, Bitset)
+                  values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+                  ```
+
+      2.  **Update Seeding and Merging Logic:**
+          Modify the main loop to correctly merge GSS nodes instead of collecting them in a set.
+
+          *   **In the seeding loop (around line 117):**
+              *   **From:**
+                  ```python
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      gss_set, existing_mask = existing
+                      gss_set.add(gss_clone)
+                      values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = ({gss_clone}, new_mask)
+                  ```
+              *   **To:**
+                  ```python
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = (gss_clone, new_mask)
+                  ```
+
+      3.  **Update Main Loop Processing:**
+          Adjust the main loop to work with a single `gss_node` instead of a `gss_set`.
+
+          *   **Around line 161:**
+              *   **From:**
+                  ```python
+                  gss_set, llm_mask = item
+                  gss_ptrs = {g.ptr() for g in gss_set}
+                  print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
+                  ```
+              *   **To:**
+                  ```python
+                  gss_node, llm_mask = item
+                  print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+                  ```
+
+          *   **In the end-node handling block (around line 168):**
+              *   **From:**
+                  ```python
+                  gss_active_tokens = ffi.Bitset.zeros()
+                  for gss in gss_set:
+                      gss_active_tokens = gss_active_tokens.union(gss.allowed_llm_tokens())
+                  ```
+              *   **To:**
+                  ```python
+                  gss_active_tokens = gss_node.allowed_llm_tokens()
+                  ```
+
+          *   **Update the stop condition (around line 180):**
+              *   **From:**
+                  ```python
+                  if not gss_set:
+                      stopped.add(node_idx)
+                      print(f"    - STOPPING node {node_idx} (empty gss_set)")
+                      continue
+                  ```
+              *   **To:**
+                  ```python
+                  if not gss_node.is_alive():
+                      stopped.add(node_idx)
+                      print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                      continue
+                  ```
+
+          *   **Update how `peeks` are collected (around line 189):**
+              *   **From:**
+                  ```python
+                  peeks = []
+                  for g in gss_set:
+                      peeks.extend(g.popn_fast(pop))
+                  ```
+              *   **To:**
+                  ```python
+                  peeks = gss_node.popn_fast(pop)
+                  ```
+
+          *   **Update the destination merge logic (around line 208):**
+              *   **From:**
+                  ```python
+                  # Merge matched parents
+                  child_gss_nodes = matched  # already a list of parent nodes
+
+                  # ... (compute child_llm_mask) ...
+
+                  d = int(dest_idx)
+                  existing = values.get(d)
+                  if existing is not None:
+                      existing_gss_set, existing_mask = existing
+                      old_len = len(existing_gss_set)
+                      existing_gss_set.update(child_gss_nodes)
+                      # Only re-enqueue if effectively changed
+                      if len(existing_gss_set) == old_len:
+                          print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
+                          continue
+                      combined_mask = existing_mask.union(child_llm_mask)
+                      values[d] = (existing_gss_set, combined_mask)
+                      print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
+                  else:
+                      values[d] = (set(child_gss_nodes), child_llm_mask)
+                      print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
+                  ```
+              *   **To:**
+                  ```python
+                  # Merge matched parent GSS nodes
+                  child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+
+                  # Compute child mask (intersection with llm_bv when present)
+                  child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                  print(f"        - Child mask: {child_llm_mask.to_ranges()}")
+
+                  d = int(dest_idx)
+                  existing = values.get(d)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                      combined_mask = existing_mask.union(child_llm_mask)
+                      values[d] = (merged_gss, combined_mask)
+                      print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                  else:
+                      values[d] = (child_gss_node, child_llm_mask)
+                      print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+                  ```
+
+      4.  **Fix the Final Assertion:**
+          In the `get_mask` method, modify the final `assert` statement to compare two `RangeSet` objects.
+
+          *   **Around line 287:**
+              *   **From:**
+                  ```python
+                  assert (temp == ref).all()
+                  ```
+              *   **To:**
+                  ```python
+                  assert (temp == RangeSet.from_numpy(ref)).all()
+                  ```
+
+      ### Git Diffs
+
+      Here is the git diff for the required changes:
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      --- a/python/aug25/models/precompute3_model.py
+      +++ b/python/aug25/models/precompute3_model.py
+      @@ -93,8 +93,8 @@
+       
+               final_mask = ffi.Bitset.zeros()
+       
+      -        # node_idx -> (set(GSSNode), Bitset)
+      -        values: Dict[int, Tuple[set, ffi.Bitset]] = {}
+      +        # node_idx -> (GSSNode, Bitset)
+      +        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+       
+               stopped: set[int] = set()  # nodes that stopped (no gss parents)
+               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+      @@ -115,12 +115,12 @@
+       
+                   existing = values.get(root_idx)
+                   if existing is not None:
+      -                gss_set, existing_mask = existing
+      -                gss_set.add(gss_clone)
+      -                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+      +                existing_gss, existing_mask = existing
+      +                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+      +                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                   else:
+      -                values[root_idx] = ({gss_clone}, new_mask)
+      +                values[root_idx] = (gss_clone, new_mask)
+       
+                   depth = max_depth[root_idx]
+                   bucket = todo.get(depth)
+      @@ -161,29 +161,25 @@
+                       if item is None:
+                           print(f"  - Node {node_idx}: SKIPPING (no value)")
+                           continue
+      -                gss_set, llm_mask = item
+      -                gss_ptrs = {g.ptr() for g in gss_set}
+      -                print(f"  - Node {node_idx}: Popped |gss|={len(gss_set)} (ptrs={gss_ptrs}), mask={llm_mask.to_ranges()}")
+      +                gss_node, llm_mask = item
+      +                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+       
+                       # End-node handling
+                       if is_end(node_idx):
+                           print(f"    - END NODE found. Updating final_mask.")
+                           print(f"      - final_mask before: {final_mask.to_ranges()}")
+       
+                           # Correct logic: intersect propagated mask with GSS active tokens
+      -                    gss_active_tokens = ffi.Bitset.zeros()
+      -                    for gss in gss_set:
+      -                        gss_active_tokens = gss_active_tokens.union(gss.allowed_llm_tokens())
+      +                    gss_active_tokens = gss_node.allowed_llm_tokens()
+       
+                           tokens_to_add = llm_mask.intersection(gss_active_tokens)
+       
+                           print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                           print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                           print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+       
+                           final_mask = final_mask.union(tokens_to_add)
+                           print(f"      - final_mask after:  {final_mask.to_ranges()}")
+       
+      -                if not gss_set:
+      +                if not gss_node.is_alive():
+                           stopped.add(node_idx)
+      -                    print(f"    - STOPPING node {node_idx} (empty gss_set)")
+      +                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                           continue
+       
+                       # Transitions grouped by (pop, llm_bv)
+      @@ -193,10 +189,7 @@
+                       for (pop, llm_bv), dests in children:
+                           print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                           # Collect all pops from GSS parents
+      -                    peeks = []
+      -                    for g in gss_set:
+      -                        peeks.extend(g.popn_fast(pop))
+      +                    peeks = gss_node.popn_fast(pop)
+                           print(f"      - Found {len(peeks)} peeks from GSS set")
+                           if not peeks:
+                               continue
+      @@ -215,28 +208,21 @@
+                               if not matched:
+                                   continue
+       
+      -                        # Merge matched parents
+      -                        child_gss_nodes = matched  # already a list of parent nodes
+      +                        # Merge matched parent GSS nodes
+      +                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+       
+                               # Compute child mask (intersection with llm_bv when present)
+                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                               print(f"        - Child mask: {child_llm_mask.to_ranges()}")
+       
+                               d = int(dest_idx)
+                               existing = values.get(d)
+                               if existing is not None:
+      -                            existing_gss_set, existing_mask = existing
+      -                            old_len = len(existing_gss_set)
+      -                            existing_gss_set.update(child_gss_nodes)
+      -                            # Only re-enqueue if effectively changed
+      -                            if len(existing_gss_set) == old_len:
+      -                                print(f"        - Enqueue {d}: SKIPPING (no new GSS nodes)")
+      -                                continue
+      +                            existing_gss, existing_mask = existing
+      +                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                   combined_mask = existing_mask.union(child_llm_mask)
+      -                            values[d] = (existing_gss_set, combined_mask)
+      -                            print(f"        - Enqueue {d}: UPDATING |gss|={len(existing_gss_set)}, mask={combined_mask.to_ranges()}")
+      +                            values[d] = (merged_gss, combined_mask)
+      +                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                               else:
+      -                            values[d] = (set(child_gss_nodes), child_llm_mask)
+      -                            print(f"        - Enqueue {d}: CREATING |gss|={len(child_gss_nodes)}, mask={child_llm_mask.to_ranges()}")
+      +                            values[d] = (child_gss_node, child_llm_mask)
+      +                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+       
+                               enqueue(max_depth[d], d)
+       
+      @@ -247,6 +233,6 @@
+               ref = self.constraint_state.get_mask()
+               print("Final mask before mapping:", RangeSet.from_ranges(final_mask.to_ranges()).to_ranges())
+               print("Final computed mask:", temp.to_ranges())
+               print("Reference mask from Rust state:", RangeSet.from_numpy(ref).to_ranges())
+      -        assert (temp == ref).all()
+      +        assert (temp == RangeSet.from_numpy(ref)).all()
+               return temp
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model.py
+      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct GSS node merging and assertion
+      comparison in precompute3_model"'
     metadata:
 ...
