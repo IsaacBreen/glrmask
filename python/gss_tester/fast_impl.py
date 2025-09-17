@@ -24,6 +24,9 @@ class _Node(Generic[T, Acc]):
     def __repr__(self):
         return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
 
+    def __str__(self):
+        return self.__repr__()
+
 class FastGSS(GSS[T, Acc]):
     """
     A performant GSS implementation using a graph of shared nodes.
@@ -221,7 +224,7 @@ class FastGSS(GSS[T, Acc]):
                 all_stacks.append({"stack": list(path), "acc": head.acc})
         
         # Sort for a canonical representation
-        return sorted(all_stacks, key=lambda x: (x["stack"], x["acc"]))
+        return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
 
     def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
         if node.id in cache:
@@ -245,4 +248,16 @@ class FastGSS(GSS[T, Acc]):
         return result
 
     def __hash__(self):
-        return hash((self._heads, frozenset((node, frozenset(edges)) for node, edges in self._child_to_parents.items())))
+        serial = self.to_json_serializable()
+        hashable_serial = tuple(
+            (tuple(item['stack']), item['acc']) for item in serial
+        )
+        return hash(hashable_serial)
+
+    def __eq__(self, other):
+        if not isinstance(other, FastGSS):
+            return NotImplemented
+        return self.to_json_serializable() == other.to_json_serializable()
+
+    def __repr__(self):
+        return f"FastGSS({self.to_json_serializable()})"

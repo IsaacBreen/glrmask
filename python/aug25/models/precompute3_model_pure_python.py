@@ -44,6 +44,9 @@ class PyAcc:
     def to_json_serializable(self):
         return {"terminals_union": self.terminals_union.to_json_serializable()}
 
+    def __repr__(self):
+        return f"PyAcc({format_bv_py(self.terminals_union)})"
+
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
     return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
@@ -343,11 +346,11 @@ class Model(GraphProvider):
 
         print(f"state_map:")
         for sid, gss in state_map.items():
-            print(f"  sid={sid}, gss_heads={[h.id for h in gss._heads]}")
+            print(gss)
 
         print(f"expected_state_map:")
         for sid, gss in expected_state_map.items():
-            print(f"  sid={sid}, gss_heads={[h.id for h in gss._heads]}")
+            print(gss)
 
         assert state_map == expected_state_map, f"state_map != expected_state_map: {state_map.keys() ^ expected_state_map.keys()}"
 
