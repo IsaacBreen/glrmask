@@ -3,7 +3,7 @@ import time
 import heapq
 from typing import Dict, List, Tuple, Optional
 
-from ..common_interface import GraphProvider
+from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
@@ -20,6 +20,8 @@ class Model(GraphProvider):
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
         self.max_depth: Dict[int, int] = {}
+        self.constraint: Optional[ffi.GrammarConstraint] = None
+        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -62,7 +64,10 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
-        return Model(roots_map, arena)
+        model = Model(roots_map, arena)
+        model.constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+        return model
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -86,13 +91,18 @@ class Model(GraphProvider):
                             for sid in range(start, end):
                                 yield (int(pop), sid, int(dest_idx))
 
-    def get_mask(self, state_to_gss: Dict[int, ffi.GSSNode]) -> ffi.Bitset:
+    def commit(self, token_id: int):
+        self.constraint_state.commit(token_id)
+
+    def get_mask(self) -> ffi.Bitset:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
         t0 = time.time()
         print(f"[{time.time() - t0:.4f}] get_mask: start")
+
+        state_to_gss: Dict[int, ffi.GSSNode] = self.constraint_state.filtered_state_gss_map()
 
         final_mask = ffi.Bitset.zeros()
 
@@ -282,4 +292,13 @@ class Model(GraphProvider):
         print(f"    - 7. Merge into values: {time_merge_values:9.4f}s ({hits_merge_values:8d} hits)")
 
         print(f"[{time.time() - t0:.4f}] get_mask: returning")
-        return final_mask
+
+        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        temp = RangeSet.from_ranges(original_mask.to_ranges())
+        ref = self.constraint_state.get_mask()
+        print("Final computed mask:", temp)
+        print("Reference mask from Rust state:", ref)
+        assert (temp == ref).all()
+        return temp
+
+
