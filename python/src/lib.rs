@@ -639,19 +639,6 @@ impl PyHybridL2Bitset {
             (py_range, py_bv)
         }).collect()
     }
-
-    #[staticmethod]
-    fn all() -> Self {
-        Self { inner: RustHybridL2Bitset::all() }
-    }
-
-    fn union(&self, other: &PyHybridL2Bitset) -> Self {
-        Self { inner: &self.inner | &other.inner }
-    }
-
-    fn complement(&self) -> Self {
-        Self { inner: self.inner.complement() }
-    }
 }
 
 
@@ -680,25 +667,6 @@ impl PyGSSNode {
 
     fn is_ok(&self) -> bool {
         self.inner.is_ok()
-    }
-
-    fn depth(&self) -> usize {
-        self.inner.max_depth()
-    }
-
-    fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
-        let mut preds = Vec::new();
-        for peek in RustGSSNode::peek_iter(&self.inner) {
-            preds.push((
-                peek.edge_value().state_id.0,
-                PyGSSNode { inner: peek.predecessor_node().clone() }
-            ));
-        }
-        preds
-    }
-
-    fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
     }
 
     fn allowed_llm_tokens(&self) -> PyHybridBitset {
