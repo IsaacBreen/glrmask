@@ -619,12 +619,6 @@ impl PyHybridBitset {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
         Ok(Self { inner })
     }
-
-    fn __hash__(&self) -> PyResult<isize> {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        Ok(hasher.finish() as isize)
-    }
 }
 
 impl From<RustHybridBitset> for PyHybridBitset {
@@ -661,12 +655,6 @@ impl PyHybridL2Bitset {
 
     pub fn complement(&self) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: self.inner.complement() }
-    }
-
-    fn __hash__(&self) -> PyResult<isize> {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        Ok(hasher.finish() as isize)
     }
 }
 

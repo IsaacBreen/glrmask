@@ -70,7 +70,7 @@ class FastGSS(GSS[T, Acc]):
                 new_heads.add(memo[head])
                 continue
 
-            new_node = _Node(acc=self._acc_default_factory(), depth=head.depth + 1)
+            new_node = _Node(acc=head.acc, depth=head.depth + 1)
             
             if new_node not in new_child_to_parents:
                 new_child_to_parents[new_node] = set()

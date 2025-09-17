@@ -37,30 +37,20 @@ class ParserTable:
 @dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
-    llm_tokens_union: ffi.Bitset
 
     def __hash__(self):
-        return hash((self.terminals_union, self.llm_tokens_union))
+        return hash(self.terminals_union)
 
     def to_json_serializable(self):
-        return {
-            "terminals_union": self.terminals_union.to_json_serializable(),
-            "llm_tokens_union": self.llm_tokens_union.to_json_string()
-        }
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(
-        terminals_union=acc1.terminals_union.union(acc2.terminals_union),
-        llm_tokens_union=acc1.llm_tokens_union.union(acc2.llm_tokens_union)
-    )
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
-
-def get_allowed_llm_tokens_py(gss: FastGSS) -> ffi.Bitset:
-    return gss.get_acc(merge_acc).llm_tokens_union
 
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     result = gss
@@ -171,16 +161,15 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
+        def acc_factory():
+            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+        model.state = {model.tokenizer_initial_state: initial_gss}
+
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = constraint.possible_matches()
         model.internal_to_original_map = constraint.internal_to_original_map()
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-
-        def acc_factory():
-            return PyAcc(terminals_union=ffi.HybridL2Bitset.all(),
-                         llm_tokens_union=model.all_internal_llm_tokens_bitset)
-        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
-        model.state = {model.tokenizer_initial_state: initial_gss}
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -304,6 +293,8 @@ class Model(GraphProvider):
         print("GSS at start of get_mask:")
         state_map = self.state
 
+        all_ones_mask = self.all_internal_llm_tokens_bitset
+
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (FastGSS, Bitset)
@@ -320,7 +311,7 @@ class Model(GraphProvider):
 
         print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
-            new_mask = self.all_internal_llm_tokens_bitset
+            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
@@ -414,7 +405,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    gss_active_tokens = get_allowed_llm_tokens_py(gss_node)
+                    gss_active_tokens = all_ones_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
