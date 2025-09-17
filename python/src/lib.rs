@@ -656,7 +656,19 @@ impl PyHybridL2Bitset {
     pub fn complement(&self) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: self.inner.complement() }
     }
+
+    fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
+        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
+    }
+
+    fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
+        self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
+    }
+
+
 }
+
+
 
 
 #[pyclass(name = "GSSNode")]

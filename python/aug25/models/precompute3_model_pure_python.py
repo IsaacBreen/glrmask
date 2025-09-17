@@ -243,6 +243,58 @@ class Model(GraphProvider):
             self.state = {}
             return
 
+        # --- Start: New logic inspired by Rust commit ---
+        tokenizer_state_map: Dict[int, int] = {} # old_sid -> new_sid
+        terminals_map: Dict[int, ffi.Bitset] = {} # old_sid -> allowed terminals
+        
+        for tokenizer_sid in self.state.keys():
+            end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+            if end_state is not None:
+                tokenizer_state_map[tokenizer_sid] = end_state
+            
+            terminals = ffi.Bitset.zeros()
+            for terminal_id, _ in matches:
+                terminals.insert(terminal_id)
+            terminals_map[tokenizer_sid] = terminals
+
+        transformed_states: Dict[int, FastGSS] = {}
+        for tokenizer_sid, gss in self.state.items():
+            # 1. Prune disallowed terminals
+            def prune_func(acc: PyAcc) -> Optional[PyAcc]:
+                if tokenizer_sid in terminals_map:
+                    matched_terminals = terminals_map[tokenizer_sid]
+                    allowed_terminals = acc.terminals_union.get_l2_bitset(tokenizer_sid)
+                    if not matched_terminals.is_subset(allowed_terminals):
+                        return None # Prune
+                return acc
+            
+            gss = gss.deep_apply(prune_func)
+            if not any(h is not gss._root for h in gss._heads):
+                continue
+
+            # 2. Map allowed terminals to new tokenizer states
+            def map_func(acc: PyAcc) -> PyAcc:
+                new_terminals_by_state: Dict[int, ffi.Bitset] = {}
+                for old_sid, new_sid in tokenizer_state_map.items():
+                    bv_source = acc.terminals_union.get_l2_bitset(old_sid)
+                    if new_sid in new_terminals_by_state:
+                        new_terminals_by_state[new_sid] = new_terminals_by_state[new_sid].union(bv_source)
+                    else:
+                        new_terminals_by_state[new_sid] = bv_source
+                
+                new_l2 = ffi.HybridL2Bitset.all()
+                for sid, bv in new_terminals_by_state.items():
+                    new_l2.insert_l2_bitset(sid, bv)
+                
+                return PyAcc(terminals_union=new_l2)
+
+            gss = gss.deep_apply(map_func)
+            if any(h is not gss._root for h in gss._heads):
+                transformed_states[tokenizer_sid] = gss
+        
+        self.state = transformed_states
+        # --- End: New logic ---
+
         new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
 
         q = collections.deque()
@@ -254,7 +306,6 @@ class Model(GraphProvider):
         while q:
             offset, tokenizer_sid, gss = q.popleft()
 
-            # GSS is not hashable, use its serializable form for visited check
             q_item = (offset, tokenizer_sid, gss)
             if q_item in visited_q_items:
                 continue
