@@ -108,6 +108,9 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         mismatches: List[int] = []
         for i in range(length):
             if baseline_masks[i] != masks[i]:
+                print(f"Mask mismatch at token index {i} for model {model_name}")
+                print(f"Baseline: {baseline_masks[i]}")
+                print(f"Current:  {masks[i]}")
                 mismatches.append(i)
         # If lengths differ, count extra indices as mismatches (conservative)
         if len(baseline_masks) != len(masks):
