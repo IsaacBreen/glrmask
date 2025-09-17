@@ -53,6 +53,15 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
 
 
 def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
+    if n == 0:
+        result = []
+        for head in gss._heads:
+            if head in gss._child_to_parents:
+                for state_id, parent_node in gss._child_to_parents[head]:
+                    isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
+                    result.append((state_id, isolated_gss))
+        return result
+
     current_heads = gss._heads
     for _ in range(n):
         next_heads = set()
