@@ -282,49 +282,49 @@ class Model(GraphProvider):
         }
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-        # Group heads by ALL top-of-stack states they expose (not just one).
-        # A single head can have multiple predecessor edges (states) simultaneously.
-        # We must include the head under each state to preserve all valid actions.
-        heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
-        for head in gss._heads:
-            for state_id in gss.peek_from_head(head):
-                heads_by_state[state_id].append(head)
-
-        shifted_gsses = []
+        # Use iter_peeks to process each path individually, akin to the Rust implementation.
+        shifted_gsses: List[FastGSS] = []
         reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
-        for state_id, heads in heads_by_state.items():
-            state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+        for state_id, parent_gss in gss.iter_peeks():
             row = self.parser_table.table.get(state_id)
-            if not row: continue
+            if not row:
+                continue
             action = row.actions.get(terminal_id)
-            if not action: continue
+            if not action:
+                continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
+                # Push onto the parent_gss, which represents the stack *after* the pop.
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
             def handle_reduce(reduce_action, gss_to_reduce):
-                popped_gss = gss_to_reduce.popn(reduce_action.len)
-                if any(h is not popped_gss._root for h in popped_gss._heads):
-                    reductions_to_do[reduce_action].append(popped_gss)
+                # iter_peeks already performed one pop. Pop `len - 1` more times if needed.
+                if reduce_action.len > 0:
+                    popped_gss = gss_to_reduce.popn(reduce_action.len - 1)
+                    if any(h is not popped_gss._root for h in popped_gss._heads):
+                        reductions_to_do[reduce_action].append(popped_gss)
 
             if isinstance(action, int):
-                handle_shift(action, state_gss)
+                handle_shift(action, parent_gss)
             elif isinstance(action, Reduce):
-                handle_reduce(action, state_gss)
+                handle_reduce(action, parent_gss)
             elif isinstance(action, Split):
                 if action.shift is not None:
-                    handle_shift(action.shift, state_gss)
+                    handle_shift(action.shift, parent_gss)
                 for length, nts in action.reduces.items():
                     for nt_id, pids in nts.items():
-                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
+                        handle_reduce(Reduce(nt_id, length, pids), parent_gss)
 
-        for reduce_action, gss_list in reductions_to_do.items():
-            merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
-            for from_state_id in merged_popped_gss.peek():
-                goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
-                if goto_state_id is not None:
-                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+        if reductions_to_do:
+            for reduce_action, gss_list in reductions_to_do.items():
+                merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+                for from_state_id in merged_popped_gss.peek():
+                    goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+                    if goto_state_id is not None:
+                        # Isolate ensures we only follow the path for the current GOTO.
+                        isolated_gss = merged_popped_gss.isolate(from_state_id)
+                        shifted_gsses.append(isolated_gss.push(goto_state_id))
 
         return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
 
