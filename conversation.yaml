@@ -10644,6 +10644,329 @@ local_system:
                   (py_range, py_bv)
               }).collect()
           }
+
+          #[staticmethod]
+          fn all() -> Self {
+              Self { inner: RustHybridL2Bitset::all() }
+          }
+
+          fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: &self.inner | &other.inner }
+          }
+      }
+
+
+      #[pyclass(name = "GSSNode")]
+      #[derive(Clone)]
+      pub struct PyGSSNode {
+          inner: std::sync::Arc<RustGSSNode>,
+      }
+
+      #[pymethods]
+      impl PyGSSNode {
+          #[new]
+          fn new() -> Self {
+              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
+          }
+
+          fn ptr(&self) -> usize {
+              // Stable identity for the inner Arc<GSSNode>; useful for change detection
+              let raw = std::sync::Arc::as_ptr(&self.inner);
+              raw as usize
+          }
+
+          fn is_alive(&self) -> bool {
+              self.inner.is_alive()
+          }
+
+          fn is_ok(&self) -> bool {
+              self.inner.is_ok()
+          }
+
+          fn allowed_llm_tokens(&self) -> PyHybridBitset {
+              PyHybridBitset::from(self.inner.allowed_llm_tokens())
+          }
+
+          fn disallowed_terminals(&self) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
+          }
+
+          fn clone_node(&self) -> PyGSSNode {
+              self.clone()
+          }
+
+          fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
+              let pairs = popn_collect_fast(&self.inner, n);
+              pairs.into_iter()
+                  .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+                  .collect()
+          }
+
+          fn print_stats(&self) {
+              let stats = gather_gss_stats(&[self.inner.as_ref()]);
+              println!("{:#?}", stats);
+          }
+
+          fn __hash__(&self) -> PyResult<isize> {
+              let mut hasher = DefaultHasher::new();
+              self.inner.hash(&mut hasher);
+              Ok(hasher.finish() as isize)
+          }
+
+          fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
+              match op {
+                  CompareOp::Eq => Ok(*self.inner == *other.inner),
+                  CompareOp::Ne => Ok(*self.inner != *other.inner),
+                  _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
+              }
+          }
+
+          fn is_root(&self) -> bool {
+              self.inner.is_root()
+          }
+
+          fn depth(&self) -> usize {
+              self.inner.max_depth()
+          }
+
+          fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
+          }
+
+          fn local_acc_llm_tokens_union(&self) -> PyHybridBitset {
+              PyHybridBitset { inner: self.inner.local_acc().llm_tokens_union.clone() }
+          }
+
+          fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
+              let mut result = Vec::new();
+              for (edge_content, preds_by_depth) in self.inner.predecessors() {
+                  for pred_vec in preds_by_depth.values() {
+                      for pred_arc in pred_vec {
+                          result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+                      }
+                  }
+              }
+              result
+          }
+      }
+
+      #[pyfunction]
+      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
+          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
+          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
+          PyGSSNode { inner: merged }
+      }
+
+      #[pyfunction]
+      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
+          let mut arc = node.inner.clone();
+          rust_allow_only(&mut arc, &bv.inner);
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+          let mut rust_terminals_map = BTreeMap::new();
+          for (k, v) in terminals_map.iter() {
+              let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+              let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+              rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+          }
+          
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+          node.inner = arc;
+          Ok(())
+      }
+
+      #[pyfunction]
+      fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+          let mut rust_state_map = BTreeMap::new();
+          for (k, v) in state_map.iter() {
+              let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+              let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+              rust_state_map.insert(from_state, to_state);
+          }
+
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+          node.inner = arc;
+          Ok(())
+      }
+
+      #[pyfunction]
+      fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
+          let mut arc = node.inner.clone();
+          arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
+          let pairs = rust_popn_collect(&node.inner, n);
+          pairs.into_iter()
+              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+              .collect()
+      }
+
+      #[self_referencing]
+      struct PyGrammarConstraintStateWrapper {
+          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
+          #[borrows(constraint)]
+          #[covariant]
+          inner: GrammarConstraintState<'this>,
+      }
+
+      #[pyclass(name = "GrammarConstraintState")]
+      pub struct PyGrammarConstraintState {
+          inner: PyGrammarConstraintStateWrapper,
+      }
+
+      #[pymethods]
+      impl PyGrammarConstraintState {
+          #[new]
+          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+              Ok(PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |c: &PyGrammarConstraint| {
+                          let state = c.inner.init();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build()?
+              })
+          }
+
+          fn __str__(&self) -> String {
+              self.inner.with_inner(|state| format!("{}", state))
+          }
+
+          fn __repr__(&self) -> String {
+              self.__str__()
+          }
+
+          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+              let bools: Vec<bool> = bitset.iter_bits().collect();
+              Ok(bools.into_pyarray_bound(py))
+          }
+
+          fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+              Ok(PyHybridBitset { inner: bitset })
+          }
+
+          fn commit(&mut self, llm_token_id: usize) {
+              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
+              self.inner.with_inner_mut(|state| {
+                  state.commit(LLMTokenID(llm_token_id));
+              });
+          }
+
+          fn print_stats(&self) {
+              self.inner.with_inner(|state| state.print_gss_stats());
+          }
+
+          fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
+              let mut out = BTreeMap::new();
+              self.inner.with_inner(|state| {
+                  for (tokenizer_state_id, glr_state) in &state.state {
+                      out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
+                  }
+              });
+              Ok(out)
+          }
+
+          fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
+              self.inner.with_inner_mut(|state| {
+                  let mut new_b_tree_map = BTreeMap::new();
+                  for (tokenizer_state_id, gss_node) in new_state {
+                      let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
+                      new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+                  }
+                  state.state = new_b_tree_map;
+              });
+              Ok(())
+          }
+
+          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+              self.inner.borrow_constraint().internal_bv_to_original(bv)
+          }
+      }
+
+      #[self_referencing]
+      struct PyIncrementalParserWrapper {
+          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
+          #[borrows(grammar)]
+          #[covariant]
+          parser: IncrementalParser<'this>,
+      }
+
+      #[pyclass(name = "IncrementalParser")]
+      pub struct PyIncrementalParser {
+          inner: PyIncrementalParserWrapper,
+      }
+
+      #[pymethods]
+      impl PyIncrementalParser {
+          #[new]
+          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
+              Ok(PyIncrementalParser {
+                  inner: PyIncrementalParserWrapperTryBuilder {
+                      grammar, // PyCompiledGrammar is moved in
+                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+                  }.try_build()?
+              })
+          }
+
+          fn feed(&mut self, bytes: &[u8]) {
+              self.inner.with_parser_mut(|p| p.feed(bytes));
+          }
+
+          fn is_valid(&self) -> bool {
+              self.inner.with_parser(|p| p.is_valid())
+          }
+      }
+
+      #[pymodule]
+      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
+          m.add_class::<PyGrammarExpr>()?;
+          m.add_class::<PyRegexExpr>()?;
+          m.add_class::<PyRegexGroup>()?;
+          m.add_class::<PyRegexGroups>()?;
+          m.add_class::<PyRegex>()?;
+          m.add_class::<PyGrammarDefinition>()?;
+          m.add_class::<PyCompiledGrammar>()?;
+          m.add_class::<PyGLRParser>()?;
+          m.add_class::<PyGrammarConstraint>()?;
+          m.add_class::<PyGrammarConstraintState>()?;
+          m.add_class::<PyHybridBitset>()?;
+          m.add_class::<PyHybridL2Bitset>()?;
+          m.add_class::<PyGSSNode>()?;
+          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
+          m.add_class::<PyIncrementalParser>()?;
+          Ok(())
+      }
+              self.inner.range_values().map(|(range, bv)| {
+                  let py_range = (*range.start(), *range.end());
+                  let py_bv = PyHybridBitset { inner: bv.clone() };
+                  (py_range, py_bv)
+              }).collect()
+          }
       }
 
 
@@ -11330,11 +11653,134 @@ local_system:
       import time
       import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional
+      from typing import Dict, List, Tuple, Optional, Set
 
       from ..common_interface import GraphProvider, RangeSet
+      from ..gss_tester.fast_impl import FastGSS, _Node
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
+
+
+      def merge_acc(acc1, acc2):
+          term1, llm1 = acc1
+          term2, llm2 = acc2
+          return (term1.union(term2), llm1.union(llm2))
+
+
+      def rust_gss_to_fast_gss(rust_gss_head: ffi.GSSNode) -> FastGSS:
+          memo = {}  # rust_ptr -> python _Node
+          child_to_parents = {}
+
+          q = collections.deque([rust_gss_head])
+          visited_ptrs = {rust_gss_head.ptr()}
+
+          while q:
+              rust_node = q.popleft()
+              ptr = rust_node.ptr()
+
+              if ptr not in memo:
+                  memo[ptr] = _Node(
+                      acc=(rust_node.local_acc_terminals_union(), rust_node.local_acc_llm_tokens_union()),
+                      depth=rust_node.depth()
+                  )
+              py_node = memo[ptr]
+
+              if not rust_node.is_root():
+                  parents = set()
+                  for state_id, pred_rust_node in rust_node.predecessors():
+                      pred_ptr = pred_rust_node.ptr()
+                      if pred_ptr not in memo:
+                          memo[pred_ptr] = _Node(
+                              acc=(pred_rust_node.local_acc_terminals_union(), pred_rust_node.local_acc_llm_tokens_union()),
+                              depth=pred_rust_node.depth()
+                          )
+                      py_pred_node = memo[pred_ptr]
+                      parents.add((state_id, py_pred_node))
+
+                      if pred_ptr not in visited_ptrs:
+                          q.append(pred_rust_node)
+                          visited_ptrs.add(pred_ptr)
+
+                  child_to_parents[py_node] = parents
+
+          py_head = memo[rust_gss_head.ptr()]
+          py_root = next((node for node in memo.values() if node.depth == 0), None)
+          if py_root is None:
+              raise ValueError("Could not find root of GSS graph")
+
+          return FastGSS(
+              heads=frozenset([py_head]),
+              acc_default_factory=lambda: py_root.acc,
+              root=py_root,
+              child_to_parents=child_to_parents,
+              path_cache={}
+          )
+
+
+      def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
+          current_heads = gss._heads
+          for _ in range(n):
+              next_heads = set()
+              for head in current_heads:
+                  if head in gss._child_to_parents:
+                      for _, parent in gss._child_to_parents[head]:
+                          next_heads.add(parent)
+              current_heads = next_heads
+              if not current_heads:
+                  break
+
+          nodes_at_n_heads = current_heads
+
+          peeks = []
+          for node in nodes_at_n_heads:
+              if node in gss._child_to_parents:
+                  for value, parent in gss._child_to_parents[node]:
+                      isolated_parent_gss = FastGSS(
+                          heads=frozenset([parent]),
+                          acc_default_factory=gss._acc_default_factory,
+                          root=gss._root,
+                          child_to_parents=gss._child_to_parents,
+                          path_cache=gss._path_cache
+                      )
+                      peeks.append((value, isolated_parent_gss))
+          return peeks
+
+
+      def get_allowed_llm_tokens(gss: FastGSS) -> ffi.Bitset:
+          q = collections.deque(list(gss._heads))
+          visited = set()
+          root_accs_llm = []
+
+          while q:
+              node = q.popleft()
+              if node in visited:
+                  continue
+              visited.add(node)
+
+              if node.depth == 0:
+                  root_accs_llm.append(node.acc[1])
+
+              if node in gss._child_to_parents:
+                  for _, parent in gss._child_to_parents[node]:
+                      q.append(parent)
+
+          if not root_accs_llm:
+              aggregated_llm = ffi.Bitset.zeros()
+          else:
+              aggregated_llm = root_accs_llm[0]
+              for i in range(1, len(root_accs_llm)):
+                  aggregated_llm = aggregated_llm.union(root_accs_llm[i])
+
+          final_llm = ffi.Bitset.zeros()
+          for head in gss._heads:
+              local_llm = head.acc[1]
+              final_llm = final_llm.union(local_llm.intersection(aggregated_llm))
+
+          return final_llm
+
+
+      def is_alive_py(gss: FastGSS) -> bool:
+          return not get_allowed_llm_tokens(gss).is_empty()
 
 
       class Model(GraphProvider):
@@ -11430,73 +11876,57 @@ local_system:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              print("\n--- get_mask START ---")
-              print("GSS at start of get_mask:")
-              # print(self.constraint_state)
-              state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-              print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
+              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+              stopped: Set[int] = set()
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
 
-              # node_idx -> (GSSNode, Bitset)
-              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
-
-              stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
-
-              # Seed: map tokenizer states and their filtered GSS to trie roots
               heappush = heapq.heappush
               roots_map = self.roots_map
               max_depth = self.max_depth
 
-              print("\n--- Seeding work queue ---")
+              state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
+
+              py_gss_map = {}
               for sid, (gss, new_mask) in state_to_gss_and_mask.items():
+                  py_gss_map[sid] = (rust_gss_to_fast_gss(gss), new_mask)
+
+              for sid, (gss, new_mask) in py_gss_map.items():
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
 
-                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
-
                   existing = values.get(root_idx)
                   if existing is not None:
                       existing_gss, existing_mask = existing
-                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
                       values[root_idx] = (gss, new_mask)
 
                   depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
+                  if depth not in todo:
+                      todo[depth] = set()
                       heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
+                  todo[depth].add(root_idx)
 
-              # Main scheduler
-
-              # Helper to enqueue a node at a given depth
               def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
+                  if depth not in todo:
+                      todo[depth] = set()
                       heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
+                  todo[depth].add(node_idx)
 
               heappop = heapq.heappop
               arena = self.arena
               is_end = self.is_end
 
-              print("\n--- Main loop ---")
               iter_count = 0
               while True:
                   iter_count += 1
-                  # Pop the smallest depth bucket (skip stale heap entries)
                   node_indices: Optional[set[int]] = None
                   current_depth = -1
                   while depth_heap:
@@ -11505,92 +11935,57 @@ local_system:
                       if node_indices:
                           break
                   if not node_indices:
-                      print(f"[{iter_count}] Loop finished: no more nodes to process.")
-                      break  # nothing left to process
+                      break
 
-                  print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
-
-                  # Process all nodes in this depth bucket
                   for node_idx in node_indices:
                       if node_idx in stopped:
-                          print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                           continue
 
                       item = values.pop(node_idx, None)
                       if item is None:
-                          print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
                       gss_node, llm_mask = item
-                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
-                      # End-node handling
                       if is_end(node_idx):
-                          print(f"    - END NODE found. Updating final_mask.")
-                          print(f"      - final_mask before: {final_mask.to_ranges()}")
-
-                          # Correct logic: intersect propagated mask with GSS active tokens
-                          gss_active_tokens = gss_node.allowed_llm_tokens()
-
+                          gss_active_tokens = get_allowed_llm_tokens(gss_node)
                           tokens_to_add = llm_mask.intersection(gss_active_tokens)
-
-                          print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
-                          print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
-                          print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
-
                           final_mask = final_mask.union(tokens_to_add)
-                          print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                      if not gss_node.is_alive():
+                      if not is_alive_py(gss_node):
                           stopped.add(node_idx)
-                          print(f"    - STOPPING node {node_idx} (GSS not alive)")
                           continue
 
-                      # Transitions grouped by (pop, llm_bv)
                       node_data = arena.get(node_idx, {})
                       children = node_data.get("children") or []
-                      # if not children:
-                      #     print(f"    - No children for node {node_idx}")
                       for (pop, llm_bv), dests in children:
-                          print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
-                          # Collect all pops from GSS parents
-                          peeks = gss_node.popn_fast(pop)
-                          print(f"      - Found {len(peeks)} peeks from GSS set")
+                          peeks = popn_fast_py(gss_node, pop)
                           if not peeks:
                               continue
 
                           llm_empty = llm_bv.is_empty()
 
                           for dest_idx, state_bv in dests:
-                              print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
-                              # Filter peeks by destination state bitset
                               matched = []
                               if not state_bv.is_empty():
                                   contains = state_bv.contains
                                   for sid_val, parent_node in peeks:
                                       if contains(sid_val):
                                           matched.append(parent_node)
-                              print(f"        - Matched {len(matched)} parent GSS nodes")
                               if not matched:
                                   continue
 
-                              # Merge matched parent GSS nodes
-                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-
-                              # Compute child mask (intersection with llm_bv when present)
+                              child_gss_node = FastGSS.merge(matched, merge_acc)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                              print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                               d = int(dest_idx)
                               existing = values.get(d)
                               if existing is not None:
                                   existing_gss, existing_mask = existing
-                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
                                   combined_mask = existing_mask.union(child_llm_mask)
                                   values[d] = (merged_gss, combined_mask)
-                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
                                   values[d] = (child_gss_node, child_llm_mask)
-                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
@@ -21586,7 +21981,7 @@ local_system:
           memo.insert(node_ptr, result.clone());
           result
       }
-    python/src/lib.rs: |-
+    python/src/lib.rs: |
       use sep1::tokenizer::LLMTokenID;
       use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
       use sep1::finite_automata::Regex;
@@ -22331,292 +22726,6 @@ local_system:
                   }
               }
               result
-          }
-      }
-
-      #[pyfunction]
-      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-          PyGSSNode { inner: merged }
-      }
-
-      #[pyfunction]
-      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-          let mut arc = node.inner.clone();
-          rust_allow_only(&mut arc, &bv.inner);
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
-          let mut rust_terminals_map = BTreeMap::new();
-          for (k, v) in terminals_map.iter() {
-              let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-              let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
-              rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
-          }
-          
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
-          node.inner = arc;
-          Ok(())
-      }
-
-      #[pyfunction]
-      fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
-          let mut rust_state_map = BTreeMap::new();
-          for (k, v) in state_map.iter() {
-              let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-              let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
-              rust_state_map.insert(from_state, to_state);
-          }
-
-          let mut arc = node.inner.clone();
-          sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
-          node.inner = arc;
-          Ok(())
-      }
-
-      #[pyfunction]
-      fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
-          let mut arc = node.inner.clone();
-          arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
-          node.inner = arc;
-      }
-
-      #[pyfunction]
-      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-          let pairs = rust_popn_collect(&node.inner, n);
-          pairs.into_iter()
-              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-              .collect()
-      }
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-          #[borrows(constraint)]
-          #[covariant]
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass(name = "GrammarConstraintState")]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |c: &PyGrammarConstraint| {
-                          let state = c.inner.init();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn __str__(&self) -> String {
-              self.inner.with_inner(|state| format!("{}", state))
-          }
-
-          fn __repr__(&self) -> String {
-              self.__str__()
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter_bits().collect();
-              Ok(bools.into_pyarray_bound(py))
-          }
-
-          fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              Ok(PyHybridBitset { inner: bitset })
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-              });
-          }
-
-          fn print_stats(&self) {
-              self.inner.with_inner(|state| state.print_gss_stats());
-          }
-
-          fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
-              let mut out = BTreeMap::new();
-              self.inner.with_inner(|state| {
-                  for (tokenizer_state_id, glr_state) in &state.state {
-                      out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
-                  }
-              });
-              Ok(out)
-          }
-
-          fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
-              self.inner.with_inner_mut(|state| {
-                  let mut new_b_tree_map = BTreeMap::new();
-                  for (tokenizer_state_id, gss_node) in new_state {
-                      let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-                      new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
-                  }
-                  state.state = new_b_tree_map;
-              });
-              Ok(())
-          }
-
-          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-              self.inner.borrow_constraint().internal_bv_to_original(bv)
-          }
-      }
-
-      #[self_referencing]
-      struct PyIncrementalParserWrapper {
-          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-          #[borrows(grammar)]
-          #[covariant]
-          parser: IncrementalParser<'this>,
-      }
-
-      #[pyclass(name = "IncrementalParser")]
-      pub struct PyIncrementalParser {
-          inner: PyIncrementalParserWrapper,
-      }
-
-      #[pymethods]
-      impl PyIncrementalParser {
-          #[new]
-          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-              Ok(PyIncrementalParser {
-                  inner: PyIncrementalParserWrapperTryBuilder {
-                      grammar, // PyCompiledGrammar is moved in
-                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-                  }.try_build()?
-              })
-          }
-
-          fn feed(&mut self, bytes: &[u8]) {
-              self.inner.with_parser_mut(|p| p.feed(bytes));
-          }
-
-          fn is_valid(&self) -> bool {
-              self.inner.with_parser(|p| p.is_valid())
-          }
-      }
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyRegex>()?;
-          m.add_class::<PyGrammarDefinition>()?;
-          m.add_class::<PyCompiledGrammar>()?;
-          m.add_class::<PyGLRParser>()?;
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          m.add_class::<PyHybridBitset>()?;
-          m.add_class::<PyHybridL2Bitset>()?;
-          m.add_class::<PyGSSNode>()?;
-          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
-          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-          m.add_class::<PyIncrementalParser>()?;
-          Ok(())
-      }
-              self.inner.range_values().map(|(range, bv)| {
-                  let py_range = (*range.start(), *range.end());
-                  let py_bv = PyHybridBitset { inner: bv.clone() };
-                  (py_range, py_bv)
-              }).collect()
-          }
-      }
-
-
-      #[pyclass(name = "GSSNode")]
-      #[derive(Clone)]
-      pub struct PyGSSNode {
-          inner: std::sync::Arc<RustGSSNode>,
-      }
-
-      #[pymethods]
-      impl PyGSSNode {
-          #[new]
-          fn new() -> Self {
-              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-          }
-
-          fn ptr(&self) -> usize {
-              // Stable identity for the inner Arc<GSSNode>; useful for change detection
-              let raw = std::sync::Arc::as_ptr(&self.inner);
-              raw as usize
-          }
-
-          fn is_alive(&self) -> bool {
-              self.inner.is_alive()
-          }
-
-          fn is_ok(&self) -> bool {
-              self.inner.is_ok()
-          }
-
-          fn allowed_llm_tokens(&self) -> PyHybridBitset {
-              PyHybridBitset::from(self.inner.allowed_llm_tokens())
-          }
-
-          fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-              PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
-          }
-
-          fn clone_node(&self) -> PyGSSNode {
-              self.clone()
-          }
-
-          fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
-              let pairs = popn_collect_fast(&self.inner, n);
-              pairs.into_iter()
-                  .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-                  .collect()
-          }
-
-          fn print_stats(&self) {
-              let stats = gather_gss_stats(&[self.inner.as_ref()]);
-              println!("{:#?}", stats);
-          }
-
-          fn __hash__(&self) -> PyResult<isize> {
-              let mut hasher = DefaultHasher::new();
-              self.inner.hash(&mut hasher);
-              Ok(hasher.finish() as isize)
-          }
-
-          fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
-              match op {
-                  CompareOp::Eq => Ok(*self.inner == *other.inner),
-                  CompareOp::Ne => Ok(*self.inner != *other.inner),
-                  _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
-              }
           }
       }
 
@@ -34276,6 +34385,329 @@ messages:
                   (py_range, py_bv)
               }).collect()
           }
+
+          #[staticmethod]
+          fn all() -> Self {
+              Self { inner: RustHybridL2Bitset::all() }
+          }
+
+          fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: &self.inner | &other.inner }
+          }
+      }
+
+
+      #[pyclass(name = "GSSNode")]
+      #[derive(Clone)]
+      pub struct PyGSSNode {
+          inner: std::sync::Arc<RustGSSNode>,
+      }
+
+      #[pymethods]
+      impl PyGSSNode {
+          #[new]
+          fn new() -> Self {
+              PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
+          }
+
+          fn ptr(&self) -> usize {
+              // Stable identity for the inner Arc<GSSNode>; useful for change detection
+              let raw = std::sync::Arc::as_ptr(&self.inner);
+              raw as usize
+          }
+
+          fn is_alive(&self) -> bool {
+              self.inner.is_alive()
+          }
+
+          fn is_ok(&self) -> bool {
+              self.inner.is_ok()
+          }
+
+          fn allowed_llm_tokens(&self) -> PyHybridBitset {
+              PyHybridBitset::from(self.inner.allowed_llm_tokens())
+          }
+
+          fn disallowed_terminals(&self) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
+          }
+
+          fn clone_node(&self) -> PyGSSNode {
+              self.clone()
+          }
+
+          fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
+              let pairs = popn_collect_fast(&self.inner, n);
+              pairs.into_iter()
+                  .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+                  .collect()
+          }
+
+          fn print_stats(&self) {
+              let stats = gather_gss_stats(&[self.inner.as_ref()]);
+              println!("{:#?}", stats);
+          }
+
+          fn __hash__(&self) -> PyResult<isize> {
+              let mut hasher = DefaultHasher::new();
+              self.inner.hash(&mut hasher);
+              Ok(hasher.finish() as isize)
+          }
+
+          fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
+              match op {
+                  CompareOp::Eq => Ok(*self.inner == *other.inner),
+                  CompareOp::Ne => Ok(*self.inner != *other.inner),
+                  _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
+              }
+          }
+
+          fn is_root(&self) -> bool {
+              self.inner.is_root()
+          }
+
+          fn depth(&self) -> usize {
+              self.inner.max_depth()
+          }
+
+          fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
+          }
+
+          fn local_acc_llm_tokens_union(&self) -> PyHybridBitset {
+              PyHybridBitset { inner: self.inner.local_acc().llm_tokens_union.clone() }
+          }
+
+          fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
+              let mut result = Vec::new();
+              for (edge_content, preds_by_depth) in self.inner.predecessors() {
+                  for pred_vec in preds_by_depth.values() {
+                      for pred_arc in pred_vec {
+                          result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+                      }
+                  }
+              }
+              result
+          }
+      }
+
+      #[pyfunction]
+      fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
+          let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
+          let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
+          PyGSSNode { inner: merged }
+      }
+
+      #[pyfunction]
+      fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
+          let mut arc = node.inner.clone();
+          rust_allow_only(&mut arc, &bv.inner);
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+          let mut rust_terminals_map = BTreeMap::new();
+          for (k, v) in terminals_map.iter() {
+              let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+              let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+              rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+          }
+          
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+          node.inner = arc;
+          Ok(())
+      }
+
+      #[pyfunction]
+      fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+          let mut rust_state_map = BTreeMap::new();
+          for (k, v) in state_map.iter() {
+              let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+              let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+              rust_state_map.insert(from_state, to_state);
+          }
+
+          let mut arc = node.inner.clone();
+          sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+          node.inner = arc;
+          Ok(())
+      }
+
+      #[pyfunction]
+      fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
+          let mut arc = node.inner.clone();
+          arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+          node.inner = arc;
+      }
+
+      #[pyfunction]
+      fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
+          let pairs = rust_popn_collect(&node.inner, n);
+          pairs.into_iter()
+              .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+              .collect()
+      }
+
+      #[self_referencing]
+      struct PyGrammarConstraintStateWrapper {
+          constraint: PyGrammarConstraint, // Owns the Arc'd constraint
+          #[borrows(constraint)]
+          #[covariant]
+          inner: GrammarConstraintState<'this>,
+      }
+
+      #[pyclass(name = "GrammarConstraintState")]
+      pub struct PyGrammarConstraintState {
+          inner: PyGrammarConstraintStateWrapper,
+      }
+
+      #[pymethods]
+      impl PyGrammarConstraintState {
+          #[new]
+          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+              Ok(PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |c: &PyGrammarConstraint| {
+                          let state = c.inner.init();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build()?
+              })
+          }
+
+          fn __str__(&self) -> String {
+              self.inner.with_inner(|state| format!("{}", state))
+          }
+
+          fn __repr__(&self) -> String {
+              self.__str__()
+          }
+
+          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+              let bools: Vec<bool> = bitset.iter_bits().collect();
+              Ok(bools.into_pyarray_bound(py))
+          }
+
+          fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+              Ok(PyHybridBitset { inner: bitset })
+          }
+
+          fn commit(&mut self, llm_token_id: usize) {
+              // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
+              self.inner.with_inner_mut(|state| {
+                  state.commit(LLMTokenID(llm_token_id));
+              });
+          }
+
+          fn print_stats(&self) {
+              self.inner.with_inner(|state| state.print_gss_stats());
+          }
+
+          fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
+              let mut out = BTreeMap::new();
+              self.inner.with_inner(|state| {
+                  for (tokenizer_state_id, glr_state) in &state.state {
+                      out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
+                  }
+              });
+              Ok(out)
+          }
+
+          fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
+              self.inner.with_inner_mut(|state| {
+                  let mut new_b_tree_map = BTreeMap::new();
+                  for (tokenizer_state_id, gss_node) in new_state {
+                      let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
+                      new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+                  }
+                  state.state = new_b_tree_map;
+              });
+              Ok(())
+          }
+
+          fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+              self.inner.borrow_constraint().internal_bv_to_original(bv)
+          }
+      }
+
+      #[self_referencing]
+      struct PyIncrementalParserWrapper {
+          grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
+          #[borrows(grammar)]
+          #[covariant]
+          parser: IncrementalParser<'this>,
+      }
+
+      #[pyclass(name = "IncrementalParser")]
+      pub struct PyIncrementalParser {
+          inner: PyIncrementalParserWrapper,
+      }
+
+      #[pymethods]
+      impl PyIncrementalParser {
+          #[new]
+          fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
+              Ok(PyIncrementalParser {
+                  inner: PyIncrementalParserWrapperTryBuilder {
+                      grammar, // PyCompiledGrammar is moved in
+                      parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+                  }.try_build()?
+              })
+          }
+
+          fn feed(&mut self, bytes: &[u8]) {
+              self.inner.with_parser_mut(|p| p.feed(bytes));
+          }
+
+          fn is_valid(&self) -> bool {
+              self.inner.with_parser(|p| p.is_valid())
+          }
+      }
+
+      #[pymodule]
+      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
+          m.add_class::<PyGrammarExpr>()?;
+          m.add_class::<PyRegexExpr>()?;
+          m.add_class::<PyRegexGroup>()?;
+          m.add_class::<PyRegexGroups>()?;
+          m.add_class::<PyRegex>()?;
+          m.add_class::<PyGrammarDefinition>()?;
+          m.add_class::<PyCompiledGrammar>()?;
+          m.add_class::<PyGLRParser>()?;
+          m.add_class::<PyGrammarConstraint>()?;
+          m.add_class::<PyGrammarConstraintState>()?;
+          m.add_class::<PyHybridBitset>()?;
+          m.add_class::<PyHybridL2Bitset>()?;
+          m.add_class::<PyGSSNode>()?;
+          m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
+          m.add_class::<PyIncrementalParser>()?;
+          Ok(())
+      }
+              self.inner.range_values().map(|(range, bv)| {
+                  let py_range = (*range.start(), *range.end());
+                  let py_bv = PyHybridBitset { inner: bv.clone() };
+                  (py_range, py_bv)
+              }).collect()
+          }
       }
 
 
@@ -34981,11 +35413,134 @@ messages:
       import time
       import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional
+      from typing import Dict, List, Tuple, Optional, Set
 
       from ..common_interface import GraphProvider, RangeSet
+      from ..gss_tester.fast_impl import FastGSS, _Node
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
+
+
+      def merge_acc(acc1, acc2):
+          term1, llm1 = acc1
+          term2, llm2 = acc2
+          return (term1.union(term2), llm1.union(llm2))
+
+
+      def rust_gss_to_fast_gss(rust_gss_head: ffi.GSSNode) -> FastGSS:
+          memo = {}  # rust_ptr -> python _Node
+          child_to_parents = {}
+
+          q = collections.deque([rust_gss_head])
+          visited_ptrs = {rust_gss_head.ptr()}
+
+          while q:
+              rust_node = q.popleft()
+              ptr = rust_node.ptr()
+
+              if ptr not in memo:
+                  memo[ptr] = _Node(
+                      acc=(rust_node.local_acc_terminals_union(), rust_node.local_acc_llm_tokens_union()),
+                      depth=rust_node.depth()
+                  )
+              py_node = memo[ptr]
+
+              if not rust_node.is_root():
+                  parents = set()
+                  for state_id, pred_rust_node in rust_node.predecessors():
+                      pred_ptr = pred_rust_node.ptr()
+                      if pred_ptr not in memo:
+                          memo[pred_ptr] = _Node(
+                              acc=(pred_rust_node.local_acc_terminals_union(), pred_rust_node.local_acc_llm_tokens_union()),
+                              depth=pred_rust_node.depth()
+                          )
+                      py_pred_node = memo[pred_ptr]
+                      parents.add((state_id, py_pred_node))
+
+                      if pred_ptr not in visited_ptrs:
+                          q.append(pred_rust_node)
+                          visited_ptrs.add(pred_ptr)
+
+                  child_to_parents[py_node] = parents
+
+          py_head = memo[rust_gss_head.ptr()]
+          py_root = next((node for node in memo.values() if node.depth == 0), None)
+          if py_root is None:
+              raise ValueError("Could not find root of GSS graph")
+
+          return FastGSS(
+              heads=frozenset([py_head]),
+              acc_default_factory=lambda: py_root.acc,
+              root=py_root,
+              child_to_parents=child_to_parents,
+              path_cache={}
+          )
+
+
+      def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
+          current_heads = gss._heads
+          for _ in range(n):
+              next_heads = set()
+              for head in current_heads:
+                  if head in gss._child_to_parents:
+                      for _, parent in gss._child_to_parents[head]:
+                          next_heads.add(parent)
+              current_heads = next_heads
+              if not current_heads:
+                  break
+
+          nodes_at_n_heads = current_heads
+
+          peeks = []
+          for node in nodes_at_n_heads:
+              if node in gss._child_to_parents:
+                  for value, parent in gss._child_to_parents[node]:
+                      isolated_parent_gss = FastGSS(
+                          heads=frozenset([parent]),
+                          acc_default_factory=gss._acc_default_factory,
+                          root=gss._root,
+                          child_to_parents=gss._child_to_parents,
+                          path_cache=gss._path_cache
+                      )
+                      peeks.append((value, isolated_parent_gss))
+          return peeks
+
+
+      def get_allowed_llm_tokens(gss: FastGSS) -> ffi.Bitset:
+          q = collections.deque(list(gss._heads))
+          visited = set()
+          root_accs_llm = []
+
+          while q:
+              node = q.popleft()
+              if node in visited:
+                  continue
+              visited.add(node)
+
+              if node.depth == 0:
+                  root_accs_llm.append(node.acc[1])
+
+              if node in gss._child_to_parents:
+                  for _, parent in gss._child_to_parents[node]:
+                      q.append(parent)
+
+          if not root_accs_llm:
+              aggregated_llm = ffi.Bitset.zeros()
+          else:
+              aggregated_llm = root_accs_llm[0]
+              for i in range(1, len(root_accs_llm)):
+                  aggregated_llm = aggregated_llm.union(root_accs_llm[i])
+
+          final_llm = ffi.Bitset.zeros()
+          for head in gss._heads:
+              local_llm = head.acc[1]
+              final_llm = final_llm.union(local_llm.intersection(aggregated_llm))
+
+          return final_llm
+
+
+      def is_alive_py(gss: FastGSS) -> bool:
+          return not get_allowed_llm_tokens(gss).is_empty()
 
 
       class Model(GraphProvider):
@@ -35081,73 +35636,57 @@ messages:
               Compute the final LLM token mask given a mapping from tokenizer state to
               GSS nodes. This is the performance-critical routine.
               """
-              print("\n--- get_mask START ---")
-              print("GSS at start of get_mask:")
-              # print(self.constraint_state)
-              state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-              print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
               t0 = time.time()
 
               final_mask = ffi.Bitset.zeros()
+              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+              stopped: Set[int] = set()
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
 
-              # node_idx -> (GSSNode, Bitset)
-              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
-
-              stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
-
-              # Seed: map tokenizer states and their filtered GSS to trie roots
               heappush = heapq.heappush
               roots_map = self.roots_map
               max_depth = self.max_depth
 
-              print("\n--- Seeding work queue ---")
+              state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
+
+              py_gss_map = {}
               for sid, (gss, new_mask) in state_to_gss_and_mask.items():
+                  py_gss_map[sid] = (rust_gss_to_fast_gss(gss), new_mask)
+
+              for sid, (gss, new_mask) in py_gss_map.items():
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
 
-                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
-
                   existing = values.get(root_idx)
                   if existing is not None:
                       existing_gss, existing_mask = existing
-                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
                       values[root_idx] = (gss, new_mask)
 
                   depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
+                  if depth not in todo:
+                      todo[depth] = set()
                       heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
+                  todo[depth].add(root_idx)
 
-              # Main scheduler
-
-              # Helper to enqueue a node at a given depth
               def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
+                  if depth not in todo:
+                      todo[depth] = set()
                       heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
+                  todo[depth].add(node_idx)
 
               heappop = heapq.heappop
               arena = self.arena
               is_end = self.is_end
 
-              print("\n--- Main loop ---")
               iter_count = 0
               while True:
                   iter_count += 1
-                  # Pop the smallest depth bucket (skip stale heap entries)
                   node_indices: Optional[set[int]] = None
                   current_depth = -1
                   while depth_heap:
@@ -35156,92 +35695,57 @@ messages:
                       if node_indices:
                           break
                   if not node_indices:
-                      print(f"[{iter_count}] Loop finished: no more nodes to process.")
-                      break  # nothing left to process
+                      break
 
-                  print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
-
-                  # Process all nodes in this depth bucket
                   for node_idx in node_indices:
                       if node_idx in stopped:
-                          print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                           continue
 
                       item = values.pop(node_idx, None)
                       if item is None:
-                          print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
                       gss_node, llm_mask = item
-                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
 
-                      # End-node handling
                       if is_end(node_idx):
-                          print(f"    - END NODE found. Updating final_mask.")
-                          print(f"      - final_mask before: {final_mask.to_ranges()}")
-
-                          # Correct logic: intersect propagated mask with GSS active tokens
-                          gss_active_tokens = gss_node.allowed_llm_tokens()
-
+                          gss_active_tokens = get_allowed_llm_tokens(gss_node)
                           tokens_to_add = llm_mask.intersection(gss_active_tokens)
-
-                          print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
-                          print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
-                          print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
-
                           final_mask = final_mask.union(tokens_to_add)
-                          print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                      if not gss_node.is_alive():
+                      if not is_alive_py(gss_node):
                           stopped.add(node_idx)
-                          print(f"    - STOPPING node {node_idx} (GSS not alive)")
                           continue
 
-                      # Transitions grouped by (pop, llm_bv)
                       node_data = arena.get(node_idx, {})
                       children = node_data.get("children") or []
-                      # if not children:
-                      #     print(f"    - No children for node {node_idx}")
                       for (pop, llm_bv), dests in children:
-                          print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
-                          # Collect all pops from GSS parents
-                          peeks = gss_node.popn_fast(pop)
-                          print(f"      - Found {len(peeks)} peeks from GSS set")
+                          peeks = popn_fast_py(gss_node, pop)
                           if not peeks:
                               continue
 
                           llm_empty = llm_bv.is_empty()
 
                           for dest_idx, state_bv in dests:
-                              print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
-                              # Filter peeks by destination state bitset
                               matched = []
                               if not state_bv.is_empty():
                                   contains = state_bv.contains
                                   for sid_val, parent_node in peeks:
                                       if contains(sid_val):
                                           matched.append(parent_node)
-                              print(f"        - Matched {len(matched)} parent GSS nodes")
                               if not matched:
                                   continue
 
-                              # Merge matched parent GSS nodes
-                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-
-                              # Compute child mask (intersection with llm_bv when present)
+                              child_gss_node = FastGSS.merge(matched, merge_acc)
                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                              print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                               d = int(dest_idx)
                               existing = values.get(d)
                               if existing is not None:
                                   existing_gss, existing_mask = existing
-                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
                                   combined_mask = existing_mask.union(child_llm_mask)
                                   values[d] = (merged_gss, combined_mask)
-                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
                                   values[d] = (child_gss_node, child_llm_mask)
-                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
@@ -35252,13 +35756,27 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
   - user: |-
-      I want to progressively reduce precompute3_model_pure_python.py's reliance on Rust code down to just ffi.Bitset and ffi.HybridL2Bitset.
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 maturin develop -r && bash run_benchmarks.sh aug25/models/rust_model.py aug25/models/precompute3_model_pure_python.py 
+      🔗 Found pyo3 bindings
+      🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
+      📡 Using build options features from pyproject.toml
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+         Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
+      error: unexpected closing delimiter: `}`
+         --> src/lib.rs:964:5
+          |
+      959 |         self.inner.range_values().map(|(range, bv)| {
+          |                                                     - this opening brace...
+      ...
+      963 |         }).collect()
+          |         - ...matches this closing brace
+      964 |     }
+          |     ^ unexpected closing delimiter
 
-      - [ ] Next up is to replace the Rust GSS in get_mask with python/gss_tester/fast_impl.py.
-          To do this, we'll need to be able to convert a Rust GSS into a Python GSS. Do this.
-          The Python GSS's acc will be simpler than Rust's. It'll just have `terminals_union`, not `llm_tokens_union` or `stored_trie_nodes`.
-          Note that it doesn't have popn, but we can easily replicate popn using `isolate` followed by calling `pop` n times.
-          Don't modify fast_impl.py. No modifications to it should be neceessary.
+      error: could not compile `_sep1` (lib) due to 1 previous error
+      💥 maturin failed
+        Caused by: Failed to build a native library through cargo
+        Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_ENVIRONMENT_SIGNATURE="cpython-3.12-64bit" PYO3_PYTHON="/Users/isaacbreen/miniforge3/envs/py312/bin/python" PYTHON_SYS_EXECUTABLE="/Users/isaacbreen/miniforge3/envs/py312/bin/python" "cargo" "rustc" "--features" "pyo3/extension-module" "--message-format" "json-render-diagnostics" "--manifest-path" "/Users/isaacbreen/Projects2/grammars2024/python/Cargo.toml" "--release" "--lib" "--" "-C" "link-arg=-undefined" "-C" "link-arg=dynamic_lookup" "-C" "link-args=-Wl,-install_name,@rpath/_sep1.cpython-312-darwin.so"`
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -35277,739 +35795,330 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to replace the Rust GSS implementation in your model with the Python version, followed by the corresponding git diffs.
+      I have identified the issue. There is a large block of duplicated code at the end of `python/src/lib.rs` which is causing a syntax error. This was likely caused by a copy-paste mistake.
+
+      Here are the steps to fix the problem:
 
       ### Step-by-step Instructions
 
-      #### 1. File: `python/src/lib.rs`
+      1.  **Open the file** `python/src/lib.rs`.
+      2.  **Locate the end of the file.** You will find a `#[pymodule]` function named `_sep1`.
+      3.  **Identify the duplicated code.** Immediately after the closing brace `}` of the `_sep1` function (around line 958), a large block of duplicated code begins. This block starts with a fragment from the `PyHybridL2Bitset::range_values` method and continues almost to the end of the file, repeating many class and function definitions.
+      4.  **Delete the duplicated code.** Remove all lines of code *after* the final closing brace `}` of the first `_sep1` function. The file should end with this function.
 
-      I will add several methods to your Python FFI bindings to expose the necessary GSS structure and accumulator data. This allows the Python code to reconstruct and interact with the GSS graph.
+      This will remove the syntactically incorrect code and resolve the compilation error.
 
-      1.  **Expose `HybridL2Bitset` operations**: In the `pymethods` block for `PyHybridL2Bitset`, add a static method `all()` to create a bitset with all bits set, and an instance method `union()` to perform a bitwise OR with another bitset.
+      ### Git Diff
 
-      2.  **Expose `GSSNode` properties and structure**: In the `pymethods` block for `PyGSSNode`, add the following five methods:
-          *   `is_root() -> bool`: Checks if the node is a GSS root.
-          *   `depth() -> int`: Returns the maximum depth of the node in the GSS graph.
-          *   `local_acc_terminals_union() -> PyHybridL2Bitset`: Returns the `terminals_union` part of the node's local accumulator.
-          *   `local_acc_llm_tokens_union() -> PyHybridBitset`: Returns the `llm_tokens_union` part of the node's local accumulator.
-          *   `predecessors() -> List[Tuple[int, PyGSSNode]]`: Returns a list of `(state_id, predecessor_node)` tuples, exposing the parent nodes in the graph.
+      Here is the git diff that applies the fix. You can apply this patch directly to your source file.
 
-      #### 2. File: `python/aug25/models/precompute3_model_pure_python.py`
-
-      I will replace the core logic of your `get_mask` method to use the pure Python `FastGSS` implementation instead of the Rust `ffi.GSSNode`.
-
-      1.  **Add Imports**: At the top of the file, add imports for `FastGSS` and its internal `_Node` class from your GSS tester implementation.
-
-      2.  **Add Helper Functions**: Before the `Model` class definition, add the following five helper functions:
-          *   `merge_acc`: A function to merge the new two-part accumulators (`(terminals_union, llm_tokens_union)`) used by `FastGSS`.
-          *   `rust_gss_to_fast_gss`: This function traverses a Rust `ffi.GSSNode` and reconstructs its entire graph structure as a new `FastGSS` object.
-          *   `popn_fast_py`: A Python implementation of the `popn_fast` logic, which pops `n` levels from a `FastGSS` and returns the resulting parent nodes and their corresponding edge values (state IDs).
-          *   `get_allowed_llm_tokens`: Replicates the logic from the Rust `allowed_llm_tokens` method. It traverses a `FastGSS` graph to compute the union of all reachable LLM token masks.
-          *   `is_alive_py`: A Python equivalent of the `is_alive` check, which determines if a GSS represents any valid parse paths.
-
-      3.  **Rewrite `Model.get_mask`**: Replace the entire body of the `get_mask` method. The new implementation will:
-          *   Call `self.constraint_state.filtered_state_gss_map()` to get the initial set of Rust GSS nodes and their associated masks.
-          *   Use your new `rust_gss_to_fast_gss` helper to convert each Rust GSS into a `FastGSS` instance.
-          *   Use `FastGSS.merge` to combine GSS instances that map to the same trie root node.
-          *   Perform the main trie traversal loop using the `FastGSS` objects and the new Python helper functions (`popn_fast_py`, `is_alive_py`, `get_allowed_llm_tokens`) instead of their FFI counterparts.
-
-      ---
-
-      ### Git Diffs
-
-      Here are the git diffs to apply these changes.
-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -2,9 +2,61 @@
-       import time
-       import heapq
-       import collections
-      -from typing import Dict, List, Tuple, Optional
-      -
-      -from ..common_interface import GraphProvider, RangeSet
-      +from typing import Dict, List, Tuple, Optional, Set
-      +
-      +from ..common_interface import GraphProvider, RangeSet
-      +from ..gss_tester.fast_impl import FastGSS, _Node
-       import _sep1 as ffi  # the compiled module
-       from tqdm.auto import tqdm
-       
-      +
-      +def merge_acc(acc1, acc2):
-      +    term1, llm1 = acc1
-      +    term2, llm2 = acc2
-      +    return (term1.union(term2), llm1.union(llm2))
-      +
-      +
-      +def rust_gss_to_fast_gss(rust_gss_head: ffi.GSSNode) -> FastGSS:
-      +    memo = {}  # rust_ptr -> python _Node
-      +    child_to_parents = {}
-      +
-      +    q = collections.deque([rust_gss_head])
-      +    visited_ptrs = {rust_gss_head.ptr()}
-      +
-      +    while q:
-      +        rust_node = q.popleft()
-      +        ptr = rust_node.ptr()
-      +
-      +        if ptr not in memo:
-      +            memo[ptr] = _Node(
-      +                acc=(rust_node.local_acc_terminals_union(), rust_node.local_acc_llm_tokens_union()),
-      +                depth=rust_node.depth()
-      +            )
-      +        py_node = memo[ptr]
-      +
-      +        if not rust_node.is_root():
-      +            parents = set()
-      +            for state_id, pred_rust_node in rust_node.predecessors():
-      +                pred_ptr = pred_rust_node.ptr()
-      +                if pred_ptr not in memo:
-      +                    memo[pred_ptr] = _Node(
-      +                        acc=(pred_rust_node.local_acc_terminals_union(), pred_rust_node.local_acc_llm_tokens_union()),
-      +                        depth=pred_rust_node.depth()
-      +                    )
-      +                py_pred_node = memo[pred_ptr]
-      +                parents.add((state_id, py_pred_node))
-      +
-      +                if pred_ptr not in visited_ptrs:
-      +                    q.append(pred_rust_node)
-      +                    visited_ptrs.add(pred_ptr)
-      +
-      +            child_to_parents[py_node] = parents
-      +
-      +    py_head = memo[rust_gss_head.ptr()]
-      +    py_root = next((node for node in memo.values() if node.depth == 0), None)
-      +    if py_root is None:
-      +        raise ValueError("Could not find root of GSS graph")
-      +
-      +    return FastGSS(
-      +        heads=frozenset([py_head]),
-      +        acc_default_factory=lambda: py_root.acc,
-      +        root=py_root,
-      +        child_to_parents=child_to_parents,
-      +        path_cache={}
-      +    )
-      +
-      +
-      +def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
-      +    current_heads = gss._heads
-      +    for _ in range(n):
-      +        next_heads = set()
-      +        for head in current_heads:
-      +            if head in gss._child_to_parents:
-      +                for _, parent in gss._child_to_parents[head]:
-      +                    next_heads.add(parent)
-      +        current_heads = next_heads
-      +        if not current_heads:
-      +            break
-      +
-      +    nodes_at_n_heads = current_heads
-      +
-      +    peeks = []
-      +    for node in nodes_at_n_heads:
-      +        if node in gss._child_to_parents:
-      +            for value, parent in gss._child_to_parents[node]:
-      +                isolated_parent_gss = FastGSS(
-      +                    heads=frozenset([parent]),
-      +                    acc_default_factory=gss._acc_default_factory,
-      +                    root=gss._root,
-      +                    child_to_parents=gss._child_to_parents,
-      +                    path_cache=gss._path_cache
-      +                )
-      +                peeks.append((value, isolated_parent_gss))
-      +    return peeks
-      +
-      +
-      +def get_allowed_llm_tokens(gss: FastGSS) -> ffi.Bitset:
-      +    q = collections.deque(list(gss._heads))
-      +    visited = set()
-      +    root_accs_llm = []
-      +
-      +    while q:
-      +        node = q.popleft()
-      +        if node in visited:
-      +            continue
-      +        visited.add(node)
-      +
-      +        if node.depth == 0:
-      +            root_accs_llm.append(node.acc[1])
-      +
-      +        if node in gss._child_to_parents:
-      +            for _, parent in gss._child_to_parents[node]:
-      +                q.append(parent)
-      +
-      +    if not root_accs_llm:
-      +        aggregated_llm = ffi.Bitset.zeros()
-      +    else:
-      +        aggregated_llm = root_accs_llm[0]
-      +        for i in range(1, len(root_accs_llm)):
-      +            aggregated_llm = aggregated_llm.union(root_accs_llm[i])
-      +
-      +    final_llm = ffi.Bitset.zeros()
-      +    for head in gss._heads:
-      +        local_llm = head.acc[1]
-      +        final_llm = final_llm.union(local_llm.intersection(aggregated_llm))
-      +
-      +    return final_llm
-      +
-      +
-      +def is_alive_py(gss: FastGSS) -> bool:
-      +    return not get_allowed_llm_tokens(gss).is_empty()
-      +
-       
-       class Model(GraphProvider):
-           """
-      @@ -92,108 +144,113 @@
-               Compute the final LLM token mask given a mapping from tokenizer state to
-               GSS nodes. This is the performance-critical routine.
-               """
-      -        print("\n--- get_mask START ---")
-      -        print("GSS at start of get_mask:")
-      -        # print(self.constraint_state)
-      -        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-      -        print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
-               t0 = time.time()
-       
-               final_mask = ffi.Bitset.zeros()
-      -
-      -        # node_idx -> (GSSNode, Bitset)
-      -        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
-      -
-      -        stopped: set[int] = set()  # nodes that stopped (no gss parents)
-      -        todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-      -        depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-      -
-      -
-      -        # Seed: map tokenizer states and their filtered GSS to trie roots
-      +        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
-      +        stopped: Set[int] = set()
-      +        todo: Dict[int, Set[int]] = {}
-      +        depth_heap: List[int] = []
-      +
-               heappush = heapq.heappush
-               roots_map = self.roots_map
-               max_depth = self.max_depth
-       
-      -        print("\n--- Seeding work queue ---")
-      +        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-      +
-      +        py_gss_map = {}
-               for sid, (gss, new_mask) in state_to_gss_and_mask.items():
-      +            py_gss_map[sid] = (rust_gss_to_fast_gss(gss), new_mask)
-      +
-      +        for sid, (gss, new_mask) in py_gss_map.items():
-                   root_idx = roots_map.get(int(sid))
-                   if root_idx is None:
-                       continue
-                   root_idx = int(root_idx)
-       
-      -            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
-      -
-                   existing = values.get(root_idx)
-                   if existing is not None:
-                       existing_gss, existing_mask = existing
-      -                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
-      +                merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
-                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-                   else:
-                       values[root_idx] = (gss, new_mask)
-       
-                   depth = max_depth[root_idx]
-      -            bucket = todo.get(depth)
-      -            if bucket is None:
-      -                todo[depth] = {root_idx}
-      -                heappush(depth_heap, depth)
-      -            else:
-      -                bucket.add(root_idx)
-      -
-      -        # Main scheduler
-      -
-      -        # Helper to enqueue a node at a given depth
-      +            if depth not in todo:
-      +                todo[depth] = set()
-      +                heappush(depth_heap, depth)
-      +            todo[depth].add(root_idx)
-      +
-               def enqueue(depth: int, node_idx: int) -> None:
-      -            bucket = todo.get(depth)
-      -            if bucket is None:
-      -                todo[depth] = {node_idx}
-      +            if depth not in todo:
-      +                todo[depth] = set()
-                       heappush(depth_heap, depth)
-      -            else:
-      -                bucket.add(node_idx)
-      +            todo[depth].add(node_idx)
-       
-               heappop = heapq.heappop
-               arena = self.arena
-               is_end = self.is_end
-       
-      -        print("\n--- Main loop ---")
-               iter_count = 0
-               while True:
-                   iter_count += 1
-      -            # Pop the smallest depth bucket (skip stale heap entries)
-                   node_indices: Optional[set[int]] = None
-                   current_depth = -1
-                   while depth_heap:
-                       current_depth = heappop(depth_heap)
-                       node_indices = todo.pop(current_depth, None)
-                       if node_indices:
-                           break
-                   if not node_indices:
-      -                print(f"[{iter_count}] Loop finished: no more nodes to process.")
-      -                break  # nothing left to process
-      -
-      -            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
-      -
-      -            # Process all nodes in this depth bucket
-      +                break
-      +
-                   for node_idx in node_indices:
-                       if node_idx in stopped:
-      -                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
-                           continue
-       
-                       item = values.pop(node_idx, None)
-                       if item is None:
-      -                    print(f"  - Node {node_idx}: SKIPPING (no value)")
-                           continue
-                       gss_node, llm_mask = item
-      -                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
-      -
-      -                # End-node handling
-      +
-                       if is_end(node_idx):
-      -                    print(f"    - END NODE found. Updating final_mask.")
-      -                    print(f"      - final_mask before: {final_mask.to_ranges()}")
-      -
-      -                    # Correct logic: intersect propagated mask with GSS active tokens
-      -                    gss_active_tokens = gss_node.allowed_llm_tokens()
-      -
-      +                    gss_active_tokens = get_allowed_llm_tokens(gss_node)
-                           tokens_to_add = llm_mask.intersection(gss_active_tokens)
-      -
-      -                    print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
-      -                    print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
-      -                    print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
-      -
-                           final_mask = final_mask.union(tokens_to_add)
-      -                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
-      -
-      -                if not gss_node.is_alive():
-      +
-      +                if not is_alive_py(gss_node):
-                           stopped.add(node_idx)
-      -                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
-                           continue
-       
-      -                # Transitions grouped by (pop, llm_bv)
-                       node_data = arena.get(node_idx, {})
-                       children = node_data.get("children") or []
-      -                # if not children:
-      -                #     print(f"    - No children for node {node_idx}")
-                       for (pop, llm_bv), dests in children:
-      -                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
-      -                    # Collect all pops from GSS parents
-      -                    peeks = gss_node.popn_fast(pop)
-      -                    print(f"      - Found {len(peeks)} peeks from GSS set")
-      +                    peeks = popn_fast_py(gss_node, pop)
-                           if not peeks:
-                               continue
-       
-                           llm_empty = llm_bv.is_empty()
-       
-                           for dest_idx, state_bv in dests:
-      -                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
-      -                        # Filter peeks by destination state bitset
-                               matched = []
-                               if not state_bv.is_empty():
-                                   contains = state_bv.contains
-                                   for sid_val, parent_node in peeks:
-                                       if contains(sid_val):
-                                           matched.append(parent_node)
-      -                        print(f"        - Matched {len(matched)} parent GSS nodes")
-                               if not matched:
-                                   continue
-       
-      -                        # Merge matched parent GSS nodes
-      -                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-      -
-      -                        # Compute child mask (intersection with llm_bv when present)
-      +                        child_gss_node = FastGSS.merge(matched, merge_acc)
-                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-      -                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
-       
-                               d = int(dest_idx)
-                               existing = values.get(d)
-                               if existing is not None:
-                                   existing_gss, existing_mask = existing
-      -                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
-      +                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
-                                   combined_mask = existing_mask.union(child_llm_mask)
-                                   values[d] = (merged_gss, combined_mask)
-      -                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
-                               else:
-                                   values[d] = (child_gss_node, child_llm_mask)
-      -                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
-       
-                               enqueue(max_depth[d], d)
-       
-
-      ```
       ```diff
       diff --git a/python/src/lib.rs b/python/src/lib.rs
+      index 2411111..1111111 100644
       --- a/python/src/lib.rs
       +++ b/python/src/lib.rs
-      @@ -311,6 +311,16 @@
-       #[pymethods]
-       impl PyHybridL2Bitset {
-           fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-      +        self.inner.range_values().map(|(range, bv)| {
-      +            let py_range = (*range.start(), *range.end());
-      +            let py_bv = PyHybridBitset { inner: bv.clone() };
-      +            (py_range, py_bv)
-      +        }).collect()
-      +    }
-      +
-      +    #[staticmethod]
-      +    fn all() -> Self {
-      +        Self { inner: RustHybridL2Bitset::all() }
-      +    }
-      +
-      +    fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-      +        PyHybridL2Bitset { inner: &self.inner | &other.inner }
-      +    }
-      +}
-      +
-      +
-      +#[pyclass(name = "GSSNode")]
-      +#[derive(Clone)]
-      +pub struct PyGSSNode {
-      +    inner: std::sync::Arc<RustGSSNode>,
-      +}
-      +
-      +#[pymethods]
-      +impl PyGSSNode {
-      +    #[new]
-      +    fn new() -> Self {
-      +        PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
-      +    }
-      +
-      +    fn ptr(&self) -> usize {
-      +        // Stable identity for the inner Arc<GSSNode>; useful for change detection
-      +        let raw = std::sync::Arc::as_ptr(&self.inner);
-      +        raw as usize
-      +    }
-      +
-      +    fn is_alive(&self) -> bool {
-      +        self.inner.is_alive()
-      +    }
-      +
-      +    fn is_ok(&self) -> bool {
-      +        self.inner.is_ok()
-      +    }
-      +
-      +    fn allowed_llm_tokens(&self) -> PyHybridBitset {
-      +        PyHybridBitset::from(self.inner.allowed_llm_tokens())
-      +    }
-      +
-      +    fn disallowed_terminals(&self) -> PyHybridL2Bitset {
-      +        PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
-      +    }
-      +
-      +    fn clone_node(&self) -> PyGSSNode {
-      +        self.clone()
-      +    }
-      +
-      +    fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
-      +        let pairs = popn_collect_fast(&self.inner, n);
-      +        pairs.into_iter()
-      +            .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-      +            .collect()
-      +    }
-      +
-      +    fn print_stats(&self) {
-      +        let stats = gather_gss_stats(&[self.inner.as_ref()]);
-      +        println!("{:#?}", stats);
-      +    }
-      +
-      +    fn __hash__(&self) -> PyResult<isize> {
-      +        let mut hasher = DefaultHasher::new();
-      +        self.inner.hash(&mut hasher);
-      +        Ok(hasher.finish() as isize)
-      +    }
-      +
-      +    fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
-      +        match op {
-      +            CompareOp::Eq => Ok(*self.inner == *other.inner),
-      +            CompareOp::Ne => Ok(*self.inner != *other.inner),
-      +            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
-      +        }
-      +    }
-      +
-      +    fn is_root(&self) -> bool {
-      +        self.inner.is_root()
-      +    }
-      +
-      +    fn depth(&self) -> usize {
-      +        self.inner.max_depth()
-      +    }
-      +
-      +    fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
-      +        PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
-      +    }
-      +
-      +    fn local_acc_llm_tokens_union(&self) -> PyHybridBitset {
-      +        PyHybridBitset { inner: self.inner.local_acc().llm_tokens_union.clone() }
-      +    }
-      +
-      +    fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
-      +        let mut result = Vec::new();
-      +        for (edge_content, preds_by_depth) in self.inner.predecessors() {
-      +            for pred_vec in preds_by_depth.values() {
-      +                for pred_arc in pred_vec {
-      +                    result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
-      +                }
-      +            }
-      +        }
-      +        result
-      +    }
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
-      +    let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
-      +    let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
-      +    PyGSSNode { inner: merged }
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-      +    let mut arc = node.inner.clone();
-      +    rust_allow_only(&mut arc, &bv.inner);
-      +    node.inner = arc;
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
-      +    let mut arc = node.inner.clone();
-      +    sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
-      +    node.inner = arc;
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
-      +    let mut rust_terminals_map = BTreeMap::new();
-      +    for (k, v) in terminals_map.iter() {
-      +        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-      +        let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
-      +        rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
-      +    }
-      +    
-      +    let mut arc = node.inner.clone();
-      +    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
-      +    node.inner = arc;
-      +    Ok(())
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
-      +    let mut rust_state_map = BTreeMap::new();
-      +    for (k, v) in state_map.iter() {
-      +        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-      +        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
-      +        rust_state_map.insert(from_state, to_state);
-      +    }
-      +
-      +    let mut arc = node.inner.clone();
-      +    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
-      +    node.inner = arc;
-      +    Ok(())
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
-      +    let mut arc = node.inner.clone();
-      +    arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
-      +    node.inner = arc;
-      +}
-      +
-      +#[pyfunction]
-      +fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
-      +    let pairs = rust_popn_collect(&node.inner, n);
-      +    pairs.into_iter()
-      +        .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
-      +        .collect()
-      +}
-      +
-      +#[self_referencing]
-      +struct PyGrammarConstraintStateWrapper {
-      +    constraint: PyGrammarConstraint, // Owns the Arc'd constraint
-      +    #[borrows(constraint)]
-      +    #[covariant]
-      +    inner: GrammarConstraintState<'this>,
-      +}
-      +
-      +#[pyclass(name = "GrammarConstraintState")]
-      +pub struct PyGrammarConstraintState {
-      +    inner: PyGrammarConstraintStateWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyGrammarConstraintState {
-      +    #[new]
-      +    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-      +        Ok(PyGrammarConstraintState {
-      +            inner: PyGrammarConstraintStateWrapperTryBuilder {
-      +                constraint,
-      +                inner_builder: |c: &PyGrammarConstraint| {
-      +                    let state = c.inner.init();
-      +                    Ok::<_, PyErr>(state)
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-      +    }
-      +
-      +    fn __str__(&self) -> String {
-      +        self.inner.with_inner(|state| format!("{}", state))
-      +    }
-      +
-      +    fn __repr__(&self) -> String {
-      +        self.__str__()
-      +    }
-      +
-      +    fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-      +        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-      +        let bools: Vec<bool> = bitset.iter_bits().collect();
-      +        Ok(bools.into_pyarray_bound(py))
-      +    }
-      +
-      +    fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
-      +        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-      +        Ok(PyHybridBitset { inner: bitset })
-      +    }
-      +
-      +    fn commit(&mut self, llm_token_id: usize) {
-      +        // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
-      +        self.inner.with_inner_mut(|state| {
-      +            state.commit(LLMTokenID(llm_token_id));
-      +        });
-      +    }
-      +
-      +    fn print_stats(&self) {
-      +        self.inner.with_inner(|state| state.print_gss_stats());
-      +    }
-      +
-      +    fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
-      +        let mut out = BTreeMap::new();
-      +        self.inner.with_inner(|state| {
-      +            for (tokenizer_state_id, glr_state) in &state.state {
-      +                out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
-      +            }
-      +        });
-      +        Ok(out)
-      +    }
-      +
-      +    fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
-      +        self.inner.with_inner_mut(|state| {
-      +            let mut new_b_tree_map = BTreeMap::new();
-      +            for (tokenizer_state_id, gss_node) in new_state {
-      +                let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-      +                new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
-      +            }
-      +            state.state = new_b_tree_map;
-      +        });
-      +        Ok(())
-      +    }
-      +
-      +    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-      +        self.inner.borrow_constraint().internal_bv_to_original(bv)
-      +    }
-      +}
-      +
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
-      +    #[borrows(grammar)]
-      +    #[covariant]
-      +    parser: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass(name = "IncrementalParser")]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar, // PyCompiledGrammar is moved in
-      +                parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-      +            }.try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) {
-      +        self.inner.with_parser_mut(|p| p.feed(bytes));
-      +    }
-      +
-      +    fn is_valid(&self) -> bool {
-      +        self.inner.with_parser(|p| p.is_valid())
-      +    }
-      +}
-      +
-      +#[pymodule]
-      +fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      +    m.add_class::<PyGrammarExpr>()?;
-      +    m.add_class::<PyRegexExpr>()?;
-      +    m.add_class::<PyRegexGroup>()?;
-      +    m.add_class::<PyRegexGroups>()?;
-      +    m.add_class::<PyRegex>()?;
-      +    m.add_class::<PyGrammarDefinition>()?;
-      +    m.add_class::<PyCompiledGrammar>()?;
-      +    m.add_class::<PyGLRParser>()?;
-      +    m.add_class::<PyGrammarConstraint>()?;
-      +    m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyHybridBitset>()?;
-      +    m.add_class::<PyHybridL2Bitset>()?;
-      +    m.add_class::<PyGSSNode>()?;
-      +    m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-      +    m.add_class::<PyIncrementalParser>()?;
-      +    Ok(())
-      +}
+      @@ -956,381 +956,3 @@
+           m.add_class::<PyIncrementalParser>()?;
+           Ok(())
+       }
+      -        self.inner.range_values().map(|(range, bv)| {
+      -            let py_range = (*range.start(), *range.end());
+      -            let py_bv = PyHybridBitset { inner: bv.clone() };
+      -            (py_range, py_bv)
+      -        }).collect()
+      -    }
+      -}
+      -
+      -
+      -#[pyclass(name = "GSSNode")]
+      -#[derive(Clone)]
+      -pub struct PyGSSNode {
+      -    inner: std::sync::Arc<RustGSSNode>,
+      -}
+      -
+      -#[pymethods]
+      -impl PyGSSNode {
+      -    #[new]
+      -    fn new() -> Self {
+      -        PyGSSNode { inner: std::sync::Arc::new(RustGSSNode::new_fresh()) }
+      -    }
+      -
+      -    fn ptr(&self) -> usize {
+      -        // Stable identity for the inner Arc<GSSNode>; useful for change detection
+      -        let raw = std::sync::Arc::as_ptr(&self.inner);
+      -        raw as usize
+      -    }
+      -
+      -    fn is_alive(&self) -> bool {
+      -        self.inner.is_alive()
+      -    }
+      -
+      -    fn is_ok(&self) -> bool {
+      -        self.inner.is_ok()
+      -    }
+      -
+      -    fn allowed_llm_tokens(&self) -> PyHybridBitset {
+      -        PyHybridBitset::from(self.inner.allowed_llm_tokens())
+      -    }
+      -
+      -    fn disallowed_terminals(&self) -> PyHybridL2Bitset {
+      -        PyHybridL2Bitset { inner: self.inner.disallowed_terminals() }
+      -    }
+      -
+      -    fn clone_node(&self) -> PyGSSNode {
+      -        self.clone()
+      -    }
+      -
+      -    fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
+      -        let pairs = popn_collect_fast(&self.inner, n);
+      -        pairs.into_iter()
+      -            .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+      -            .collect()
+      -    }
+      -
+      -    fn print_stats(&self) {
+      -        let stats = gather_gss_stats(&[self.inner.as_ref()]);
+      -        println!("{:#?}", stats);
+      -    }
+      -
+      -    fn __hash__(&self) -> PyResult<isize> {
+      -        let mut hasher = DefaultHasher::new();
+      -        self.inner.hash(&mut hasher);
+      -        Ok(hasher.finish() as isize)
+      -    }
+      -
+      -    fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
+      -        match op {
+      -            CompareOp::Eq => Ok(*self.inner == *other.inner),
+      -            CompareOp::Ne => Ok(*self.inner != *other.inner),
+      -            _ => Err(pyo3::exceptions::PyNotImplementedError::new_err("Only == and != are supported for GSSNode")),
+      -        }
+      -    }
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
+      -    let arcs = nodes.into_iter().map(|n| n.inner.clone()).collect::<Vec<_>>();
+      -    let merged = RustGSSNode::merge_many_with_depth(depth, arcs);
+      -    PyGSSNode { inner: merged }
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
+      -    let mut arc = node.inner.clone();
+      -    rust_allow_only(&mut arc, &bv.inner);
+      -    node.inner = arc;
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
+      -    let mut arc = node.inner.clone();
+      -    sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+      -    node.inner = arc;
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+      -    let mut rust_terminals_map = BTreeMap::new();
+      -    for (k, v) in terminals_map.iter() {
+      -        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+      -        let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+      -        rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+      -    }
+      -    
+      -    let mut arc = node.inner.clone();
+      -    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+      -    node.inner = arc;
+      -    Ok(())
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+      -    let mut rust_state_map = BTreeMap::new();
+      -    for (k, v) in state_map.iter() {
+      -        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+      -        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+      -        rust_state_map.insert(from_state, to_state);
+      -    }
+      -
+      -    let mut arc = node.inner.clone();
+      -    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+      -    node.inner = arc;
+      -    Ok(())
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
+      -    let mut arc = node.inner.clone();
+      -    arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+      -    node.inner = arc;
+      -}
+      -
+      -#[pyfunction]
+      -fn gss_popn_collect(node: &PyGSSNode, n: usize) -> Vec<(usize, PyGSSNode)> {
+      -    let pairs = rust_popn_collect(&node.inner, n);
+      -    pairs.into_iter()
+      -        .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+      -        .collect()
+      -}
+      -
+      -#[self_referencing]
+      -struct PyGrammarConstraintStateWrapper {
+      -    constraint: PyGrammarConstraint, // Owns the Arc'd constraint
+      -    #[borrows(constraint)]
+      -    #[covariant]
+      -    inner: GrammarConstraintState<'this>,
+      -}
+      -
+      -#[pyclass(name = "GrammarConstraintState")]
+      -pub struct PyGrammarConstraintState {
+      -    inner: PyGrammarConstraintStateWrapper,
+      -}
+      -
+      -#[pymethods]
+      -impl PyGrammarConstraintState {
+      -    #[new]
+      -    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+      -        Ok(PyGrammarConstraintState {
+      -            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      -                constraint,
+      -                inner_builder: |c: &PyGrammarConstraint| {
+      -                    let state = c.inner.init();
+      -                    Ok::<_, PyErr>(state)
+      -                },
+      -            }
+      -            .try_build()?
+      -        })
+      -    }
+      -
+      -    fn __str__(&self) -> String {
+      -        self.inner.with_inner(|state| format!("{}", state))
+      -    }
+      -
+      -    fn __repr__(&self) -> String {
+      -        self.__str__()
+      -    }
+      -
+      -    fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+      -        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+      -        let bools: Vec<bool> = bitset.iter_bits().collect();
+      -        Ok(bools.into_pyarray_bound(py))
+      -    }
+      -
+      -    fn get_mask_bv(&mut self) -> PyResult<PyHybridBitset> {
+      -        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
+      -        Ok(PyHybridBitset { inner: bitset })
+      -    }
+      -
+      -    fn commit(&mut self, llm_token_id: usize) {
+      -        // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
+      -        self.inner.with_inner_mut(|state| {
+      -            state.commit(LLMTokenID(llm_token_id));
+      -        });
+      -    }
+      -
+      -    fn print_stats(&self) {
+      -        self.inner.with_inner(|state| state.print_gss_stats());
+      -    }
+      -
+      -    fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
+      -        let mut out = BTreeMap::new();
+      -        self.inner.with_inner(|state| {
+      -            for (tokenizer_state_id, glr_state) in &state.state {
+      -                out.insert(tokenizer_state_id.0, PyGSSNode { inner: glr_state.active_state.stack.clone() });
+      -            }
+      -        });
+      -        Ok(out)
+      -    }
+      -
+      -    fn set_state_map(&mut self, new_state: BTreeMap<usize, PyGSSNode>) -> PyResult<()> {
+      -        self.inner.with_inner_mut(|state| {
+      -            let mut new_b_tree_map = BTreeMap::new();
+      -            for (tokenizer_state_id, gss_node) in new_state {
+      -                let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
+      -                new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+      -            }
+      -            state.state = new_b_tree_map;
+      -        });
+      -        Ok(())
+      -    }
+      -
+      -    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+      -        self.inner.borrow_constraint().internal_bv_to_original(bv)
+      -    }
+      -}
+      -
+      -#[self_referencing]
+      -struct PyIncrementalParserWrapper {
+      -    grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
+      -    #[borrows(grammar)]
+      -    #[covariant]
+      -    parser: IncrementalParser<'this>,
+      -}
+      -
+      -#[pyclass(name = "IncrementalParser")]
+      -pub struct PyIncrementalParser {
+      -    inner: PyIncrementalParserWrapper,
+      -}
+      -
+      -#[pymethods]
+      -impl PyIncrementalParser {
+      -    #[new]
+      -    fn new(grammar: PyCompiledGrammar) -> PyResult<Self> {
+      -        Ok(PyIncrementalParser {
+      -            inner: PyIncrementalParserWrapperTryBuilder {
+      -                grammar, // PyCompiledGrammar is moved in
+      -                parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+      -            }.try_build()?
+      -        })
+      -    }
+      -
+      -    fn feed(&mut self, bytes: &[u8]) {
+      -        self.inner.with_parser_mut(|p| p.feed(bytes));
+      -    }
+      -
+      -    fn is_valid(&self) -> bool {
+      -        self.inner.with_parser(|p| p.is_valid())
+      -    }
+      -}
+      -
+      -#[pymodule]
+      -fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
+      -    m.add_class::<PyGrammarExpr>()?;
+      -    m.add_class::<PyRegexExpr>()?;
+      -    m.add_class::<PyRegexGroup>()?;
+      -    m.add_class::<PyRegexGroups>()?;
+      -    m.add_class::<PyRegex>()?;
+      -    m.add_class::<PyGrammarDefinition>()?;
+      -    m.add_class::<PyCompiledGrammar>()?;
+      -    m.add_class::<PyGLRParser>()?;
+      -    m.add_class::<PyGrammarConstraint>()?;
+      -    m.add_class::<PyGrammarConstraintState>()?;
+      -    m.add_class::<PyHybridBitset>()?;
+      -    m.add_class::<PyHybridL2Bitset>()?;
+      -    m.add_class::<PyGSSNode>()?;
+      -    m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
+      -    m.add_class::<PyIncrementalParser>()?;
+      -    Ok(())
+      -}
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-
-      --- Processing Diff Block 2 ---
       Identified target file: python/src/lib.rs
       Applying patch to 'python/src/lib.rs' using custom patcher...
       Successfully applied patch and wrote to python/src/lib.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Replace Rust GSS with Python FastGSS
-      in precompute3 model"'
+  - user: 'Changes committed with message: "Remove duplicated code from python/src/lib.rs"'
     metadata:
 ...
