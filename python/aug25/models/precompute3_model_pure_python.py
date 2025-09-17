@@ -8,7 +8,7 @@ from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
-from ...gss_tester.fast_impl import FastGSS, _Node
+from gss_tester.fast_impl import FastGSS, _Node
 
 
 def merge_acc(acc1, acc2):
