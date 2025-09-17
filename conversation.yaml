@@ -11566,7 +11566,7 @@ local_system:
               print("GSS at start of get_mask:")
               state_map = self.state
 
-              # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+              state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
               all_ones_mask = self.all_internal_llm_tokens_bitset
 
@@ -22403,19 +22403,7 @@ local_system:
           pub fn complement(&self) -> PyHybridL2Bitset {
               PyHybridL2Bitset { inner: self.inner.complement() }
           }
-
-          fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-              PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
-          }
-
-          fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-              self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
-          }
-
-
       }
-
-
 
 
       #[pyclass(name = "GSSNode")]
@@ -22949,57 +22937,6 @@ local_system:
               # Sort for a canonical representation
               return sorted(all_stacks, key=lambda x: (x["stack"], x["acc"]))
 
-          def deep_apply(self, func: Callable[[Acc], Optional[Acc]]) -> 'FastGSS[T, Acc]':
-              """
-              Recursively apply a function to the accumulator of every node in the GSS.
-              If the function returns None, the node and paths leading to it are pruned.
-              """
-              memo: Dict[int, Optional[_Node[T, Acc]]] = {}
-              new_child_to_parents_rebuilt = {}
-
-              def _transform_and_rebuild(node: _Node[T, Acc]) -> Optional[_Node[T, Acc]]:
-                  if node.id in memo:
-                      return memo[node.id]
-
-                  new_acc = func(node.acc)
-                  if new_acc is None:
-                      memo[node.id] = None
-                      return None
-
-                  if node == self._root:
-                      new_node = _Node(acc=new_acc, depth=0) if new_acc != node.acc else node
-                      memo[node.id] = new_node
-                      return new_node
-
-                  new_parents = set()
-                  if node in self._child_to_parents:
-                      for value, parent_node in self._child_to_parents[node]:
-                          new_parent = _transform_and_rebuild(parent_node)
-                          if new_parent:
-                              new_parents.add((value, new_parent))
-                  
-                  if not new_parents:
-                      memo[node.id] = None
-                      return None
-
-                  # Create a new node. We create a new one even if nothing changed to rebuild the parent map cleanly.
-                  new_node = _Node(acc=new_acc, depth=node.depth)
-                  new_child_to_parents_rebuilt[new_node] = new_parents
-                  memo[node.id] = new_node
-                  return new_node
-
-              new_heads_rebuilt = {new_head for head in self._heads if (new_head := _transform_and_rebuild(head)) is not None}
-
-              if not new_heads_rebuilt:
-                  return FastGSS.initial(self._acc_default_factory)
-              
-              new_root_rebuilt = memo.get(self._root.id)
-              if new_root_rebuilt is None:
-                  new_root_rebuilt = _Node(acc=self._acc_default_factory(), depth=0)
-
-
-              return FastGSS(frozenset(new_heads_rebuilt), self._acc_default_factory, new_root_rebuilt, new_child_to_parents_rebuilt, {})
-
           def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
               if node.id in cache:
                   return cache[node.id]
@@ -23269,58 +23206,6 @@ local_system:
                   self.state = {}
                   return
 
-              # --- Start: New logic inspired by Rust commit ---
-              tokenizer_state_map: Dict[int, int] = {} # old_sid -> new_sid
-              terminals_map: Dict[int, ffi.Bitset] = {} # old_sid -> allowed terminals
-              
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      tokenizer_state_map[tokenizer_sid] = end_state
-                  
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              transformed_states: Dict[int, FastGSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  # 1. Prune disallowed terminals
-                  def prune_func(acc: PyAcc) -> Optional[PyAcc]:
-                      if tokenizer_sid in terminals_map:
-                          matched_terminals = terminals_map[tokenizer_sid]
-                          allowed_terminals = acc.terminals_union.get_l2_bitset(tokenizer_sid)
-                          if not matched_terminals.is_subset(allowed_terminals):
-                              return None # Prune
-                      return acc
-                  
-                  gss = gss.deep_apply(prune_func)
-                  if not any(h is not gss._root for h in gss._heads):
-                      continue
-
-                  # 2. Map allowed terminals to new tokenizer states
-                  def map_func(acc: PyAcc) -> PyAcc:
-                      new_terminals_by_state: Dict[int, ffi.Bitset] = {}
-                      for old_sid, new_sid in tokenizer_state_map.items():
-                          bv_source = acc.terminals_union.get_l2_bitset(old_sid)
-                          if new_sid in new_terminals_by_state:
-                              new_terminals_by_state[new_sid] = new_terminals_by_state[new_sid].union(bv_source)
-                          else:
-                              new_terminals_by_state[new_sid] = bv_source
-                      
-                      new_l2 = ffi.HybridL2Bitset.all()
-                      for sid, bv in new_terminals_by_state.items():
-                          new_l2.insert_l2_bitset(sid, bv)
-                      
-                      return PyAcc(terminals_union=new_l2)
-
-                  gss = gss.deep_apply(map_func)
-                  if any(h is not gss._root for h in gss._heads):
-                      transformed_states[tokenizer_sid] = gss
-              
-              self.state = transformed_states
-              # --- End: New logic ---
-
               new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
 
               q = collections.deque()
@@ -23332,6 +23217,7 @@ local_system:
               while q:
                   offset, tokenizer_sid, gss = q.popleft()
 
+                  # GSS is not hashable, use its serializable form for visited check
                   q_item = (offset, tokenizer_sid, gss)
                   if q_item in visited_q_items:
                       continue
@@ -23361,9 +23247,7 @@ local_system:
           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
               for head in gss._heads:
-                  peeked = gss.peek_from_head(head)
-                  if peeked:
-                      state_id = next(iter(peeked))
+                  for state_id in gss.peek_from_head(head):
                       heads_by_state[state_id].append(head)
 
               shifted_gsses = []
@@ -23414,7 +23298,7 @@ local_system:
               print("GSS at start of get_mask:")
               state_map = self.state
 
-              # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+              state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
               all_ones_mask = self.all_internal_llm_tokens_bitset
 
@@ -35226,7 +35110,7 @@ messages:
               print("GSS at start of get_mask:")
               state_map = self.state
 
-              # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+              state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
               all_ones_mask = self.all_internal_llm_tokens_bitset
 
@@ -39265,380 +39149,69 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've analyzed the discrepancy you're observing. The issue stems from your Python implementation of the `commit` method in `precompute3_model_pure_python.py`, which is missing several crucial GSS transformation steps that are present in the correct Rust implementation. Additionally, there's a bug in how you memoize visited states during the commit process.
+      Of course. It appears there's a subtle but critical bug in your Python implementation of the GLR parsing logic, specifically in how it handles multiple possible parser states for a single stack. The fix involves correctly iterating over all possible states instead of arbitrarily picking one.
 
-      When you uncomment the line to fetch state from Rust, you are correctly getting a GSS that has been processed by Rust's robust `commit` logic. When you use the Python-managed state, you are using a GSS that has been processed by your incomplete Python `commit` logic, leading to incorrect results.
+      Here are the step-by-step instructions to correct the issue, followed by the corresponding git diff.
 
-      To fix this, we need to make the Python `commit` logic correctly mirror the Rust implementation. This involves adding the missing GSS transformation steps (`prune_disallowed_terminals` and `map_allowed_terminals_tokenizer_states`) and fixing the memoization bug. This requires adding a new `deep_apply` method to your `FastGSS` class and adding a few FFI bindings to support the transformations.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to apply the fixes:
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`**.
 
-      ### Step 1: Add FFI Bindings for `HybridL2Bitset`
+      2.  **Navigate to the `_process_token` method** within the `Model` class.
 
-      To allow the Python code to correctly manipulate terminal constraints, we need to expose more functionality of the `HybridL2Bitset` to Python.
-
-      **File:** `python/src/lib.rs`
-
-      In the `#[pymethods]` block for `PyHybridL2Bitset`, add the `get_l2_bitset` and `insert_l2_bitset` methods:
-
-      ```rust
-      #[pymethods]
-      impl PyHybridL2Bitset {
-          fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-              // ... existing code ...
-          }
-
-          #[staticmethod]
-          fn all() -> Self {
-              // ... existing code ...
-          }
-
-          fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
-              // ... existing code ...
-          }
-
-          pub fn complement(&self) -> PyHybridL2Bitset {
-              // ... existing code ...
-          }
-
-          // ADD THE FOLLOWING TWO METHODS:
-          fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-              PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
-          }
-
-          fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-              self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
-          }
-      }
-      ```
-
-      *Note: This change assumes that `get_l2_bitset` and `insert_l2_bitset` methods exist on the underlying Rust `HybridL2Bitset` struct. Based on the context, this is a necessary capability.*
-
-      ### Step 2: Add `deep_apply` Method to `FastGSS`
-
-      Your `FastGSS` class needs a method to recursively apply transformations to all nodes in the graph, not just the heads.
-
-      **File:** `python/gss_tester/fast_impl.py`
-
-      Inside the `FastGSS` class, add the following `deep_apply` method. A good place is after the `to_json_serializable` method.
-
-      ```python
-          def deep_apply(self, func: Callable[[Acc], Optional[Acc]]) -> 'FastGSS[T, Acc]':
-              """
-              Recursively apply a function to the accumulator of every node in the GSS.
-              If the function returns None, the node and paths leading to it are pruned.
-              """
-              memo: Dict[int, Optional[_Node[T, Acc]]] = {}
-              new_child_to_parents_rebuilt = {}
-
-              def _transform_and_rebuild(node: _Node[T, Acc]) -> Optional[_Node[T, Acc]]:
-                  if node.id in memo:
-                      return memo[node.id]
-
-                  new_acc = func(node.acc)
-                  if new_acc is None:
-                      memo[node.id] = None
-                      return None
-
-                  if node == self._root:
-                      new_node = _Node(acc=new_acc, depth=0) if new_acc != node.acc else node
-                      memo[node.id] = new_node
-                      return new_node
-
-                  new_parents = set()
-                  if node in self._child_to_parents:
-                      for value, parent_node in self._child_to_parents[node]:
-                          new_parent = _transform_and_rebuild(parent_node)
-                          if new_parent:
-                              new_parents.add((value, new_parent))
-                  
-                  if not new_parents:
-                      memo[node.id] = None
-                      return None
-
-                  # Create a new node. We create a new one even if nothing changed to rebuild the parent map cleanly.
-                  new_node = _Node(acc=new_acc, depth=node.depth)
-                  new_child_to_parents_rebuilt[new_node] = new_parents
-                  memo[node.id] = new_node
-                  return new_node
-
-              new_heads_rebuilt = {new_head for head in self._heads if (new_head := _transform_and_rebuild(head)) is not None}
-
-              if not new_heads_rebuilt:
-                  return FastGSS.initial(self._acc_default_factory)
-              
-              new_root_rebuilt = memo.get(self._root.id)
-              if new_root_rebuilt is None:
-                  new_root_rebuilt = _Node(acc=self._acc_default_factory(), depth=0)
-
-
-              return FastGSS(frozenset(new_heads_rebuilt), self._acc_default_factory, new_root_rebuilt, new_child_to_parents_rebuilt, {})
-      ```
-
-      ### Step 3: Correct the `commit` Method
-
-      Now, let's fix the `commit` method in your Python model to use the new capabilities and align its logic with the Rust implementation.
-
-      **File:** `python/aug25/models/precompute3_model_pure_python.py`
-
-      1.  **Fix the memoization bug:**
-          -   In the `commit` method, find the line:
-              ```python
-              q_item = (offset, tokenizer_sid, id(gss))
-              ```
-          -   Change it to correctly use the hashable `FastGSS` object for memoization:
-              ```python
-              q_item = (offset, tokenizer_sid, gss)
-              ```
-
-      2.  **Add GSS transformation logic:**
-          -   In the `commit` method, right after the initial `if not token_bytes:` block, insert the following code block. This adds the crucial pre-processing of the GSS state before handling token matches.
-
+      3.  **Locate the incorrect loop for populating `heads_by_state`**. Around line 302, you will find the following code block:
           ```python
-              # --- Start: New logic inspired by Rust commit ---
-              tokenizer_state_map: Dict[int, int] = {} # old_sid -> new_sid
-              terminals_map: Dict[int, ffi.Bitset] = {} # old_sid -> allowed terminals
-              
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      tokenizer_state_map[tokenizer_sid] = end_state
-                  
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              transformed_states: Dict[int, FastGSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  # 1. Prune disallowed terminals
-                  def prune_func(acc: PyAcc) -> Optional[PyAcc]:
-                      if tokenizer_sid in terminals_map:
-                          matched_terminals = terminals_map[tokenizer_sid]
-                          allowed_terminals = acc.terminals_union.get_l2_bitset(tokenizer_sid)
-                          if not matched_terminals.is_subset(allowed_terminals):
-                              return None # Prune
-                      return acc
-                  
-                  gss = gss.deep_apply(prune_func)
-                  if not any(h is not gss._root for h in gss._heads):
-                      continue
-
-                  # 2. Map allowed terminals to new tokenizer states
-                  def map_func(acc: PyAcc) -> PyAcc:
-                      new_terminals_by_state: Dict[int, ffi.Bitset] = {}
-                      for old_sid, new_sid in tokenizer_state_map.items():
-                          bv_source = acc.terminals_union.get_l2_bitset(old_sid)
-                          if new_sid in new_terminals_by_state:
-                              new_terminals_by_state[new_sid] = new_terminals_by_state[new_sid].union(bv_source)
-                          else:
-                              new_terminals_by_state[new_sid] = bv_source
-                      
-                      new_l2 = ffi.HybridL2Bitset.all()
-                      for sid, bv in new_terminals_by_state.items():
-                          new_l2.insert_l2_bitset(sid, bv)
-                      
-                      return PyAcc(terminals_union=new_l2)
-
-                  gss = gss.deep_apply(map_func)
-                  if any(h is not gss._root for h in gss._heads):
-                      transformed_states[tokenizer_sid] = gss
-              
-              self.state = transformed_states
-              # --- End: New logic ---
+                  for head in gss._heads:
+                      peeked = gss.peek_from_head(head)
+                      if peeked:
+                          state_id = next(iter(peeked))
+                          heads_by_state[state_id].append(head)
           ```
+          This code incorrectly processes only one of the possible parent states (`state_id`) for each stack head by using `next(iter(peeked))`.
 
-      ---
+      4.  **Replace the incorrect block with the corrected version**. The fix is to iterate over all states returned by `peek_from_head`:
+          ```python
+                  for head in gss._heads:
+                      for state_id in gss.peek_from_head(head):
+                          heads_by_state[state_id].append(head)
+          ```
+          This ensures that if a stack is in multiple parser states simultaneously (a key feature of GLR parsing), it is correctly processed for each of those states.
+
+      This single change corrects the logic for how actions are determined for each stack, which is the likely cause of the divergence you're seeing between your Python and Rust implementations.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
+      Here is the git patch that applies the change described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -200,6 +200,55 @@
-                   self.state = {}
-                   return
+      @@ -302,10 +302,8 @@
+           def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+               heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+               for head in gss._heads:
+      -            peeked = gss.peek_from_head(head)
+      -            if peeked:
+      -                state_id = next(iter(peeked))
+      +            for state_id in gss.peek_from_head(head):
+                       heads_by_state[state_id].append(head)
        
-      +        # --- Start: New logic inspired by Rust commit ---
-      +        tokenizer_state_map: Dict[int, int] = {} # old_sid -> new_sid
-      +        terminals_map: Dict[int, ffi.Bitset] = {} # old_sid -> allowed terminals
-      +        
-      +        for tokenizer_sid in self.state.keys():
-      +            end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-      +            if end_state is not None:
-      +                tokenizer_state_map[tokenizer_sid] = end_state
-      +            
-      +            terminals = ffi.Bitset.zeros()
-      +            for terminal_id, _ in matches:
-      +                terminals.insert(terminal_id)
-      +            terminals_map[tokenizer_sid] = terminals
-      +
-      +        transformed_states: Dict[int, FastGSS] = {}
-      +        for tokenizer_sid, gss in self.state.items():
-      +            # 1. Prune disallowed terminals
-      +            def prune_func(acc: PyAcc) -> Optional[PyAcc]:
-      +                if tokenizer_sid in terminals_map:
-      +                    matched_terminals = terminals_map[tokenizer_sid]
-      +                    allowed_terminals = acc.terminals_union.get_l2_bitset(tokenizer_sid)
-      +                    if not matched_terminals.is_subset(allowed_terminals):
-      +                        return None # Prune
-      +                return acc
-      +            
-      +            gss = gss.deep_apply(prune_func)
-      +            if not any(h is not gss._root for h in gss._heads):
-      +                continue
-      +
-      +            # 2. Map allowed terminals to new tokenizer states
-      +            def map_func(acc: PyAcc) -> PyAcc:
-      +                new_terminals_by_state: Dict[int, ffi.Bitset] = {}
-      +                for old_sid, new_sid in tokenizer_state_map.items():
-      +                    bv_source = acc.terminals_union.get_l2_bitset(old_sid)
-      +                    if new_sid in new_terminals_by_state:
-      +                        new_terminals_by_state[new_sid] = new_terminals_by_state[new_sid].union(bv_source)
-      +                    else:
-      +                        new_terminals_by_state[new_sid] = bv_source
-      +                
-      +                new_l2 = ffi.HybridL2Bitset.all()
-      +                for sid, bv in new_terminals_by_state.items():
-      +                    new_l2.insert_l2_bitset(sid, bv)
-      +                
-      +                return PyAcc(terminals_union=new_l2)
-      +
-      +            gss = gss.deep_apply(map_func)
-      +            if any(h is not gss._root for h in gss._heads):
-      +                transformed_states[tokenizer_sid] = gss
-      +        
-      +        self.state = transformed_states
-      +        # --- End: New logic ---
-      +
-               new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-       
-               q = collections.deque()
-      @@ -211,8 +260,7 @@
-               while q:
-                   offset, tokenizer_sid, gss = q.popleft()
-       
-      -            # GSS is not hashable, use its serializable form for visited check
-      -            q_item = (offset, tokenizer_sid, gss)
-      +            q_item = (offset, tokenizer_sid, gss)
-                   if q_item in visited_q_items:
-                       continue
-                   visited_q_items.add(q_item)
-
-      ```
-
-      ```diff
-      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
-      --- a/python/gss_tester/fast_impl.py
-      +++ b/python/gss_tester/fast_impl.py
-      @@ -153,6 +153,55 @@
-                       all_stacks.append({"stack": list(path), "acc": head.acc})
-               
-               # Sort for a canonical representation
-               return sorted(all_stacks, key=lambda x: (x["stack"], x["acc"]))
-      +
-      +    def deep_apply(self, func: Callable[[Acc], Optional[Acc]]) -> 'FastGSS[T, Acc]':
-      +        """
-      +        Recursively apply a function to the accumulator of every node in the GSS.
-      +        If the function returns None, the node and paths leading to it are pruned.
-      +        """
-      +        memo: Dict[int, Optional[_Node[T, Acc]]] = {}
-      +        new_child_to_parents_rebuilt = {}
-      +
-      +        def _transform_and_rebuild(node: _Node[T, Acc]) -> Optional[_Node[T, Acc]]:
-      +            if node.id in memo:
-      +                return memo[node.id]
-      +
-      +            new_acc = func(node.acc)
-      +            if new_acc is None:
-      +                memo[node.id] = None
-      +                return None
-      +
-      +            if node == self._root:
-      +                new_node = _Node(acc=new_acc, depth=0) if new_acc != node.acc else node
-      +                memo[node.id] = new_node
-      +                return new_node
-      +
-      +            new_parents = set()
-      +            if node in self._child_to_parents:
-      +                for value, parent_node in self._child_to_parents[node]:
-      +                    new_parent = _transform_and_rebuild(parent_node)
-      +                    if new_parent:
-      +                        new_parents.add((value, new_parent))
-      +            
-      +            if not new_parents:
-      +                memo[node.id] = None
-      +                return None
-      +
-      +            # Create a new node. We create a new one even if nothing changed to rebuild the parent map cleanly.
-      +            new_node = _Node(acc=new_acc, depth=node.depth)
-      +            new_child_to_parents_rebuilt[new_node] = new_parents
-      +            memo[node.id] = new_node
-      +            return new_node
-      +
-      +        new_heads_rebuilt = {new_head for head in self._heads if (new_head := _transform_and_rebuild(head)) is not None}
-      +
-      +        if not new_heads_rebuilt:
-      +            return FastGSS.initial(self._acc_default_factory)
-      +        
-      +        new_root_rebuilt = memo.get(self._root.id)
-      +        if new_root_rebuilt is None:
-      +            new_root_rebuilt = _Node(acc=self._acc_default_factory(), depth=0)
-      +
-      +
-      +        return FastGSS(frozenset(new_heads_rebuilt), self._acc_default_factory, new_root_rebuilt, new_child_to_parents_rebuilt, {})
-       
-           def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
-               if node.id in cache:
-
-      ```
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -360,6 +360,16 @@
-               PyHybridL2Bitset { inner: self.inner.complement() }
-           }
-       
-      +    fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-      +        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
-      +    }
-      +
-      +    fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-      +        self.inner.insert_l2_bitset(state_id, bitset.inner.clone());
-      +    }
-      +
-      +
-       }
-       
-       
+               shifted_gsses = []
+               reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/fast_impl.py
-      Applying patch to 'python/gss_tester/fast_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/fast_impl.py.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
     metadata:
-  - user: 'Changes committed with message: "refactor: Implement Python GSS transformations,
-      add deep_apply, and fix commit memoization"'
+  - user: 'Changes committed with message: "Fix: Correctly iterate over all parser
+      states in _process_token"'
     metadata:
 ...

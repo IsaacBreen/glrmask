@@ -1,6 +1,6 @@
 import itertools
 from functools import reduce
-from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet, Optional
+from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
 
 from .interface import GSS, T, Acc
 
@@ -222,57 +222,6 @@ class FastGSS(GSS[T, Acc]):
         
         # Sort for a canonical representation
         return sorted(all_stacks, key=lambda x: (x["stack"], x["acc"]))
-
-    def deep_apply(self, func: Callable[[Acc], Optional[Acc]]) -> 'FastGSS[T, Acc]':
-        """
-        Recursively apply a function to the accumulator of every node in the GSS.
-        If the function returns None, the node and paths leading to it are pruned.
-        """
-        memo: Dict[int, Optional[_Node[T, Acc]]] = {}
-        new_child_to_parents_rebuilt = {}
-
-        def _transform_and_rebuild(node: _Node[T, Acc]) -> Optional[_Node[T, Acc]]:
-            if node.id in memo:
-                return memo[node.id]
-
-            new_acc = func(node.acc)
-            if new_acc is None:
-                memo[node.id] = None
-                return None
-
-            if node == self._root:
-                new_node = _Node(acc=new_acc, depth=0) if new_acc != node.acc else node
-                memo[node.id] = new_node
-                return new_node
-
-            new_parents = set()
-            if node in self._child_to_parents:
-                for value, parent_node in self._child_to_parents[node]:
-                    new_parent = _transform_and_rebuild(parent_node)
-                    if new_parent:
-                        new_parents.add((value, new_parent))
-            
-            if not new_parents:
-                memo[node.id] = None
-                return None
-
-            # Create a new node. We create a new one even if nothing changed to rebuild the parent map cleanly.
-            new_node = _Node(acc=new_acc, depth=node.depth)
-            new_child_to_parents_rebuilt[new_node] = new_parents
-            memo[node.id] = new_node
-            return new_node
-
-        new_heads_rebuilt = {new_head for head in self._heads if (new_head := _transform_and_rebuild(head)) is not None}
-
-        if not new_heads_rebuilt:
-            return FastGSS.initial(self._acc_default_factory)
-        
-        new_root_rebuilt = memo.get(self._root.id)
-        if new_root_rebuilt is None:
-            new_root_rebuilt = _Node(acc=self._acc_default_factory(), depth=0)
-
-
-        return FastGSS(frozenset(new_heads_rebuilt), self._acc_default_factory, new_root_rebuilt, new_child_to_parents_rebuilt, {})
 
     def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
         if node.id in cache:
