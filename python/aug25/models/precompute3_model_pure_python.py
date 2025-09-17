@@ -6,7 +6,56 @@ from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
+from ...gss_tester.fast_impl import FastGSS, Node
 from tqdm.auto import tqdm
+
+
+def rust_gss_to_fast_gss(rust_gss: ffi.GSSNode, acc_factory):
+    memo = {}  # rust_gss.ptr() -> fast_gss.Node
+    child_to_parents = {}
+
+    q = collections.deque([rust_gss])
+    visited = {rust_gss.ptr()}
+    all_rust_nodes = [rust_gss]
+
+    while q:
+        curr = q.popleft()
+        for _, pred in curr.predecessors():
+            if pred.ptr() not in visited:
+                visited.add(pred.ptr())
+                q.append(pred)
+                all_rust_nodes.append(pred)
+
+    fast_root = None
+    for r_node in reversed(all_rust_nodes):  # bottom-up
+        if r_node.ptr() in memo:
+            continue
+
+        local_acc = r_node.local_acc_terminals_union()
+        new_node = Node(acc=local_acc, depth=r_node.depth())
+        memo[r_node.ptr()] = new_node
+
+        if r_node.depth() == 0:
+            fast_root = new_node
+
+        for value, pred_node in r_node.predecessors():
+            converted_pred = memo[pred_node.ptr()]
+            if new_node not in child_to_parents:
+                child_to_parents[new_node] = set()
+            child_to_parents[new_node].add((value, converted_pred))
+
+    if fast_root is None:
+        return FastGSS.initial(acc_factory)
+
+    heads = {memo[rust_gss.ptr()]}
+
+    return FastGSS(
+        heads=frozenset(heads),
+        acc_default_factory=acc_factory,
+        root=fast_root,
+        child_to_parents=child_to_parents,
+        path_cache={}
+    )
 
 
 class Model(GraphProvider):
@@ -23,6 +72,7 @@ class Model(GraphProvider):
         self.constraint: Optional[ffi.GrammarConstraint] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.id_to_token: Dict[int, bytes] = {}
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
         self.max_depth: Dict[int, int] = {}
 
         # Normalize arena children bitsets and cache max_depth
@@ -70,6 +120,7 @@ class Model(GraphProvider):
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        model.possible_matches_cache = model.constraint.possible_matches()
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -103,10 +154,18 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         print("\n--- get_mask START ---")
-        print("GSS at start of get_mask:")
-        # print(self.constraint_state)
-        state_to_gss_and_mask = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss_and_mask: { {k: (v[0].ptr(), v[1].to_ranges()) for k, v in state_to_gss_and_mask.items()} }")
+        state_map = self.constraint_state.get_state_map()
+
+        def acc_factory():
+            return ffi.HybridL2Bitset.all()
+
+        py_state_map = {
+            sid: rust_gss_to_fast_gss(gss, acc_factory)
+            for sid, gss in state_map.items()
+        }
+        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
+        print(f"Initial Python GSS map: { {k: v._heads for k, v in py_state_map.items()} }")
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
@@ -125,7 +184,8 @@ class Model(GraphProvider):
         max_depth = self.max_depth
 
         print("\n--- Seeding work queue ---")
-        for sid, (gss, new_mask) in state_to_gss_and_mask.items():
+        for sid, gss in py_state_map.items():
+            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
@@ -136,7 +196,7 @@ class Model(GraphProvider):
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                merged_gss = FastGSS.merge([existing_gss, gss], lambda a, b: a.union(b))
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -199,20 +259,38 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     print(f"    - END NODE found. Updating final_mask.")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
+                    
+                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                    forbidden_llm_tokens = ffi.Bitset.zeros()
+                    disallowed_terminals_l2 = gss_node.disallowed_terminals(
+                        lambda a, b: a.union(b),
+                        lambda a: a.complement()
+                    )
+                    possible_matches = self.possible_matches_cache
 
-                    # Correct logic: intersect propagated mask with GSS active tokens
-                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                        if disallowed_bv.is_empty():
+                            continue
+                        
+                        for tsid in range(start, end + 1):
+                            possible_matches_for_state = possible_matches.get(tsid)
+                            if not possible_matches_for_state:
+                                continue
+                            
+                            for terminal_id, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                if disallowed_bv.contains(terminal_id):
+                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
-
+                    gss_active_tokens = llm_mask
+                    final_allowed_tokens = gss_active_tokens.difference(forbidden_llm_tokens)
+                    tokens_to_add = final_allowed_tokens
                     print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
-                    print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
-                    print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+                    print(f"      - tokens_to_add (after filtering): {tokens_to_add.to_ranges()}")
 
                     final_mask = final_mask.union(tokens_to_add)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
-
-                if not gss_node.is_alive():
+                
+                if llm_mask.is_empty():
                     stopped.add(node_idx)
                     print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
@@ -225,7 +303,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
+                    peeks = gss_node.popn_fast(pop + 1)
                     print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
@@ -246,7 +324,7 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parent GSS nodes
-                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss_node = FastGSS.merge(matched, lambda a, b: a.union(b))
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -256,7 +334,7 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], lambda a, b: a.union(b))
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                             print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")

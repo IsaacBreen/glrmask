@@ -4,7 +4,7 @@ from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generi
 
 from .interface import GSS, T, Acc
 
-class _Node(Generic[T, Acc]):
+class Node(Generic[T, Acc]):
     """Represents a node in the GSS graph. Each node is a unique state."""
     _id_counter = itertools.count()
 
@@ -17,12 +17,12 @@ class _Node(Generic[T, Acc]):
         return self.id
 
     def __eq__(self, other):
-        if not isinstance(other, _Node):
+        if not isinstance(other, Node):
             return NotImplemented
         return self.id == other.id
     
     def __repr__(self):
-        return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
+        return f"Node(id={self.id}, depth={self.depth}, acc={self.acc})"
 
 class FastGSS(GSS[T, Acc]):
     """
@@ -36,10 +36,10 @@ class FastGSS(GSS[T, Acc]):
     """
 
     def __init__(self, 
-                 heads: FrozenSet[_Node[T, Acc]], 
+                 heads: FrozenSet[Node[T, Acc]], 
                  acc_default_factory: Callable[[], Acc], 
-                 root: _Node[T, Acc],
-                 child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
+                 root: Node[T, Acc],
+                 child_to_parents: Dict[Node[T, Acc], Set[Tuple[T, Node[T, Acc]]]],
                  path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
         self._heads = heads
         self._acc_default_factory = acc_default_factory
@@ -49,7 +49,7 @@ class FastGSS(GSS[T, Acc]):
 
     @classmethod
     def initial(cls: Type['FastGSS'], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
-        root = _Node(acc=acc_default_factory(), depth=0)
+        root = Node(acc=acc_default_factory(), depth=0)
         return cls(
             heads=frozenset([root]),
             acc_default_factory=acc_default_factory,
@@ -59,18 +59,18 @@ class FastGSS(GSS[T, Acc]):
         )
 
     def push(self, value: T) -> 'FastGSS[T, Acc]':
-        new_heads: Set[_Node[T, Acc]] = set()
+        new_heads: Set[Node[T, Acc]] = set()
         new_child_to_parents = self._child_to_parents.copy()
         
         # Memoize node creation within a single push operation
-        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+        memo: Dict[Node[T, Acc], Node[T, Acc]] = {}
 
         for head in self._heads:
             if head in memo:
                 new_heads.add(memo[head])
                 continue
 
-            new_node = _Node(acc=head.acc, depth=head.depth + 1)
+            new_node = Node(acc=head.acc, depth=head.depth + 1)
             
             if new_node not in new_child_to_parents:
                 new_child_to_parents[new_node] = set()
@@ -82,7 +82,7 @@ class FastGSS(GSS[T, Acc]):
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
     def pop(self) -> 'FastGSS[T, Acc]':
-        new_heads: Set[_Node[T, Acc]] = set()
+        new_heads: Set[Node[T, Acc]] = set()
         for head in self._heads:
             if head in self._child_to_parents:
                 for _, parent in self._child_to_parents[head]:
@@ -95,7 +95,7 @@ class FastGSS(GSS[T, Acc]):
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
     def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-        new_heads: Set[_Node[T, Acc]] = set()
+        new_heads: Set[Node[T, Acc]] = set()
         for head in self._heads:
             if head in self._child_to_parents:
                 if any(v == value for v, _ in self._child_to_parents[head]):
@@ -107,9 +107,9 @@ class FastGSS(GSS[T, Acc]):
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-        new_heads: Set[_Node[T, Acc]] = set()
+        new_heads: Set[Node[T, Acc]] = set()
         new_child_to_parents = self._child_to_parents.copy()
-        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+        memo: Dict[Node[T, Acc], Node[T, Acc]] = {}
 
         for head in self._heads:
             if head in memo:
@@ -117,7 +117,7 @@ class FastGSS(GSS[T, Acc]):
                 continue
 
             new_acc = func(head.acc)
-            new_node = _Node(acc=new_acc, depth=head.depth)
+            new_node = Node(acc=new_acc, depth=head.depth)
             
             if head in self._child_to_parents:
                 new_child_to_parents[new_node] = self._child_to_parents[head]
@@ -134,6 +134,59 @@ class FastGSS(GSS[T, Acc]):
                 for value, _ in self._child_to_parents[head]:
                     peek_values.add(value)
         return peek_values
+
+    def _get_all_reachable_roots(self, node: Node, memo: Dict[int, Set[Node]]) -> Set[Node]:
+        if node.id in memo:
+            return memo[node.id]
+        if node == self._root:
+            return {self._root}
+
+        roots = set()
+        if node in self._child_to_parents:
+            for _, parent in self._child_to_parents[node]:
+                roots.update(self._get_all_reachable_roots(parent, memo))
+        
+        memo[node.id] = roots
+        return roots
+
+    def aggregated_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+        all_roots = set()
+        memo = {}
+        for head in self._heads:
+            all_roots.update(self._get_all_reachable_roots(head, memo))
+        
+        if not all_roots:
+            return self._acc_default_factory()
+        
+        return reduce(merge_func, (r.acc for r in all_roots))
+
+    def disallowed_terminals(self, union_func: Callable, complement_func: Callable) -> Acc:
+        # The acc stores allowed terminals. We union them and then complement.
+        allowed_terminals = self.aggregated_acc(union_func)
+        return complement_func(allowed_terminals)
+
+    def popn_fast(self, n: int) -> List[Tuple[T, 'FastGSS[T, Acc]']]:
+        # 1. Pop n times
+        nodes_at_n = self._heads
+        for _ in range(n):
+            next_heads = set()
+            for head in nodes_at_n:
+                if head in self._child_to_parents:
+                    for _, parent in self._child_to_parents[head]:
+                        next_heads.add(parent)
+            nodes_at_n = next_heads
+            if not nodes_at_n:
+                return []
+        
+        # 2. Peek from nodes at n
+        result = []
+        for node_n in nodes_at_n:
+            if node_n in self._child_to_parents:
+                for value, _ in self._child_to_parents[node_n]:
+                    # The `isolated_parent` is a GSS with `node_n` as head.
+                    isolated_gss = FastGSS(frozenset([node_n]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+                    result.append((value, isolated_gss))
+        return result
 
     @staticmethod
     def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
@@ -165,14 +218,14 @@ class FastGSS(GSS[T, Acc]):
             all_heads.update(gss._heads)
 
         # Group heads by their structural path
-        heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
+        heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[Node[T, Acc]]] = {}
         for head in all_heads:
             paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
             if paths not in heads_by_path:
                 heads_by_path[paths] = []
             heads_by_path[paths].append(head)
 
-        final_heads: Set[_Node[T, Acc]] = set()
+        final_heads: Set[Node[T, Acc]] = set()
         for paths, nodes in heads_by_path.items():
             if len(nodes) == 1:
                 final_heads.add(nodes[0])
@@ -189,7 +242,7 @@ class FastGSS(GSS[T, Acc]):
             else:
                 # Create a new node representing the merged state
                 canonical_node = nodes[0]
-                new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
+                new_node = Node(acc=merged_acc, depth=canonical_node.depth)
                 if canonical_node in all_child_to_parents:
                     all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
                 final_heads.add(new_node)
@@ -206,7 +259,7 @@ class FastGSS(GSS[T, Acc]):
         # Sort for a canonical representation
         return sorted(all_stacks, key=lambda x: (x["stack"], x["acc"]))
 
-    def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
+    def _reconstruct_paths(self, node: Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
         if node.id in cache:
             return cache[node.id]
 
