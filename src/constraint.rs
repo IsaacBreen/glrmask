@@ -790,7 +790,7 @@ impl GrammarConstraint {
         original_bv
     }
 
-    pub(crate) fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
+    pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
         HybridBitset::max_ones()
     }
 
