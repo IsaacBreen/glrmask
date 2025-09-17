@@ -688,6 +688,12 @@ impl PyHybridL2Bitset {
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
+
+    fn __hash__(&self) -> PyResult<isize> {
+        let mut hasher = DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        Ok(hasher.finish() as isize)
+    }
 }
 
 
