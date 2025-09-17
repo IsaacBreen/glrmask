@@ -2522,13 +2522,13 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn get_mask3(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
-        crate::debug!(1, "\n--- get_mask3 START ---");
-        crate::debug!(1, "GSS at start of get_mask3:");
+        crate::debug!(2, "\n--- get_mask3 START ---");
+        crate::debug!(2, "GSS at start of get_mask3:");
         crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(1, "Initial GSS stats: {:#?}", stats);
+        crate::debug!(2, "Initial GSS stats: {:#?}", stats);
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
         if GSS_LOGGING_ENABLED {
@@ -2567,7 +2567,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
-        crate::debug!(1, "\n--- Seeding work queue ---");
+        crate::debug!(2, "\n--- Seeding work queue ---");
 
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.active_state.stack.is_empty() {
@@ -2575,7 +2575,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
                 let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
-                crate::debug!(1, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={:?}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, allowed_bv);
+                crate::debug!(4, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={:?}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, allowed_bv);
                 
                 initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
                     .and_modify(|(existing_glr, existing_bv)| {
@@ -2606,15 +2606,15 @@ impl<'a> GrammarConstraintState<'a> {
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |state, (pop, llm_token_bv_from_edge), dest_map| {
                 let (glr_s, allowed_bv) = state;
-                crate::debug!(1, "  - STEP: gss_ptr={:p}, allowed_bv={:?}", glr_s.active_state.stack, allowed_bv);
-                crate::debug!(1, "    - Edge: pop={}, llm_bv={:?}", pop, llm_token_bv_from_edge);
+                crate::debug!(4, "  - STEP: gss_ptr={:p}, allowed_bv={:?}", glr_s.active_state.stack, allowed_bv);
+                crate::debug!(5, "    - Edge: pop={}, llm_bv={:?}", pop, llm_token_bv_from_edge);
                 let popped = glr_s.active_state.stack.popn(*pop);
                 let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
-                crate::debug!(1, "      - Found {} peeks from GSS", num_peeks);
+                crate::debug!(5, "      - Found {} peeks from GSS", num_peeks);
                 let mut results = Vec::new();
 
                 for (dest_idx, state_id_bv) in dest_map.iter() {
-                    crate::debug!(1, "      - Dest: idx={}, state_bv={:?}", dest_idx, state_id_bv);
+                    crate::debug!(5, "      - Dest: idx={}, state_bv={:?}", dest_idx, state_id_bv);
                     let mut valid_gss_nodes = Vec::new();
                     for popper_item in popped.iter() {
                         for peek in popper_item.peek_iter() {
@@ -2623,7 +2623,7 @@ impl<'a> GrammarConstraintState<'a> {
                             }
                         }
                     }
-                    crate::debug!(1, "        - Matched {} parent GSS nodes", valid_gss_nodes.len());
+                    crate::debug!(5, "        - Matched {} parent GSS nodes", valid_gss_nodes.len());
 
                     if valid_gss_nodes.is_empty() {
                         continue;
@@ -2634,10 +2634,10 @@ impl<'a> GrammarConstraintState<'a> {
                     new_glr_s.active_state.stack = merged_gss;
 
                     let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;
-                    crate::debug!(1, "        - Child mask: {:?}", new_allowed_bv);
+                    crate::debug!(5, "        - Child mask: {:?}", new_allowed_bv);
 
                     if new_glr_s.is_ok() && !new_allowed_bv.is_empty() {
-                        crate::debug!(1, "        - Enqueue {}: CREATING gss_ptr={:p}, mask={:?}", dest_idx, new_glr_s.active_state.stack, new_allowed_bv);
+                        crate::debug!(5, "        - Enqueue {}: CREATING gss_ptr={:p}, mask={:?}", dest_idx, new_glr_s.active_state.stack, new_allowed_bv);
                         results.push((dest_idx.clone(), (new_glr_s, new_allowed_bv)));
                     }
                 }
@@ -2647,15 +2647,15 @@ impl<'a> GrammarConstraintState<'a> {
             |state1, state2| {
                 let (glr_s1, allowed_bv1) = state1;
                 let (glr_s2, allowed_bv2) = state2;
-                crate::debug!(1, "    - MERGE: gss1_ptr={:p}, mask1={:?} WITH gss2_ptr={:p}, mask2={:?}", glr_s1.active_state.stack, allowed_bv1, glr_s2.active_state.stack, allowed_bv2);
+                crate::debug!(4, "    - MERGE: gss1_ptr={:p}, mask1={:?} WITH gss2_ptr={:p}, mask2={:?}", glr_s1.active_state.stack, allowed_bv1, glr_s2.active_state.stack, allowed_bv2);
                 glr_s1.merge_with(glr_s2);
                 *allowed_bv1 |= allowed_bv2;
-                crate::debug!(1, "      - Merged result: gss_ptr={:p}, mask={:?}", glr_s1.active_state.stack, allowed_bv1);
+                crate::debug!(5, "      - Merged result: gss_ptr={:p}, mask={:?}", glr_s1.active_state.stack, allowed_bv1);
             },
             // process_fn: (precomputed_node_data, final_state_for_this_path)
             |precomputed_node_data, state| {
                 let (glr_s, allowed_bv) = state;
-                crate::debug!(1, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={:?}", precomputed_node_data as *const _, glr_s.active_state.stack, allowed_bv);
+                crate::debug!(4, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={:?}", precomputed_node_data as *const _, glr_s.active_state.stack, allowed_bv);
 
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
@@ -2680,11 +2680,11 @@ impl<'a> GrammarConstraintState<'a> {
                 let final_allowed_tokens = glr_active_tokens - &forbidden_llm_tokens;
                 let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();
                 if precomputed_node_data.value.end {
-                    crate::debug!(1, "    - END NODE found. Updating final_mask.");
-                    crate::debug!(1, "      - final_mask before: {:?}", final_mask_internal.borrow());
-                    crate::debug!(1, "      - glr_active_tokens to union: {:?}", final_allowed_tokens);
+                    crate::debug!(4, "    - END NODE found. Updating final_mask.");
+                    crate::debug!(5, "      - final_mask before: {:?}", final_mask_internal.borrow());
+                    crate::debug!(5, "      - glr_active_tokens to union: {:?}", final_allowed_tokens);
                     *final_mask_internal.borrow_mut() |= final_allowed_tokens;
-                    crate::debug!(1, "      - final_mask after:  {:?}", final_mask_internal.borrow());
+                    crate::debug!(5, "      - final_mask after:  {:?}", final_mask_internal.borrow());
                 }
                 keep_going
             },
@@ -2697,11 +2697,11 @@ impl<'a> GrammarConstraintState<'a> {
         crate::profiler::print_summary();
         crate::profiler::reset();
 
-        crate::debug!(1, "\n--- get_mask3 END ---");
-        crate::debug!(1, "Final mask internal: {:?}", final_mask_internal.borrow());
+        crate::debug!(2, "\n--- get_mask3 END ---");
+        crate::debug!(2, "Final mask internal: {:?}", final_mask_internal.borrow());
         crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        crate::debug!(1, "Final mask mapped: {:?}", final_mask_mapped);
+        crate::debug!(2, "Final mask mapped: {:?}", final_mask_mapped);
         crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
 
         let t_end = std::time::Instant::now();

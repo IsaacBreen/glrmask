@@ -211,6 +211,11 @@ impl PyRegex {
     fn initial_state_id(&self) -> usize {
         self.inner.initial_state_id().0
     }
+
+    fn tokens_accessible_from_state(&self, state_id: usize) -> Vec<usize> {
+        self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id))
+            .into_iter().map(|tid| tid.0).collect()
+    }
 }
 
 #[pyclass(name = "GrammarDefinition")]
@@ -656,7 +661,26 @@ impl PyHybridL2Bitset {
     pub fn complement(&self) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: self.inner.complement() }
     }
+
+    #[staticmethod]
+    fn new() -> Self {
+        Self { inner: RustHybridL2Bitset::new() }
+    }
+
+    fn insert_l2_bitset(&mut self, l1_key: usize, l2_bitset: &PyHybridBitset) {
+        self.inner.insert_l2_bitset(l1_key, l2_bitset.inner.clone());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn difference(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+        PyHybridL2Bitset { inner: &self.inner - &other.inner }
+    }
 }
+
+
 
 
 #[pyclass(name = "GSSNode")]
