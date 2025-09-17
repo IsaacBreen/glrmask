@@ -37,21 +37,16 @@ class ParserTable:
 @dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
-    llm_tokens_union: ffi.Bitset
 
     def __hash__(self):
-        return hash((self.terminals_union, self.llm_tokens_union))
+        return hash(self.terminals_union)
 
     def to_json_serializable(self):
-        return {
-            "terminals_union": self.terminals_union.to_json_serializable(),
-            "llm_tokens_union": self.llm_tokens_union.to_json_string()
-        }
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union),
-                 llm_tokens_union=acc1.llm_tokens_union.union(acc2.llm_tokens_union))
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
@@ -168,10 +163,7 @@ class Model(GraphProvider):
         model.parser_table = ParserTable(start_state_id, py_table)
 
         def acc_factory():
-            return PyAcc(
-                terminals_union=ffi.HybridL2Bitset.all(),
-                llm_tokens_union=model.all_internal_llm_tokens_bitset
-            )
+            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
         initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -209,13 +201,6 @@ class Model(GraphProvider):
             self.state = {}
             return
 
-        def reset_llm_acc_func(acc: PyAcc) -> PyAcc:
-            return PyAcc(terminals_union=acc.terminals_union, llm_tokens_union=self.all_internal_llm_tokens_bitset)
-
-        new_state_after_reset = {}
-        for sid, gss in self.state.items():
-            new_state_after_reset[sid] = gss.map_acc(reset_llm_acc_func)
-        self.state = new_state_after_reset
         new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
 
         q = collections.deque()
@@ -421,10 +406,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    # This is the main bug fix: get active tokens from the GSS state
-                    gss_active_tokens = gss_node.get_acc(merge_acc).llm_tokens_union
-                    if gss_active_tokens is None:
-                        gss_active_tokens = llm_mask
+                    gss_active_tokens = all_ones_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
