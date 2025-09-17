@@ -162,9 +162,6 @@ class Model(GraphProvider):
         scanning all destination bitsets on every transition.
         """
         print("\n--- get_mask START ---")
-        print(self.constraint_state)
-        state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
 
         state_to_gss = self.constraint_state.get_state_map()
         Bitset = ffi.Bitset

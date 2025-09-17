@@ -223,9 +223,7 @@ class Model(GraphProvider):
         precomputed SID->arcs mapping per pop group.
         """
         print("\n--- get_mask START ---")
-        print(self.constraint_state)
         state_to_gss = self.constraint_state.filtered_state_gss_map()
-        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
 
         t0 = time.time()
         final_mask = ffi.Bitset.zeros()
