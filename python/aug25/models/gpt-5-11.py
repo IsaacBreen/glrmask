@@ -483,7 +483,7 @@ class Model(GraphProvider):
                         print(f"        - Matched {len(parent_list)} parent GSS nodes")
                         if not parent_list:
                             continue
-                        child_gss = ffi.gss_merge_many_with_depth(parent_list, 1)
+                        child_gss = ffi.gss_merge_many_with_depth(list(parent_list), 1)
                         if not child_gss.is_alive():
                             continue
 
