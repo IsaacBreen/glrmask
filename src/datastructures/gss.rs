@@ -92,9 +92,9 @@ impl JSONConvertible for PrecomputedNodeContents {
 /// In the simplified design, only root nodes carry Acc values. Internal nodes' Acc
 /// is computed on demand by aggregating the Accs of all reachable roots.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Acc {
-    pub(crate) llm_tokens_union: HybridBitset,
-    pub(crate) terminals_union: HybridL2Bitset,
+pub struct Acc {
+    pub llm_tokens_union: HybridBitset,
+    pub terminals_union: HybridL2Bitset,
     stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
 }
 
@@ -680,14 +680,14 @@ impl GSSNode {
     }
 
     /// Returns the local Acc stored on this node (both internal and root).
-    pub(crate) fn local_acc(&self) -> Arc<Acc> {
+    pub fn local_acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => i.acc.clone(),
         }
     }
 
-    pub(crate) fn predecessors(&self) -> &NodeMap {
+    pub fn predecessors(&self) -> &NodeMap {
         match self {
             GSSNode::Root(_) => empty_nodemap(),
             GSSNode::Internal(i) => &i.predecessors,
@@ -701,7 +701,7 @@ impl GSSNode {
             .sum()
     }
 
-    pub(crate) fn max_depth(&self) -> MaxDepth {
+    pub fn max_depth(&self) -> MaxDepth {
         match self {
             GSSNode::Root(_) => 0,
             GSSNode::Internal(i) => i.max_depth,
@@ -797,7 +797,7 @@ impl GSSNode {
 
     pub fn is_ok(&self) -> bool { self.is_alive() }
 
-    pub(crate) fn is_root(&self) -> bool {
+    pub fn is_root(&self) -> bool {
         matches!(self, GSSNode::Root(_))
     }
 
