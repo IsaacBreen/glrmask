@@ -2638,7 +2638,7 @@ impl<'a> GrammarConstraintState<'a> {
                         continue;
                     }
 
-                    let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes);
+                    let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes.clone());
                     let mut new_glr_s = glr_s.clone();
                     new_glr_s.active_state.stack = merged_gss;
 
@@ -2655,7 +2655,7 @@ impl<'a> GrammarConstraintState<'a> {
             |state1, state2| {
                 let (glr_s1, allowed_bv1) = state1;
                 let (glr_s2, allowed_bv2) = state2;
-                crate::debug!(1, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(allowed_bv2));
+                crate::debug!(1, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(&allowed_bv2));
                 glr_s1.merge_with(glr_s2);
                 *allowed_bv1 |= allowed_bv2;
             },
