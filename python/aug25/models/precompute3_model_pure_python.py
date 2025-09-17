@@ -277,9 +277,7 @@ class Model(GraphProvider):
             if gss_list
         }
 
-        final_states = {}
-
-        self.state = final_states
+        self.state = merged_states
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
         heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
