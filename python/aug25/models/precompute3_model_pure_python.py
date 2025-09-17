@@ -234,6 +234,7 @@ class Model(GraphProvider):
 
     def commit(self, token_id: int):
         self.constraint_state.commit(token_id)
+        # The Rust state (constraint_state) has now applied its own commit semantics.
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
             self.state = {}
@@ -258,6 +259,7 @@ class Model(GraphProvider):
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
+            # Phase 1: simulate parser step for each grammar terminal match.
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
                 if any(h is not processed_gss._root for h in processed_gss._heads):
@@ -266,6 +268,37 @@ class Model(GraphProvider):
                     if new_offset == len(token_bytes):
                         new_states[next_tokenizer_sid].append(processed_gss)
                     else:
+                        # Mirror Rust's immediate-repetition disallow:
+                        # If the tokenizer consumed this segment and ended in 'end_state',
+                        # and that end_state can also start the SAME grammar terminal again,
+                        # then disallow this terminal at that specific tokenizer state.
+                        #
+                        # Rust equivalent:
+                        #   if let Some(end_state_id) = exec_result.end_state {
+                        #       let possible = tokenizer.tokens_accessible_from_state(end_state_id);
+                        #       if possible.contains(&TerminalID(match_info.id)) {
+                        #           disallow_terminals_and_prune_arc(... end_state_id -> {match_info.id} ...)
+                        #       }
+                        #   }
+                        #
+                        # We use possible_matches_cache to determine accessibility of the terminal at end_state.
+                        if end_state is not None:
+                            pm_for_end = self.possible_matches_cache.get(end_state) if self.possible_matches_cache else None
+                            # pm_for_end is a dict: terminal_id -> Bitset
+                            if pm_for_end and int(terminal_id) in pm_for_end:
+                                # Apply the terminal disallow at the single tokenizer state 'end_state'
+                                def _disallow_terminal_at_state(acc: PyAcc) -> PyAcc:
+                                    # Clone the L2 bitset by a no-op union with itself (produces a new object)
+                                    new_union = acc.terminals_union.union(acc.terminals_union)
+                                    allowed = new_union.get_l2_bitset(int(end_state))
+                                    # Remove just this terminal from the allowed set at that state.
+                                    allowed.remove(int(terminal_id))
+                                    new_union.insert_l2_bitset(int(end_state), allowed)
+                                    return PyAcc(terminals_union=new_union)
+
+                                processed_gss = processed_gss.apply(_disallow_terminal_at_state)
+
+                        # Enqueue for remaining bytes of this LLM token segment.
                         q.append((new_offset, next_tokenizer_sid, processed_gss))
 
             if end_state is not None:
