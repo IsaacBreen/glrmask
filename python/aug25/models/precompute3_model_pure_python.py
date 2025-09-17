@@ -2,11 +2,88 @@ import json
 import time
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
+from dataclasses import dataclass
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
+from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+
+
+@dataclass(frozen=True)
+class PyAcc:
+    terminals_union: ffi.HybridL2Bitset
+
+
+def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+
+
+def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
+    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
+    q = collections.deque([rust_gss_node])
+    visited_rust_ptrs = {rust_gss_node.ptr()}
+    while q:
+        rust_node = q.popleft()
+        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
+        memo_nodes[rust_node.ptr()] = py_node
+        for _, pred_rust_node in rust_node.predecessors():
+            if pred_rust_node.ptr() not in visited_rust_ptrs:
+                visited_rust_ptrs.add(pred_rust_node.ptr())
+                q.append(pred_rust_node)
+    q = collections.deque([rust_gss_node])
+    visited_rust_ptrs = {rust_gss_node.ptr()}
+    while q:
+        rust_node = q.popleft()
+        py_node = memo_nodes[rust_node.ptr()]
+        for state_id, pred_rust_node in rust_node.predecessors():
+            py_pred_node = memo_nodes[pred_rust_node.ptr()]
+            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
+            if pred_rust_node.ptr() not in visited_rust_ptrs:
+                visited_rust_ptrs.add(pred_rust_node.ptr())
+                q.append(pred_rust_node)
+    py_head_node = memo_nodes[rust_gss_node.ptr()]
+    def acc_factory():
+        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
+    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+
+
+def popn_fast_py(gss: FastGSS, n: int) -> List[Tuple[int, FastGSS]]:
+    current_heads = gss._heads
+    for _ in range(n):
+        next_heads = set()
+        for head in current_heads:
+            if head in gss._child_to_parents:
+                for _, parent in gss._child_to_parents[head]:
+                    next_heads.add(parent)
+        current_heads = next_heads
+        if not current_heads:
+            return []
+    result = []
+    for head in current_heads:
+        if head in gss._child_to_parents:
+            for state_id, parent_node in gss._child_to_parents[head]:
+                isolated_gss = FastGSS(heads=frozenset([parent_node]), acc_default_factory=gss._acc_default_factory, root=gss._root, child_to_parents=gss._child_to_parents, path_cache=gss._path_cache)
+                result.append((state_id, isolated_gss))
+    return result
+
+
+def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+    if not gss._heads:
+        return ffi.HybridL2Bitset.all().complement()
+    it_heads = iter(gss._heads)
+    try:
+        first_head = next(it_heads)
+        allowed_terminals = first_head.acc.terminals_union
+        for head in it_heads:
+            allowed_terminals = allowed_terminals.union(head.acc.terminals_union)
+    except StopIteration:
+        return ffi.HybridL2Bitset.all().complement()
+    return allowed_terminals.complement()
 
 
 class Model(GraphProvider):
@@ -106,20 +183,21 @@ class Model(GraphProvider):
         """
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
-        state_map = self.constraint_state.get_state_map()
+        rust_state_map = self.constraint_state.get_state_map()
+        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
+
         all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
-        # node_idx -> (GSSNode, Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        # node_idx -> (FastGSS, Bitset)
+        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
         depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
 
         # Seed: map tokenizer states and their filtered GSS to trie roots
         heappush = heapq.heappush
@@ -134,12 +212,12 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -196,7 +274,7 @@ class Model(GraphProvider):
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -205,7 +283,7 @@ class Model(GraphProvider):
 
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
-                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                    disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
                     possible_matches = self.possible_matches_cache
 
                     for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
@@ -222,7 +300,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    gss_active_tokens = all_ones_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
@@ -234,7 +312,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(tokens_to_add)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
-                if not gss_node.is_alive():
+                if llm_mask.is_empty():
                     stopped.add(node_idx)
                     print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
@@ -247,7 +325,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
+                    peeks = popn_fast_py(gss_node, pop)
                     print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
@@ -268,7 +346,7 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parent GSS nodes
-                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss_node = FastGSS.merge(matched, merge_acc)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -278,13 +356,13 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
-                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                            print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
-                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+                            print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
 
                         enqueue(max_depth[d], d)
 
