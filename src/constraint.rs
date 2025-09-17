@@ -1853,42 +1853,6 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_filtered_gss_map(&self) -> BTreeMap<TokenizerStateID, (GLRParserState<'a>, LLMTokenBV)> {
-        let mut result = BTreeMap::new();
-        for (tokenizer_state_id, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
-            }
-
-            let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-            let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
-
-            for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
-                if disallowed_terminals_for_range.is_empty() {
-                    continue;
-                }
-
-                let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
-
-                for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
-                    for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_range.contains(terminal_id.0) {
-                            forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                        }
-                    }
-                }
-            }
-            let glr_state = glr_state.clone();
-            let mut allowed_bv = self.parent.all_internal_llm_tokens_bitset();
-            if !forbidden_llm_tokens.is_empty() {
-                allowed_bv -= &forbidden_llm_tokens;
-            }
-            
-            result.insert(*tokenizer_state_id, (glr_state, allowed_bv));
-        }
-        result
-    }
-
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
@@ -2602,13 +2566,15 @@ impl<'a> GrammarConstraintState<'a> {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
-        let filtered_gss_map = self.get_filtered_gss_map();
-
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
         crate::debug!(1, "\n--- Seeding work queue ---");
 
-        for (tokenizer_state_id, (glr_state, allowed_bv)) in filtered_gss_map {
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
+                let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
                 crate::debug!(1, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={:?}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, allowed_bv);
                 
                 initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
@@ -2616,7 +2582,7 @@ impl<'a> GrammarConstraintState<'a> {
                         existing_glr.merge_with(glr_state.clone());
                         *existing_bv |= &allowed_bv;
                     })
-                    .or_insert((glr_state, allowed_bv));
+                    .or_insert((glr_state.clone(), allowed_bv));
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
             }
@@ -2690,13 +2656,34 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, state| {
                 let (glr_s, allowed_bv) = state;
                 crate::debug!(1, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={:?}", precomputed_node_data as *const _, glr_s.active_state.stack, allowed_bv);
+
+                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
+
+                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+                    if disallowed_terminals_for_range.is_empty() {
+                        continue;
+                    }
+
+                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+
+                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                            if disallowed_terminals_for_range.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                            }
+                        }
+                    }
+                }
+
                 let glr_active_tokens = &glr_s.active_state.stack.allowed_llm_tokens() & allowed_bv;
+                let final_allowed_tokens = glr_active_tokens - &forbidden_llm_tokens;
                 let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();
                 if precomputed_node_data.value.end {
                     crate::debug!(1, "    - END NODE found. Updating final_mask.");
                     crate::debug!(1, "      - final_mask before: {:?}", final_mask_internal.borrow());
-                    crate::debug!(1, "      - glr_active_tokens to union: {:?}", glr_active_tokens);
-                    *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                    crate::debug!(1, "      - glr_active_tokens to union: {:?}", final_allowed_tokens);
+                    *final_mask_internal.borrow_mut() |= final_allowed_tokens;
                     crate::debug!(1, "      - final_mask after:  {:?}", final_mask_internal.borrow());
                 }
                 keep_going
