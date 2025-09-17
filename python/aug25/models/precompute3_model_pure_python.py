@@ -24,16 +24,10 @@ class Split:
 # Action can be a Shift (int), Reduce, or Split
 Action = Union[int, Reduce, Split]
 
-@dataclass(frozen=True)
-class DefaultReduce:
-    clone_and_merge: bool
-    reduce: Optional[Tuple[Reduce, ffi.Bitset]]
-
 @dataclass
 class Row:
     actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
     gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
-    default_reduce: Optional[DefaultReduce] = None
 
 @dataclass
 class ParserTable:
@@ -203,19 +197,6 @@ class Model(GraphProvider):
                 nt_id = int(nt_id_str)
                 if goto_data['state_id'] is not None:
                     py_row.gotos[nt_id] = goto_data['state_id']
-            # Parse default_reduce
-            default_reduce_data = row_data.get('default_reduce')
-            if default_reduce_data:
-                clone_and_merge = default_reduce_data['clone_and_merge']
-                reduce_info = default_reduce_data['reduce']
-                py_reduce = None
-                if reduce_info:
-                    reduce_action_data, terminals_bv_json = reduce_info
-                    pids = tuple(sorted(reduce_action_data['production_ids']))
-                    reduce_action = Reduce(reduce_action_data['nonterminal_id'], reduce_action_data['len'], pids)
-                    terminals_bv = ffi.Bitset.from_json_string(json.dumps(terminals_bv_json))
-                    py_reduce = (reduce_action, terminals_bv)
-                py_row.default_reduce = DefaultReduce(clone_and_merge, py_reduce)
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
@@ -254,65 +235,6 @@ class Model(GraphProvider):
                         for start, end in state_bv.to_ranges():
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
-
-    def _do_default_reductions(self, gss: FastGSS) -> FastGSS:
-        work_list = [gss]
-        final_gsses = []
-        
-        processed_gss_hashes = set()
-
-        while work_list:
-            current_gss = work_list.pop(0)
-            
-            gss_hash = hash(current_gss)
-            if gss_hash in processed_gss_hashes:
-                continue
-            processed_gss_hashes.add(gss_hash)
-
-            heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
-            for head in current_gss._heads:
-                for state_id in current_gss.peek_from_head(head):
-                    heads_by_state[state_id].append(head)
-
-            reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
-            gsses_to_keep_as_is = []
-            
-            any_reductions_found = False
-
-            for state_id, heads in heads_by_state.items():
-                state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
-                row = self.parser_table.table.get(state_id)
-                
-                if not row or not row.default_reduce:
-                    gsses_to_keep_as_is.append(state_gss)
-                    continue
-
-                default_reduce = row.default_reduce
-                if default_reduce.clone_and_merge:
-                    gsses_to_keep_as_is.append(state_gss)
-                
-                if default_reduce.reduce:
-                    reduce_action, _ = default_reduce.reduce
-                    popped_gss = state_gss.popn(reduce_action.len)
-                    if any(h is not popped_gss._root for h in popped_gss._heads):
-                        reductions_to_do[reduce_action].append(popped_gss)
-                        any_reductions_found = True
-            
-            if gsses_to_keep_as_is:
-                final_gsses.append(FastGSS.merge(gsses_to_keep_as_is, merge_acc))
-
-            if any_reductions_found:
-                for reduce_action, gss_list in reductions_to_do.items():
-                    merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
-                    for from_state_id in merged_popped_gss.peek():
-                        goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
-                        if goto_state_id is not None:
-                            new_gss = merged_popped_gss.isolate(from_state_id).push(goto_state_id)
-                            work_list.append(new_gss)
-
-        if not final_gsses:
-            return FastGSS.initial(gss._acc_default_factory)
-        return FastGSS.merge(final_gsses, merge_acc)
 
     def commit(self, token_id: int):
         self.constraint_state.commit(token_id)
@@ -360,11 +282,7 @@ class Model(GraphProvider):
         }
 
         final_states = {}
-        for sid, gss in merged_states.items():
-            final_gss = self._do_default_reductions(gss)
-            if any(h is not final_gss._root for h in final_gss._heads):
-                final_states[sid] = final_gss
-        
+
         self.state = final_states
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
