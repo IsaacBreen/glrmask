@@ -684,6 +684,10 @@ impl PyHybridL2Bitset {
     fn __repr__(&self) -> String {
         format!("HybridL2Bitset({:?})", self.inner)
     }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 }
 
 
