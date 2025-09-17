@@ -3,17 +3,12 @@ import time
 import heapq
 import collections
 from typing import Dict, List, Tuple, Optional, Set, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-
-
-@dataclass(frozen=True)
-class Shift:
-    state_id: int
 
 @dataclass(frozen=True)
 class Reduce:
@@ -24,20 +19,20 @@ class Reduce:
 @dataclass(frozen=True)
 class Split:
     shift: Optional[int]
-    reduces: Tuple[Reduce, ...]
+    reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
 
-Action = Union[Shift, Reduce, Split]
-
-@dataclass(frozen=True)
-class Goto:
-    state_id: Optional[int]
-    accept: bool
+# Action can be a Shift (int), Reduce, or Split
+Action = Union[int, Reduce, Split]
 
 @dataclass
 class Row:
-    actions: Dict[int, Action]  # terminal_id -> Action
-    gotos: Dict[int, Goto]      # nonterminal_id -> Goto
+    actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
+    gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
 
+@dataclass
+class ParserTable:
+    start_state_id: int
+    table: Dict[int, Row]
 
 @dataclass(frozen=True)
 class PyAcc:
@@ -46,12 +41,6 @@ class PyAcc:
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
     return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-    for _ in range(n):
-        gss = gss.pop()
-    return gss
-
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
@@ -69,10 +58,14 @@ class Model(GraphProvider):
         # Map tokenizer state -> trie root node
         self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
         self.arena: Dict[int, dict] = arena
-        self.constraint: Optional[ffi.GrammarConstraint] = None 
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self.tokenizer: Optional[ffi.Regex] = None
+        self.parser_table: Optional[ParserTable] = None
+        self.state: Dict[int, FastGSS] = {}
+        self.internal_to_original_map: Dict[int, int] = {}
+        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -116,78 +109,57 @@ class Model(GraphProvider):
         arena_values = arena_json.get("values", [])
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
-        model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-        model.possible_matches_cache = model.constraint.possible_matches()
 
-        # Load parse table
-        glr_parser = model.constraint.glr_parser()
-        raw_table_data = glr_parser.get_parse_table()
-        model.start_state_id = raw_table_data['start_state_id']
-        model.parse_table = model._parse_table_data(raw_table_data['table'])
+        # Load tokenizer and parser table from the full constraint JSON
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        model.tokenizer = constraint.tokenizer()
+        model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
-        # Initialize state_map
+        parser_data = data['parser']
+        table_data = parser_data['table']
+        start_state_id = parser_data['start_state_id']
+        py_table = {}
+        for state_id_str, row_data in table_data.items():
+            state_id = int(state_id_str)
+            py_row = Row()
+            # Parse actions from 'shifts_and_reduces_full'
+            for term_id_str, action_data in row_data['shifts_and_reduces_full'].items():
+                term_id = int(term_id_str)
+                variant = action_data['variant']
+                if variant == 'Shift':
+                    py_row.actions[term_id] = action_data['state_id']
+                elif variant == 'Reduce':
+                    pids = tuple(sorted(action_data['production_ids']))
+                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                elif variant == 'Split':
+                    shift = action_data['shift']
+                    reduces = {}
+                    for len_str, nts_data in action_data['reduces'].items():
+                        len_int = int(len_str)
+                        nts = {}
+                        for nt_id_str, pids in nts_data.items():
+                            nt_id_int = int(nt_id_str)
+                            nts[nt_id_int] = tuple(sorted(pids))
+                        reduces[len_int] = nts
+                    py_row.actions[term_id] = Split(shift, reduces)
+            # Parse gotos
+            for nt_id_str, goto_data in row_data['gotos'].items():
+                nt_id = int(nt_id_str)
+                if goto_data['state_id'] is not None:
+                    py_row.gotos[nt_id] = goto_data['state_id']
+            py_table[state_id] = py_row
+        model.parser_table = ParserTable(start_state_id, py_table)
+
         def acc_factory():
             return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-        initial_gss = FastGSS.initial(acc_factory).push(model.start_state_id)
-        model.state_map = {0: initial_gss} # tokenizer state 0 -> initial GSS
+        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+        model.state = {model.tokenizer_initial_state: initial_gss}
 
+        model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        model.possible_matches_cache = constraint.possible_matches()
+        model.internal_to_original_map = constraint.internal_to_original_map()
+        model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
         return model
-
-    def _parse_table_data(self, raw_table: Dict) -> Dict[int, Row]:
-        parsed_table = {}
-        for state_id_str, raw_row in raw_table.items():
-            state_id = int(state_id_str)
-            
-            # Parse actions
-            actions = {}
-            for term_id_str, raw_action in raw_row['shifts_and_reduces'].items():
-                term_id = int(term_id_str)
-                action_type = raw_action[0]
-                if action_type == 'shift':
-                    actions[term_id] = Shift(state_id=raw_action[1])
-                elif action_type == 'reduce':
-                    _, nt_id, length, pids = raw_action
-                    actions[term_id] = Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids))
-                elif action_type == 'split':
-                    _, shift_id, reduces_dict = raw_action
-                    reduces = []
-                    for length, nts_dict in reduces_dict.items():
-                        for nt_id, pids in nts_dict.items():
-                            reduces.append(Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids)))
-                    actions[term_id] = Split(shift=shift_id, reduces=tuple(reduces))
-            
-            # Parse gotos
-            gotos = {}
-            for nt_id_str, raw_goto in raw_row['gotos'].items():
-                nt_id = int(nt_id_str)
-                goto_state_id, accept = raw_goto
-                gotos[nt_id] = Goto(state_id=goto_state_id, accept=accept)
-
-            parsed_table[state_id] = Row(actions=actions, gotos=gotos)
-        return parsed_table
-
-    def _handle_reduce(self, gss_after_pop: FastGSS, reduce: Reduce) -> FastGSS:
-        gss_after_full_pop = gss_after_pop
-        for _ in range(reduce.len - 1):
-            gss_after_full_pop = gss_after_full_pop.pop()
-            
-        goto_gsses = []
-        for top_state_id in gss_after_full_pop.peek():
-            gss_with_top_state = gss_after_full_pop.isolate(top_state_id)
-            
-            row = self.parse_table.get(top_state_id)
-            if not row: continue
-            
-            goto = row.gotos.get(reduce.nonterminal_id)
-            if not goto or goto.state_id is None: continue
-            
-            goto_gsses.append(gss_with_top_state.push(goto.state_id))
-            
-        if not goto_gsses:
-            return FastGSS.initial(gss_after_pop._acc_default_factory)
-        return FastGSS.merge(goto_gsses, merge_acc)
-
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -214,67 +186,92 @@ class Model(GraphProvider):
     def commit(self, token_id: int):
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
-            self.state_map = {}
+            self.state = {}
             return
 
-        final_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-        queue_map: Dict[int, Dict[int, List[FastGSS]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
         
-        for sid, gss in self.state_map.items():
-            queue_map[0][sid].append(gss)
+        q = collections.deque()
+        for tokenizer_sid, gss in self.state.items():
+            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
 
-        sorted_offsets = [0] if 0 in queue_map else []
+        visited_q_items = set()
 
-        while sorted_offsets:
-            offset = sorted_offsets.pop(0)
-            states_at_offset = queue_map.pop(offset)
+        while q:
+            offset, tokenizer_sid, gss = q.popleft()
+            
+            # GSS is not hashable, use its serializable form for visited check
+            q_item = (offset, tokenizer_sid, gss.to_json_serializable())
+            if q_item in visited_q_items:
+                continue
+            visited_q_items.add(q_item)
 
-            for sid, gss_list in states_at_offset.items():
-                gss = FastGSS.merge(gss_list, merge_acc)
+            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
-                end_state, matches = self.constraint.tokenizer().execute_from_state(token_bytes[offset:], sid)
+            for terminal_id, width in matches:
+                processed_gss = self._process_token(gss, terminal_id)
+                if any(h is not processed_gss._root for h in processed_gss._heads):
+                    new_offset = offset + width
+                    next_tokenizer_sid = self.tokenizer_initial_state
+                    if new_offset == len(token_bytes):
+                        new_states[next_tokenizer_sid].append(processed_gss)
+                    else:
+                        q.append((new_offset, next_tokenizer_sid, processed_gss))
+            
+            if end_state is not None:
+                new_states[end_state].append(gss)
 
-                for terminal_id, width in matches:
-                    new_gss = self._process_terminal(gss, terminal_id)
-                    if any(h is not new_gss._root for h in new_gss._heads):
-                        new_offset = offset + width
-                        next_sid = 0  # tokenizer resets
-                        
-                        if new_offset == len(token_bytes):
-                            final_states[next_sid].append(new_gss)
-                        else:
-                            if new_offset not in queue_map and new_offset not in [o for o, _ in enumerate(sorted_offsets)]:
-                                sorted_offsets.append(new_offset)
-                                sorted_offsets.sort()
-                            queue_map[new_offset][next_sid].append(new_gss)
-                
-                if end_state is not None:
-                    final_states[end_state].append(gss)
-
-        self.state_map = {
+        self.state = {
             sid: FastGSS.merge(gss_list, merge_acc)
-            for sid, gss_list in final_states.items()
+            for sid, gss_list in new_states.items()
             if gss_list
         }
 
-    def _process_terminal(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-        shifted_gsses, reduced_gsses = [], []
-        for top_state_id in gss.peek():
-            gss_for_state = gss.isolate(top_state_id)
-            if not any(h is not gss_for_state._root for h in gss_for_state._heads): continue
-            
-            popped_gss = gss_for_state.pop()
-            row = self.parse_table.get(top_state_id)
-            if not row or terminal_id not in row.actions: continue
-            action = row.actions[terminal_id]
+    def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+        heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+        for head in gss._heads:
+            peeked = gss.peek_from_head(head)
+            if peeked:
+                state_id = next(iter(peeked))
+                heads_by_state[state_id].append(head)
 
-            if isinstance(action, (Shift, Split)) and (shift_to := getattr(action, 'shift', action.state_id)) is not None:
-                shifted_gsses.append(popped_gss.push(shift_to))
-            if isinstance(action, (Reduce, Split)):
-                reductions = (action,) if isinstance(action, Reduce) else action.reduces
-                for r in reductions: reduced_gsses.append(self._handle_reduce(popped_gss, r))
+        shifted_gsses = []
+        reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
-        return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
+        for state_id, heads in heads_by_state.items():
+            state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+            row = self.parser_table.table.get(state_id)
+            if not row: continue
+            action = row.actions.get(terminal_id)
+            if not action: continue
+
+            def handle_shift(shift_to_state_id, gss_to_shift):
+                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+            def handle_reduce(reduce_action, gss_to_reduce):
+                popped_gss = gss_to_reduce.popn(reduce_action.len)
+                if any(h is not popped_gss._root for h in popped_gss._heads):
+                    reductions_to_do[reduce_action].append(popped_gss)
+
+            if isinstance(action, int):
+                handle_shift(action, state_gss)
+            elif isinstance(action, Reduce):
+                handle_reduce(action, state_gss)
+            elif isinstance(action, Split):
+                if action.shift is not None:
+                    handle_shift(action.shift, state_gss)
+                for length, nts in action.reduces.items():
+                    for nt_id, pids in nts.items():
+                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+        for reduce_action, gss_list in reductions_to_do.items():
+            merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+            for from_state_id in merged_popped_gss.peek():
+                goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+                if goto_state_id is not None:
+                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+
+        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
 
     def get_mask(self) -> RangeSet:
         """
@@ -282,11 +279,10 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         print("\n--- get_mask START ---")
-        state_map = self.state_map
+        print("GSS at start of get_mask:")
+        state_map = self.state
 
-        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-
-        t0 = time.time()
+        all_ones_mask = self.all_internal_llm_tokens_bitset
 
         final_mask = ffi.Bitset.zeros()
 
@@ -460,7 +456,10 @@ class Model(GraphProvider):
 
                         enqueue(max_depth[d], d)
 
-        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        original_mask = ffi.Bitset.zeros()
+        for internal_id in final_mask.to_indices():
+            if internal_id in self.internal_to_original_map:
+                original_mask.insert(self.internal_to_original_map[internal_id])
         temp = RangeSet.from_ranges(original_mask.to_ranges())
         print(f"\n--- get_mask END ---")
         print(f"Final mask: {temp.to_ranges()}")

@@ -207,6 +207,10 @@ impl PyRegex {
         let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
         Ok((end_state, matches))
     }
+
+    fn initial_state_id(&self) -> usize {
+        self.inner.initial_state_id().0
+    }
 }
 
 #[pyclass(name = "GrammarDefinition")]

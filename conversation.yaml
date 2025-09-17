@@ -21744,6 +21744,10 @@ local_system:
               let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
               Ok((end_state, matches))
           }
+
+          fn initial_state_id(&self) -> usize {
+              self.inner.initial_state_id().0
+          }
       }
 
       #[pyclass(name = "GrammarDefinition")]
@@ -22594,6 +22598,12 @@ local_system:
 
               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
+          def popn(self, n: int) -> 'FastGSS[T, Acc]':
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
           def isolate(self, value: T) -> 'FastGSS[T, Acc]':
               new_heads: Set[_Node[T, Acc]] = set()
               for head in self._heads:
@@ -22633,6 +22643,12 @@ local_system:
                   if head in self._child_to_parents:
                       for value, _ in self._child_to_parents[head]:
                           peek_values.add(value)
+              return peek_values
+
+          def peek_from_head(self, head: _Node[T, Acc]) -> Set[T]:
+              peek_values: Set[T] = set()
+              if head in self._child_to_parents:
+                  peek_values.update(v for v, _ in self._child_to_parents[head])
               return peek_values
 
           def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
@@ -22737,17 +22753,12 @@ local_system:
       import heapq
       import collections
       from typing import Dict, List, Tuple, Optional, Set, Union
-      from dataclasses import dataclass
+      from dataclasses import dataclass, field
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
       from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-
-
-      @dataclass(frozen=True)
-      class Shift:
-          state_id: int
 
       @dataclass(frozen=True)
       class Reduce:
@@ -22758,20 +22769,20 @@ local_system:
       @dataclass(frozen=True)
       class Split:
           shift: Optional[int]
-          reduces: Tuple[Reduce, ...]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
 
-      Action = Union[Shift, Reduce, Split]
-
-      @dataclass(frozen=True)
-      class Goto:
-          state_id: Optional[int]
-          accept: bool
+      # Action can be a Shift (int), Reduce, or Split
+      Action = Union[int, Reduce, Split]
 
       @dataclass
       class Row:
-          actions: Dict[int, Action]  # terminal_id -> Action
-          gotos: Dict[int, Goto]      # nonterminal_id -> Goto
+          actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
+          gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
 
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
 
       @dataclass(frozen=True)
       class PyAcc:
@@ -22780,12 +22791,6 @@ local_system:
 
       def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
           return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-      def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-          for _ in range(n):
-              gss = gss.pop()
-          return gss
-
 
       def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
           merged_acc = gss.get_acc(merge_acc)
@@ -22803,10 +22808,14 @@ local_system:
               # Map tokenizer state -> trie root node
               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
               self.arena: Dict[int, dict] = arena
-              self.constraint: Optional[ffi.GrammarConstraint] = None 
               self.id_to_token: Dict[int, bytes] = {}
               self.max_depth: Dict[int, int] = {}
               self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+              self.tokenizer: Optional[ffi.Regex] = None
+              self.parser_table: Optional[ParserTable] = None
+              self.state: Dict[int, FastGSS] = {}
+              self.internal_to_original_map: Dict[int, int] = {}
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
 
               # Normalize arena children bitsets and cache max_depth
               dumps = json.dumps
@@ -22850,78 +22859,57 @@ local_system:
               arena_values = arena_json.get("values", [])
               arena = {int(k): v for k, v in arena_values}
               model = Model(roots_map, arena)
-              model.constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              model.possible_matches_cache = model.constraint.possible_matches()
 
-              # Load parse table
-              glr_parser = model.constraint.glr_parser()
-              raw_table_data = glr_parser.get_parse_table()
-              model.start_state_id = raw_table_data['start_state_id']
-              model.parse_table = model._parse_table_data(raw_table_data['table'])
+              # Load tokenizer and parser table from the full constraint JSON
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.tokenizer = constraint.tokenizer()
+              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
-              # Initialize state_map
+              parser_data = data['parser']
+              table_data = parser_data['table']
+              start_state_id = parser_data['start_state_id']
+              py_table = {}
+              for state_id_str, row_data in table_data.items():
+                  state_id = int(state_id_str)
+                  py_row = Row()
+                  # Parse actions from 'shifts_and_reduces_full'
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full'].items():
+                      term_id = int(term_id_str)
+                      variant = action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          pids = tuple(sorted(action_data['production_ids']))
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                      elif variant == 'Split':
+                          shift = action_data['shift']
+                          reduces = {}
+                          for len_str, nts_data in action_data['reduces'].items():
+                              len_int = int(len_str)
+                              nts = {}
+                              for nt_id_str, pids in nts_data.items():
+                                  nt_id_int = int(nt_id_str)
+                                  nts[nt_id_int] = tuple(sorted(pids))
+                              reduces[len_int] = nts
+                          py_row.actions[term_id] = Split(shift, reduces)
+                  # Parse gotos
+                  for nt_id_str, goto_data in row_data['gotos'].items():
+                      nt_id = int(nt_id_str)
+                      if goto_data['state_id'] is not None:
+                          py_row.gotos[nt_id] = goto_data['state_id']
+                  py_table[state_id] = py_row
+              model.parser_table = ParserTable(start_state_id, py_table)
+
               def acc_factory():
                   return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-              initial_gss = FastGSS.initial(acc_factory).push(model.start_state_id)
-              model.state_map = {0: initial_gss} # tokenizer state 0 -> initial GSS
+              initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+              model.state = {model.tokenizer_initial_state: initial_gss}
 
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              model.possible_matches_cache = constraint.possible_matches()
+              model.internal_to_original_map = constraint.internal_to_original_map()
+              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
               return model
-
-          def _parse_table_data(self, raw_table: Dict) -> Dict[int, Row]:
-              parsed_table = {}
-              for state_id_str, raw_row in raw_table.items():
-                  state_id = int(state_id_str)
-                  
-                  # Parse actions
-                  actions = {}
-                  for term_id_str, raw_action in raw_row['shifts_and_reduces'].items():
-                      term_id = int(term_id_str)
-                      action_type = raw_action[0]
-                      if action_type == 'shift':
-                          actions[term_id] = Shift(state_id=raw_action[1])
-                      elif action_type == 'reduce':
-                          _, nt_id, length, pids = raw_action
-                          actions[term_id] = Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids))
-                      elif action_type == 'split':
-                          _, shift_id, reduces_dict = raw_action
-                          reduces = []
-                          for length, nts_dict in reduces_dict.items():
-                              for nt_id, pids in nts_dict.items():
-                                  reduces.append(Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids)))
-                          actions[term_id] = Split(shift=shift_id, reduces=tuple(reduces))
-                  
-                  # Parse gotos
-                  gotos = {}
-                  for nt_id_str, raw_goto in raw_row['gotos'].items():
-                      nt_id = int(nt_id_str)
-                      goto_state_id, accept = raw_goto
-                      gotos[nt_id] = Goto(state_id=goto_state_id, accept=accept)
-
-                  parsed_table[state_id] = Row(actions=actions, gotos=gotos)
-              return parsed_table
-
-          def _handle_reduce(self, gss_after_pop: FastGSS, reduce: Reduce) -> FastGSS:
-              gss_after_full_pop = gss_after_pop
-              for _ in range(reduce.len - 1):
-                  gss_after_full_pop = gss_after_full_pop.pop()
-                  
-              goto_gsses = []
-              for top_state_id in gss_after_full_pop.peek():
-                  gss_with_top_state = gss_after_full_pop.isolate(top_state_id)
-                  
-                  row = self.parse_table.get(top_state_id)
-                  if not row: continue
-                  
-                  goto = row.gotos.get(reduce.nonterminal_id)
-                  if not goto or goto.state_id is None: continue
-                  
-                  goto_gsses.append(gss_with_top_state.push(goto.state_id))
-                  
-              if not goto_gsses:
-                  return FastGSS.initial(gss_after_pop._acc_default_factory)
-              return FastGSS.merge(goto_gsses, merge_acc)
-
 
           def get_root(self, state_id: int) -> int:
               return self.roots_map[int(state_id)]
@@ -22948,67 +22936,92 @@ local_system:
           def commit(self, token_id: int):
               token_bytes = self.id_to_token.get(token_id)
               if not token_bytes:
-                  self.state_map = {}
+                  self.state = {}
                   return
 
-              final_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-              queue_map: Dict[int, Dict[int, List[FastGSS]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+              new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
               
-              for sid, gss in self.state_map.items():
-                  queue_map[0][sid].append(gss)
+              q = collections.deque()
+              for tokenizer_sid, gss in self.state.items():
+                  q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
 
-              sorted_offsets = [0] if 0 in queue_map else []
+              visited_q_items = set()
 
-              while sorted_offsets:
-                  offset = sorted_offsets.pop(0)
-                  states_at_offset = queue_map.pop(offset)
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+                  
+                  # GSS is not hashable, use its serializable form for visited check
+                  q_item = (offset, tokenizer_sid, gss.to_json_serializable())
+                  if q_item in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item)
 
-                  for sid, gss_list in states_at_offset.items():
-                      gss = FastGSS.merge(gss_list, merge_acc)
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
-                      end_state, matches = self.constraint.tokenizer().execute_from_state(token_bytes[offset:], sid)
+                  for terminal_id, width in matches:
+                      processed_gss = self._process_token(gss, terminal_id)
+                      if any(h is not processed_gss._root for h in processed_gss._heads):
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+                  
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
 
-                      for terminal_id, width in matches:
-                          new_gss = self._process_terminal(gss, terminal_id)
-                          if any(h is not new_gss._root for h in new_gss._heads):
-                              new_offset = offset + width
-                              next_sid = 0  # tokenizer resets
-                              
-                              if new_offset == len(token_bytes):
-                                  final_states[next_sid].append(new_gss)
-                              else:
-                                  if new_offset not in queue_map and new_offset not in [o for o, _ in enumerate(sorted_offsets)]:
-                                      sorted_offsets.append(new_offset)
-                                      sorted_offsets.sort()
-                                  queue_map[new_offset][next_sid].append(new_gss)
-                      
-                      if end_state is not None:
-                          final_states[end_state].append(gss)
-
-              self.state_map = {
+              self.state = {
                   sid: FastGSS.merge(gss_list, merge_acc)
-                  for sid, gss_list in final_states.items()
+                  for sid, gss_list in new_states.items()
                   if gss_list
               }
 
-          def _process_terminal(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-              shifted_gsses, reduced_gsses = [], []
-              for top_state_id in gss.peek():
-                  gss_for_state = gss.isolate(top_state_id)
-                  if not any(h is not gss_for_state._root for h in gss_for_state._heads): continue
-                  
-                  popped_gss = gss_for_state.pop()
-                  row = self.parse_table.get(top_state_id)
-                  if not row or terminal_id not in row.actions: continue
-                  action = row.actions[terminal_id]
+          def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+              heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+              for head in gss._heads:
+                  peeked = gss.peek_from_head(head)
+                  if peeked:
+                      state_id = next(iter(peeked))
+                      heads_by_state[state_id].append(head)
 
-                  if isinstance(action, (Shift, Split)) and (shift_to := getattr(action, 'shift', action.state_id)) is not None:
-                      shifted_gsses.append(popped_gss.push(shift_to))
-                  if isinstance(action, (Reduce, Split)):
-                      reductions = (action,) if isinstance(action, Reduce) else action.reduces
-                      for r in reductions: reduced_gsses.append(self._handle_reduce(popped_gss, r))
+              shifted_gsses = []
+              reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
-              return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
+              for state_id, heads in heads_by_state.items():
+                  state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if not action: continue
+
+                  def handle_shift(shift_to_state_id, gss_to_shift):
+                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+                  def handle_reduce(reduce_action, gss_to_reduce):
+                      popped_gss = gss_to_reduce.popn(reduce_action.len)
+                      if any(h is not popped_gss._root for h in popped_gss._heads):
+                          reductions_to_do[reduce_action].append(popped_gss)
+
+                  if isinstance(action, int):
+                      handle_shift(action, state_gss)
+                  elif isinstance(action, Reduce):
+                      handle_reduce(action, state_gss)
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          handle_shift(action.shift, state_gss)
+                      for length, nts in action.reduces.items():
+                          for nt_id, pids in nts.items():
+                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+              for reduce_action, gss_list in reductions_to_do.items():
+                  merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+                  for from_state_id in merged_popped_gss.peek():
+                      goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+                      if goto_state_id is not None:
+                          shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+
+              return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
 
           def get_mask(self) -> RangeSet:
               """
@@ -23016,11 +23029,10 @@ local_system:
               GSS nodes. This is the performance-critical routine.
               """
               print("\n--- get_mask START ---")
-              state_map = self.state_map
+              print("GSS at start of get_mask:")
+              state_map = self.state
 
-              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-
-              t0 = time.time()
+              all_ones_mask = self.all_internal_llm_tokens_bitset
 
               final_mask = ffi.Bitset.zeros()
 
@@ -23194,7 +23206,10 @@ local_system:
 
                               enqueue(max_depth[d], d)
 
-              original_mask = self.constraint.internal_bv_to_original(final_mask)
+              original_mask = ffi.Bitset.zeros()
+              for internal_id in final_mask.to_indices():
+                  if internal_id in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[internal_id])
               temp = RangeSet.from_ranges(original_mask.to_ranges())
               print(f"\n--- get_mask END ---")
               print(f"Final mask: {temp.to_ranges()}")
@@ -34843,67 +34858,134 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to implement Python-native parsing for your `precompute3_model`, followed by the corresponding git diffs.
+      Here are the step-by-step instructions to implement Python-native parsing for the grammar constraint, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      #### 1. File: `python/aug25/models/precompute3_model_pure_python.py`
+      #### 1. Enhance the Python GSS Implementation
 
-      1.  **Add Imports and Dataclasses:**
-          At the beginning of the file, add imports for `Union` and `dataclass`. Then, define a set of dataclasses (`Shift`, `Reduce`, `Split`, `Action`, `Goto`, `Row`) to represent the structure of the GLR parse table in Python.
+      In `python/gss_tester/fast_impl.py`, we need to add two helper methods to the `FastGSS` class:
+      - `popn(self, n: int)`: To pop multiple items from the stack.
+      - `peek_from_head(self, head: _Node[T, Acc])`: To inspect the state ID at the top of a specific stack path represented by a `head` node.
 
-      2.  **Update `Model.__init__`:**
-          In the `Model` class's `__init__` method, remove the initialization of `self.constraint_state`. It will be replaced by a Python-managed state map.
+      **File: `python/gss_tester/fast_impl.py`**
 
-      3.  **Update `Model.from_json_string`:**
-          This static method needs significant changes to load the parse table and initialize the new Python-based parser state.
-          -   Remove the line that initializes `model.constraint_state`.
-          -   Add a call to `model.constraint.glr_parser().get_parse_table()` to fetch the raw table data from the Rust FFI.
-          -   Call a new helper method, `_parse_table_data`, to convert this raw data into your new Python dataclasses and store it in `model.parse_table`.
-          -   Store the `start_state_id`.
-          -   Initialize `model.state_map` to represent the initial state of the parser: a single tokenizer state (0) with a GSS containing one stack for the grammar's start state.
-          -   Remove the `convert_rust_gss_to_python_gss` function, as it is no longer needed.
+      1.  After the `pop` method, add the `popn` method:
+          ```python
+          def popn(self, n: int) -> 'FastGSS[T, Acc]':
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+          ```
+      2.  After the `peek` method, add the `peek_from_head` method:
+          ```python
+          def peek_from_head(self, head: _Node[T, Acc]) -> Set[T]:
+              peek_values: Set[T] = set()
+              if head in self._child_to_parents:
+                  peek_values.update(v for v, _ in self._child_to_parents[head])
+              return peek_values
+          ```
 
-      4.  **Implement `_parse_table_data`:**
-          Add a new method to the `Model` class named `_parse_table_data`. This method will contain the logic to iterate through the nested dictionary returned by `get_parse_table` and construct the `Row` objects with the appropriate `Shift`, `Reduce`, `Split`, and `Goto` instances.
+      #### 2. Expose Tokenizer Initial State in FFI
 
-      5.  **Implement `_handle_reduce` and `_process_terminal`:**
-          -   Add a new method `_handle_reduce` to the `Model` class. This will implement the logic for a reduce action: popping the correct number of states from the GSS and then performing a GOTO transition.
-          -   Add another new method `_process_terminal`. This method will orchestrate the parsing of a single grammar terminal. It will look up actions in the parse table for each stack in the GSS, handle shifts and splits, and call `_handle_reduce` for reductions.
+      To initialize the Python parser state correctly, we need to know the tokenizer's initial state ID.
 
-      6.  **Replace the `commit` Method:**
-          Delete the existing `commit` method that calls the FFI. Replace it with a new Python implementation that performs a breadth-first search over the bytes of the input LLM token. For each segment of the token that matches a grammar terminal, it will call your new `_process_terminal` method to update the GSS. This new method will manage a queue of `(offset, tokenizer_state_id, gss)` tuples to handle all possible parsings of the token.
+      **File: `python/src/lib.rs`**
 
-      7.  **Update the `get_mask` Method:**
-          In the `get_mask` method, find the line `rust_state_map = self.constraint_state.get_state_map()` and replace it with `state_map = self.state_map`. This switches the mask computation to use the new Python-managed state. Also, remove the now-unused `convert_rust_gss_to_python_gss` call.
+      1.  Inside the `#[pymethods]` block for `PyRegex`, add the following method:
+          ```rust
+          fn initial_state_id(&self) -> usize {
+              self.inner.initial_state_id().0
+          }
+          ```
 
-      8.  **Clean up Imports:**
-          Remove the unused import of `GSSNode as RustGSSNode` from the `_sep1` FFI module.
+      #### 3. Refactor the Python Model for Native Parsing
+
+      This is the most significant change. We will refactor `python/aug25/models/precompute3_model_pure_python.py` to handle parsing logic natively in Python instead of relying on the Rust `GrammarConstraintState`.
+
+      **File: `python/aug25/models/precompute3_model_pure_python.py`**
+
+      1.  **Add Imports and Dataclasses**: At the top of the file, add new imports and dataclasses to represent the parser table structure.
+          ```python
+          from typing import Dict, List, Tuple, Optional, Set, Union
+          from dataclasses import dataclass, field
+          # ...
+          from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+
+          @dataclass(frozen=True)
+          class Reduce:
+              nonterminal_id: int
+              len: int
+              production_ids: Tuple[int, ...]
+
+          @dataclass(frozen=True)
+          class Split:
+              shift: Optional[int]
+              reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
+
+          # Action can be a Shift (int), Reduce, or Split
+          Action = Union[int, Reduce, Split]
+
+          @dataclass
+          class Row:
+              actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
+              gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
+
+          @dataclass
+          class ParserTable:
+              start_state_id: int
+              table: Dict[int, Row]
+          ```
+
+      2.  **Remove Obsolete Helpers**: Delete the functions `convert_rust_gss_to_python_gss` and `popn_fast_py`, as their functionality is now part of `FastGSS` or no longer needed.
+
+      3.  **Update `Model.__init__`**: Modify the `__init__` method to remove `constraint` and `constraint_state` and add fields for the Python-native parser.
+          ```python
+          # In class Model:
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # ... (existing initializations)
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+              self.tokenizer: Optional[ffi.Regex] = None
+              self.parser_table: Optional[ParserTable] = None
+              self.state: Dict[int, FastGSS] = {}
+              self.internal_to_original_map: Dict[int, int] = {}
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
+              # ... (rest of __init__)
+          ```
+
+      4.  **Update `Model.from_json_string`**: This static method needs to be completely rewritten to parse the grammar constraint JSON and populate the new Python-native parser structures.
+          - It will load the tokenizer, parser table, and initial GSS state.
+          - It will also store necessary mappings like `id_to_token` and `internal_to_original_map`.
+
+      5.  **Implement `Model.commit` and `Model._process_token`**: Add these two new methods to the `Model` class to handle the parsing logic for a given token. `commit` will manage the tokenizer interaction, and `_process_token` will simulate the GLR parser for a single grammar token.
+
+      6.  **Update `Model.get_mask`**: Modify this method to use `self.state` (the Python GSS state) as its input instead of calling `self.constraint_state.get_state_map()`. It will also need to handle the conversion from the internal token mask to the original token mask at the end.
 
       ### Git Diffs
 
+      Here are the git diffs corresponding to the instructions above.
+
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -2,12 +2,39 @@
+      @@ -2,14 +2,37 @@
        import time
        import heapq
        import collections
       -from typing import Dict, List, Tuple, Optional, Set
+      -from dataclasses import dataclass
       +from typing import Dict, List, Tuple, Optional, Set, Union
-       from dataclasses import dataclass
+      +from dataclasses import dataclass, field
        
        from ..common_interface import GraphProvider, RangeSet
        import _sep1 as ffi  # the compiled module
        from tqdm.auto import tqdm
        from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-      +
-      +
-      +@dataclass(frozen=True)
-      +class Shift:
-      +    state_id: int
-      +
+       
       +@dataclass(frozen=True)
       +class Reduce:
       +    nonterminal_id: int
@@ -34913,23 +34995,24 @@ messages:
       +@dataclass(frozen=True)
       +class Split:
       +    shift: Optional[int]
-      +    reduces: Tuple[Reduce, ...]
+      +    reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
       +
-      +Action = Union[Shift, Reduce, Split]
-      +
-      +@dataclass(frozen=True)
-      +class Goto:
-      +    state_id: Optional[int]
-      +    accept: bool
+      +# Action can be a Shift (int), Reduce, or Split
+      +Action = Union[int, Reduce, Split]
       +
       +@dataclass
       +class Row:
-      +    actions: Dict[int, Action]  # terminal_id -> Action
-      +    gotos: Dict[int, Goto]      # nonterminal_id -> Goto
-       
+      +    actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
+      +    gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
+      +
+      +@dataclass
+      +class ParserTable:
+      +    start_state_id: int
+      +    table: Dict[int, Row]
        
        @dataclass(frozen=True)
-      @@ -18,41 +45,6 @@
+       class PyAcc:
+      @@ -19,50 +42,6 @@
        def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
            return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
        
@@ -34966,512 +35049,289 @@ messages:
       -    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
       -
       -
-       def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-           for _ in range(n):
-               gss = gss.pop()
-      @@ -73,7 +65,7 @@
+      -def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+      -    for _ in range(n):
+      -        gss = gss.pop()
+      -    return gss
+      -
+      -
+       def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+           merged_acc = gss.get_acc(merge_acc)
+           return merged_acc.terminals_union.complement()
+      @@ -77,11 +56,13 @@
+           def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
                # Map tokenizer state -> trie root node
                self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
                self.arena: Dict[int, dict] = arena
       -        self.constraint: Optional[ffi.GrammarConstraint] = None
       -        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-      +        self.constraint: Optional[ffi.GrammarConstraint] = None 
                self.id_to_token: Dict[int, bytes] = {}
                self.max_depth: Dict[int, int] = {}
                self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-      @@ -115,11 +107,79 @@
+      +        self.tokenizer: Optional[ffi.Regex] = None
+      +        self.parser_table: Optional[ParserTable] = None
+      +        self.state: Dict[int, FastGSS] = {}
+      +        self.internal_to_original_map: Dict[int, int] = {}
+      +        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
+       
+               # Normalize arena children bitsets and cache max_depth
+               dumps = json.dumps
+      @@ -118,11 +99,54 @@
+               arena_json = data["trie3_god"]
+               arena_values = arena_json.get("values", [])
                arena = {int(k): v for k, v in arena_values}
                model = Model(roots_map, arena)
-               model.constraint = ffi.GrammarConstraint.from_json_string(s)
+      -        model.constraint = ffi.GrammarConstraint.from_json_string(s)
       -        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-               model.possible_matches_cache = model.constraint.possible_matches()
       +
-      +        # Load parse table
-      +        glr_parser = model.constraint.glr_parser()
-      +        raw_table_data = glr_parser.get_parse_table()
-      +        model.start_state_id = raw_table_data['start_state_id']
-      +        model.parse_table = model._parse_table_data(raw_table_data['table'])
+      +        # Load tokenizer and parser table from the full constraint JSON
+      +        constraint = ffi.GrammarConstraint.from_json_string(s)
+      +        model.tokenizer = constraint.tokenizer()
+      +        model.tokenizer_initial_state = model.tokenizer.initial_state_id()
       +
-      +        # Initialize state_map
+      +        parser_data = data['parser']
+      +        table_data = parser_data['table']
+      +        start_state_id = parser_data['start_state_id']
+      +        py_table = {}
+      +        for state_id_str, row_data in table_data.items():
+      +            state_id = int(state_id_str)
+      +            py_row = Row()
+      +            # Parse actions from 'shifts_and_reduces_full'
+      +            for term_id_str, action_data in row_data['shifts_and_reduces_full'].items():
+      +                term_id = int(term_id_str)
+      +                variant = action_data['variant']
+      +                if variant == 'Shift':
+      +                    py_row.actions[term_id] = action_data['state_id']
+      +                elif variant == 'Reduce':
+      +                    pids = tuple(sorted(action_data['production_ids']))
+      +                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+      +                elif variant == 'Split':
+      +                    shift = action_data['shift']
+      +                    reduces = {}
+      +                    for len_str, nts_data in action_data['reduces'].items():
+      +                        len_int = int(len_str)
+      +                        nts = {}
+      +                        for nt_id_str, pids in nts_data.items():
+      +                            nt_id_int = int(nt_id_str)
+      +                            nts[nt_id_int] = tuple(sorted(pids))
+      +                        reduces[len_int] = nts
+      +                    py_row.actions[term_id] = Split(shift, reduces)
+      +            # Parse gotos
+      +            for nt_id_str, goto_data in row_data['gotos'].items():
+      +                nt_id = int(nt_id_str)
+      +                if goto_data['state_id'] is not None:
+      +                    py_row.gotos[nt_id] = goto_data['state_id']
+      +            py_table[state_id] = py_row
+      +        model.parser_table = ParserTable(start_state_id, py_table)
+      +
       +        def acc_factory():
       +            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-      +        initial_gss = FastGSS.initial(acc_factory).push(model.start_state_id)
-      +        model.state_map = {0: initial_gss} # tokenizer state 0 -> initial GSS
+      +        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+      +        model.state = {model.tokenizer_initial_state: initial_gss}
       +
+               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+      -        model.possible_matches_cache = model.constraint.possible_matches()
+      +        model.possible_matches_cache = constraint.possible_matches()
+      +        model.internal_to_original_map = constraint.internal_to_original_map()
+      +        model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
                return model
        
-      +    def _parse_table_data(self, raw_table: Dict) -> Dict[int, Row]:
-      +        parsed_table = {}
-      +        for state_id_str, raw_row in raw_table.items():
-      +            state_id = int(state_id_str)
-      +            
-      +            # Parse actions
-      +            actions = {}
-      +            for term_id_str, raw_action in raw_row['shifts_and_reduces'].items():
-      +                term_id = int(term_id_str)
-      +                action_type = raw_action[0]
-      +                if action_type == 'shift':
-      +                    actions[term_id] = Shift(state_id=raw_action[1])
-      +                elif action_type == 'reduce':
-      +                    _, nt_id, length, pids = raw_action
-      +                    actions[term_id] = Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids))
-      +                elif action_type == 'split':
-      +                    _, shift_id, reduces_dict = raw_action
-      +                    reduces = []
-      +                    for length, nts_dict in reduces_dict.items():
-      +                        for nt_id, pids in nts_dict.items():
-      +                            reduces.append(Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids)))
-      +                    actions[term_id] = Split(shift=shift_id, reduces=tuple(reduces))
-      +            
-      +            # Parse gotos
-      +            gotos = {}
-      +            for nt_id_str, raw_goto in raw_row['gotos'].items():
-      +                nt_id = int(nt_id_str)
-      +                goto_state_id, accept = raw_goto
-      +                gotos[nt_id] = Goto(state_id=goto_state_id, accept=accept)
-      +
-      +            parsed_table[state_id] = Row(actions=actions, gotos=gotos)
-      +        return parsed_table
-      +
-      +    def _handle_reduce(self, gss_after_pop: FastGSS, reduce: Reduce) -> FastGSS:
-      +        gss_after_full_pop = gss_after_pop
-      +        for _ in range(reduce.len - 1):
-      +            gss_after_full_pop = gss_after_full_pop.pop()
-      +            
-      +        goto_gsses = []
-      +        for top_state_id in gss_after_full_pop.peek():
-      +            gss_with_top_state = gss_after_full_pop.isolate(top_state_id)
-      +            
-      +            row = self.parse_table.get(top_state_id)
-      +            if not row: continue
-      +            
-      +            goto = row.gotos.get(reduce.nonterminal_id)
-      +            if not goto or goto.state_id is None: continue
-      +            
-      +            goto_gsses.append(gss_with_top_state.push(goto.state_id))
-      +            
-      +        if not goto_gsses:
-      +            return FastGSS.initial(gss_after_pop._acc_default_factory)
-      +        return FastGSS.merge(goto_gsses, merge_acc)
-      +
-      +
            def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
-       
-      @@ -142,7 +202,69 @@
+      @@ -147,7 +171,94 @@
                                        yield (int(pop), sid, int(dest_idx))
        
            def commit(self, token_id: int):
       -        self.constraint_state.commit(token_id)
       +        token_bytes = self.id_to_token.get(token_id)
       +        if not token_bytes:
-      +            self.state_map = {}
+      +            self.state = {}
       +            return
       +
-      +        final_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-      +        queue_map: Dict[int, Dict[int, List[FastGSS]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+      +        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
       +        
-      +        for sid, gss in self.state_map.items():
-      +            queue_map[0][sid].append(gss)
+      +        q = collections.deque()
+      +        for tokenizer_sid, gss in self.state.items():
+      +            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
       +
-      +        sorted_offsets = [0] if 0 in queue_map else []
+      +        visited_q_items = set()
       +
-      +        while sorted_offsets:
-      +            offset = sorted_offsets.pop(0)
-      +            states_at_offset = queue_map.pop(offset)
+      +        while q:
+      +            offset, tokenizer_sid, gss = q.popleft()
+      +            
+      +            # GSS is not hashable, use its serializable form for visited check
+      +            q_item = (offset, tokenizer_sid, gss.to_json_serializable())
+      +            if q_item in visited_q_items:
+      +                continue
+      +            visited_q_items.add(q_item)
       +
-      +            for sid, gss_list in states_at_offset.items():
-      +                gss = FastGSS.merge(gss_list, merge_acc)
+      +            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
       +
-      +                end_state, matches = self.constraint.tokenizer().execute_from_state(token_bytes[offset:], sid)
+      +            for terminal_id, width in matches:
+      +                processed_gss = self._process_token(gss, terminal_id)
+      +                if any(h is not processed_gss._root for h in processed_gss._heads):
+      +                    new_offset = offset + width
+      +                    next_tokenizer_sid = self.tokenizer_initial_state
+      +                    if new_offset == len(token_bytes):
+      +                        new_states[next_tokenizer_sid].append(processed_gss)
+      +                    else:
+      +                        q.append((new_offset, next_tokenizer_sid, processed_gss))
+      +            
+      +            if end_state is not None:
+      +                new_states[end_state].append(gss)
       +
-      +                for terminal_id, width in matches:
-      +                    new_gss = self._process_terminal(gss, terminal_id)
-      +                    if any(h is not new_gss._root for h in new_gss._heads):
-      +                        new_offset = offset + width
-      +                        next_sid = 0  # tokenizer resets
-      +                        
-      +                        if new_offset == len(token_bytes):
-      +                            final_states[next_sid].append(new_gss)
-      +                        else:
-      +                            if new_offset not in queue_map and new_offset not in [o for o, _ in enumerate(sorted_offsets)]:
-      +                                sorted_offsets.append(new_offset)
-      +                                sorted_offsets.sort()
-      +                            queue_map[new_offset][next_sid].append(new_gss)
-      +                
-      +                if end_state is not None:
-      +                    final_states[end_state].append(gss)
-      +
-      +        self.state_map = {
+      +        self.state = {
       +            sid: FastGSS.merge(gss_list, merge_acc)
-      +            for sid, gss_list in final_states.items()
+      +            for sid, gss_list in new_states.items()
       +            if gss_list
       +        }
       +
-      +    def _process_terminal(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-      +        shifted_gsses, reduced_gsses = [], []
-      +        for top_state_id in gss.peek():
-      +            gss_for_state = gss.isolate(top_state_id)
-      +            if not any(h is not gss_for_state._root for h in gss_for_state._heads): continue
-      +            
-      +            popped_gss = gss_for_state.pop()
-      +            row = self.parse_table.get(top_state_id)
-      +            if not row or terminal_id not in row.actions: continue
-      +            action = row.actions[terminal_id]
+      +    def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+      +        heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+      +        for head in gss._heads:
+      +            peeked = gss.peek_from_head(head)
+      +            if peeked:
+      +                state_id = next(iter(peeked))
+      +                heads_by_state[state_id].append(head)
       +
-      +            if isinstance(action, (Shift, Split)) and (shift_to := getattr(action, 'shift', action.state_id)) is not None:
-      +                shifted_gsses.append(popped_gss.push(shift_to))
-      +            if isinstance(action, (Reduce, Split)):
-      +                reductions = (action,) if isinstance(action, Reduce) else action.reduces
-      +                for r in reductions: reduced_gsses.append(self._handle_reduce(popped_gss, r))
+      +        shifted_gsses = []
+      +        reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
       +
-      +        return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
-       
-           def get_mask(self) -> RangeSet:
-               """
-      @@ -151,8 +273,7 @@
-               and provides graph traversal and mask computation interfaces.
-               """
-               print("\n--- get_mask START ---")
-      -        print("GSS at start of get_mask:")
-      -        rust_state_map = self.constraint_state.get_state_map()
-      -        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-      +        state_map = self.state_map
-       
-               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-       
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -151,8 +273,7 @@
-               and provides graph traversal and mask computation interfaces.
-               """
-               print("\n--- get_mask START ---")
-      -        print("GSS at start of get_mask:")
-      -        rust_state_map = self.constraint_state.get_state_map()
-      -        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-      +        state_map = self.state_map
-       
-               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-       
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-              and provides graph traversal and mask computation interfaces.
-              """
-              print("\n--- get_mask START ---")
-              print("GSS at start of get_mask:")
-              rust_state_map = self.constraint_state.get_state_map()
-              state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-
-              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-      ```
-
-      Nearest Match in `python/aug25/models/precompute3_model_pure_python.py` (found at line 282 with 88.89% similarity, shown with padding):
-
-      ```python
-              return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
-
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask given a mapping from tokenizer state to
-              GSS nodes. This is the performance-critical routine.
-              """
-              print("\n--- get_mask START ---")
-              print("GSS at start of get_mask:")
-              rust_state_map = self.constraint_state.get_state_map()
-              state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
-
-              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
-
-              t0 = time.time()
-
-              final_mask = ffi.Bitset.zeros()
-
-              # node_idx -> (FastGSS, Bitset)
-      ```
-
-      The git diff hunk above failed to apply to the file `python/aug25/models/precompute3_model_pure_python.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -2,12 +2,39 @@
-       import time
-       import heapq
-       import collections
-      -from typing import Dict, List, Tuple, Optional, Set
-      +from typing import Dict, List, Tuple, Optional, Set, Union
-       from dataclasses import dataclass
-       
-       from ..common_interface import GraphProvider, RangeSet
-       import _sep1 as ffi  # the compiled module
-       from tqdm.auto import tqdm
-       from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-      +
-      +
-      +@dataclass(frozen=True)
-      +class Shift:
-      +    state_id: int
-      +
-      +@dataclass(frozen=True)
-      +class Reduce:
-      +    nonterminal_id: int
-      +    len: int
-      +    production_ids: Tuple[int, ...]
-      +
-      +@dataclass(frozen=True)
-      +class Split:
-      +    shift: Optional[int]
-      +    reduces: Tuple[Reduce, ...]
-      +
-      +Action = Union[Shift, Reduce, Split]
-      +
-      +@dataclass(frozen=True)
-      +class Goto:
-      +    state_id: Optional[int]
-      +    accept: bool
-      +
-      +@dataclass
-      +class Row:
-      +    actions: Dict[int, Action]  # terminal_id -> Action
-      +    gotos: Dict[int, Goto]      # nonterminal_id -> Goto
-       
-       
-       @dataclass(frozen=True)
-      @@ -18,41 +45,6 @@
-       def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-           return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-       
-      -
-      -def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-      -    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
-      -    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
-      -    q = collections.deque([rust_gss_node])
-      -    visited_rust_ptrs = {rust_gss_node.ptr()}
-      -    while q:
-      -        rust_node = q.popleft()
-      -        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
-      -        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
-      -        memo_nodes[rust_node.ptr()] = py_node
-      -        for _, pred_rust_node in rust_node.predecessors():
-      -            if pred_rust_node.ptr() not in visited_rust_ptrs:
-      -                visited_rust_ptrs.add(pred_rust_node.ptr())
-      -                q.append(pred_rust_node)
-      -    q = collections.deque([rust_gss_node])
-      -    visited_rust_ptrs = {rust_gss_node.ptr()}
-      -    while q:
-      -        rust_node = q.popleft()
-      -        py_node = memo_nodes[rust_node.ptr()]
-      -        for state_id, pred_rust_node in rust_node.predecessors():
-      -            py_pred_node = memo_nodes[pred_rust_node.ptr()]
-      -            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
-      -            if pred_rust_node.ptr() not in visited_rust_ptrs:
-      -                visited_rust_ptrs.add(pred_rust_node.ptr())
-      -                q.append(pred_rust_node)
-      -    py_head_node = memo_nodes[rust_gss_node.ptr()]
-      -    def acc_factory():
-      -        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-      -    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
-      -    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-      -
-      -
-       def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-           for _ in range(n):
-               gss = gss.pop()
-      @@ -73,7 +65,7 @@
-               # Map tokenizer state -> trie root node
-               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-               self.arena: Dict[int, dict] = arena
-      -        self.constraint: Optional[ffi.GrammarConstraint] = None
-      -        self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-      +        self.constraint: Optional[ffi.GrammarConstraint] = None 
-               self.id_to_token: Dict[int, bytes] = {}
-               self.max_depth: Dict[int, int] = {}
-               self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-      @@ -115,11 +107,79 @@
-               arena = {int(k): v for k, v in arena_values}
-               model = Model(roots_map, arena)
-               model.constraint = ffi.GrammarConstraint.from_json_string(s)
-      -        model.constraint_state = ffi.GrammarConstraintState(model.constraint)
-               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-               model.possible_matches_cache = model.constraint.possible_matches()
-      +
-      +        # Load parse table
-      +        glr_parser = model.constraint.glr_parser()
-      +        raw_table_data = glr_parser.get_parse_table()
-      +        model.start_state_id = raw_table_data['start_state_id']
-      +        model.parse_table = model._parse_table_data(raw_table_data['table'])
-      +
-      +        # Initialize state_map
-      +        def acc_factory():
-      +            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-      +        initial_gss = FastGSS.initial(acc_factory).push(model.start_state_id)
-      +        model.state_map = {0: initial_gss} # tokenizer state 0 -> initial GSS
-      +
-               return model
-       
-      +    def _parse_table_data(self, raw_table: Dict) -> Dict[int, Row]:
-      +        parsed_table = {}
-      +        for state_id_str, raw_row in raw_table.items():
-      +            state_id = int(state_id_str)
-      +            
-      +            # Parse actions
-      +            actions = {}
-      +            for term_id_str, raw_action in raw_row['shifts_and_reduces'].items():
-      +                term_id = int(term_id_str)
-      +                action_type = raw_action[0]
-      +                if action_type == 'shift':
-      +                    actions[term_id] = Shift(state_id=raw_action[1])
-      +                elif action_type == 'reduce':
-      +                    _, nt_id, length, pids = raw_action
-      +                    actions[term_id] = Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids))
-      +                elif action_type == 'split':
-      +                    _, shift_id, reduces_dict = raw_action
-      +                    reduces = []
-      +                    for length, nts_dict in reduces_dict.items():
-      +                        for nt_id, pids in nts_dict.items():
-      +                            reduces.append(Reduce(nonterminal_id=nt_id, len=length, production_ids=tuple(pids)))
-      +                    actions[term_id] = Split(shift=shift_id, reduces=tuple(reduces))
-      +            
-      +            # Parse gotos
-      +            gotos = {}
-      +            for nt_id_str, raw_goto in raw_row['gotos'].items():
-      +                nt_id = int(nt_id_str)
-      +                goto_state_id, accept = raw_goto
-      +                gotos[nt_id] = Goto(state_id=goto_state_id, accept=accept)
-      +
-      +            parsed_table[state_id] = Row(actions=actions, gotos=gotos)
-      +        return parsed_table
-      +
-      +    def _handle_reduce(self, gss_after_pop: FastGSS, reduce: Reduce) -> FastGSS:
-      +        gss_after_full_pop = gss_after_pop
-      +        for _ in range(reduce.len - 1):
-      +            gss_after_full_pop = gss_after_full_pop.pop()
-      +            
-      +        goto_gsses = []
-      +        for top_state_id in gss_after_full_pop.peek():
-      +            gss_with_top_state = gss_after_full_pop.isolate(top_state_id)
-      +            
-      +            row = self.parse_table.get(top_state_id)
+      +        for state_id, heads in heads_by_state.items():
+      +            state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+      +            row = self.parser_table.table.get(state_id)
       +            if not row: continue
-      +            
-      +            goto = row.gotos.get(reduce.nonterminal_id)
-      +            if not goto or goto.state_id is None: continue
-      +            
-      +            goto_gsses.append(gss_with_top_state.push(goto.state_id))
-      +            
-      +        if not goto_gsses:
-      +            return FastGSS.initial(gss_after_pop._acc_default_factory)
-      +        return FastGSS.merge(goto_gsses, merge_acc)
+      +            action = row.actions.get(terminal_id)
+      +            if not action: continue
       +
+      +            def handle_shift(shift_to_state_id, gss_to_shift):
+      +                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
       +
-           def get_root(self, state_id: int) -> int:
-               return self.roots_map[int(state_id)]
-       
-      @@ -142,7 +202,69 @@
-                                       yield (int(pop), sid, int(dest_idx))
-       
-           def commit(self, token_id: int):
-      -        self.constraint_state.commit(token_id)
-      +        token_bytes = self.id_to_token.get(token_id)
-      +        if not token_bytes:
-      +            self.state_map = {}
-      +            return
+      +            def handle_reduce(reduce_action, gss_to_reduce):
+      +                popped_gss = gss_to_reduce.popn(reduce_action.len)
+      +                if any(h is not popped_gss._root for h in popped_gss._heads):
+      +                    reductions_to_do[reduce_action].append(popped_gss)
       +
-      +        final_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-      +        queue_map: Dict[int, Dict[int, List[FastGSS]]] = collections.defaultdict(lambda: collections.defaultdict(list))
-      +        
-      +        for sid, gss in self.state_map.items():
-      +            queue_map[0][sid].append(gss)
+      +            if isinstance(action, int):
+      +                handle_shift(action, state_gss)
+      +            elif isinstance(action, Reduce):
+      +                handle_reduce(action, state_gss)
+      +            elif isinstance(action, Split):
+      +                if action.shift is not None:
+      +                    handle_shift(action.shift, state_gss)
+      +                for length, nts in action.reduces.items():
+      +                    for nt_id, pids in nts.items():
+      +                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
       +
-      +        sorted_offsets = [0] if 0 in queue_map else []
+      +        for reduce_action, gss_list in reductions_to_do.items():
+      +            merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+      +            for from_state_id in merged_popped_gss.peek():
+      +                goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+      +                if goto_state_id is not None:
+      +                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
       +
-      +        while sorted_offsets:
-      +            offset = sorted_offsets.pop(0)
-      +            states_at_offset = queue_map.pop(offset)
-      +
-      +            for sid, gss_list in states_at_offset.items():
-      +                gss = FastGSS.merge(gss_list, merge_acc)
-      +
-      +                end_state, matches = self.constraint.tokenizer().execute_from_state(token_bytes[offset:], sid)
-      +
-      +                for terminal_id, width in matches:
-      +                    new_gss = self._process_terminal(gss, terminal_id)
-      +                    if any(h is not new_gss._root for h in new_gss._heads):
-      +                        new_offset = offset + width
-      +                        next_sid = 0  # tokenizer resets
-      +                        
-      +                        if new_offset == len(token_bytes):
-      +                            final_states[next_sid].append(new_gss)
-      +                        else:
-      +                            if new_offset not in queue_map and new_offset not in [o for o, _ in enumerate(sorted_offsets)]:
-      +                                sorted_offsets.append(new_offset)
-      +                                sorted_offsets.sort()
-      +                            queue_map[new_offset][next_sid].append(new_gss)
-      +                
-      +                if end_state is not None:
-      +                    final_states[end_state].append(gss)
-      +
-      +        self.state_map = {
-      +            sid: FastGSS.merge(gss_list, merge_acc)
-      +            for sid, gss_list in final_states.items()
-      +            if gss_list
-      +        }
-      +
-      +    def _process_terminal(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-      +        shifted_gsses, reduced_gsses = [], []
-      +        for top_state_id in gss.peek():
-      +            gss_for_state = gss.isolate(top_state_id)
-      +            if not any(h is not gss_for_state._root for h in gss_for_state._heads): continue
-      +            
-      +            popped_gss = gss_for_state.pop()
-      +            row = self.parse_table.get(top_state_id)
-      +            if not row or terminal_id not in row.actions: continue
-      +            action = row.actions[terminal_id]
-      +
-      +            if isinstance(action, (Shift, Split)) and (shift_to := getattr(action, 'shift', action.state_id)) is not None:
-      +                shifted_gsses.append(popped_gss.push(shift_to))
-      +            if isinstance(action, (Reduce, Split)):
-      +                reductions = (action,) if isinstance(action, Reduce) else action.reduces
-      +                for r in reductions: reduced_gsses.append(self._handle_reduce(popped_gss, r))
-      +
-      +        return FastGSS.merge(shifted_gsses + reduced_gsses, merge_acc) if shifted_gsses or reduced_gsses else FastGSS.initial(gss._acc_default_factory)
+      +        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
        
            def get_mask(self) -> RangeSet:
                """
-      @@ -289,6 +289,4 @@
+      @@ -156,12 +259,9 @@
+               """
                print("\n--- get_mask START ---")
-      -        print("GSS at start of get_mask:")
+               print("GSS at start of get_mask:")
       -        rust_state_map = self.constraint_state.get_state_map()
       -        state_map = {sid: convert_rust_gss_to_python_gss(gss) for sid, gss in rust_state_map.items()}
       -
-      +        state_map = self.state_map
+      -        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+      -
+      -        t0 = time.time()
+      +        state_map = self.state
       +
-               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+      +        all_ones_mask = self.all_internal_llm_tokens_bitset
+       
+               final_mask = ffi.Bitset.zeros()
+       
+      @@ -291,9 +391,12 @@
+       
+                               enqueue(max_depth[d], d)
+       
+      -        original_mask = self.constraint.internal_bv_to_original(final_mask)
+      -        temp = RangeSet.from_ranges(original_mask.to_ranges())
+      +        original_mask = ffi.Bitset.zeros()
+      +        for internal_id in final_mask.to_indices():
+      +            if internal_id in self.internal_to_original_map:
+      +                original_mask.insert(self.internal_to_original_map[internal_id])
+      +        temp = RangeSet.from_ranges(original_mask.to_ranges())
+               print(f"\n--- get_mask END ---")
+               print(f"Final mask: {temp.to_ranges()}")
+               return temp
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
+      --- a/python/gss_tester/fast_impl.py
+      +++ b/python/gss_tester/fast_impl.py
+      @@ -82,6 +82,12 @@
+       
+               return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+       
+      +    def popn(self, n: int) -> 'FastGSS[T, Acc]':
+      +        gss = self
+      +        for _ in range(n):
+      +            gss = gss.pop()
+      +        return gss
+      +
+           def isolate(self, value: T) -> 'FastGSS[T, Acc]':
+               new_heads: Set[_Node[T, Acc]] = set()
+               for head in self._heads:
+      @@ -116,6 +122,12 @@
+                   if head in self._child_to_parents:
+                       for value, _ in self._child_to_parents[head]:
+                           peek_values.add(value)
+      +        return peek_values
+      +
+      +    def peek_from_head(self, head: _Node[T, Acc]) -> Set[T]:
+      +        peek_values: Set[T] = set()
+      +        if head in self._child_to_parents:
+      +            peek_values.update(v for v, _ in self._child_to_parents[head])
+               return peek_values
+       
+           def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+
+      ```
+      ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -176,6 +176,10 @@
+               let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
+               Ok((end_state, matches))
+           }
+      +
+      +    fn initial_state_id(&self) -> usize {
+      +        self.inner.initial_state_id().0
+      +    }
+       }
+       
+       #[pyclass(name = "GrammarDefinition")]
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-    metadata:
-  - user: 'Changes committed with message: "Implement Python-native GLR parser and
-      GSS state management"'
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/fast_impl.py
+      Applying patch to 'python/gss_tester/fast_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/fast_impl.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/src/lib.rs
+      Applying patch to 'python/src/lib.rs' using custom patcher...
+      Successfully applied patch and wrote to python/src/lib.rs.
     metadata:
 ...

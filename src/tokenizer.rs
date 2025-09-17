@@ -93,7 +93,7 @@ impl JSONConvertible for ExecuteResult {
 
 
 impl Regex {
-    pub(crate) fn initial_state_id(&self) -> TokenizerStateID {
+    pub fn initial_state_id(&self) -> TokenizerStateID {
         TokenizerStateID(0)
     }
 
