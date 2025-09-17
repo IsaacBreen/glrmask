@@ -856,10 +856,6 @@ impl PyGrammarConstraintState {
                 }
 
             let mut gss_arc = glr_state.active_state.stack.clone();
-            if !forbidden.is_empty() {
-                let allowed = &RustHybridBitset::max_ones() - &forbidden;
-                rust_allow_only(&mut gss_arc, &allowed);
-            }
             out.insert(tokenizer_state_id.0, PyGSSNode { inner: gss_arc });
         }
         });
