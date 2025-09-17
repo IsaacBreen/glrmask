@@ -222,8 +222,8 @@ class Model(GraphProvider):
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
-                if not children:
-                    # print(f"    - No children for node {node_idx}")
+                # if not children:
+                #     print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
                     # print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
