@@ -435,16 +435,17 @@ class Model(GraphProvider):
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
-                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
                             for sid_val in popped.peek():
                                 if state_bv.contains(sid_val):
                                     matched.append(popped.isolate(sid_val))
-                        print(f"        - Matched {len(matched)} parent GSS nodes")
                         if not matched:
                             continue
+
+                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                        print(f"        - Matched {len(matched)} parent GSS nodes")
 
                         # Merge matched parent GSS nodes
                         child_gss_node = FastGSS.merge(matched, merge_acc)
