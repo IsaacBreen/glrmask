@@ -116,6 +116,7 @@ class Model(GraphProvider):
         model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
         parser_data = data['parser']
+        print(parser_data)
         table_data = parser_data['table']
         start_state_id = parser_data['start_state_id']
         py_table = {}
