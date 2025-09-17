@@ -52,6 +52,12 @@ def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
 
+def format_bv_py(bv):
+    if bv.is_empty():
+        return "[]"
+    # No easy way to check for ALL in python side
+    return f"[len={bv.len()}]"
+
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     result = gss
     for _ in range(n):
@@ -317,7 +323,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask.to_ranges()}")
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={format_bv_py(new_mask)}")
 
             existing = values.get(root_idx)
             if existing is not None:
@@ -379,13 +385,10 @@ class Model(GraphProvider):
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
-                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask.to_ranges()}")
+                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={format_bv_py(llm_mask)}")
 
                 # End-node handling
                 if is_end(node_idx):
-                    print(f"    - END NODE found. Updating final_mask.")
-                    print(f"      - final_mask before: {final_mask.to_ranges()}")
-
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
                     disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
@@ -408,14 +411,12 @@ class Model(GraphProvider):
                     gss_active_tokens = all_ones_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                    tokens_to_add = final_allowed_tokens
-
-                    print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
-                    print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
-                    print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
-
-                    final_mask = final_mask.union(tokens_to_add)
-                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
+                    if not final_allowed_tokens.is_empty():
+                        before_len = final_mask.len()
+                        final_mask = final_mask.union(final_allowed_tokens)
+                        after_len = final_mask.len()
+                        if after_len > before_len:
+                            print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {format_bv_py(final_allowed_tokens)}")
 
                 if llm_mask.is_empty():
                     stopped.add(node_idx)
@@ -428,21 +429,19 @@ class Model(GraphProvider):
                 # if not children:
                 #     print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
-                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                    print(f"    - Edge: pop={pop}, llm_bv={format_bv_py(llm_bv)}")
                     # Collect all pops from GSS parents
                     popped = popn_fast_py(gss_node, pop)
 
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
-                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
                             for sid_val in popped.peek():
                                 if state_bv.contains(sid_val):
                                     matched.append(popped.isolate(sid_val))
-                        print(f"        - Matched {len(matched)} parent GSS nodes")
                         if not matched:
                             continue
 
@@ -451,7 +450,6 @@ class Model(GraphProvider):
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                         d = int(dest_idx)
                         existing = values.get(d)
@@ -460,10 +458,12 @@ class Model(GraphProvider):
                             merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
-                            print(f"        - Enqueue {d}: UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask.to_ranges()}")
+                            print(f"      - Dest: idx={d}, state_bv={format_bv_py(state_bv)}, matched={len(matched)}, child_mask={format_bv_py(child_llm_mask)}")
+                            print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={format_bv_py(combined_mask)}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
-                            print(f"        - Enqueue {d}: CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask.to_ranges()}")
+                            print(f"      - Dest: idx={d}, state_bv={format_bv_py(state_bv)}, matched={len(matched)}, child_mask={format_bv_py(child_llm_mask)}")
+                            print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={format_bv_py(child_llm_mask)}")
 
                         enqueue(max_depth[d], d)
 
