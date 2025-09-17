@@ -513,7 +513,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Setting up for JS Constraint Integration Test ---");
 
     // 1. Load and compile the JavaScript grammar.
-    let grammar_path = "src/js.ebnf";
+    let grammar_path = "src/js_simplified4.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -531,7 +531,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 5;
+        let x = 1;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
