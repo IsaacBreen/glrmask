@@ -38,6 +38,12 @@ class ParserTable:
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
 
+    def __hash__(self):
+        return hash(self.terminals_union)
+
+    def to_json_serializable(self):
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
+
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
     return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
@@ -46,6 +52,11 @@ def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
 
+def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+    result = gss
+    for _ in range(n):
+        result = result.pop()
+    return result
 
 class Model(GraphProvider):
     """
@@ -117,14 +128,14 @@ class Model(GraphProvider):
 
         parser_data = data['parser']
         print(parser_data)
-        table_data = parser_data['table']
+        table_data = parser_data['stage_7_table']
         start_state_id = parser_data['start_state_id']
         py_table = {}
-        for state_id_str, row_data in table_data.items():
+        for state_id_str, row_data in table_data:
             state_id = int(state_id_str)
             py_row = Row()
             # Parse actions from 'shifts_and_reduces_full'
-            for term_id_str, action_data in row_data['shifts_and_reduces_full'].items():
+            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
                 term_id = int(term_id_str)
                 variant = action_data['variant']
                 if variant == 'Shift':
@@ -135,16 +146,16 @@ class Model(GraphProvider):
                 elif variant == 'Split':
                     shift = action_data['shift']
                     reduces = {}
-                    for len_str, nts_data in action_data['reduces'].items():
+                    for len_str, nts_data in action_data['reduces']:
                         len_int = int(len_str)
                         nts = {}
-                        for nt_id_str, pids in nts_data.items():
+                        for nt_id_str, pids in nts_data:
                             nt_id_int = int(nt_id_str)
                             nts[nt_id_int] = tuple(sorted(pids))
                         reduces[len_int] = nts
                     py_row.actions[term_id] = Split(shift, reduces)
             # Parse gotos
-            for nt_id_str, goto_data in row_data['gotos'].items():
+            for nt_id_str, goto_data in row_data['gotos']:
                 nt_id = int(nt_id_str)
                 if goto_data['state_id'] is not None:
                     py_row.gotos[nt_id] = goto_data['state_id']
@@ -202,7 +213,7 @@ class Model(GraphProvider):
             offset, tokenizer_sid, gss = q.popleft()
             
             # GSS is not hashable, use its serializable form for visited check
-            q_item = (offset, tokenizer_sid, gss.to_json_serializable())
+            q_item = (offset, tokenizer_sid, gss)
             if q_item in visited_q_items:
                 continue
             visited_q_items.add(q_item)

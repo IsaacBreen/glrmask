@@ -74,3 +74,7 @@ class GSS(ABC, Generic[T, Acc]):
         if not isinstance(other, GSS):
             return NotImplemented
         return self.to_json_serializable() == other.to_json_serializable()
+
+    def __hash__(self):
+        """Defines hash based on the canonical JSON representation."""
+        pass
