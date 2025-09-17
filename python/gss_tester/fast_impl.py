@@ -1,4 +1,5 @@
 import itertools
+import collections
 from functools import reduce
 from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
 
@@ -243,6 +244,41 @@ class FastGSS(GSS[T, Acc]):
         result = frozenset(paths)
         cache[node.id] = result
         return result
+    
+    def map_acc(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+        memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+
+        # Discover all nodes
+        all_nodes = {self._root}
+        q = collections.deque(list(self._heads))
+        visited_for_discovery = set(self._heads)
+        all_nodes.update(self._heads)
+
+        while q:
+            node = q.popleft()
+            if node in self._child_to_parents:
+                for _, parent in self._child_to_parents[node]:
+                    all_nodes.add(parent)
+                    if parent not in visited_for_discovery:
+                        visited_for_discovery.add(parent)
+                        q.append(parent)
+        
+        # Create new nodes with mapped accumulators
+        for node in all_nodes:
+            new_acc = func(node.acc)
+            memo[node] = _Node(acc=new_acc, depth=node.depth)
+
+        # Re-wire the graph structure with new nodes
+        new_child_to_parents = {}
+        for child, parents_set in self._child_to_parents.items():
+            new_child = memo[child]
+            new_parents = {(value, memo[parent]) for value, parent in parents_set}
+            new_child_to_parents[new_child] = new_parents
+
+        new_heads = frozenset(memo[h] for h in self._heads)
+        new_root = memo[self._root]
+
+        return FastGSS(new_heads, self._acc_default_factory, new_root, new_child_to_parents, {})
 
     def __hash__(self):
         return hash((self._heads, frozenset((node, frozenset(edges)) for node, edges in self._child_to_parents.items())))

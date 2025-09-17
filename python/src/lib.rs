@@ -619,6 +619,20 @@ impl PyHybridBitset {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
         Ok(Self { inner })
     }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self.inner == other.inner,
+            CompareOp::Ne => self.inner != other.inner,
+            _ => unimplemented!(),
+        }
+    }
 }
 
 impl From<RustHybridBitset> for PyHybridBitset {
@@ -655,6 +669,20 @@ impl PyHybridL2Bitset {
 
     pub fn complement(&self) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: self.inner.complement() }
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.inner.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+        match op {
+            CompareOp::Eq => self.inner == other.inner,
+            CompareOp::Ne => self.inner != other.inner,
+            _ => unimplemented!(),
+        }
     }
 }
 
