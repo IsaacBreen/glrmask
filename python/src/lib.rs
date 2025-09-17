@@ -652,65 +652,18 @@ impl PyGSSNode {
 
     fn clone_node(&self) -> PyGSSNode {
         self.clone()
-        }
     }
 
-    fn to_graph<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let graph = PyDict::new_bound(py);
-        let nodes = PyDict::new_bound(py);
-        let edges = pyo3::types::PyList::empty_bound(py);
+    fn popn_fast(&self, n: usize) -> Vec<(usize, PyGSSNode)> {
+        let pairs = popn_collect_fast(&self.inner, n);
+        pairs.into_iter()
+            .map(|(sid, arc)| (sid.0, PyGSSNode { inner: arc }))
+            .collect()
+    }
 
-        let mut q = std::collections::VecDeque::new();
-        let mut visited = std::collections::HashSet::new();
-
-        let head_arc = self.inner.clone();
-        let head_ptr = std::sync::Arc::as_ptr(&head_arc) as usize;
-
-        q.push_back(head_arc);
-        visited.insert(head_ptr);
-
-        while let Some(node_arc) = q.pop_front() {
-            let node_ptr = std::sync::Arc::as_ptr(&node_arc) as usize;
-
-            let node_info = PyDict::new_bound(py);
-            node_info.set_item("is_root", node_arc.is_root())?;
-            node_info.set_item("depth", node_arc.max_depth())?;
-
-            let local_acc_rust = node_arc.local_acc();
-            let acc_py = PyDict::new_bound(py);
-
-            let terminals_py = PyDict::new_bound(py);
-            for (range, bv) in local_acc_rust.terminals_union.range_values() {
-                for i in *range.start()..=*range.end() {
-                    terminals_py.set_item(i, PyHybridBitset { inner: bv.clone() })?;
-                }
-            }
-            acc_py.set_item("terminals", terminals_py)?;
-            acc_py.set_item("llms", PyHybridBitset { inner: local_acc_rust.llm_tokens_union.clone() })?;
-            node_info.set_item("acc", acc_py)?;
-
-            nodes.set_item(node_ptr, node_info)?;
-
-            for (edge_content, preds_by_depth) in node_arc.predecessors() {
-                for pred_vec in preds_by_depth.values() {
-                    for pred_arc in pred_vec {
-                        let pred_ptr = std::sync::Arc::as_ptr(pred_arc) as usize;
-                        let edge_tuple = PyTuple::new_bound(py, &[node_ptr.to_object(py), edge_content.state_id.0.to_object(py), pred_ptr.to_object(py)]);
-                        edges.append(edge_tuple)?;
-
-                        if !visited.contains(&pred_ptr) {
-                            visited.insert(pred_ptr);
-                            q.push_back(pred_arc.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        graph.set_item("nodes", nodes)?;
-        graph.set_item("edges", edges)?;
-        graph.set_item("head_ptr", head_ptr)?;
-        Ok(graph)
+    fn print_stats(&self) {
+        let stats = gather_gss_stats(&[self.inner.as_ref()]);
+        println!("{:#?}", stats);
     }
 
     fn __hash__(&self) -> PyResult<isize> {
