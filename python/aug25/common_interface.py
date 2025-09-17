@@ -62,6 +62,23 @@ class RangeSet:
         """Converts the RangeSet to a list of [start, end] lists."""
         return [list(interval) for interval in self.intervals]
 
+    @staticmethod
+    def from_numpy(bv) -> 'RangeSet':
+        """Creates a RangeSet from a numpy array of booleans."""
+        intervals = []
+        in_range = False
+        start = 0
+        for i in range(len(bv)):
+            if bv[i] and not in_range:
+                start = i
+                in_range = True
+            elif not bv[i] and in_range:
+                intervals.append((start, i - 1))
+                in_range = False
+        if in_range:
+            intervals.append((start, len(bv) - 1))
+        return RangeSet(intervals)
+
     def __eq__(self, other):
         if not isinstance(other, RangeSet):
             return NotImplemented
