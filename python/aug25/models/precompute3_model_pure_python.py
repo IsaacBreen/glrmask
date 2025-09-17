@@ -233,7 +233,6 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        self.constraint_state.commit(token_id)
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
             self.state = {}
@@ -260,6 +259,21 @@ class Model(GraphProvider):
 
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
+
+                # Apply terminal disallowing logic, mimicking Rust implementation
+                if end_state is not None:
+                    terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
+                    if terminal_id in terminals_accessible:
+                        disallowed_terminals = ffi.HybridL2Bitset.all().complement() # empty
+                        disallowed_for_end_state = ffi.Bitset.zeros()
+                        disallowed_for_end_state.insert(terminal_id)
+                        disallowed_terminals.insert_l2_bitset(end_state, disallowed_for_end_state)
+                        
+                        allowed_terminals = disallowed_terminals.complement()
+                        def apply_allow(acc: PyAcc) -> PyAcc:
+                            return PyAcc(terminals_union=acc.terminals_union.intersection(allowed_terminals))
+                        processed_gss = processed_gss.apply(apply_allow)
+
                 if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state

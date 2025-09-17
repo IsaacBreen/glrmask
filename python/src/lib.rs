@@ -211,6 +211,11 @@ impl PyRegex {
     fn initial_state_id(&self) -> usize {
         self.inner.initial_state_id().0
     }
+
+    fn tokens_accessible_from_state(&self, state_id: usize) -> Vec<usize> {
+        self.inner.tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id))
+            .into_iter().map(|tid| tid.0).collect()
+    }
 }
 
 #[pyclass(name = "GrammarDefinition")]
@@ -655,6 +660,10 @@ impl PyHybridL2Bitset {
 
     fn union(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
         PyHybridL2Bitset { inner: &self.inner | &other.inner }
+    }
+
+    fn intersection(&self, other: &PyHybridL2Bitset) -> PyHybridL2Bitset {
+        PyHybridL2Bitset { inner: &self.inner & &other.inner }
     }
 
     pub fn complement(&self) -> PyHybridL2Bitset {
