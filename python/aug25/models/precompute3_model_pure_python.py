@@ -133,7 +133,7 @@ class Model(GraphProvider):
 
         parser_data = data['parser']
         print(parser_data)
-        table_data = parser_data['table']
+        table_data = parser_data['stage_7_table']
         start_state_id = parser_data['start_state_id']
         py_table = {}
         for state_id_str, row_data in table_data:
@@ -423,6 +423,8 @@ class Model(GraphProvider):
 
                     # This is the main bug fix: get active tokens from the GSS state
                     gss_active_tokens = gss_node.get_acc(merge_acc).llm_tokens_union
+                    if gss_active_tokens is None:
+                        gss_active_tokens = llm_mask
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
