@@ -76,7 +76,7 @@ class Model(GraphProvider):
         return self.roots_map[int(state_id)]
 
     def is_end(self, node: int) -> bool:
-        return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+        return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
     def iter_edges(self, node: int, token: int):
         """
@@ -202,10 +202,19 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     print(f"    - END NODE found. Updating final_mask.")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
-                    print(f"      - llm_mask to union: {llm_mask.to_ranges()}")
-                    for i, gss in enumerate(gss_set):
-                        print(f"      - gss[{i}] allowed_llm_tokens: {gss.allowed_llm_tokens().to_ranges()}")
-                    final_mask = final_mask.union(llm_mask)
+
+                    # Correct logic: intersect propagated mask with GSS active tokens
+                    gss_active_tokens = ffi.Bitset.zeros()
+                    for gss in gss_set:
+                        gss_active_tokens = gss_active_tokens.union(gss.allowed_llm_tokens())
+
+                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+
+                    print(f"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                    print(f"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                    print(f"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+
+                    final_mask = final_mask.union(tokens_to_add)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 if not gss_set:
