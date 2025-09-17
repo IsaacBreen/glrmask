@@ -56,7 +56,7 @@ class Model(GraphProvider):
         for uid, node in self.arena.items():
             self.max_depth[uid] = int(node.get("max_depth", 0))
 
-            if (node.get("value") or {}).get("end", False):
+            if (node.get("value") or {}).get("clean_end", False):
                 self.end_nodes.add(uid)
 
             original_children = node.get("children") or []

@@ -67,7 +67,7 @@ class Model(GraphProvider):
         return self.roots_map[int(state_id)]
 
     def is_end(self, node: int) -> bool:
-        return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+        return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
     def iter_edges(self, node: int, token: int):
         # Reference edges are token-gated on their BVs. This provider yields only matching edges.

@@ -9,8 +9,8 @@ import _sep1 as ffi
 @dataclass
 class _NodeState:
     # Aggregated state per trie node during get_mask()
-    gss_set: set  # set[ffi.GSSNode]
-    mask: ffi.Bitset
+    gss_node: ffi.GSSNode
+    mask: ffi.Bitset # set[ffi.GSSNode]
     mask_hash: int
     in_queue: bool = False
 
@@ -67,7 +67,7 @@ class Model(GraphProvider):
         for uid_raw, node in arena.items():
             uid = int(uid_raw)
             val = node.get("value") or {}
-            self.end_flags[uid] = bool(val.get("end", False))
+            self.end_flags[uid] = bool(val.get("clean_end", False))
 
             # Collect children by pop
             pop_map: Dict[int, List[Tuple[ffi.Bitset, List[Tuple[int, ffi.Bitset]]]]] = {}
@@ -153,14 +153,15 @@ class Model(GraphProvider):
 
             st = values.get(root)
             if st is None:
-                st = _NodeState(gss_set={gss_clone}, mask=new_mask, mask_hash=new_hash, in_queue=True)
+                st = _NodeState(gss_node=gss_clone, mask=new_mask, mask_hash=new_hash, in_queue=True)
                 values[root] = st
                 q.append(root)
             else:
                 # Merge GSS set
-                before = len(st.gss_set)
-                st.gss_set.add(gss_clone)
-                gss_changed = len(st.gss_set) != before
+                merged_gss = ffi.gss_merge_many_with_depth([st.gss_node, gss_clone], 1)
+                gss_changed = merged_gss.ptr() != st.gss_node.ptr()
+                if gss_changed:
+                    st.gss_node = merged_gss
 
                 # Merge mask
                 merged_mask = st.mask.union(new_mask)
@@ -185,12 +186,12 @@ class Model(GraphProvider):
 
             # If end node, accumulate its mask
             if self.end_flags.get(node_idx, False):
-                final_mask = final_mask.union(st.mask)
+                gss_active_tokens = st.gss_node.allowed_llm_tokens()
+                tokens_to_add = st.mask.intersection(gss_active_tokens)
+                final_mask = final_mask.union(tokens_to_add)
 
             # If node has no viable GSS nodes, skip propagation
-            # We check viability on the current gss_set.
-            gss_ok_list = [g for g in st.gss_set if g]
-            if not gss_ok_list:
+            if not st.gss_node.is_alive():
                 continue
 
             pop_map = self.children_by_pop.get(node_idx)
@@ -220,49 +221,28 @@ class Model(GraphProvider):
                 # Compute peeks for this pop
                 # sid -> list[parent_nodes]
                 sid_to_parents: Dict[int, List[ffi.GSSNode]] = {}
-                pop_n = int(pop)
-                for gss_node in gss_ok_list:
-                    for sid_val, parent_node in gss_node.popn_fast(pop_n):
-                        sid = int(sid_val)
-                        lst = sid_to_parents.get(sid)
-                        if lst is None:
-                            sid_to_parents[sid] = [parent_node]
-                        else:
-                            lst.append(parent_node)
-
-                if not sid_to_parents:
+                peeks = st.gss_node.popn_fast(int(pop))
+                if not peeks:
                     # No possible transitions for this pop
                     continue
 
-                # Precompute OK parent nodes and filtered per-sid ok lists
-                ok_nodes_set: set = set()
-                for lst in sid_to_parents.values():
-                    for pn in lst:
-                        ok_nodes_set.add(pn)
-
-                if not ok_nodes_set:
-                    continue
-
-                # Build per-sid ok lists for quick updates
-                sid_keys = list(sid_to_parents.keys())
-                sid_to_parents_ok: Dict[int, List[ffi.GSSNode]] = {}
-                for sid in sid_keys:
-                    src_list = sid_to_parents[sid]
-                    # filter by ok set
-                    dst_list = [pn for pn in src_list if pn in ok_nodes_set]
-                    if dst_list:
-                        sid_to_parents_ok[sid] = dst_list
-                if not sid_to_parents_ok:
-                    continue
-
-                # Prepare an "all parents ok" set for epsilon state transitions
-                # Note: ok_nodes_set already has unique nodes.
-                all_parents_ok_set = ok_nodes_set
+                for sid_val, parent_node in peeks:
+                    sid = int(sid_val)
+                    lst = sid_to_parents.get(sid)
+                    if lst is None:
+                        sid_to_parents[sid] = [parent_node]
+                    else:
+                        lst.append(parent_node)
 
                 # Now fan out to each (llm_bv group, dests)
                 for (llm_bv, dests), child_mask in zip(groups, child_masks):
                     if child_mask.is_empty():
                         continue  # nothing to propagate for this group
+
+                    # This logic is complex; let's simplify by merging parents per destination
+                    dest_to_parents = defaultdict(list)
+
+                    all_parents_list = [p for _, p in peeks]
 
                     for dest_idx, state_bv in dests:
                         d = int(dest_idx)
@@ -270,20 +250,33 @@ class Model(GraphProvider):
                         if dst_state is None:
                             # Lazily construct with the mask now; GSS set will be updated below
                             dst_mask = child_mask
-                            dst_state = _NodeState(gss_set=set(), mask=dst_mask, mask_hash=_bitset_fingerprint(dst_mask), in_queue=False)
+                            # Placeholder GSS node, will be replaced
+                            dst_state = _NodeState(gss_node=ffi.gss_merge_many_with_depth([], 1), mask=dst_mask, mask_hash=_bitset_fingerprint(dst_mask), in_queue=False)
                             values[d] = dst_state
 
-                        # 1) Update GSS for destination (filtered by state_bv)
-                        gss_before = len(dst_state.gss_set)
+                        parents_for_dest = []
                         if state_bv.is_empty():
-                            # Epsilon on tokenizer state: all ok parents qualify
-                            dst_state.gss_set.update(all_parents_ok_set)
+                            parents_for_dest.extend(all_parents_list)
                         else:
-                            # Only parents whose sid is in state_bv
-                            for sid in sid_to_parents_ok.keys():
+                            for sid, parents in sid_to_parents.items():
                                 if state_bv.contains(sid):
-                                    dst_state.gss_set.update(sid_to_parents_ok[sid])
-                        gss_changed = len(dst_state.gss_set) != gss_before
+                                    parents_for_dest.extend(parents)
+
+                        if not parents_for_dest:
+                            continue
+
+                        child_gss = ffi.gss_merge_many_with_depth(parents_for_dest, 1)
+                        if not child_gss.is_alive():
+                            continue
+
+                        # 1) Update GSS for destination
+                        if not dst_state.gss_node.is_alive(): # Was placeholder
+                            merged_gss = child_gss
+                        else:
+                            merged_gss = ffi.gss_merge_many_with_depth([dst_state.gss_node, child_gss], 1)
+
+                        gss_changed = merged_gss.ptr() != dst_state.gss_node.ptr()
+                        dst_state.gss_node = merged_gss
 
                         # 2) Update llm mask for destination
                         merged_mask = dst_state.mask.union(child_mask)

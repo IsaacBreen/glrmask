@@ -83,7 +83,7 @@ class Model(GraphProvider):
         for uid, node in arena.items():
             node_id = int(uid)
             self.depths[node_id] = int(node.get("max_depth", 0) or 0)
-            self.is_end_node[node_id] = bool((node.get("value") or {}).get("end", False))
+            self.is_end_node[node_id] = bool((node.get("value") or {}).get("clean_end", False))
 
             children = node.get("children") or []
             if not children:

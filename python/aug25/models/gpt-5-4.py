@@ -72,7 +72,7 @@ class Model(GraphProvider):
         for uid, node in arena.items():
             node_idx = int(uid)
             value = node.get("value") or {}
-            is_end = bool(value.get("end", False))
+            is_end = bool(value.get("clean_end", False))
             max_depth = int(node.get("max_depth", 0) or 0)
             self.max_depth[node_idx] = max_depth
 

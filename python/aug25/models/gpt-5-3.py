@@ -61,7 +61,7 @@ class Model(GraphProvider):
                 self.max_depth[nid] = 0
 
             value_obj = node.get("value") or {}
-            node["end"] = bool(value_obj.get("end", False))
+            node["end"] = bool(value_obj.get("clean_end", False))
 
             # Children normalization
             ch = node.get("children") or []

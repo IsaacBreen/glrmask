@@ -77,7 +77,7 @@ class Model(GraphProvider):
             self.max_depth[uid_int] = md_int
 
             # End flag
-            end_flag = bool((node.get("value") or {}).get("end", False))
+            end_flag = bool((node.get("value") or {}).get("clean_end", False))
 
             children = node.get("children") or []
             if not children:
@@ -225,7 +225,7 @@ class Model(GraphProvider):
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (set(GSSNode), Bitset)
-        values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
         stopped: Set[int] = set()               # nodes that stopped (no gss parents)
         todo: Dict[int, Set[int]] = {}          # depth -> set(node_idx)
@@ -256,11 +256,11 @@ class Model(GraphProvider):
 
             existing = values.get(root_idx)
             if existing is not None:
-                gss_set, existing_mask = existing
-                gss_set.add(gss_clone)
-                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = ({gss_clone}, new_mask)
+                values[root_idx] = (gss_clone, new_mask)
 
             depth = max_depth.get(root_idx, 0)
             if todo.get(depth) is None:
@@ -291,13 +291,15 @@ class Model(GraphProvider):
                 item = values.pop(node_idx, None)
                 if item is None:
                     continue
-                gss_set, llm_mask = item
+                gss_node, llm_mask = item
 
                 # End-node handling
                 if nodes.get(node_idx, None) and nodes[node_idx].end_flag:
-                    final_mask = final_mask.union(llm_mask)
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    final_mask = final_mask.union(tokens_to_add)
 
-                if not gss_set:
+                if not gss_node.is_alive():
                     stopped.add(node_idx)
                     continue
 
@@ -308,20 +310,17 @@ class Model(GraphProvider):
                 # For every pop group of this node, do one GSS pop and route by SID using precomputed arcs
                 for pop_val, group in nd.groups.items():
                     # Collect all parents from GSS after popping 'pop_val'
-                    peeks: List[Tuple[int, ffi.GSSNode]] = []
-                    for g in gss_set:
-                        peeks.extend(g.popn_fast(pop_val))
+                    peeks = gss_node.popn_fast(pop_val)
                     if not peeks:
                         continue
 
                     sid_to_parents: Dict[int, List[ffi.GSSNode]] = {}
-                    eps_parents: Optional[Set[ffi.GSSNode]] = None
+                    eps_parents: Optional[List[ffi.GSSNode]] = None
 
                     # If epsilon arcs exist, we need the set of all parent nodes
                     if group.eps_arcs:
                         # Construct set of parent nodes from peeks
-                        # Note: Avoid building this set unless eps_arcs is non-empty.
-                        eps_parents = set()
+                        eps_parents = []
                         for sid_val, parent_node in peeks:
                             eps_parents.add(parent_node)
 
@@ -335,7 +334,7 @@ class Model(GraphProvider):
                             lst.append(parent_node)
 
                     # Prepare accumulators for next nodes: dest -> (gss_set, child_llm_mask)
-                    next_gss: Dict[int, Set[ffi.GSSNode]] = {}
+                    next_gss: Dict[int, List[ffi.GSSNode]] = {}
                     next_mask: Dict[int, ffi.Bitset] = {}
 
                     # Cache intersections of llm_mask with edge llm_bv
@@ -360,9 +359,9 @@ class Model(GraphProvider):
                             # Merge parents
                             s = next_gss.get(dest_idx)
                             if s is None:
-                                s = set()
+                                s = []
                                 next_gss[dest_idx] = s
-                            s.update(parents_all)
+                            s.extend(parents_all)
 
                             # Merge mask
                             m = next_mask.get(dest_idx)
@@ -392,9 +391,9 @@ class Model(GraphProvider):
                             # Merge parents
                             s = next_gss.get(dest_idx)
                             if s is None:
-                                s = set()
+                                s = []
                                 next_gss[dest_idx] = s
-                            s.update(parents_list)  # set dedups automatically
+                            s.extend(parents_list)  # set dedups automatically
 
                             # Merge mask
                             m = next_mask.get(dest_idx)
@@ -404,19 +403,24 @@ class Model(GraphProvider):
                                 next_mask[dest_idx] = m.union(child_mask)
 
                     # Flush to values and enqueue
-                    for d, parent_set in next_gss.items():
+                    for d, parent_list in next_gss.items():
+                        if not parent_list:
+                            continue
+                        child_gss = ffi.gss_merge_many_with_depth(parent_list, 1)
+                        if not child_gss.is_alive():
+                            continue
+
                         existing = values.get(d)
                         if existing is not None:
-                            existing_gss_set, existing_mask = existing
-                            old_len = len(existing_gss_set)
-                            existing_gss_set.update(parent_set)
+                            existing_gss, existing_mask = existing
+                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 1)
                             combined_mask = existing_mask.union(next_mask[d])
-                            values[d] = (existing_gss_set, combined_mask)
+                            values[d] = (merged_gss, combined_mask)
                             # Only re-enqueue if gss_set actually changed
-                            if len(existing_gss_set) != old_len:
+                            if merged_gss.ptr() != existing_gss.ptr():
                                 enqueue(self.max_depth.get(d, 0), d)
                         else:
-                            values[d] = (parent_set, next_mask[d])
+                            values[d] = (child_gss, next_mask[d])
                             enqueue(self.max_depth.get(d, 0), d)
 
         original_mask = self.constraint.internal_bv_to_original(final_mask)

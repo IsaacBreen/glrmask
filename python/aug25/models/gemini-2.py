@@ -124,7 +124,7 @@ class Model(GraphProvider):
         return self.roots_map[int(state_id)]
 
     def is_end(self, node: int) -> bool:
-        return bool((self.arena.get(node, {}).get("value") or {}).get("end", False))
+        return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
     def iter_edges(self, node: int, token: int):
         """
@@ -151,7 +151,7 @@ class Model(GraphProvider):
         """
         state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
-        values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
         todo: Dict[int, set[int]] = defaultdict(set)
         depth_heap: List[int] = []
 
@@ -166,11 +166,11 @@ class Model(GraphProvider):
 
             existing = values.get(root_idx)
             if existing:
-                gss_set, existing_mask = existing
-                gss_set.add(gss_clone)
-                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = ({gss_clone}, new_mask)
+                values[root_idx] = (gss_clone, new_mask)
                 depth = self.max_depth[root_idx]
                 if not todo[depth]:
                     heapq.heappush(depth_heap, depth)
@@ -187,19 +187,19 @@ class Model(GraphProvider):
                 item = values.pop(node_idx, None)
                 if item is None:
                     continue
-                gss_set, llm_mask = item
+                gss_node, llm_mask = item
 
                 if self.is_end(node_idx):
-                    final_mask = final_mask.union(llm_mask)
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    final_mask = final_mask.union(tokens_to_add)
 
-                if not gss_set:
+                if not gss_node.is_alive():
                     continue
 
                 children_by_pop = self.arena.get(node_idx, {}).get("children", {})
                 for pop, transitions in children_by_pop.items():
-                    peeks = []
-                    for g in gss_set:
-                        peeks.extend(g.popn_fast(pop))
+                    peeks = gss_node.popn_fast(pop)
                     if not peeks:
                         continue
 
@@ -208,33 +208,36 @@ class Model(GraphProvider):
                         if child_llm_mask.is_empty():
                             continue
 
-                        dest_to_parents = defaultdict(set)
+                        dest_to_parents = defaultdict(list)
                         if sid_map:
                             for sid, parent_gss in peeks:
                                 dest_idx = sid_map.get(sid)
                                 if dest_idx is not None:
-                                    dest_to_parents[dest_idx].add(parent_gss)
+                                    dest_to_parents[dest_idx].append(parent_gss)
                         
                         if epsilon_dests:
-                            all_parents = {p for _, p in peeks}
+                            all_parents = [p for _, p in peeks]
                             if all_parents:
                                 for dest_idx in epsilon_dests:
-                                    dest_to_parents[dest_idx].update(all_parents)
+                                    dest_to_parents[dest_idx].extend(all_parents)
 
-                        for dest_idx, parents_set in dest_to_parents.items():
+                        for dest_idx, parents_list in dest_to_parents.items():
+                            if not parents_list:
+                                continue
+                            child_gss = ffi.gss_merge_many_with_depth(parents_list, 1)
+                            if not child_gss.is_alive():
+                                continue
+
                             existing = values.get(dest_idx)
                             if existing:
                                 existing_gss, existing_mask = existing
-                                old_gss_len = len(existing_gss)
-                                existing_gss.update(parents_set)
+                                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 1)
                                 new_mask = existing_mask.union(child_llm_mask)
-
-                                if len(existing_gss) == old_gss_len and new_mask == existing_mask:
+                                if merged_gss.ptr() == existing_gss.ptr() and new_mask == existing_mask:
                                     continue
-                                
-                                values[dest_idx] = (existing_gss, new_mask)
+                                values[dest_idx] = (merged_gss, new_mask)
                             else:
-                                values[dest_idx] = (parents_set, child_llm_mask)
+                                values[dest_idx] = (child_gss, child_llm_mask)
 
                             depth = self.max_depth[dest_idx]
                             if not todo[depth]:

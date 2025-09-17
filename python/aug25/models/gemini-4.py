@@ -81,7 +81,7 @@ class Model(GraphProvider):
         ):
             uid_int = int(uid)
             self.max_depth[uid_int] = int(node_def.get("max_depth", 0))
-            is_end = bool((node_def.get("value") or {}).get("end", False))
+            is_end = bool((node_def.get("value") or {}).get("clean_end", False))
 
             children = node_def.get("children") or []
             if not children:
@@ -177,7 +177,7 @@ class Model(GraphProvider):
         state_to_gss = self.constraint_state.get_state_map()
         final_mask = ffi.Bitset.zeros()
         # {node_idx: ({gss_parents}, llm_mask)}
-        values: Dict[int, Tuple[Set[ffi.GSSNode], ffi.Bitset]] = {}
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
         # {depth: {node_idx, ...}}
         todo: Dict[int, Set[int]] = defaultdict(set)
         # min-heap of depths to visit
@@ -196,11 +196,11 @@ class Model(GraphProvider):
 
             existing = values.get(root_idx)
             if existing:
-                gss_set, existing_mask = existing
-                gss_set.add(gss_clone)
-                values[root_idx] = (gss_set, existing_mask.union(new_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss_clone], 1)
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = ({gss_clone}, new_mask)
+                values[root_idx] = (gss_clone, new_mask)
                 depth = self.max_depth.get(root_idx, 0)
                 if not todo[depth]:
                     heapq.heappush(depth_heap, depth)
@@ -219,28 +219,28 @@ class Model(GraphProvider):
                 item = values.pop(node_idx, None)
                 if not item:
                     continue
-                gss_set, llm_mask = item
+                gss_node, llm_mask = item
 
                 node_data = self.nodes.get(node_idx)
                 if not node_data:
                     continue
 
                 if node_data.is_end:
-                    final_mask = final_mask.union(llm_mask)
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    final_mask = final_mask.union(tokens_to_add)
 
-                if not gss_set:
+                if not gss_node.is_alive():
                     continue
 
                 # --- Process Transitions for the Current Node ---
                 for pop, group in node_data.groups.items():
-                    peeks = []
-                    for g in gss_set:
-                        peeks.extend(g.popn_fast(pop))
+                    peeks = gss_node.popn_fast(pop)
                     if not peeks:
                         continue
 
                     # Accumulators for child nodes to be processed later.
-                    next_gss: Dict[int, Set[ffi.GSSNode]] = defaultdict(set)
+                    next_gss: Dict[int, List[ffi.GSSNode]] = defaultdict(list)
                     next_mask: Dict[int, ffi.Bitset] = defaultdict(ffi.Bitset.zeros)
 
                     # Group GSS parents by SID for efficient lookup.
@@ -256,38 +256,39 @@ class Model(GraphProvider):
                         for dest_idx, llm_bv in arcs:
                             child_mask = llm_mask if llm_bv is None else llm_mask.intersection(llm_bv)
                             if not child_mask.is_empty():
-                                next_gss[dest_idx].update(parents)
+                                next_gss[dest_idx].extend(parents)
                                 next_mask[dest_idx] = next_mask[dest_idx].union(child_mask)
 
                     # Process epsilon transitions (not dependent on SID)
                     if group.eps_arcs:
-                        all_parents = {p for _, p in peeks}
+                        all_parents = [p for _, p in peeks]
                         if all_parents:
                             for dest_idx, llm_bv in group.eps_arcs:
                                 child_mask = llm_mask if llm_bv is None else llm_mask.intersection(llm_bv)
                                 if not child_mask.is_empty():
-                                    next_gss[dest_idx].update(all_parents)
+                                    next_gss[dest_idx].extend(all_parents)
                                     next_mask[dest_idx] = next_mask[dest_idx].union(child_mask)
 
                     # --- Flush accumulated children to the main queue ---
-                    for dest_idx, parents_set in next_gss.items():
+                    for dest_idx, parents_list in next_gss.items():
+                        if not parents_list:
+                            continue
+                        child_gss = ffi.gss_merge_many_with_depth(parents_list, 1)
+                        if not child_gss.is_alive():
+                            continue
+
                         child_llm_mask = next_mask[dest_idx]
                         
                         existing = values.get(dest_idx)
                         if existing:
                             existing_gss, existing_mask = existing
-                            old_gss_len = len(existing_gss)
-                            
+                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss], 1)
                             new_mask = existing_mask.union(child_llm_mask)
-                            existing_gss.update(parents_set)
-
-                            # OPTIMIZATION: Only re-queue if state has changed.
-                            if len(existing_gss) == old_gss_len and new_mask == existing_mask:
+                            if merged_gss.ptr() == existing_gss.ptr() and new_mask == existing_mask:
                                 continue
-                            
-                            values[dest_idx] = (existing_gss, new_mask)
+                            values[dest_idx] = (merged_gss, new_mask)
                         else:
-                            values[dest_idx] = (parents_set, child_llm_mask)
+                            values[dest_idx] = (child_gss, child_llm_mask)
 
                         depth = self.max_depth.get(dest_idx, 0)
                         if not todo[depth]:

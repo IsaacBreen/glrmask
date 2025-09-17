@@ -38,7 +38,7 @@ class Model(GraphProvider):
             self.max_depth[idx] = int(node.get("max_depth", 0))
 
             # Pre-compute is_end
-            self.is_end_node[idx] = bool((node.get("value") or {}).get("end", False))
+            self.is_end_node[idx] = bool((node.get("value") or {}).get("clean_end", False))
 
             # Process and store children
             ch = node.get("children") or []
@@ -124,7 +124,7 @@ class Model(GraphProvider):
         num_nodes = len(self.node_id_to_idx)
 
         # Pre-allocate arrays for node state
-        node_gss_lists = [None] * num_nodes
+        node_gss_nodes = [None] * num_nodes
         node_masks = [None] * num_nodes
         node_active = [False] * num_nodes
         node_stopped = [False] * num_nodes
@@ -142,11 +142,11 @@ class Model(GraphProvider):
             gss_clone = gss.clone_node()
             new_mask = gss_clone.allowed_llm_tokens()
 
-            if node_gss_lists[root_idx] is None:
-                node_gss_lists[root_idx] = [gss_clone]
+            if node_gss_nodes[root_idx] is None:
+                node_gss_nodes[root_idx] = gss_clone
                 node_masks[root_idx] = new_mask
             else:
-                node_gss_lists[root_idx].append(gss_clone)
+                node_gss_nodes[root_idx] = ffi.gss_merge_many_with_depth([node_gss_nodes[root_idx], gss_clone], 1)
                 node_masks[root_idx] = node_masks[root_idx].union(new_mask)
 
             node_active[root_idx] = True
@@ -169,24 +169,24 @@ class Model(GraphProvider):
                 if not node_active[idx] or node_stopped[idx]:
                     continue
 
-                gss_list = node_gss_lists[idx]
+                gss_node = node_gss_nodes[idx]
                 llm_mask = node_masks[idx]
 
-                if gss_list is None:
+                if gss_node is None:
                     continue
 
                 # Clear this node's state after processing
                 node_active[idx] = False
-                node_gss_lists[idx] = None
+                node_gss_nodes[idx] = None
                 node_masks[idx] = None
 
                 # Check if end node
                 if self.is_end_node[idx]:
-                    final_mask = final_mask.union(llm_mask)
+                    gss_active_tokens = gss_node.allowed_llm_tokens()
+                    tokens_to_add = llm_mask.intersection(gss_active_tokens)
+                    final_mask = final_mask.union(tokens_to_add)
 
-                # Filter GSS nodes
-                ok_gss = [g for g in gss_list if g]
-                if not ok_gss:
+                if not gss_node.is_alive():
                     node_stopped[idx] = True
                     continue
 
@@ -197,9 +197,7 @@ class Model(GraphProvider):
 
                 for (pop, llm_bv), dests in children:
                     # Batch collect all popn results
-                    all_peeks = []
-                    for gss_node in ok_gss:
-                        all_peeks.extend(gss_node.popn_fast(pop))
+                    all_peeks = gss_node.popn_fast(pop)
 
                     if not all_peeks:
                         continue
@@ -224,16 +222,17 @@ class Model(GraphProvider):
                         if not llm_bv.is_empty():
                             child_llm_mask = child_llm_mask.intersection(llm_bv)
 
+                        child_gss = ffi.gss_merge_many_with_depth(matched_parents, 1)
+                        if not child_gss.is_alive():
+                            continue
+
                         # Update destination node
-                        if node_gss_lists[dest_idx] is None:
-                            node_gss_lists[dest_idx] = matched_parents[:]
+                        if node_gss_nodes[dest_idx] is None:
+                            node_gss_nodes[dest_idx] = child_gss
                             node_masks[dest_idx] = child_llm_mask
                         else:
                             # Merge with existing
-                            existing_set = set(id(g) for g in node_gss_lists[dest_idx])
-                            new_parents = [p for p in matched_parents if id(p) not in existing_set]
-                            if new_parents:
-                                node_gss_lists[dest_idx].extend(new_parents)
+                            node_gss_nodes[dest_idx] = ffi.gss_merge_many_with_depth([node_gss_nodes[dest_idx], child_gss], 1)
                             node_masks[dest_idx] = node_masks[dest_idx].union(child_llm_mask)
 
                         node_active[dest_idx] = True
