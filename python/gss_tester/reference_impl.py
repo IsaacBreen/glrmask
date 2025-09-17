@@ -87,3 +87,6 @@ class ReferenceGSS(GSS[T, Acc]):
         # Stacks (lists) are converted to tuples to be sortable keys.
         sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
         return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+
+    def __hash__(self):
+        return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))

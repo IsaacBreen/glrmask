@@ -243,3 +243,6 @@ class FastGSS(GSS[T, Acc]):
         result = frozenset(paths)
         cache[node.id] = result
         return result
+
+    def __hash__(self):
+        return hash((self._heads, frozenset((node, frozenset(edges)) for node, edges in self._child_to_parents.items())))
