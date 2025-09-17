@@ -37,9 +37,13 @@ class Model(GraphProvider):
         if self.constraint_state:
             self.constraint_state.commit(token_id)
 
+
     def get_mask(self) -> RangeSet:
         print("\n--- get_mask START (deepseek-1.py) ---")
-        print("deepseek-1.py get_mask is not implemented.")
         print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+        print("deepseek-1.py get_mask is not implemented.")
         # Return an empty mask as a fallback
         return RangeSet.empty()
+

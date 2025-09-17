@@ -20,7 +20,14 @@ class Model:
 
     def get_mask(self) -> RangeSet:
         """Calls the underlying Rust implementation for get_mask."""
+        print("\n--- get_mask START (rust_model.py) ---")
+        print(self.constraint_state)
+        state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print(f"Filtered state_to_gss: { {k: v.ptr() for k, v in state_to_gss.items()} }")
+
         mask_bv = self.constraint_state.get_mask_bv()
+
+        print("\n--- get_mask END (rust_model.py) ---")
         return RangeSet.from_ranges(mask_bv.to_ranges())
 
     def commit(self, token_id: int):
