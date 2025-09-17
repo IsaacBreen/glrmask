@@ -238,53 +238,18 @@ class Model(GraphProvider):
 
     def commit(self, token_id: int):
         self.constraint_state.commit(token_id)
-        token_bytes = self.id_to_token.get(token_id)
-        if not token_bytes:
-            self.state = {}
-            return
-
-        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-
-        q = collections.deque()
-        for tokenizer_sid, gss in self.state.items():
-            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
-
-        visited_q_items = set()
-
-        while q:
-            offset, tokenizer_sid, gss = q.popleft()
-
-            # GSS is not hashable, use its serializable form for visited check
-            q_item = (offset, tokenizer_sid, gss)
-            if q_item in visited_q_items:
-                continue
-            visited_q_items.add(q_item)
-
-            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-            for terminal_id, width in matches:
-                processed_gss = self._process_token(gss, terminal_id)
-                if any(h is not processed_gss._root for h in processed_gss._heads):
-                    new_offset = offset + width
-                    next_tokenizer_sid = self.tokenizer_initial_state
-                    if new_offset == len(token_bytes):
-                        new_states[next_tokenizer_sid].append(processed_gss)
-                    else:
-                        q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-            if end_state is not None:
-                new_states[end_state].append(gss)
-
+        # The Python state is now stale. Re-sync it from the Rust state.
         self.state = {
-            sid: FastGSS.merge(gss_list, merge_acc)
-            for sid, gss_list in new_states.items()
-            if gss_list
+            sid: convert_rust_gss_to_python_gss(rust_gss)
+            for sid, rust_gss in self.constraint_state.get_state_map().items()
         }
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
         heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
         for head in gss._heads:
-            for state_id in gss.peek_from_head(head):
+            peeked = gss.peek_from_head(head)
+            if peeked:
+                state_id = next(iter(peeked))
                 heads_by_state[state_id].append(head)
 
         shifted_gsses = []
@@ -335,7 +300,7 @@ class Model(GraphProvider):
         print("GSS at start of get_mask:")
         state_map = self.state
 
-        state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+        # state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
