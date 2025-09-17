@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 const PROFILER_CORRECTION: Duration = Duration::from_nanos(0);
 
 /// Set this to `false` to completely disable profiling at runtime.
-pub const PROFILING_ENABLED: bool = true;
+pub const PROFILING_ENABLED: bool = false;
 
 /// Controls detailed GSS logging. If false, `log_gss` and `print_gss_forest` are disabled.
 pub const GSS_LOGGING_ENABLED: bool = false;
