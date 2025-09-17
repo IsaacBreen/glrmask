@@ -103,6 +103,7 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         state_to_gss = self.constraint_state.filtered_state_gss_map()
+        print("state_to_gss:", state_to_gss)
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
