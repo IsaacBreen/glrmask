@@ -259,28 +259,14 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                gss_after_step = self._process_token(gss, terminal_id)
-                if any(h is not gss_after_step._root for h in gss_after_step._heads):
-                    # After a grammar token is consumed, disallow it from being matched again immediately
-                    # if the tokenizer could produce it from its new state.
-                    disallowed_terminals = ffi.HybridL2Bitset()
-                    if end_state is not None:
-                        terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_state)
-                        if terminal_id in terminals_accessible:
-                            disallowed_bv = ffi.Bitset.from_indices([terminal_id])
-                            disallowed_terminals.insert_l2_bitset(end_state, disallowed_bv)
-                    
-                    def disallow_func(acc: PyAcc) -> PyAcc:
-                        return PyAcc(terminals_union=acc.terminals_union.__sub__(disallowed_terminals))
-                    
-                    final_gss = gss_after_step.apply_to_all(disallow_func)
-
+                processed_gss = self._process_token(gss, terminal_id)
+                if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        new_states[next_tokenizer_sid].append(final_gss)
+                        new_states[next_tokenizer_sid].append(processed_gss)
                     else:
-                        q.append((new_offset, next_tokenizer_sid, final_gss))
+                        q.append((new_offset, next_tokenizer_sid, processed_gss))
 
             if end_state is not None:
                 new_states[end_state].append(gss)
