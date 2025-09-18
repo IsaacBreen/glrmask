@@ -1,11 +1,147 @@
 local_system:
   attached_files:
+    - python/gss_tester/__init__.py
+    - python/gss_tester/analyzer.py
     - python/gss_tester/interface.py
+    - python/gss_tester/leveled_impl.py
     - python/gss_tester/reference_impl.py
-    - python/gss_tester/leveled_acc_impl.py
+    - python/gss_tester/runner.py
+    - python/gss_tester/test_spec.py
   conversation_file:
   compile_command:
   initial_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
     python/gss_tester/interface.py: |-
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
@@ -113,8 +249,9 @@ local_system:
           def __hash__(self):
               """Defines hash based on the canonical JSON representation."""
               pass
+    python/gss_tester/leveled_impl.py: ''
     python/gss_tester/reference_impl.py: |
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Optional
+      from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
       import json
 
@@ -124,751 +261,476 @@ local_system:
       class ReferenceGSS(GSS[T, Acc]):
           """
           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Its behavior is the gold standard for the consistency tests.
-          Internally, each active stack is represented as a tuple of values (the stack) paired with an
-          accumulator of generic type Acc.
+          Each stack is represented as a pair: (list_of_values, accumulator).
 
-          Notes:
-          - All operations are purely functional and return a new GSS state; the current instance is not mutated.
-          - Duplicate stacks (identical sequences of T) are allowed unless explicitly merged via `merge`.
-          - `to_json_serializable` returns a stable, canonical representation suitable for equality checks.
+          Notes on semantics (aligned with GSS interface):
+          - from_stacks: constructs a new GSS from explicit stacks.
+          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
+          - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
+                   Stacks that are already empty are dropped by pop().
+          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
+          - apply(func): transforms each accumulator independently; returns a new GSS.
+          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
+          - peek(): returns the set of top values across all stacks (ignores empty stacks).
+          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
+                                    if there are no active stacks.
+          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
+                                         identical stacks using `merge_func`.
+          - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
           """
 
-          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Optional[Acc]):
-              # Store stacks as immutable tuples for stable hashing/keys; copy input to avoid aliasing.
-              processed: List[Tuple[Tuple[T, ...], Acc]] = []
-              computed_root_acc: Optional[Acc] = root_acc
-              for st, acc in stacks:
-                  st_tuple: Tuple[T, ...] = tuple(st)
-                  processed.append((st_tuple, acc))
-                  if computed_root_acc is None and len(st_tuple) == 0:
-                      computed_root_acc = acc
-              self._stacks: List[Tuple[Tuple[T, ...], Acc]] = processed
-              self._root_acc: Optional[Acc] = computed_root_acc
+          def __init__(self, stacks: List[Tuple[List[T], Acc]]):
+              # Store a private copy to prevent aliasing
+              self._stacks: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in stacks]
 
           @classmethod
           def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # Derive a root_acc if any empty stack is present; otherwise None.
-              root_acc: Optional[Acc] = None
-              for st, acc in stacks:
-                  if len(st) == 0:
-                      root_acc = acc
-                      break
-              return cls(stacks, root_acc)
+              # Construct from a shallow copy of lists (to avoid external mutation)
+              return cls([(list(vals), acc) for vals, acc in stacks])
 
           def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Pushes a value onto all active stack heads, returning a new GSS state.
-              Accumulators remain unchanged.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack, value], acc) for (stack, acc) in self._stacks]
-              # root_acc persists, but recalculation is harmless.
-              return ReferenceGSS(new_stacks, self._root_acc)
+              # Push `value` onto all stacks (copy each list to avoid mutating original)
+              new_stacks: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  new_vals = list(vals)
+                  new_vals.append(value)
+                  new_stacks.append((new_vals, acc))
+              return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks. Empty stacks are ignored for popping.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack[:-1]], acc) for (stack, acc) in self._stacks if len(stack) > 0]
-              # Recalculate root_acc if an empty stack appears in the result.
-              new_root: Optional[Acc] = None
-              for st, acc in new_stacks:
-                  if len(st) == 0:
-                      new_root = acc
-                      break
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Pop from all stacks that are non-empty; drop empty stacks
+              popped: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals:
+                      new_vals = list(vals[:-1])
+                      popped.append((new_vals, acc))
+              return ReferenceGSS(popped)
 
           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              Returns a new GSS state containing only these stacks.
-              """
-              filtered: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks if len(stack) > 0 and stack[-1] == value]
-              # After isolation, empty stacks do not exist; keep prior root_acc.
-              return ReferenceGSS(filtered, self._root_acc)
+              # Keep only stacks whose top equals `value`
+              filtered: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals and vals[-1] == value:
+                      filtered.append((list(vals), acc))
+              return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Applies a function to each accumulator, returning a new GSS state.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
-                  new_acc = func(acc)
-                  if new_root is None and len(stack) == 0:
-                      new_root = new_acc
-                  new_stacks.append(([*stack], new_acc))
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Apply func to each accumulator independently
+              transformed: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  transformed.append((list(vals), func(acc)))
+              return ReferenceGSS(transformed)
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
+              # Keep only stacks where predicate(acc) is True
               kept: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
+              for vals, acc in self._stacks:
                   if predicate(acc):
-                      if new_root is None and len(stack) == 0:
-                          new_root = acc
-                      kept.append(([*stack], acc))
-              return ReferenceGSS(kept, new_root if new_root is not None else self._root_acc)
+                      kept.append((list(vals), acc))
+              return ReferenceGSS(kept)
 
           def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return {stack[-1] for (stack, _acc) in self._stacks if len(stack) > 0}
+              # Return all top values across non-empty stacks
+              tops: Set[T] = set()
+              for vals, _ in self._stacks:
+                  if vals:
+                      tops.add(vals[-1])
+              return tops
 
           def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: The caller should ensure `merge_func` is associative/commutative if deterministic results
-              are required across implementations, as order of reduction is unspecified.
-              """
+              # Reduce all accumulators into a single Acc (or None if no stacks)
               if not self._stacks:
                   return None
-              it = iter(self._stacks)
-              _first_stack, first_acc = next(it)
-              result = first_acc
-              for _stack, acc in it:
-                  result = merge_func(result, acc)
-              return result
+              accs = [acc for _, acc in self._stacks]
+              return reduce(merge_func, accs)
 
           @staticmethod
-          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
+          def merge(
+              gss_list: Iterable['ReferenceGSS[T, Acc]'],
+              merge_func: Callable[[Acc, Acc], Acc]
+          ) -> 'ReferenceGSS[T, Acc]':
+              # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
+              merged: Dict[Tuple[T, ...], Acc] = {}
               for gss in gss_list:
-                  for stack, acc in gss._stacks:
-                      if stack in acc_by_stack:
-                          acc_by_stack[stack] = merge_func(acc_by_stack[stack], acc)
+                  for vals, acc in gss._stacks:
+                      key = tuple(vals)
+                      if key in merged:
+                          merged[key] = merge_func(merged[key], acc)
                       else:
-                          acc_by_stack[stack] = acc
-
-              # Build the merged list; derive a root_acc if an empty stack is present.
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*stack], acc) for stack, acc in acc_by_stack.items()]
-              root_acc: Optional[Acc] = acc_by_stack.get(()) if () in acc_by_stack else None
-              return ReferenceGSS(merged_stacks, root_acc)
+                          merged[key] = acc
+              result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+              return ReferenceGSS(result_stacks)
 
           def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison.
-              Representation: a list of [stack_as_list, acc] pairs, sorted deterministically.
-              """
-              entries: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks]
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
 
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  # Use JSON strings as stable, type-agnostic ordering keys.
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
+              def _encode_for_sort(obj: Any) -> str:
+                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      # Fallback to repr if something goes wrong
+                      return repr(obj)
 
-              entries_sorted = sorted(entries, key=sort_key)
-              # Output as list of pairs: [stack, acc]
-              return [[stack, acc] for stack, acc in entries_sorted]
+              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              # Return a plain JSON-serializable structure
+              return [[vals, acc] for vals, acc in items]
 
           def __hash__(self):
-              """
-              Hash based on the canonical JSON representation.
-              """
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
-
-          def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
-              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
-    python/gss_tester/leveled_acc_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Dict, Generic, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, TypeVar, Callable, Any
-      import json
-
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------------------------------------------------------
-      # Internal node structures
-      # ------------------------------------------------------------------------------
-
-      @dataclass(frozen=True, slots=True)
-      class Shape(Generic[T]):
-          """
-          Acc-free shape trie for stacks (top-first orientation).
-          - terms: number of stacks that end exactly at this node (multiplicity count).
-          - children: map from top-of-stack symbol to deeper shapes.
-          """
-          terms: int
-          children: Dict[T, 'Shape[T]']
-
-          def is_empty(self) -> bool:
-              return self.terms == 0 and not self.children
-
-
-      class BNode(Generic[T, Acc]):
-          """Union type base class for BranchNode and UniformNode."""
-          __slots__ = ()
-
-          def is_empty(self) -> bool:
-              raise NotImplementedError
-
-
-      @dataclass(frozen=True, slots=True)
-      class BranchNode(BNode[T, Acc]):
-          """
-          Branch node: No uniform accumulator at this level.
-          - terms: Acc values for stacks that end exactly at this node (duplicates allowed).
-          - children: map from top-of-stack symbol to BNode.
-          This node may contain children that are either BranchNode or UniformNode.
-          """
-          terms: Tuple[Acc, ...]
-          children: Dict[T, BNode[T, Acc]]
-
-          def is_empty(self) -> bool:
-              return len(self.terms) == 0 and not self.children
-
-
-      @dataclass(frozen=True, slots=True)
-      class UniformNode(BNode[T, Acc]):
-          """
-          Uniform node: All stacks in this subtree share the same accumulator (acc).
-          - acc: shared accumulator for the entire subtree.
-          - shape: an acc-free shape trie that encodes where stacks end (via counts) and how they continue.
-          Invariants:
-            - Under a UniformNode, there are no child Acc values stored; only counts exist within Shape.
-            - If a UniformNode has a parent UniformNode, the parent must absorb it (we never create nested Uniforms).
-          """
-          acc: Acc
-          shape: Shape[T]
-
-          def is_empty(self) -> bool:
-              return self.shape.is_empty()
-
-
-      # ------------------------------------------------------------------------------
-      # Helpers for node construction and canonicalization
-      # ------------------------------------------------------------------------------
-
-      def _shape_normalize(s: Shape[T]) -> Shape[T]:
-          """Drop empty children for a clean shape."""
-          if not s.children:
-              return s
-          pruned: Dict[T, Shape[T]] = {}
-          for k, ch in s.children.items():
-              if not ch.is_empty():
-                  pruned[k] = ch
-          if len(pruned) is not len(s.children):
-              return Shape(s.terms, pruned)
-          return s
-
-
-      def _mk_uniform(acc: Acc, shape: Shape[T]) -> BNode[T, Acc]:
-          """Create a Uniform node if shape not empty; otherwise return empty Branch."""
-          shape = _shape_normalize(shape)
-          if shape.is_empty():
-              return BranchNode((), {})
-          return UniformNode(acc, shape)
-
-
-      def _unsuck(u: UniformNode[T, Acc]) -> BranchNode[T, Acc]:
-          """
-          Expand a Uniform node into a Branch node by distributing the uniform acc to:
-            - 'terms' as repeated acc values,
-            - each child shape becomes a Uniform child with the same acc.
-          """
-          terms = (u.acc,) * u.shape.terms
-          children: Dict[T, BNode[T, Acc]] = {k: UniformNode(u.acc, ch) for k, ch in u.shape.children.items()}
-          return BranchNode(terms, children)
-
-
-      def _canonicalize_branch(terms: Iterable[Acc], children: Dict[T, BNode[T, Acc]]) -> BNode[T, Acc]:
-          """
-          Canonicalize a Branch node by:
-            - Dropping empty children,
-            - Sucking up to a Uniform node if:
-                * every child is Uniform with the same acc, and
-                * every acc in `terms` equals that acc.
-            - Otherwise, return a clean Branch.
-          """
-          terms_tuple: Tuple[Acc, ...] = tuple(terms)
-          if children:
-              # Drop empty children first
-              pruned_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in children.items():
-                  if isinstance(ch, UniformNode):
-                      if not ch.shape.is_empty():
-                          pruned_children[k] = ch
-                  else:
-                      # Branch child
-                      if not ch.is_empty():
-                          pruned_children[k] = ch
-
-              if pruned_children:
-                  # Check for suck-up possibility
-                  first_child = next(iter(pruned_children.values()))
-                  if isinstance(first_child, UniformNode):
-                      acc0 = first_child.acc
-                      all_children_uniform = True
-                      all_equal_acc = True
-                      for ch in pruned_children.values():
-                          if not isinstance(ch, UniformNode):
-                              all_children_uniform = False
-                              break
-                          if ch.acc != acc0:
-                              all_equal_acc = False
-                              break
-                      if all_children_uniform and all_equal_acc:
-                          # Terms all equal to acc0?
-                          if len(terms_tuple) == 0 or all(a == acc0 for a in terms_tuple):
-                              # Create a uniform node with shape:
-                              #   shape.terms = len(terms_tuple)
-                              #   shape.children = {k: child.shape}
-                              shape_children: Dict[T, Shape[T]] = {k: ch.shape for k, ch in pruned_children.items()}
-                              shape = Shape(terms=len(terms_tuple), children=shape_children)
-                              return _mk_uniform(acc0, shape)
-
-                  # Not suckable; return cleaned branch
-                  return BranchNode(terms_tuple, pruned_children)
-
-          # No children; possibly only terms remain.
-          # If terms exist but children don't, they are not suckable unless homogenous and some structure exists.
-          # Keep them as a Branch.
-          return BranchNode(terms_tuple, {})
-
-
-      def _shape_union(a: Shape[T], b: Shape[T]) -> Shape[T]:
-          """Union of two shapes: sum of term counts and recursive union of children."""
-          if a is b:
-              return a
-          terms = a.terms + b.terms
-          if not a.children and not b.children:
-              return Shape(terms, {})
-          keys = set(a.children.keys()) | set(b.children.keys())
-          merged: Dict[T, Shape[T]] = {}
-          for k in keys:
-              ca = a.children.get(k)
-              cb = b.children.get(k)
-              if ca is None:
-                  merged[k] = cb  # type: ignore[assignment]
-              elif cb is None:
-                  merged[k] = ca
-              else:
-                  merged[k] = _shape_union(ca, cb)
-          return _shape_normalize(Shape(terms, merged))
-
-
-      def _b_union(x: Optional[BNode[T, Acc]], y: Optional[BNode[T, Acc]]) -> Optional[BNode[T, Acc]]:
-          """Union of two BNode subtrees."""
-          if x is None:
-              return y
-          if y is None:
-              return x
-          if isinstance(x, BranchNode) and isinstance(y, BranchNode):
-              # Concatenate terms, merge children by key
-              terms = x.terms + y.terms
-              keys = set(x.children.keys()) | set(y.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cx = x.children.get(k)
-                  cy = y.children.get(k)
-                  if cx is None:
-                      c = cy
-                  elif cy is None:
-                      c = cx
-                  else:
-                      c = _b_union(cx, cy)
-                  if c is not None and not c.is_empty():
-                      children[k] = c
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, UniformNode) and isinstance(y, UniformNode):
-              if x.acc == y.acc:
-                  return _mk_uniform(x.acc, _shape_union(x.shape, y.shape))
-              # Different accs at same level -> distribute both
-              return _b_union(_unsuck(x), _unsuck(y))
-
-          if isinstance(x, UniformNode) and isinstance(y, BranchNode):
-              # Distribute x into y (efficient version of union(unsuck(x), y))
-              terms = y.terms + (x.acc,) * x.shape.terms
-              keys = set(y.children.keys()) | set(x.shape.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cy = y.children.get(k)
-                  sx = x.shape.children.get(k)
-                  if sx is None:
-                      children[k] = cy  # type: ignore[assignment]
-                  elif cy is None:
-                      children[k] = _mk_uniform(x.acc, sx)
-                  else:
-                      children[k] = _b_union(_mk_uniform(x.acc, sx), cy)  # type: ignore[assignment]
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, BranchNode) and isinstance(y, UniformNode):
-              return _b_union(y, x)
-
-          raise AssertionError("Unreachable union case")
-
-
-      def _b_pop(node: BNode[T, Acc]) -> BNode[T, Acc]:
-          """
-          Pop: remove the first/top element from every non-empty stack.
-          - Branch: union of its children (ignore terms since empty stacks can't be popped).
-          - Uniform: union of a Uniform node built from each shape child.
-          """
-          if isinstance(node, BranchNode):
-              res: Optional[BNode[T, Acc]] = None
-              for child in node.children.values():
-                  res = _b_union(res, child)
-              return res if res is not None else BranchNode((), {})
-
-          # Uniform
-          res: Optional[BNode[T, Acc]] = None
-          for k, subshape in node.shape.children.items():
-              res = _b_union(res, _mk_uniform(node.acc, subshape))
-          return res if res is not None else BranchNode((), {})
-
-
-      def _b_isolate(node: BNode[T, Acc], value: T) -> BNode[T, Acc]:
-          """
-          Isolate: keep only stacks whose top equals 'value'.
-          - Branch: return the child under 'value' (terms ignored).
-          - Uniform: return Uniform(acc, shape_child[value]) if exists.
-          """
-          if isinstance(node, BranchNode):
-              return node.children.get(value, BranchNode((), {}))
-          # Uniform
-          ch = node.shape.children.get(value)
-          if ch is None:
-              return BranchNode((), {})
-          return _mk_uniform(node.acc, ch)
-
-
-      def _shape_insert(s: Shape[T], rev_path: Sequence[T]) -> Shape[T]:
-          """Insert the reversed path (top-first) into an acc-free shape, increasing terminal counts."""
-          if not rev_path:
-              return Shape(s.terms + 1, s.children)
-          head = rev_path[0]
-          tail = rev_path[1:]
-          child = s.children.get(head, Shape(0, {}))
-          new_child = _shape_insert(child, tail)
-          if new_child is child:
-              return s
-          new_children = dict(s.children)
-          new_children[head] = new_child
-          return _shape_normalize(Shape(s.terms, new_children))
-
-
-      def _b_insert(node: BNode[T, Acc], rev_path: Sequence[T], acc: Acc) -> BNode[T, Acc]:
-          """
-          Insert a stack (given as reversed path) with accumulator acc into the B-node.
-          Maintains invariants, unsucking uniform nodes if a conflict appears.
-          """
-          if not rev_path:
-              # End at this node: add a terminal here.
-              if isinstance(node, BranchNode):
-                  return _canonicalize_branch(node.terms + (acc,), node.children)
-              # Uniform
-              if node.acc == acc:
-                  return _mk_uniform(acc, Shape(node.shape.terms + 1, node.shape.children))
-              # Conflict: unsuck, then add term
-              br = _unsuck(node)
-              return _canonicalize_branch(br.terms + (acc,), br.children)
-
-          head = rev_path[0]
-          tail = rev_path[1:]
-
-          if isinstance(node, BranchNode):
-              child = node.children.get(head, BranchNode((), {}))
-              new_child = _b_insert(child, tail, acc)
-              if new_child is child:
-                  return node
-              new_children = dict(node.children)
-              if not new_child.is_empty():
-                  new_children[head] = new_child
-              else:
-                  new_children.pop(head, None)
-              return _canonicalize_branch(node.terms, new_children)
-
-          # Uniform
-          if node.acc == acc:
-              # We can stay uniform and update the shape
-              new_shape = _shape_insert(node.shape, rev_path)
-              if new_shape is node.shape:
-                  return node
-              return _mk_uniform(acc, new_shape)
-
-          # Conflict: unsuck uniform to branch, then insert
-          br = _unsuck(node)
-          return _b_insert(br, rev_path, acc)
-
-
-      def _b_apply(node: BNode[T, Acc], func: Callable[[Acc], Acc]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              new_terms = tuple(func(a) for a in node.terms)
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_children[k] = _b_apply(ch, func)
-              return _canonicalize_branch(new_terms, new_children)
-          # Uniform
-          return _mk_uniform(func(node.acc), node.shape)
-
-
-      def _b_prune(node: BNode[T, Acc], predicate: Callable[[Acc], bool]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              kept_terms = tuple(a for a in node.terms if predicate(a))
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_ch = _b_prune(ch, predicate)
-                  if not new_ch.is_empty():
-                      new_children[k] = new_ch
-              return _canonicalize_branch(kept_terms, new_children)
-          # Uniform
-          if predicate(node.acc):
-              return node
-          return BranchNode((), {})
-
-
-      def _b_peek(node: BNode[T, Acc]) -> Set[T]:
-          if isinstance(node, BranchNode):
-              return set(node.children.keys())
-          return set(node.shape.children.keys())
-
-
-      def _b_iter_entries(node: BNode[T, Acc], prefix_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-          """
-          Iterate all [stack_as_bottom_first, acc] pairs, including duplicates (by duplicating yields).
-          prefix_rev holds the partial stack as top-first; we reverse when emitting.
-          """
-          if isinstance(node, BranchNode):
-              # Terminals at this node
-              if node.terms:
-                  stack = list(reversed(prefix_rev))
-                  for acc in node.terms:
-                      yield (stack, acc)
-              # Children
-              for k, ch in node.children.items():
-                  prefix_rev.append(k)
-                  yield from _b_iter_entries(ch, prefix_rev)
-                  prefix_rev.pop()
-              return
-
-          # Uniform node: enumerate from shape with uniform acc
-          acc = node.acc
-
-          def _shape_iter(s: Shape[T], pfx_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-              if s.terms:
-                  stack = list(reversed(pfx_rev))
-                  for _ in range(s.terms):
-                      yield (stack, acc)
-              for kk, sub in s.children.items():
-                  pfx_rev.append(kk)
-                  yield from _shape_iter(sub, pfx_rev)
-                  pfx_rev.pop()
-
-          yield from _shape_iter(node.shape, prefix_rev)
-
-
-      def _b_count_total(node: BNode[T, Acc]) -> int:
-          """Count total stacks (including duplicates)."""
-          if isinstance(node, BranchNode):
-              total = len(node.terms)
-              for ch in node.children.values():
-                  total += _b_count_total(ch)
-              return total
-          # Uniform
-          def _shape_count(s: Shape[T]) -> int:
-              cnt = s.terms
-              for sub in s.children.values():
-                  cnt += _shape_count(sub)
-              return cnt
-          return _shape_count(node.shape)
-
-
-      def _b_is_single_empty(node: BNode[T, Acc]) -> bool:
-          """True iff the set contains exactly one stack and it is empty."""
-          if isinstance(node, BranchNode):
-              return len(node.terms) == 1 and not node.children
-          if isinstance(node, UniformNode):
-              return node.shape.terms == 1 and not node.shape.children
-          return False
-
-
-      # ------------------------------------------------------------------------------
-      # Implementation of the GSS interface
-      # ------------------------------------------------------------------------------
-
-      class LeveledGSS(GSS[T, Acc]):
-          """
-          High-performance leveled GSS implementation with strict "acc-at-one-level" invariants.
-
-          Invariants enforced:
-          - Accumulators (Acc) exist only at one level at a time:
-            * BranchNode: children may carry accs (via UniformNode) and/or terminal accs at terms.
-            * UniformNode: holds a single acc for the entire subtree; below it there are no Acc values, only shape counts.
-          - If at a BranchNode every child is a UniformNode with the same acc, and all terminal accs at that node
-            equal that same acc, we "suck up" the acc into a parent UniformNode and drop accs from the children.
-            As a result, if the children of a node have accs, there is at least one inequality between them.
-
-          Orientation:
-          - Stacks are represented top-first (i.e., the top of the stack is the first symbol in the path).
-            This makes push/isolate/pop efficient.
-
-          Notes:
-          - This implementation preserves multiplicity of identical stacks (duplicates) via terminal lists or counts,
-            so to_json output can reflect duplicates when they arise (e.g., after pop).
-          - reduce_acc enumerates all stacks (including duplicates); results match reference when the merge
-            function is order-independent (as requested).
-          """
-
-          __slots__ = ("_root",)
-
-          def __init__(self, root: BNode[T, Acc]):
-              self._root: BNode[T, Acc] = root
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              """
-              Build a GSS from explicit stacks. If the same stack appears multiple times with different Acc values,
-              they are stored as duplicates. If a conflict occurs at an already uniformized subtree, it is expanded
-              ("unsucked") automatically.
-              """
-              root: BNode[T, Acc] = BranchNode((), {})
-              for st, acc in stacks:
-                  rev = list(reversed(st))
-                  root = _b_insert(root, rev, acc)
-              return cls(root)
-
-          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Push a value onto all active stack heads, returning a new GSS state.
-              Implemented as: new_root = Branch({value: old_root}, terms=[]).
-              """
-              # Equivalent to pre-pending 'value' to every top-first path.
-              new_root = _canonicalize_branch((), {value: self._root})
-              return LeveledGSS(new_root)
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              """
-              Pop the top value from all non-empty stacks.
-              """
-              return LeveledGSS(_b_pop(self._root))
-
-          def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
-              # Exactly one stack and it is empty
-              return _b_is_single_empty(self._root)
-
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Keep only stacks that have `value` at the top.
-              """
-              return LeveledGSS(_b_isolate(self._root, value))
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Apply a function to each accumulator, returning a new GSS state.
-              """
-              return LeveledGSS(_b_apply(self._root, func))
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              """
-              Removes stacks for which predicate(acc) is False.
-              """
-              return LeveledGSS(_b_prune(self._root, predicate))
-
-          def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return _b_peek(self._root)
-
-          def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: We enumerate all (including duplicates) stacks and fold over the accs.
-              The caller should ensure merge_func is associative/commutative if deterministic results
-              are required across implementations (order of reduction is unspecified).
-              """
-              it = _b_iter_entries(self._root, [])
+              # Hash consistent with equality based on the canonical JSON representation.
               try:
-                  _st0, acc0 = next(it)
-              except StopIteration:
-                  return None
-              res = acc0
-              for _st, acc in it:
-                  res = merge_func(res, acc)
-              return res
-
-          @staticmethod
-          def merge(gss_list: Iterable['LeveledGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              # Accumulate by stack path (as tuple bottom-first) and merge using merge_func
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
-              for g in gss_list:
-                  for stack, acc in _b_iter_entries(g._root, []):
-                      key = tuple(stack)  # bottom-first
-                      if key in acc_by_stack:
-                          acc_by_stack[key] = merge_func(acc_by_stack[key], acc)
-                      else:
-                          acc_by_stack[key] = acc
-              # Rebuild via from_stacks
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*key], acc) for key, acc in acc_by_stack.items()]
-              return LeveledGSS.from_stacks(merged_stacks)
-
-          def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison:
-              list of [stack_as_list_bottom_first, acc], sorted deterministically:
-                - by stack length,
-                - then by JSON of stack,
-                - then by JSON of acc.
-              """
-              entries: List[Tuple[List[T], Acc]] = list(_b_iter_entries(self._root, []))
-
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
-
-              entries_sorted = sorted(entries, key=sort_key)
-              return [[stack, acc] for stack, acc in entries_sorted]
-
-          def __str__(self) -> str:
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
+                  canonical = self.to_json_serializable()
+                  # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
+                  s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
+                  return hash(s)
               except Exception:
-                  return super().__str__()
+                  # Fallback: hash the tuple of tuples if possible, else id-based hash
+                  try:
+                      tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
+                      return hash(tup)
+                  except Exception:
+                      return object.__hash__(self)
 
-          def __eq__(self, other):
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
+          def is_empty(self) -> bool:
+              # True iff there is exactly one active stack and that stack is empty.
+              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
 
-          def __hash__(self):
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
   prev_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
     python/gss_tester/interface.py: |-
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
@@ -976,8 +838,9 @@ local_system:
           def __hash__(self):
               """Defines hash based on the canonical JSON representation."""
               pass
+    python/gss_tester/leveled_impl.py: ''
     python/gss_tester/reference_impl.py: |
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Optional
+      from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
       import json
 
@@ -987,753 +850,346 @@ local_system:
       class ReferenceGSS(GSS[T, Acc]):
           """
           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Its behavior is the gold standard for the consistency tests.
-          Internally, each active stack is represented as a tuple of values (the stack) paired with an
-          accumulator of generic type Acc.
+          Each stack is represented as a pair: (list_of_values, accumulator).
 
-          Notes:
-          - All operations are purely functional and return a new GSS state; the current instance is not mutated.
-          - Duplicate stacks (identical sequences of T) are allowed unless explicitly merged via `merge`.
-          - `to_json_serializable` returns a stable, canonical representation suitable for equality checks.
+          Notes on semantics (aligned with GSS interface):
+          - from_stacks: constructs a new GSS from explicit stacks.
+          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
+          - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
+                   Stacks that are already empty are dropped by pop().
+          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
+          - apply(func): transforms each accumulator independently; returns a new GSS.
+          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
+          - peek(): returns the set of top values across all stacks (ignores empty stacks).
+          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
+                                    if there are no active stacks.
+          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
+                                         identical stacks using `merge_func`.
+          - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
           """
 
-          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Optional[Acc]):
-              # Store stacks as immutable tuples for stable hashing/keys; copy input to avoid aliasing.
-              processed: List[Tuple[Tuple[T, ...], Acc]] = []
-              computed_root_acc: Optional[Acc] = root_acc
-              for st, acc in stacks:
-                  st_tuple: Tuple[T, ...] = tuple(st)
-                  processed.append((st_tuple, acc))
-                  if computed_root_acc is None and len(st_tuple) == 0:
-                      computed_root_acc = acc
-              self._stacks: List[Tuple[Tuple[T, ...], Acc]] = processed
-              self._root_acc: Optional[Acc] = computed_root_acc
+          def __init__(self, stacks: List[Tuple[List[T], Acc]]):
+              # Store a private copy to prevent aliasing
+              self._stacks: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in stacks]
 
           @classmethod
           def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # Derive a root_acc if any empty stack is present; otherwise None.
-              root_acc: Optional[Acc] = None
-              for st, acc in stacks:
-                  if len(st) == 0:
-                      root_acc = acc
-                      break
-              return cls(stacks, root_acc)
+              # Construct from a shallow copy of lists (to avoid external mutation)
+              return cls([(list(vals), acc) for vals, acc in stacks])
 
           def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Pushes a value onto all active stack heads, returning a new GSS state.
-              Accumulators remain unchanged.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack, value], acc) for (stack, acc) in self._stacks]
-              # root_acc persists, but recalculation is harmless.
-              return ReferenceGSS(new_stacks, self._root_acc)
+              # Push `value` onto all stacks (copy each list to avoid mutating original)
+              new_stacks: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  new_vals = list(vals)
+                  new_vals.append(value)
+                  new_stacks.append((new_vals, acc))
+              return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks. Empty stacks are ignored for popping.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack[:-1]], acc) for (stack, acc) in self._stacks if len(stack) > 0]
-              # Recalculate root_acc if an empty stack appears in the result.
-              new_root: Optional[Acc] = None
-              for st, acc in new_stacks:
-                  if len(st) == 0:
-                      new_root = acc
-                      break
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Pop from all stacks that are non-empty; drop empty stacks
+              popped: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals:
+                      new_vals = list(vals[:-1])
+                      popped.append((new_vals, acc))
+              return ReferenceGSS(popped)
 
           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              Returns a new GSS state containing only these stacks.
-              """
-              filtered: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks if len(stack) > 0 and stack[-1] == value]
-              # After isolation, empty stacks do not exist; keep prior root_acc.
-              return ReferenceGSS(filtered, self._root_acc)
+              # Keep only stacks whose top equals `value`
+              filtered: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals and vals[-1] == value:
+                      filtered.append((list(vals), acc))
+              return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Applies a function to each accumulator, returning a new GSS state.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
-                  new_acc = func(acc)
-                  if new_root is None and len(stack) == 0:
-                      new_root = new_acc
-                  new_stacks.append(([*stack], new_acc))
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Apply func to each accumulator independently
+              transformed: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  transformed.append((list(vals), func(acc)))
+              return ReferenceGSS(transformed)
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
+              # Keep only stacks where predicate(acc) is True
               kept: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
+              for vals, acc in self._stacks:
                   if predicate(acc):
-                      if new_root is None and len(stack) == 0:
-                          new_root = acc
-                      kept.append(([*stack], acc))
-              return ReferenceGSS(kept, new_root if new_root is not None else self._root_acc)
+                      kept.append((list(vals), acc))
+              return ReferenceGSS(kept)
 
           def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return {stack[-1] for (stack, _acc) in self._stacks if len(stack) > 0}
+              # Return all top values across non-empty stacks
+              tops: Set[T] = set()
+              for vals, _ in self._stacks:
+                  if vals:
+                      tops.add(vals[-1])
+              return tops
 
           def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: The caller should ensure `merge_func` is associative/commutative if deterministic results
-              are required across implementations, as order of reduction is unspecified.
-              """
+              # Reduce all accumulators into a single Acc (or None if no stacks)
               if not self._stacks:
                   return None
-              it = iter(self._stacks)
-              _first_stack, first_acc = next(it)
-              result = first_acc
-              for _stack, acc in it:
-                  result = merge_func(result, acc)
-              return result
+              accs = [acc for _, acc in self._stacks]
+              return reduce(merge_func, accs)
 
           @staticmethod
-          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
+          def merge(
+              gss_list: Iterable['ReferenceGSS[T, Acc]'],
+              merge_func: Callable[[Acc, Acc], Acc]
+          ) -> 'ReferenceGSS[T, Acc]':
+              # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
+              merged: Dict[Tuple[T, ...], Acc] = {}
               for gss in gss_list:
-                  for stack, acc in gss._stacks:
-                      if stack in acc_by_stack:
-                          acc_by_stack[stack] = merge_func(acc_by_stack[stack], acc)
+                  for vals, acc in gss._stacks:
+                      key = tuple(vals)
+                      if key in merged:
+                          merged[key] = merge_func(merged[key], acc)
                       else:
-                          acc_by_stack[stack] = acc
-
-              # Build the merged list; derive a root_acc if an empty stack is present.
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*stack], acc) for stack, acc in acc_by_stack.items()]
-              root_acc: Optional[Acc] = acc_by_stack.get(()) if () in acc_by_stack else None
-              return ReferenceGSS(merged_stacks, root_acc)
+                          merged[key] = acc
+              result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+              return ReferenceGSS(result_stacks)
 
           def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison.
-              Representation: a list of [stack_as_list, acc] pairs, sorted deterministically.
-              """
-              entries: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks]
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
 
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  # Use JSON strings as stable, type-agnostic ordering keys.
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
+              def _encode_for_sort(obj: Any) -> str:
+                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      # Fallback to repr if something goes wrong
+                      return repr(obj)
 
-              entries_sorted = sorted(entries, key=sort_key)
-              # Output as list of pairs: [stack, acc]
-              return [[stack, acc] for stack, acc in entries_sorted]
+              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              # Return a plain JSON-serializable structure
+              return [[vals, acc] for vals, acc in items]
 
           def __hash__(self):
-              """
-              Hash based on the canonical JSON representation.
-              """
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
-
-          def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
-              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
-    python/gss_tester/leveled_acc_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Dict, Generic, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, TypeVar, Callable, Any
-      import json
-
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------------------------------------------------------
-      # Internal node structures
-      # ------------------------------------------------------------------------------
-
-      @dataclass(frozen=True, slots=True)
-      class Shape(Generic[T]):
-          """
-          Acc-free shape trie for stacks (top-first orientation).
-          - terms: number of stacks that end exactly at this node (multiplicity count).
-          - children: map from top-of-stack symbol to deeper shapes.
-          """
-          terms: int
-          children: Dict[T, 'Shape[T]']
-
-          def is_empty(self) -> bool:
-              return self.terms == 0 and not self.children
-
-
-      class BNode(Generic[T, Acc]):
-          """Union type base class for BranchNode and UniformNode."""
-          __slots__ = ()
-
-          def is_empty(self) -> bool:
-              raise NotImplementedError
-
-
-      @dataclass(frozen=True, slots=True)
-      class BranchNode(BNode[T, Acc]):
-          """
-          Branch node: No uniform accumulator at this level.
-          - terms: Acc values for stacks that end exactly at this node (duplicates allowed).
-          - children: map from top-of-stack symbol to BNode.
-          This node may contain children that are either BranchNode or UniformNode.
-          """
-          terms: Tuple[Acc, ...]
-          children: Dict[T, BNode[T, Acc]]
-
-          def is_empty(self) -> bool:
-              return len(self.terms) == 0 and not self.children
-
-
-      @dataclass(frozen=True, slots=True)
-      class UniformNode(BNode[T, Acc]):
-          """
-          Uniform node: All stacks in this subtree share the same accumulator (acc).
-          - acc: shared accumulator for the entire subtree.
-          - shape: an acc-free shape trie that encodes where stacks end (via counts) and how they continue.
-          Invariants:
-            - Under a UniformNode, there are no child Acc values stored; only counts exist within Shape.
-            - If a UniformNode has a parent UniformNode, the parent must absorb it (we never create nested Uniforms).
-          """
-          acc: Acc
-          shape: Shape[T]
-
-          def is_empty(self) -> bool:
-              return self.shape.is_empty()
-
-
-      # ------------------------------------------------------------------------------
-      # Helpers for node construction and canonicalization
-      # ------------------------------------------------------------------------------
-
-      def _shape_normalize(s: Shape[T]) -> Shape[T]:
-          """Drop empty children for a clean shape."""
-          if not s.children:
-              return s
-          pruned: Dict[T, Shape[T]] = {}
-          for k, ch in s.children.items():
-              if not ch.is_empty():
-                  pruned[k] = ch
-          if len(pruned) is not len(s.children):
-              return Shape(s.terms, pruned)
-          return s
-
-
-      def _mk_uniform(acc: Acc, shape: Shape[T]) -> BNode[T, Acc]:
-          """Create a Uniform node if shape not empty; otherwise return empty Branch."""
-          shape = _shape_normalize(shape)
-          if shape.is_empty():
-              return BranchNode((), {})
-          return UniformNode(acc, shape)
-
-
-      def _unsuck(u: UniformNode[T, Acc]) -> BranchNode[T, Acc]:
-          """
-          Expand a Uniform node into a Branch node by distributing the uniform acc to:
-            - 'terms' as repeated acc values,
-            - each child shape becomes a Uniform child with the same acc.
-          """
-          terms = (u.acc,) * u.shape.terms
-          children: Dict[T, BNode[T, Acc]] = {k: UniformNode(u.acc, ch) for k, ch in u.shape.children.items()}
-          return BranchNode(terms, children)
-
-
-      def _canonicalize_branch(terms: Iterable[Acc], children: Dict[T, BNode[T, Acc]]) -> BNode[T, Acc]:
-          """
-          Canonicalize a Branch node by:
-            - Dropping empty children,
-            - Sucking up to a Uniform node if:
-                * every child is Uniform with the same acc, and
-                * every acc in `terms` equals that acc.
-            - Otherwise, return a clean Branch.
-          """
-          terms_tuple: Tuple[Acc, ...] = tuple(terms)
-          if children:
-              # Drop empty children first
-              pruned_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in children.items():
-                  if isinstance(ch, UniformNode):
-                      if not ch.shape.is_empty():
-                          pruned_children[k] = ch
-                  else:
-                      # Branch child
-                      if not ch.is_empty():
-                          pruned_children[k] = ch
-
-              if pruned_children:
-                  # Check for suck-up possibility
-                  first_child = next(iter(pruned_children.values()))
-                  if isinstance(first_child, UniformNode):
-                      acc0 = first_child.acc
-                      all_children_uniform = True
-                      all_equal_acc = True
-                      for ch in pruned_children.values():
-                          if not isinstance(ch, UniformNode):
-                              all_children_uniform = False
-                              break
-                          if ch.acc != acc0:
-                              all_equal_acc = False
-                              break
-                      if all_children_uniform and all_equal_acc:
-                          # Terms all equal to acc0?
-                          if len(terms_tuple) == 0 or all(a == acc0 for a in terms_tuple):
-                              # Create a uniform node with shape:
-                              #   shape.terms = len(terms_tuple)
-                              #   shape.children = {k: child.shape}
-                              shape_children: Dict[T, Shape[T]] = {k: ch.shape for k, ch in pruned_children.items()}
-                              shape = Shape(terms=len(terms_tuple), children=shape_children)
-                              return _mk_uniform(acc0, shape)
-
-                  # Not suckable; return cleaned branch
-                  return BranchNode(terms_tuple, pruned_children)
-
-          # No children; possibly only terms remain.
-          # If terms exist but children don't, they are not suckable unless homogenous and some structure exists.
-          # Keep them as a Branch.
-          return BranchNode(terms_tuple, {})
-
-
-      def _shape_union(a: Shape[T], b: Shape[T]) -> Shape[T]:
-          """Union of two shapes: sum of term counts and recursive union of children."""
-          if a is b:
-              return a
-          terms = a.terms + b.terms
-          if not a.children and not b.children:
-              return Shape(terms, {})
-          keys = set(a.children.keys()) | set(b.children.keys())
-          merged: Dict[T, Shape[T]] = {}
-          for k in keys:
-              ca = a.children.get(k)
-              cb = b.children.get(k)
-              if ca is None:
-                  merged[k] = cb  # type: ignore[assignment]
-              elif cb is None:
-                  merged[k] = ca
-              else:
-                  merged[k] = _shape_union(ca, cb)
-          return _shape_normalize(Shape(terms, merged))
-
-
-      def _b_union(x: Optional[BNode[T, Acc]], y: Optional[BNode[T, Acc]]) -> Optional[BNode[T, Acc]]:
-          """Union of two BNode subtrees."""
-          if x is None:
-              return y
-          if y is None:
-              return x
-          if isinstance(x, BranchNode) and isinstance(y, BranchNode):
-              # Concatenate terms, merge children by key
-              terms = x.terms + y.terms
-              keys = set(x.children.keys()) | set(y.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cx = x.children.get(k)
-                  cy = y.children.get(k)
-                  if cx is None:
-                      c = cy
-                  elif cy is None:
-                      c = cx
-                  else:
-                      c = _b_union(cx, cy)
-                  if c is not None and not c.is_empty():
-                      children[k] = c
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, UniformNode) and isinstance(y, UniformNode):
-              if x.acc == y.acc:
-                  return _mk_uniform(x.acc, _shape_union(x.shape, y.shape))
-              # Different accs at same level -> distribute both
-              return _b_union(_unsuck(x), _unsuck(y))
-
-          if isinstance(x, UniformNode) and isinstance(y, BranchNode):
-              # Distribute x into y (efficient version of union(unsuck(x), y))
-              terms = y.terms + (x.acc,) * x.shape.terms
-              keys = set(y.children.keys()) | set(x.shape.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cy = y.children.get(k)
-                  sx = x.shape.children.get(k)
-                  if sx is None:
-                      children[k] = cy  # type: ignore[assignment]
-                  elif cy is None:
-                      children[k] = _mk_uniform(x.acc, sx)
-                  else:
-                      children[k] = _b_union(_mk_uniform(x.acc, sx), cy)  # type: ignore[assignment]
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, BranchNode) and isinstance(y, UniformNode):
-              return _b_union(y, x)
-
-          raise AssertionError("Unreachable union case")
-
-
-      def _b_pop(node: BNode[T, Acc]) -> BNode[T, Acc]:
-          """
-          Pop: remove the first/top element from every non-empty stack.
-          - Branch: union of its children (ignore terms since empty stacks can't be popped).
-          - Uniform: union of a Uniform node built from each shape child.
-          """
-          if isinstance(node, BranchNode):
-              res: Optional[BNode[T, Acc]] = None
-              for child in node.children.values():
-                  res = _b_union(res, child)
-              return res if res is not None else BranchNode((), {})
-
-          # Uniform
-          res: Optional[BNode[T, Acc]] = None
-          for k, subshape in node.shape.children.items():
-              res = _b_union(res, _mk_uniform(node.acc, subshape))
-          return res if res is not None else BranchNode((), {})
-
-
-      def _b_isolate(node: BNode[T, Acc], value: T) -> BNode[T, Acc]:
-          """
-          Isolate: keep only stacks whose top equals 'value'.
-          - Branch: return the child under 'value' (terms ignored).
-          - Uniform: return Uniform(acc, shape_child[value]) if exists.
-          """
-          if isinstance(node, BranchNode):
-              return node.children.get(value, BranchNode((), {}))
-          # Uniform
-          ch = node.shape.children.get(value)
-          if ch is None:
-              return BranchNode((), {})
-          return _mk_uniform(node.acc, ch)
-
-
-      def _shape_insert(s: Shape[T], rev_path: Sequence[T]) -> Shape[T]:
-          """Insert the reversed path (top-first) into an acc-free shape, increasing terminal counts."""
-          if not rev_path:
-              return Shape(s.terms + 1, s.children)
-          head = rev_path[0]
-          tail = rev_path[1:]
-          child = s.children.get(head, Shape(0, {}))
-          new_child = _shape_insert(child, tail)
-          if new_child is child:
-              return s
-          new_children = dict(s.children)
-          new_children[head] = new_child
-          return _shape_normalize(Shape(s.terms, new_children))
-
-
-      def _b_insert(node: BNode[T, Acc], rev_path: Sequence[T], acc: Acc) -> BNode[T, Acc]:
-          """
-          Insert a stack (given as reversed path) with accumulator acc into the B-node.
-          Maintains invariants, unsucking uniform nodes if a conflict appears.
-          """
-          if not rev_path:
-              # End at this node: add a terminal here.
-              if isinstance(node, BranchNode):
-                  return _canonicalize_branch(node.terms + (acc,), node.children)
-              # Uniform
-              if node.acc == acc:
-                  return _mk_uniform(acc, Shape(node.shape.terms + 1, node.shape.children))
-              # Conflict: unsuck, then add term
-              br = _unsuck(node)
-              return _canonicalize_branch(br.terms + (acc,), br.children)
-
-          head = rev_path[0]
-          tail = rev_path[1:]
-
-          if isinstance(node, BranchNode):
-              child = node.children.get(head, BranchNode((), {}))
-              new_child = _b_insert(child, tail, acc)
-              if new_child is child:
-                  return node
-              new_children = dict(node.children)
-              if not new_child.is_empty():
-                  new_children[head] = new_child
-              else:
-                  new_children.pop(head, None)
-              return _canonicalize_branch(node.terms, new_children)
-
-          # Uniform
-          if node.acc == acc:
-              # We can stay uniform and update the shape
-              new_shape = _shape_insert(node.shape, rev_path)
-              if new_shape is node.shape:
-                  return node
-              return _mk_uniform(acc, new_shape)
-
-          # Conflict: unsuck uniform to branch, then insert
-          br = _unsuck(node)
-          return _b_insert(br, rev_path, acc)
-
-
-      def _b_apply(node: BNode[T, Acc], func: Callable[[Acc], Acc]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              new_terms = tuple(func(a) for a in node.terms)
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_children[k] = _b_apply(ch, func)
-              return _canonicalize_branch(new_terms, new_children)
-          # Uniform
-          return _mk_uniform(func(node.acc), node.shape)
-
-
-      def _b_prune(node: BNode[T, Acc], predicate: Callable[[Acc], bool]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              kept_terms = tuple(a for a in node.terms if predicate(a))
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_ch = _b_prune(ch, predicate)
-                  if not new_ch.is_empty():
-                      new_children[k] = new_ch
-              return _canonicalize_branch(kept_terms, new_children)
-          # Uniform
-          if predicate(node.acc):
-              return node
-          return BranchNode((), {})
-
-
-      def _b_peek(node: BNode[T, Acc]) -> Set[T]:
-          if isinstance(node, BranchNode):
-              return set(node.children.keys())
-          return set(node.shape.children.keys())
-
-
-      def _b_iter_entries(node: BNode[T, Acc], prefix_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-          """
-          Iterate all [stack_as_bottom_first, acc] pairs, including duplicates (by duplicating yields).
-          prefix_rev holds the partial stack as top-first; we reverse when emitting.
-          """
-          if isinstance(node, BranchNode):
-              # Terminals at this node
-              if node.terms:
-                  stack = list(reversed(prefix_rev))
-                  for acc in node.terms:
-                      yield (stack, acc)
-              # Children
-              for k, ch in node.children.items():
-                  prefix_rev.append(k)
-                  yield from _b_iter_entries(ch, prefix_rev)
-                  prefix_rev.pop()
-              return
-
-          # Uniform node: enumerate from shape with uniform acc
-          acc = node.acc
-
-          def _shape_iter(s: Shape[T], pfx_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-              if s.terms:
-                  stack = list(reversed(pfx_rev))
-                  for _ in range(s.terms):
-                      yield (stack, acc)
-              for kk, sub in s.children.items():
-                  pfx_rev.append(kk)
-                  yield from _shape_iter(sub, pfx_rev)
-                  pfx_rev.pop()
-
-          yield from _shape_iter(node.shape, prefix_rev)
-
-
-      def _b_count_total(node: BNode[T, Acc]) -> int:
-          """Count total stacks (including duplicates)."""
-          if isinstance(node, BranchNode):
-              total = len(node.terms)
-              for ch in node.children.values():
-                  total += _b_count_total(ch)
-              return total
-          # Uniform
-          def _shape_count(s: Shape[T]) -> int:
-              cnt = s.terms
-              for sub in s.children.values():
-                  cnt += _shape_count(sub)
-              return cnt
-          return _shape_count(node.shape)
-
-
-      def _b_is_single_empty(node: BNode[T, Acc]) -> bool:
-          """True iff the set contains exactly one stack and it is empty."""
-          if isinstance(node, BranchNode):
-              return len(node.terms) == 1 and not node.children
-          if isinstance(node, UniformNode):
-              return node.shape.terms == 1 and not node.shape.children
-          return False
-
-
-      # ------------------------------------------------------------------------------
-      # Implementation of the GSS interface
-      # ------------------------------------------------------------------------------
-
-      class LeveledGSS(GSS[T, Acc]):
-          """
-          High-performance leveled GSS implementation with strict "acc-at-one-level" invariants.
-
-          Invariants enforced:
-          - Accumulators (Acc) exist only at one level at a time:
-            * BranchNode: children may carry accs (via UniformNode) and/or terminal accs at terms.
-            * UniformNode: holds a single acc for the entire subtree; below it there are no Acc values, only shape counts.
-          - If at a BranchNode every child is a UniformNode with the same acc, and all terminal accs at that node
-            equal that same acc, we "suck up" the acc into a parent UniformNode and drop accs from the children.
-            As a result, if the children of a node have accs, there is at least one inequality between them.
-
-          Orientation:
-          - Stacks are represented top-first (i.e., the top of the stack is the first symbol in the path).
-            This makes push/isolate/pop efficient.
-
-          Notes:
-          - This implementation preserves multiplicity of identical stacks (duplicates) via terminal lists or counts,
-            so to_json output can reflect duplicates when they arise (e.g., after pop).
-          - reduce_acc enumerates all stacks (including duplicates); results match reference when the merge
-            function is order-independent (as requested).
-          """
-
-          __slots__ = ("_root",)
-
-          def __init__(self, root: BNode[T, Acc]):
-              self._root: BNode[T, Acc] = root
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              """
-              Build a GSS from explicit stacks. If the same stack appears multiple times with different Acc values,
-              they are stored as duplicates. If a conflict occurs at an already uniformized subtree, it is expanded
-              ("unsucked") automatically.
-              """
-              root: BNode[T, Acc] = BranchNode((), {})
-              for st, acc in stacks:
-                  rev = list(reversed(st))
-                  root = _b_insert(root, rev, acc)
-              return cls(root)
-
-          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Push a value onto all active stack heads, returning a new GSS state.
-              Implemented as: new_root = Branch({value: old_root}, terms=[]).
-              """
-              # Equivalent to pre-pending 'value' to every top-first path.
-              new_root = _canonicalize_branch((), {value: self._root})
-              return LeveledGSS(new_root)
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              """
-              Pop the top value from all non-empty stacks.
-              """
-              return LeveledGSS(_b_pop(self._root))
-
-          def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
-              # Exactly one stack and it is empty
-              return _b_is_single_empty(self._root)
-
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Keep only stacks that have `value` at the top.
-              """
-              return LeveledGSS(_b_isolate(self._root, value))
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Apply a function to each accumulator, returning a new GSS state.
-              """
-              return LeveledGSS(_b_apply(self._root, func))
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              """
-              Removes stacks for which predicate(acc) is False.
-              """
-              return LeveledGSS(_b_prune(self._root, predicate))
-
-          def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return _b_peek(self._root)
-
-          def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: We enumerate all (including duplicates) stacks and fold over the accs.
-              The caller should ensure merge_func is associative/commutative if deterministic results
-              are required across implementations (order of reduction is unspecified).
-              """
-              it = _b_iter_entries(self._root, [])
+              # Hash consistent with equality based on the canonical JSON representation.
               try:
-                  _st0, acc0 = next(it)
-              except StopIteration:
-                  return None
-              res = acc0
-              for _st, acc in it:
-                  res = merge_func(res, acc)
-              return res
-
-          @staticmethod
-          def merge(gss_list: Iterable['LeveledGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              # Accumulate by stack path (as tuple bottom-first) and merge using merge_func
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
-              for g in gss_list:
-                  for stack, acc in _b_iter_entries(g._root, []):
-                      key = tuple(stack)  # bottom-first
-                      if key in acc_by_stack:
-                          acc_by_stack[key] = merge_func(acc_by_stack[key], acc)
-                      else:
-                          acc_by_stack[key] = acc
-              # Rebuild via from_stacks
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*key], acc) for key, acc in acc_by_stack.items()]
-              return LeveledGSS.from_stacks(merged_stacks)
-
-          def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison:
-              list of [stack_as_list_bottom_first, acc], sorted deterministically:
-                - by stack length,
-                - then by JSON of stack,
-                - then by JSON of acc.
-              """
-              entries: List[Tuple[List[T], Acc]] = list(_b_iter_entries(self._root, []))
-
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
-
-              entries_sorted = sorted(entries, key=sort_key)
-              return [[stack, acc] for stack, acc in entries_sorted]
-
-          def __str__(self) -> str:
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
+                  canonical = self.to_json_serializable()
+                  # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
+                  s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
+                  return hash(s)
               except Exception:
-                  return super().__str__()
+                  # Fallback: hash the tuple of tuples if possible, else id-based hash
+                  try:
+                      tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
+                      return hash(tup)
+                  except Exception:
+                      return object.__hash__(self)
 
-          def __eq__(self, other):
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
+          def is_empty(self) -> bool:
+              # True iff there is exactly one active stack and that stack is empty.
+              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
 
-          def __hash__(self):
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
-  diffs_applied_this_send: true
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+  diffs_applied_this_send: false
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode:
 system:
   message: |-
     You are a helpful assistant.
@@ -1741,7 +1197,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -1753,7 +1209,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -1775,6 +1231,148 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```python 'python/gss_tester/__init__.py'
+      # This file makes 'gss_tester' a Python package.
+
+      ```
+    metadata:
+      filename: python/gss_tester/__init__.py
+  - user: |-
+      ```python 'python/gss_tester/analyzer.py'
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+
+      ```
+    metadata:
+      filename: python/gss_tester/analyzer.py
   - user: |-
       ```python 'python/gss_tester/interface.py'
       from abc import ABC, abstractmethod
@@ -1887,8 +1485,14 @@ messages:
     metadata:
       filename: python/gss_tester/interface.py
   - user: |-
+      ```python 'python/gss_tester/leveled_impl.py'
+
+      ```
+    metadata:
+      filename: python/gss_tester/leveled_impl.py
+  - user: |-
       ```python 'python/gss_tester/reference_impl.py'
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Optional
+      from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
       import json
 
@@ -1898,799 +1502,358 @@ messages:
       class ReferenceGSS(GSS[T, Acc]):
           """
           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Its behavior is the gold standard for the consistency tests.
-          Internally, each active stack is represented as a tuple of values (the stack) paired with an
-          accumulator of generic type Acc.
+          Each stack is represented as a pair: (list_of_values, accumulator).
 
-          Notes:
-          - All operations are purely functional and return a new GSS state; the current instance is not mutated.
-          - Duplicate stacks (identical sequences of T) are allowed unless explicitly merged via `merge`.
-          - `to_json_serializable` returns a stable, canonical representation suitable for equality checks.
+          Notes on semantics (aligned with GSS interface):
+          - from_stacks: constructs a new GSS from explicit stacks.
+          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
+          - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
+                   Stacks that are already empty are dropped by pop().
+          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
+          - apply(func): transforms each accumulator independently; returns a new GSS.
+          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
+          - peek(): returns the set of top values across all stacks (ignores empty stacks).
+          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
+                                    if there are no active stacks.
+          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
+                                         identical stacks using `merge_func`.
+          - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
           """
 
-          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Optional[Acc]):
-              # Store stacks as immutable tuples for stable hashing/keys; copy input to avoid aliasing.
-              processed: List[Tuple[Tuple[T, ...], Acc]] = []
-              computed_root_acc: Optional[Acc] = root_acc
-              for st, acc in stacks:
-                  st_tuple: Tuple[T, ...] = tuple(st)
-                  processed.append((st_tuple, acc))
-                  if computed_root_acc is None and len(st_tuple) == 0:
-                      computed_root_acc = acc
-              self._stacks: List[Tuple[Tuple[T, ...], Acc]] = processed
-              self._root_acc: Optional[Acc] = computed_root_acc
+          def __init__(self, stacks: List[Tuple[List[T], Acc]]):
+              # Store a private copy to prevent aliasing
+              self._stacks: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in stacks]
 
           @classmethod
           def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # Derive a root_acc if any empty stack is present; otherwise None.
-              root_acc: Optional[Acc] = None
-              for st, acc in stacks:
-                  if len(st) == 0:
-                      root_acc = acc
-                      break
-              return cls(stacks, root_acc)
+              # Construct from a shallow copy of lists (to avoid external mutation)
+              return cls([(list(vals), acc) for vals, acc in stacks])
 
           def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Pushes a value onto all active stack heads, returning a new GSS state.
-              Accumulators remain unchanged.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack, value], acc) for (stack, acc) in self._stacks]
-              # root_acc persists, but recalculation is harmless.
-              return ReferenceGSS(new_stacks, self._root_acc)
+              # Push `value` onto all stacks (copy each list to avoid mutating original)
+              new_stacks: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  new_vals = list(vals)
+                  new_vals.append(value)
+                  new_stacks.append((new_vals, acc))
+              return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks. Empty stacks are ignored for popping.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = [([*stack[:-1]], acc) for (stack, acc) in self._stacks if len(stack) > 0]
-              # Recalculate root_acc if an empty stack appears in the result.
-              new_root: Optional[Acc] = None
-              for st, acc in new_stacks:
-                  if len(st) == 0:
-                      new_root = acc
-                      break
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Pop from all stacks that are non-empty; drop empty stacks
+              popped: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals:
+                      new_vals = list(vals[:-1])
+                      popped.append((new_vals, acc))
+              return ReferenceGSS(popped)
 
           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              Returns a new GSS state containing only these stacks.
-              """
-              filtered: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks if len(stack) > 0 and stack[-1] == value]
-              # After isolation, empty stacks do not exist; keep prior root_acc.
-              return ReferenceGSS(filtered, self._root_acc)
+              # Keep only stacks whose top equals `value`
+              filtered: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals and vals[-1] == value:
+                      filtered.append((list(vals), acc))
+              return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Applies a function to each accumulator, returning a new GSS state.
-              """
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
-                  new_acc = func(acc)
-                  if new_root is None and len(stack) == 0:
-                      new_root = new_acc
-                  new_stacks.append(([*stack], new_acc))
-              return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
+              # Apply func to each accumulator independently
+              transformed: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  transformed.append((list(vals), func(acc)))
+              return ReferenceGSS(transformed)
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
+              # Keep only stacks where predicate(acc) is True
               kept: List[Tuple[List[T], Acc]] = []
-              new_root: Optional[Acc] = None
-              for stack, acc in self._stacks:
+              for vals, acc in self._stacks:
                   if predicate(acc):
-                      if new_root is None and len(stack) == 0:
-                          new_root = acc
-                      kept.append(([*stack], acc))
-              return ReferenceGSS(kept, new_root if new_root is not None else self._root_acc)
+                      kept.append((list(vals), acc))
+              return ReferenceGSS(kept)
 
           def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return {stack[-1] for (stack, _acc) in self._stacks if len(stack) > 0}
+              # Return all top values across non-empty stacks
+              tops: Set[T] = set()
+              for vals, _ in self._stacks:
+                  if vals:
+                      tops.add(vals[-1])
+              return tops
 
           def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: The caller should ensure `merge_func` is associative/commutative if deterministic results
-              are required across implementations, as order of reduction is unspecified.
-              """
+              # Reduce all accumulators into a single Acc (or None if no stacks)
               if not self._stacks:
                   return None
-              it = iter(self._stacks)
-              _first_stack, first_acc = next(it)
-              result = first_acc
-              for _stack, acc in it:
-                  result = merge_func(result, acc)
-              return result
+              accs = [acc for _, acc in self._stacks]
+              return reduce(merge_func, accs)
 
           @staticmethod
-          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
+          def merge(
+              gss_list: Iterable['ReferenceGSS[T, Acc]'],
+              merge_func: Callable[[Acc, Acc], Acc]
+          ) -> 'ReferenceGSS[T, Acc]':
+              # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
+              merged: Dict[Tuple[T, ...], Acc] = {}
               for gss in gss_list:
-                  for stack, acc in gss._stacks:
-                      if stack in acc_by_stack:
-                          acc_by_stack[stack] = merge_func(acc_by_stack[stack], acc)
+                  for vals, acc in gss._stacks:
+                      key = tuple(vals)
+                      if key in merged:
+                          merged[key] = merge_func(merged[key], acc)
                       else:
-                          acc_by_stack[stack] = acc
-
-              # Build the merged list; derive a root_acc if an empty stack is present.
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*stack], acc) for stack, acc in acc_by_stack.items()]
-              root_acc: Optional[Acc] = acc_by_stack.get(()) if () in acc_by_stack else None
-              return ReferenceGSS(merged_stacks, root_acc)
+                          merged[key] = acc
+              result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+              return ReferenceGSS(result_stacks)
 
           def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison.
-              Representation: a list of [stack_as_list, acc] pairs, sorted deterministically.
-              """
-              entries: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks]
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
 
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  # Use JSON strings as stable, type-agnostic ordering keys.
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
+              def _encode_for_sort(obj: Any) -> str:
+                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      # Fallback to repr if something goes wrong
+                      return repr(obj)
 
-              entries_sorted = sorted(entries, key=sort_key)
-              # Output as list of pairs: [stack, acc]
-              return [[stack, acc] for stack, acc in entries_sorted]
+              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              # Return a plain JSON-serializable structure
+              return [[vals, acc] for vals, acc in items]
 
           def __hash__(self):
-              """
-              Hash based on the canonical JSON representation.
-              """
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
+              # Hash consistent with equality based on the canonical JSON representation.
+              try:
+                  canonical = self.to_json_serializable()
+                  # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
+                  s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
+                  return hash(s)
+              except Exception:
+                  # Fallback: hash the tuple of tuples if possible, else id-based hash
+                  try:
+                      tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
+                      return hash(tup)
+                  except Exception:
+                      return object.__hash__(self)
 
           def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
+              # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
 
       ```
     metadata:
       filename: python/gss_tester/reference_impl.py
   - user: |-
-      Create a new implementation of GSS. Make it as fast as possible.
-
-      I want Accs in this implementation to existing only at one 'level', if that makes sense.
-      ie either all of a node's children have Accs, or none of them do. And if the parent has an acc then none of its children do.
-      And it should be maintained such that if all the children's accs are equal, the accs are sucked up into the parent. ie they aren't at the children any more.
-      So, if the children of a node have accs, then there must be at least one inequality between them.
-
-      We can enforce that Accs can only exist at one level by defining different types of node: type A that can be either root or an internal node that maps to other type As, and type B that can either contain type A and an Acc OR that maps to other type Bs. 'Contain' here means just contains one - wraps. Maps means contains a node map.
-      If we were working in Rust, these'd both be enums.
-
-      These are just the invariants I want. How you achieve them is up to you. Do it as elegantly as possible.
-
-      It should behave equivalently to leveled_impl.py (with the caveat that reduce_acc is only guaranteed to output the same value between impls as long as the reduce closure is order-independent.)
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      ```python "python/gss_tester/leveled_acc_impl.py"
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Dict, Generic, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, TypeVar, Callable, Any
+      ```python 'python/gss_tester/runner.py'
+      import argparse
+      import importlib
       import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
 
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------------------------------------------------------
-      # Internal node structures
-      # ------------------------------------------------------------------------------
-
-      @dataclass(frozen=True, slots=True)
-      class Shape(Generic[T]):
-          """
-          Acc-free shape trie for stacks (top-first orientation).
-          - terms: number of stacks that end exactly at this node (multiplicity count).
-          - children: map from top-of-stack symbol to deeper shapes.
-          """
-          terms: int
-          children: Dict[T, 'Shape[T]']
-
-          def is_empty(self) -> bool:
-              return self.terms == 0 and not self.children
-
-
-      class BNode(Generic[T, Acc]):
-          """Union type base class for BranchNode and UniformNode."""
-          __slots__ = ()
-
-          def is_empty(self) -> bool:
-              raise NotImplementedError
-
-
-      @dataclass(frozen=True, slots=True)
-      class BranchNode(BNode[T, Acc]):
-          """
-          Branch node: No uniform accumulator at this level.
-          - terms: Acc values for stacks that end exactly at this node (duplicates allowed).
-          - children: map from top-of-stack symbol to BNode.
-          This node may contain children that are either BranchNode or UniformNode.
-          """
-          terms: Tuple[Acc, ...]
-          children: Dict[T, BNode[T, Acc]]
-
-          def is_empty(self) -> bool:
-              return len(self.terms) == 0 and not self.children
-
-
-      @dataclass(frozen=True, slots=True)
-      class UniformNode(BNode[T, Acc]):
-          """
-          Uniform node: All stacks in this subtree share the same accumulator (acc).
-          - acc: shared accumulator for the entire subtree.
-          - shape: an acc-free shape trie that encodes where stacks end (via counts) and how they continue.
-          Invariants:
-            - Under a UniformNode, there are no child Acc values stored; only counts exist within Shape.
-            - If a UniformNode has a parent UniformNode, the parent must absorb it (we never create nested Uniforms).
-          """
-          acc: Acc
-          shape: Shape[T]
-
-          def is_empty(self) -> bool:
-              return self.shape.is_empty()
-
-
-      # ------------------------------------------------------------------------------
-      # Helpers for node construction and canonicalization
-      # ------------------------------------------------------------------------------
-
-      def _shape_normalize(s: Shape[T]) -> Shape[T]:
-          """Drop empty children for a clean shape."""
-          if not s.children:
-              return s
-          pruned: Dict[T, Shape[T]] = {}
-          for k, ch in s.children.items():
-              if not ch.is_empty():
-                  pruned[k] = ch
-          if len(pruned) is not len(s.children):
-              return Shape(s.terms, pruned)
-          return s
-
-
-      def _mk_uniform(acc: Acc, shape: Shape[T]) -> BNode[T, Acc]:
-          """Create a Uniform node if shape not empty; otherwise return empty Branch."""
-          shape = _shape_normalize(shape)
-          if shape.is_empty():
-              return BranchNode((), {})
-          return UniformNode(acc, shape)
-
-
-      def _unsuck(u: UniformNode[T, Acc]) -> BranchNode[T, Acc]:
-          """
-          Expand a Uniform node into a Branch node by distributing the uniform acc to:
-            - 'terms' as repeated acc values,
-            - each child shape becomes a Uniform child with the same acc.
-          """
-          terms = (u.acc,) * u.shape.terms
-          children: Dict[T, BNode[T, Acc]] = {k: UniformNode(u.acc, ch) for k, ch in u.shape.children.items()}
-          return BranchNode(terms, children)
-
-
-      def _canonicalize_branch(terms: Iterable[Acc], children: Dict[T, BNode[T, Acc]]) -> BNode[T, Acc]:
-          """
-          Canonicalize a Branch node by:
-            - Dropping empty children,
-            - Sucking up to a Uniform node if:
-                * every child is Uniform with the same acc, and
-                * every acc in `terms` equals that acc.
-            - Otherwise, return a clean Branch.
-          """
-          terms_tuple: Tuple[Acc, ...] = tuple(terms)
-          if children:
-              # Drop empty children first
-              pruned_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in children.items():
-                  if isinstance(ch, UniformNode):
-                      if not ch.shape.is_empty():
-                          pruned_children[k] = ch
-                  else:
-                      # Branch child
-                      if not ch.is_empty():
-                          pruned_children[k] = ch
-
-              if pruned_children:
-                  # Check for suck-up possibility
-                  first_child = next(iter(pruned_children.values()))
-                  if isinstance(first_child, UniformNode):
-                      acc0 = first_child.acc
-                      all_children_uniform = True
-                      all_equal_acc = True
-                      for ch in pruned_children.values():
-                          if not isinstance(ch, UniformNode):
-                              all_children_uniform = False
-                              break
-                          if ch.acc != acc0:
-                              all_equal_acc = False
-                              break
-                      if all_children_uniform and all_equal_acc:
-                          # Terms all equal to acc0?
-                          if len(terms_tuple) == 0 or all(a == acc0 for a in terms_tuple):
-                              # Create a uniform node with shape:
-                              #   shape.terms = len(terms_tuple)
-                              #   shape.children = {k: child.shape}
-                              shape_children: Dict[T, Shape[T]] = {k: ch.shape for k, ch in pruned_children.items()}
-                              shape = Shape(terms=len(terms_tuple), children=shape_children)
-                              return _mk_uniform(acc0, shape)
-
-                  # Not suckable; return cleaned branch
-                  return BranchNode(terms_tuple, pruned_children)
-
-          # No children; possibly only terms remain.
-          # If terms exist but children don't, they are not suckable unless homogenous and some structure exists.
-          # Keep them as a Branch.
-          return BranchNode(terms_tuple, {})
-
-
-      def _shape_union(a: Shape[T], b: Shape[T]) -> Shape[T]:
-          """Union of two shapes: sum of term counts and recursive union of children."""
-          if a is b:
-              return a
-          terms = a.terms + b.terms
-          if not a.children and not b.children:
-              return Shape(terms, {})
-          keys = set(a.children.keys()) | set(b.children.keys())
-          merged: Dict[T, Shape[T]] = {}
-          for k in keys:
-              ca = a.children.get(k)
-              cb = b.children.get(k)
-              if ca is None:
-                  merged[k] = cb  # type: ignore[assignment]
-              elif cb is None:
-                  merged[k] = ca
-              else:
-                  merged[k] = _shape_union(ca, cb)
-          return _shape_normalize(Shape(terms, merged))
-
-
-      def _b_union(x: Optional[BNode[T, Acc]], y: Optional[BNode[T, Acc]]) -> Optional[BNode[T, Acc]]:
-          """Union of two BNode subtrees."""
-          if x is None:
-              return y
-          if y is None:
-              return x
-          if isinstance(x, BranchNode) and isinstance(y, BranchNode):
-              # Concatenate terms, merge children by key
-              terms = x.terms + y.terms
-              keys = set(x.children.keys()) | set(y.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cx = x.children.get(k)
-                  cy = y.children.get(k)
-                  if cx is None:
-                      c = cy
-                  elif cy is None:
-                      c = cx
-                  else:
-                      c = _b_union(cx, cy)
-                  if c is not None and not c.is_empty():
-                      children[k] = c
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, UniformNode) and isinstance(y, UniformNode):
-              if x.acc == y.acc:
-                  return _mk_uniform(x.acc, _shape_union(x.shape, y.shape))
-              # Different accs at same level -> distribute both
-              return _b_union(_unsuck(x), _unsuck(y))
-
-          if isinstance(x, UniformNode) and isinstance(y, BranchNode):
-              # Distribute x into y (efficient version of union(unsuck(x), y))
-              terms = y.terms + (x.acc,) * x.shape.terms
-              keys = set(y.children.keys()) | set(x.shape.children.keys())
-              children: Dict[T, BNode[T, Acc]] = {}
-              for k in keys:
-                  cy = y.children.get(k)
-                  sx = x.shape.children.get(k)
-                  if sx is None:
-                      children[k] = cy  # type: ignore[assignment]
-                  elif cy is None:
-                      children[k] = _mk_uniform(x.acc, sx)
-                  else:
-                      children[k] = _b_union(_mk_uniform(x.acc, sx), cy)  # type: ignore[assignment]
-              return _canonicalize_branch(terms, children)
-
-          if isinstance(x, BranchNode) and isinstance(y, UniformNode):
-              return _b_union(y, x)
-
-          raise AssertionError("Unreachable union case")
-
-
-      def _b_pop(node: BNode[T, Acc]) -> BNode[T, Acc]:
-          """
-          Pop: remove the first/top element from every non-empty stack.
-          - Branch: union of its children (ignore terms since empty stacks can't be popped).
-          - Uniform: union of a Uniform node built from each shape child.
-          """
-          if isinstance(node, BranchNode):
-              res: Optional[BNode[T, Acc]] = None
-              for child in node.children.values():
-                  res = _b_union(res, child)
-              return res if res is not None else BranchNode((), {})
-
-          # Uniform
-          res: Optional[BNode[T, Acc]] = None
-          for k, subshape in node.shape.children.items():
-              res = _b_union(res, _mk_uniform(node.acc, subshape))
-          return res if res is not None else BranchNode((), {})
-
-
-      def _b_isolate(node: BNode[T, Acc], value: T) -> BNode[T, Acc]:
-          """
-          Isolate: keep only stacks whose top equals 'value'.
-          - Branch: return the child under 'value' (terms ignored).
-          - Uniform: return Uniform(acc, shape_child[value]) if exists.
-          """
-          if isinstance(node, BranchNode):
-              return node.children.get(value, BranchNode((), {}))
-          # Uniform
-          ch = node.shape.children.get(value)
-          if ch is None:
-              return BranchNode((), {})
-          return _mk_uniform(node.acc, ch)
-
-
-      def _shape_insert(s: Shape[T], rev_path: Sequence[T]) -> Shape[T]:
-          """Insert the reversed path (top-first) into an acc-free shape, increasing terminal counts."""
-          if not rev_path:
-              return Shape(s.terms + 1, s.children)
-          head = rev_path[0]
-          tail = rev_path[1:]
-          child = s.children.get(head, Shape(0, {}))
-          new_child = _shape_insert(child, tail)
-          if new_child is child:
-              return s
-          new_children = dict(s.children)
-          new_children[head] = new_child
-          return _shape_normalize(Shape(s.terms, new_children))
-
-
-      def _b_insert(node: BNode[T, Acc], rev_path: Sequence[T], acc: Acc) -> BNode[T, Acc]:
-          """
-          Insert a stack (given as reversed path) with accumulator acc into the B-node.
-          Maintains invariants, unsucking uniform nodes if a conflict appears.
-          """
-          if not rev_path:
-              # End at this node: add a terminal here.
-              if isinstance(node, BranchNode):
-                  return _canonicalize_branch(node.terms + (acc,), node.children)
-              # Uniform
-              if node.acc == acc:
-                  return _mk_uniform(acc, Shape(node.shape.terms + 1, node.shape.children))
-              # Conflict: unsuck, then add term
-              br = _unsuck(node)
-              return _canonicalize_branch(br.terms + (acc,), br.children)
-
-          head = rev_path[0]
-          tail = rev_path[1:]
-
-          if isinstance(node, BranchNode):
-              child = node.children.get(head, BranchNode((), {}))
-              new_child = _b_insert(child, tail, acc)
-              if new_child is child:
-                  return node
-              new_children = dict(node.children)
-              if not new_child.is_empty():
-                  new_children[head] = new_child
-              else:
-                  new_children.pop(head, None)
-              return _canonicalize_branch(node.terms, new_children)
-
-          # Uniform
-          if node.acc == acc:
-              # We can stay uniform and update the shape
-              new_shape = _shape_insert(node.shape, rev_path)
-              if new_shape is node.shape:
-                  return node
-              return _mk_uniform(acc, new_shape)
-
-          # Conflict: unsuck uniform to branch, then insert
-          br = _unsuck(node)
-          return _b_insert(br, rev_path, acc)
-
-
-      def _b_apply(node: BNode[T, Acc], func: Callable[[Acc], Acc]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              new_terms = tuple(func(a) for a in node.terms)
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_children[k] = _b_apply(ch, func)
-              return _canonicalize_branch(new_terms, new_children)
-          # Uniform
-          return _mk_uniform(func(node.acc), node.shape)
-
-
-      def _b_prune(node: BNode[T, Acc], predicate: Callable[[Acc], bool]) -> BNode[T, Acc]:
-          if isinstance(node, BranchNode):
-              kept_terms = tuple(a for a in node.terms if predicate(a))
-              new_children: Dict[T, BNode[T, Acc]] = {}
-              for k, ch in node.children.items():
-                  new_ch = _b_prune(ch, predicate)
-                  if not new_ch.is_empty():
-                      new_children[k] = new_ch
-              return _canonicalize_branch(kept_terms, new_children)
-          # Uniform
-          if predicate(node.acc):
-              return node
-          return BranchNode((), {})
-
-
-      def _b_peek(node: BNode[T, Acc]) -> Set[T]:
-          if isinstance(node, BranchNode):
-              return set(node.children.keys())
-          return set(node.shape.children.keys())
-
-
-      def _b_iter_entries(node: BNode[T, Acc], prefix_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-          """
-          Iterate all [stack_as_bottom_first, acc] pairs, including duplicates (by duplicating yields).
-          prefix_rev holds the partial stack as top-first; we reverse when emitting.
-          """
-          if isinstance(node, BranchNode):
-              # Terminals at this node
-              if node.terms:
-                  stack = list(reversed(prefix_rev))
-                  for acc in node.terms:
-                      yield (stack, acc)
-              # Children
-              for k, ch in node.children.items():
-                  prefix_rev.append(k)
-                  yield from _b_iter_entries(ch, prefix_rev)
-                  prefix_rev.pop()
-              return
-
-          # Uniform node: enumerate from shape with uniform acc
-          acc = node.acc
-
-          def _shape_iter(s: Shape[T], pfx_rev: List[T]) -> Iterator[Tuple[List[T], Acc]]:
-              if s.terms:
-                  stack = list(reversed(pfx_rev))
-                  for _ in range(s.terms):
-                      yield (stack, acc)
-              for kk, sub in s.children.items():
-                  pfx_rev.append(kk)
-                  yield from _shape_iter(sub, pfx_rev)
-                  pfx_rev.pop()
-
-          yield from _shape_iter(node.shape, prefix_rev)
-
-
-      def _b_count_total(node: BNode[T, Acc]) -> int:
-          """Count total stacks (including duplicates)."""
-          if isinstance(node, BranchNode):
-              total = len(node.terms)
-              for ch in node.children.values():
-                  total += _b_count_total(ch)
-              return total
-          # Uniform
-          def _shape_count(s: Shape[T]) -> int:
-              cnt = s.terms
-              for sub in s.children.values():
-                  cnt += _shape_count(sub)
-              return cnt
-          return _shape_count(node.shape)
-
-
-      def _b_is_single_empty(node: BNode[T, Acc]) -> bool:
-          """True iff the set contains exactly one stack and it is empty."""
-          if isinstance(node, BranchNode):
-              return len(node.terms) == 1 and not node.children
-          if isinstance(node, UniformNode):
-              return node.shape.terms == 1 and not node.shape.children
-          return False
-
-
-      # ------------------------------------------------------------------------------
-      # Implementation of the GSS interface
-      # ------------------------------------------------------------------------------
-
-      class LeveledGSS(GSS[T, Acc]):
-          """
-          High-performance leveled GSS implementation with strict "acc-at-one-level" invariants.
-
-          Invariants enforced:
-          - Accumulators (Acc) exist only at one level at a time:
-            * BranchNode: children may carry accs (via UniformNode) and/or terminal accs at terms.
-            * UniformNode: holds a single acc for the entire subtree; below it there are no Acc values, only shape counts.
-          - If at a BranchNode every child is a UniformNode with the same acc, and all terminal accs at that node
-            equal that same acc, we "suck up" the acc into a parent UniformNode and drop accs from the children.
-            As a result, if the children of a node have accs, there is at least one inequality between them.
-
-          Orientation:
-          - Stacks are represented top-first (i.e., the top of the stack is the first symbol in the path).
-            This makes push/isolate/pop efficient.
-
-          Notes:
-          - This implementation preserves multiplicity of identical stacks (duplicates) via terminal lists or counts,
-            so to_json output can reflect duplicates when they arise (e.g., after pop).
-          - reduce_acc enumerates all stacks (including duplicates); results match reference when the merge
-            function is order-independent (as requested).
-          """
-
-          __slots__ = ("_root",)
-
-          def __init__(self, root: BNode[T, Acc]):
-              self._root: BNode[T, Acc] = root
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              """
-              Build a GSS from explicit stacks. If the same stack appears multiple times with different Acc values,
-              they are stored as duplicates. If a conflict occurs at an already uniformized subtree, it is expanded
-              ("unsucked") automatically.
-              """
-              root: BNode[T, Acc] = BranchNode((), {})
-              for st, acc in stacks:
-                  rev = list(reversed(st))
-                  root = _b_insert(root, rev, acc)
-              return cls(root)
-
-          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Push a value onto all active stack heads, returning a new GSS state.
-              Implemented as: new_root = Branch({value: old_root}, terms=[]).
-              """
-              # Equivalent to pre-pending 'value' to every top-first path.
-              new_root = _canonicalize_branch((), {value: self._root})
-              return LeveledGSS(new_root)
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              """
-              Pop the top value from all non-empty stacks.
-              """
-              return LeveledGSS(_b_pop(self._root))
-
-          def is_empty(self) -> bool:
-              """
-              Checks if the GSS contains only the initial empty stack.
-              """
-              # Exactly one stack and it is empty
-              return _b_is_single_empty(self._root)
-
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              """
-              Keep only stacks that have `value` at the top.
-              """
-              return LeveledGSS(_b_isolate(self._root, value))
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Apply a function to each accumulator, returning a new GSS state.
-              """
-              return LeveledGSS(_b_apply(self._root, func))
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              """
-              Removes stacks for which predicate(acc) is False.
-              """
-              return LeveledGSS(_b_prune(self._root, predicate))
-
-          def peek(self) -> Set[T]:
-              """
-              Returns the set of all values at the top of any stack.
-              """
-              return _b_peek(self._root)
-
-          def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-
-              Note: We enumerate all (including duplicates) stacks and fold over the accs.
-              The caller should ensure merge_func is associative/commutative if deterministic results
-              are required across implementations (order of reduction is unspecified).
-              """
-              it = _b_iter_entries(self._root, [])
-              try:
-                  _st0, acc0 = next(it)
-              except StopIteration:
-                  return None
-              res = acc0
-              for _st, acc in it:
-                  res = merge_func(res, acc)
-              return res
-
-          @staticmethod
-          def merge(gss_list: Iterable['LeveledGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one, combining accumulators for identical stacks.
-              If the same stack appears multiple times, their accumulators are merged via `merge_func`.
-              """
-              # Accumulate by stack path (as tuple bottom-first) and merge using merge_func
-              acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
-              for g in gss_list:
-                  for stack, acc in _b_iter_entries(g._root, []):
-                      key = tuple(stack)  # bottom-first
-                      if key in acc_by_stack:
-                          acc_by_stack[key] = merge_func(acc_by_stack[key], acc)
-                      else:
-                          acc_by_stack[key] = acc
-              # Rebuild via from_stacks
-              merged_stacks: List[Tuple[List[T], Acc]] = [([*key], acc) for key, acc in acc_by_stack.items()]
-              return LeveledGSS.from_stacks(merged_stacks)
-
-          def to_json_serializable(self) -> Any:
-              """
-              Returns a JSON-serializable, canonical representation of the GSS state for comparison:
-              list of [stack_as_list_bottom_first, acc], sorted deterministically:
-                - by stack length,
-                - then by JSON of stack,
-                - then by JSON of acc.
-              """
-              entries: List[Tuple[List[T], Acc]] = list(_b_iter_entries(self._root, []))
-
-              def sort_key(item: Tuple[List[T], Acc]):
-                  st_list, acc = item
-                  st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
-                  acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
-                  return (len(st_list), st_json, acc_json)
-
-              entries_sorted = sorted(entries, key=sort_key)
-              return [[stack, acc] for stack, acc in entries_sorted]
-
-          def __str__(self) -> str:
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
-              except Exception:
-                  return super().__str__()
-
-          def __eq__(self, other):
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __hash__(self):
-              data = self.to_json_serializable()
-              s = json.dumps(data, sort_keys=True, separators=(",", ":"))
-              return hash(s)
       ```
     metadata:
-  - user: |
-      Identified target file 'python/gss_tester/leveled_acc_impl.py' on fence open line 1:
-      ```python "python/gss_tester/leveled_acc_impl.py"
-      Found 1 code blocks.
-      Matching against available files:
-        1: python/gss_tester/interface.py
-        2: python/gss_tester/reference_impl.py
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to NEW file python/gss_tester/leveled_acc_impl.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 2
-      --- Phase 6: Applying changes to assigned files ---
-      Successfully created new file: python/gss_tester/leveled_acc_impl.py
+      filename: python/gss_tester/runner.py
+  - user: |-
+      ```python 'python/gss_tester/test_spec.py'
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+      ```
+    metadata:
+      filename: python/gss_tester/test_spec.py
+  - user: Make it so isolate takes Self and Optional[T] and keeps only those stacks
+      that have T on top, or empty stacks if T is None.
     metadata:
 ...
