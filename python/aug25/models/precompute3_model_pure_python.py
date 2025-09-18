@@ -332,7 +332,7 @@ class Model(GraphProvider):
             offset, tokenizer_sid, gss = q.popleft()
 
             # GSS is not hashable, use its serializable form for visited check
-            q_item_key = (offset, tokenizer_sid, gss.to_reference_impl())
+            q_item_key = (offset, tokenizer_sid, gss)
             if q_item_key in visited_q_items:
                 continue
             visited_q_items.add(q_item_key)
