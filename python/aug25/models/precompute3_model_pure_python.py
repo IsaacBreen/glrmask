@@ -105,6 +105,7 @@ class _CommitProfiler:
         # Pre/post state stats
         self.pre_stats: Dict[int, GSSStats] = {}
         self.post_stats: Dict[int, GSSStats] = {}
+        self.post_gss: Dict[int, GSS] = {}
 
         # Queue traversal
         self.queue_enqueued = 0
@@ -145,8 +146,9 @@ class _CommitProfiler:
     def add_pre_stats(self, sid: int, stats: GSSStats) -> None:
         self.pre_stats[int(sid)] = stats
 
-    def add_post_stats(self, sid: int, stats: GSSStats) -> None:
-        self.post_stats[int(sid)] = stats
+    def add_post_stats(self, sid: int, gss: "GSS") -> None:
+        self.post_stats[int(sid)] = gss.compute_stats()
+        self.post_gss[int(sid)] = gss
 
     def on_queue_enqueued(self, n: int) -> None:
         self.queue_enqueued += n
@@ -219,13 +221,18 @@ class _CommitProfiler:
         print(f"merges: calls={self.merge_calls} inputs_gss={self.merge_inputs_gss} input_stacks={self.merge_input_stacks} output_stacks={self.merge_output_stacks} dedup_saved={self.merge_input_stacks - self.merge_output_stacks}")
         print(f"end_state: carry_forward={self.carry_forward_count} prunes={self.end_state_prunes} enqueue_after_match={self.enqueue_after_match}")
 
-        if self.verbose and self.pre_stats:
-            largest_sid = max(self.pre_stats.items(), key=lambda kv: kv[1].unique_stacks)[0]
-            pre = self.pre_stats[largest_sid]
+        if self.verbose and self.post_gss:
+            if not self.post_stats:
+                print("=== COMMIT PROFILE END ===")
+                return
+            largest_sid = max(self.post_stats.items(), key=lambda kv: kv[1].unique_stacks)[0]
+            pre = self.pre_stats.get(largest_sid)
             post = self.post_stats.get(largest_sid)
-            print(f"largest pre-state sid={largest_sid} {pre.brief()}")
+            print(f"largest pre-state sid={largest_sid} {pre.brief()}" if pre else f"largest post-state sid={largest_sid} (no pre-state)")
             if post:
                 print(f"same sid post-state {post.brief()}")
+                if (largest_gss := self.post_gss.get(largest_sid)):
+                    largest_gss.analyze_prefixes()
 
         print("=== COMMIT PROFILE END ===")
 
@@ -314,6 +321,33 @@ class GSS:
             depth_mean=dmean,
         )
 
+    def analyze_prefixes(self) -> None:
+        if not self._heads:
+            print("[GSS PREFIX ANALYSIS] Empty GSS")
+            return
+
+        prefixes = collections.defaultdict(int)
+        total_stack_els = 0
+        for stack in self._heads.keys():
+            total_stack_els += len(stack)
+            for i in range(1, len(stack) + 1):
+                prefixes[stack[:i]] += 1
+
+        num_unique_stacks = len(self._heads)
+        num_unique_prefixes = len(prefixes)
+
+        print("[GSS PREFIX ANALYSIS]")
+        print(f"  Unique stacks: {num_unique_stacks}")
+        print(f"  Total stack elements (sum of depths): {total_stack_els}")
+        print(f"  Unique prefixes (nodes in a true GSS): {num_unique_prefixes}")
+        if num_unique_prefixes > 0:
+            compression = total_stack_els / num_unique_prefixes
+            print(f"  Compression potential (total_els / unique_prefixes): {compression:.2f}")
+
+        if num_unique_stacks > 10:
+            print("  Top 10 most common prefixes:")
+            for p, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
+                print(f"    - Prefix {p} occurred {count} times")
     # --- Core operations ---
 
     def push(self, value: int) -> "GSS":
@@ -660,8 +694,8 @@ class Model(GraphProvider):
         t1 = time.perf_counter()
 
         if profiler is not None:
-            for sid, st in self._gss_stats_map(self.state).items():
-                profiler.add_post_stats(sid, st)
+            for sid, gss in self.state.items():
+                profiler.add_post_stats(sid, gss)
             profiler.finalize()
 
         if os.environ.get("REPORT_COMMIT_TIME") == "1":
