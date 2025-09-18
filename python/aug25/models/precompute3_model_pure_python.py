@@ -191,7 +191,7 @@ class Model(GraphProvider):
 
         model.constraint_state = ffi.GrammarConstraintState(constraint)
 
-        print(constraint.print_parser())
+        # print(constraint.print_parser())
 
         return model
 
@@ -264,7 +264,7 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        print(f"\n--- commit token_id={token_id} ---")
+        # print(f"\n--- commit token_id={token_id} ---")
         # Get Rust state before commit for comparison
         rust_state_map_before_commit = self.constraint_state.get_state_map()
 
@@ -292,12 +292,12 @@ class Model(GraphProvider):
         # === ASSERTION 1: Compare maps ===
         rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
         if state_map != rust_state_map:
-            print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
+            # print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
         
         py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
         rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
         if py_terminals_map_serializable != rust_terminals_map_serializable:
-            print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
+            # print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
 
         if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
             raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
@@ -384,9 +384,9 @@ class Model(GraphProvider):
             for sid, gss_list in new_states.items()
             if gss_list
         }
-        print("merged_states before filtering empties:")
+        # print("merged_states before filtering empties:")
         for sid, gss in merged_states.items():
-            print(f"  sid={sid}, gss={gss}")
+            # print(f"  sid={sid}, gss={gss}")
 
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
@@ -394,14 +394,14 @@ class Model(GraphProvider):
 
         self.constraint_state.commit(token_id)
 
-        print("state_map after commit:")
+        # print("state_map after commit:")
         for sid, gss in self.state.items():
-            print(f"  sid={sid}, gss={gss}")
+            # print(f"  sid={sid}, gss={gss}")
 
-        print("Rust state_map after commit:")
+        # print("Rust state_map after commit:")
         expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
         for sid, rust_gss in expected_state_map.items():
-            print(f"  sid={sid}, gss={rust_gss}")
+            # print(f"  sid={sid}, gss={rust_gss}")
 
         assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
         for sid, gss in self.state.items():
@@ -421,11 +421,11 @@ class Model(GraphProvider):
             state_gss = GSS.merge(state_gsss)
             row = self.parser_table.table.get(state_id)
             if not row:
-                print(f"No parser table row for state_id {state_id}, skipping.")
+                # print(f"No parser table row for state_id {state_id}, skipping.")
                 continue
             action = row.actions.get(terminal_id)
             if not action:
-                print(f"No action for terminal_id {terminal_id} in state_id {state_id}, skipping.")
+                # print(f"No action for terminal_id {terminal_id} in state_id {state_id}, skipping.")
                 continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
@@ -462,19 +462,19 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
 
-        print("\n--- get_mask START ---")
-        print("GSS at start of get_mask:")
+        # print("\n--- get_mask START ---")
+        # print("GSS at start of get_mask:")
         state_map = self.state
 
         expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
-        print(f"state_map:")
+        # print(f"state_map:")
         for sid, gss in state_map.items():
-            print(gss)
+            # print(gss)
 
-        print(f"expected_state_map:")
+        # print(f"expected_state_map:")
         for sid, gss in expected_state_map.items():
-            print(gss)
+            # print(gss)
 
         assert state_map.keys() == expected_state_map.keys(), f"state_map keys {state_map.keys()} != expected_state_map keys {expected_state_map.keys()}"
         for sid in state_map:
@@ -496,7 +496,7 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        # print("\n--- Seeding work queue ---")
+        # # print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
             new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
@@ -504,7 +504,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
-            # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
+            # # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
 
             existing = values.get(root_idx)
             if existing is not None:
@@ -537,7 +537,7 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
-        # print("\n--- Main loop ---")
+        # # print("\n--- Main loop ---")
         iter_count = 0
         while True:
             iter_count += 1
@@ -550,23 +550,23 @@ class Model(GraphProvider):
                 if node_indices:
                     break
             if not node_indices:
-                # print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                # # print(f"[{iter_count}] Loop finished: no more nodes to process.")
                 break  # nothing left to process
 
-            # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+            # # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
-                    # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                    # # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 item = values.pop(node_idx, None)
                 if item is None:
-                    # print(f"  - Node {node_idx}: SKIPPING (no value)")
+                    # # print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
-                # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
+                # # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -599,20 +599,20 @@ class Model(GraphProvider):
                         final_mask = final_mask.union(final_allowed_tokens)
                         after_len = final_mask.len()
                         # if after_len > before_len:
-                        #     print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
+                        #     # print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
 
                 if llm_mask.is_empty():
                     stopped.add(node_idx)
-                    # print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                    # # print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
                 # if not children:
-                #     # print(f"    - No children for node {node_idx}")
+                #     # # print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
-                    # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                    # # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
                     # Collect all pops from GSS parents
                     popped = gss_node.popn(pop)
 
@@ -641,12 +641,12 @@ class Model(GraphProvider):
                             merged_gss = GSS.merge([existing_gss, child_gss_node])
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
-                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                            # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
+                            # # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
-                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                            # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
+                            # # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
 
                         enqueue(max_depth[d], d)
 
@@ -655,6 +655,6 @@ class Model(GraphProvider):
             if internal_id in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[internal_id])
         temp = RangeSet.from_ranges(original_mask.to_ranges())
-        print(f"\n--- get_mask END ---")
-        print(f"Final mask: {temp.to_ranges()}")
+        # print(f"\n--- get_mask END ---")
+        # print(f"Final mask: {temp.to_ranges()}")
         return temp
