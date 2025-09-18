@@ -84,7 +84,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         node_factory: Optional[_NodeFactory[T]] = None,
         heads: Optional[Dict[_StackNode[T], List[Acc]]] = None,
         empty_accs: Optional[List[Acc]] = None,
-        track_edges: bool = False,
     ) -> None:
         self._factory: _NodeFactory[T] = node_factory if node_factory is not None else _NodeFactory()
         # map: head_node -> list of Acc (multiplicity preserved)
@@ -92,13 +91,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # accumulators for empty stacks (each entry is one stack's acc)
         self._empty_accs: List[Acc] = empty_accs if empty_accs is not None else []
         self._hash: Optional[int] = None
-        # Edge tracking control (disabled by default for performance)
-        self._track_edges: bool = track_edges
         # Edge metadata: (parent_node, T) -> max depth (absolute depth from the implicit root)
         # parent_node is None for the first edge (i.e., edge to single-element stacks).
         self._edge_max_depth: Dict[Tuple[Optional[_StackNode[T]], T], int] = {}
-        if self._track_edges:
-            self._recompute_edge_max_depth()
+        self._recompute_edge_max_depth()
 
     # ------------- Construction -------------
 
@@ -160,6 +156,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         self._edge_max_depth = edge_depths
 
+    def _clone_with(
+        self,
+        heads: Optional[Dict[_StackNode[T], List[Acc]]] = None,
+        empty_accs: Optional[List[Acc]] = None,
+    ) -> "LeveledGSS[T, Acc]":
+        new_gss = LeveledGSS(self._factory, heads if heads is not None else dict(self._heads),
+                              empty_accs if empty_accs is not None else list(self._empty_accs))
+        # _recompute_edge_max_depth is called in __init__
+        return new_gss
+
     # ------------- Interface implementation -------------
 
     def push(self, value: T) -> "LeveledGSS[T, Acc]":
@@ -208,38 +214,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # Popping an empty stack yields nothing (as in reference implementation)
         return self._clone_with(heads=new_heads, empty_accs=new_empty)
 
-    def popn(self, n: int) -> "LeveledGSS[T, Acc]":
-        """
-        Pop `n` elements from all active stacks. If a stack has fewer than `n` elements,
-        it contributes an empty stack to the result.
-        """
-        if n <= 0:
-            return self
-        new_heads: Dict[_StackNode[T], List[Acc]] = {}
-        new_empty: List[Acc] = []
-
-        for head, accs in self._heads.items():
-            cur: Optional[_StackNode[T]] = head
-            k = n
-            while k > 0 and cur is not None:
-                cur = cur.prev
-                k -= 1
-            if cur is None and k > 0:
-                # Popped past the bottom (should not happen because cur None implies at most n steps),
-                # but treat as empty anyway.
-                new_empty.extend(accs)
-            elif cur is None:
-                # Exactly reached empty
-                new_empty.extend(accs)
-            else:
-                lst = new_heads.get(cur)
-                if lst is None:
-                    new_heads[cur] = list(accs)
-                else:
-                    lst.extend(accs)
-
-        return self._clone_with(heads=new_heads, empty_accs=new_empty)
-
     def is_empty(self) -> bool:
         """
         True iff there is exactly one active stack and that stack is the empty stack.
@@ -261,18 +235,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         new_heads: Dict[_StackNode[T], List[Acc]] = {}
         for head, accs in self._heads.items():
             if head.value == value:
-                new_heads[head] = list(accs)
-        return self._clone_with(heads=new_heads, empty_accs=[])
-
-    def isolate_values(self, allowed_values: Set[T]) -> "LeveledGSS[T, Acc]":
-        """
-        Keeps only stacks whose top value is in allowed_values.
-        """
-        if not allowed_values:
-            return self._clone_with(heads={}, empty_accs=[])
-        new_heads: Dict[_StackNode[T], List[Acc]] = {}
-        for head, accs in self._heads.items():
-            if head.value in allowed_values:
                 new_heads[head] = list(accs)
         return self._clone_with(heads=new_heads, empty_accs=[])
 
@@ -370,8 +332,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
           key = (parent_node, symbol T); parent_node is None for first step from empty.
           value = max absolute depth of any active stack using that edge.
         """
-        if not self._track_edges:
-            return {}
         return dict(self._edge_max_depth)
 
     # Override core mutators to recompute edge depths after changes
@@ -383,8 +343,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     empty_accs: Optional[List[Acc]] = None) -> "LeveledGSS[T, Acc]":
         new_heads = heads if heads is not None else dict(self._heads)
         new_empty = empty_accs if empty_accs is not None else list(self._empty_accs)
-        new_inst = LeveledGSS(self._factory, new_heads, new_empty, track_edges=self._track_edges)
-        # __init__ invokes _recompute_edge_max_depth when tracking is enabled
+        new_inst = LeveledGSS(self._factory, new_heads, new_empty)
+        # __init__ invokes _recompute_edge_max_depth
         return new_inst
 
     def __hash__(self) -> int:
