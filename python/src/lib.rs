@@ -756,6 +756,15 @@ impl PyGSSNode {
         println!("{:#?}", stats);
     }
 
+    fn flatten(&self) -> Vec<(Vec<usize>, PyHybridL2Bitset)> {
+        let flattened = self.inner.flatten();
+        flattened.into_iter().map(|(path, acc)| {
+            let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
+            let py_terminals_union = PyHybridL2Bitset { inner: acc.terminals_union };
+            (path_ids, py_terminals_union)
+        }).collect()
+    }
+
     fn __hash__(&self) -> PyResult<isize> {
         let mut hasher = DefaultHasher::new();
         self.inner.hash(&mut hasher);

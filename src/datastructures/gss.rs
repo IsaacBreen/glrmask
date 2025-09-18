@@ -815,6 +815,58 @@ impl GSSNode {
         }
         })
     }
+
+    pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+        let mut memo: HashMap<*const GSSNode, Vec<(Vec<ParseStateEdgeContent>, Acc)>> = HashMap::new();
+        let mut paths = self._flatten_recursive(&mut memo);
+        // The paths are reversed (from leaf to root), so we need to reverse them back.
+        for (path, _) in &mut paths {
+            path.reverse();
+        }
+        paths
+    }
+
+    fn _flatten_recursive(
+        &self,
+        memo: &mut HashMap<*const GSSNode, Vec<(Vec<ParseStateEdgeContent>, Acc)>>,
+    ) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+        let ptr = self as *const GSSNode;
+        if let Some(cached_paths) = memo.get(&ptr) {
+            return cached_paths.clone();
+        }
+
+        if self.is_root() {
+            // A root node represents the end of a path (or the start of a reversed one).
+            // The path from here is empty, and the acc is its own.
+            let result = vec![(vec![], (*self.local_acc()).clone())];
+            memo.insert(ptr, result.clone());
+            return result;
+        }
+
+        let mut all_paths = Vec::new();
+        if let GSSNode::Internal(internal) = self {
+            // The local acc of this internal node needs to be applied to all paths passing through it.
+            let local_acc = self.local_acc();
+
+            for (edge_val, preds_by_depth) in &internal.predecessors {
+                for pred_vec in preds_by_depth.values() {
+                    for pred_arc in pred_vec {
+                        let sub_paths = pred_arc._flatten_recursive(memo);
+                        for (mut sub_path, sub_acc) in sub_paths {
+                            // The path from the predecessor is extended with the current edge.
+                            sub_path.push(edge_val.clone());
+                            // The acc from the predecessor's path is narrowed by this node's local acc.
+                            let new_acc = Acc::narrow(&local_acc, &sub_acc);
+                            all_paths.push((sub_path, new_acc));
+                        }
+                    }
+                }
+            }
+        }
+
+        memo.insert(ptr, all_paths.clone());
+        all_paths
+    }
 }
 
 // Core GSS operations

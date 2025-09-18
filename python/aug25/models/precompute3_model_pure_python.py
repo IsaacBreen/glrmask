@@ -10,35 +10,21 @@ from tqdm.auto import tqdm
 from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
 
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
-    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
-    q = collections.deque([rust_gss_node])
-    visited_rust_ptrs = {rust_gss_node.ptr()}
-    while q:
-        rust_node = q.popleft()
-        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
-        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
-        memo_nodes[rust_node.ptr()] = py_node
-        for _, pred_rust_node in rust_node.predecessors():
-            if pred_rust_node.ptr() not in visited_rust_ptrs:
-                visited_rust_ptrs.add(pred_rust_node.ptr())
-                q.append(pred_rust_node)
-    q = collections.deque([rust_gss_node])
-    visited_rust_ptrs = {rust_gss_node.ptr()}
-    while q:
-        rust_node = q.popleft()
-        py_node = memo_nodes[rust_node.ptr()]
-        for state_id, pred_rust_node in rust_node.predecessors():
-            py_pred_node = memo_nodes[pred_rust_node.ptr()]
-            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
-            if pred_rust_node.ptr() not in visited_rust_ptrs:
-                visited_rust_ptrs.add(pred_rust_node.ptr())
-                q.append(pred_rust_node)
-    py_head_node = memo_nodes[rust_gss_node.ptr()]
+    flattened_stacks = rust_gss_node.flatten()
+    
+    stacks_for_from_stacks = []
+    for path_ids, terminals_union in flattened_stacks:
+        py_acc = PyAcc(terminals_union=terminals_union)
+        stacks_for_from_stacks.append((path_ids, py_acc))
+
     def acc_factory():
         return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
-    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+
+    if not stacks_for_from_stacks:
+        # Handle empty GSS case
+        return FastGSS.initial(acc_factory)
+
+    return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
 
 
 @dataclass(frozen=True)
