@@ -427,7 +427,7 @@ class Model(GraphProvider):
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else type(gss).initial(gss.get_acc_factory())
+        return FastGSS.merge(shifted_gsses, merge_acc)
 
     def get_mask(self) -> RangeSet:
         """
