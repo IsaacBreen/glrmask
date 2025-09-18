@@ -5,7 +5,6 @@ import collections
 import time
 from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, Type
 from dataclasses import dataclass, field
-from functools import reduce
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
 
@@ -120,31 +119,21 @@ class GSS:
     def push(self, value: int) -> "GSS":
         new_heads: Dict[_StackNode, List[PyAcc]] = {}
         for head, accs in self._heads.items():
-            new_head = self._factory.get(head, value)
-            if new_head in new_heads:
-                new_heads[new_head].extend(accs)
-            else:
-                new_heads[new_head] = list(accs)
+            nh = self._factory.get(head, value)
+            new_heads.setdefault(nh, []).extend(accs)
         if self._empty_accs:
-            first_head = self._factory.get(None, value)
-            if first_head in new_heads:
-                new_heads[first_head].extend(self._empty_accs)
-            else:
-                new_heads[first_head] = list(self._empty_accs)
+            nh0 = self._factory.get(None, value)
+            new_heads.setdefault(nh0, []).extend(self._empty_accs)
         return self._clone_with(heads=new_heads, empty_accs=[])
 
     def pop(self) -> "GSS":
         new_heads: Dict[_StackNode, List[PyAcc]] = {}
         new_empty: List[PyAcc] = []
         for head, accs in self._heads.items():
-            prev = head.prev
-            if prev is None:
+            if head.prev is None:
                 new_empty.extend(accs)
             else:
-                if prev in new_heads:
-                    new_heads[prev].extend(accs)
-                else:
-                    new_heads[prev] = list(accs)
+                new_heads.setdefault(head.prev, []).extend(accs)
         return self._clone_with(heads=new_heads, empty_accs=new_empty)
 
     def popn(self, n: int) -> "GSS":
@@ -155,9 +144,7 @@ class GSS:
 
     def is_empty(self) -> bool:
         """Checks if the GSS contains no stacks."""
-        if self._empty_accs:
-            return False
-        return not any(self._heads.values())
+        return not (self._empty_accs or any(self._heads.values()))
 
     def isolate(self, value: Optional[int]) -> "GSS":
         if value is None:
@@ -186,17 +173,17 @@ class GSS:
         return {head.value for head, accs in self._heads.items() if accs}
 
     def reduce_acc(self) -> Optional[PyAcc]:
-        items: List[PyAcc] = []
+        combined: Optional[PyAcc] = None
         for accs in self._heads.values():
-            items.extend(accs)
-        items.extend(self._empty_accs)
-        if not items:
-            return None
-        return reduce(lambda a, b: a.merge(b), items)
+            for a in accs:
+                combined = a if combined is None else combined.merge(a)
+        for a in self._empty_accs:
+            combined = a if combined is None else combined.merge(a)
+        return combined
 
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
-        all_stacks: List[Tuple[List[int], PyAcc]] = []
+        merged: Dict[Tuple[int, ...], PyAcc] = {}
         for gss in gss_list:
             for head, accs in gss._heads.items():
                 vals: List[int] = []
@@ -204,24 +191,15 @@ class GSS:
                 while cur is not None:
                     vals.append(cur.value)
                     cur = cur.prev
-                vals.reverse()
+                key = tuple(reversed(vals))
                 for a in accs:
-                    all_stacks.append((vals, a))
+                    merged[key] = merged[key].merge(a) if key in merged else a
             for a in gss._empty_accs:
-                all_stacks.append(([], a))
-
-        if not all_stacks:
+                key = ()
+                merged[key] = merged[key].merge(a) if key in merged else a
+        if not merged:
             return GSS()
-
-        merged_stacks: Dict[Tuple[int, ...], PyAcc] = {}
-        for stack_vals, acc in all_stacks:
-            key = tuple(stack_vals)
-            if key in merged_stacks:
-                merged_stacks[key] = merged_stacks[key].merge(acc)
-            else:
-                merged_stacks[key] = acc
-        
-        final_stacks = [(list(key), acc) for key, acc in merged_stacks.items()]
+        final_stacks = [(list(k), v) for k, v in merged.items()]
         return GSS.from_stacks(final_stacks)
 
 
@@ -257,8 +235,7 @@ class Model(GraphProvider):
 
         # Normalize arena children bitsets and cache max_depth
         for uid, node in self.arena.items():
-            uid_int = int(uid)
-            self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+            self.max_depth[int(uid)] = int(node.get("max_depth", 0) or 0)
 
             children = node.get("children") or []
             if not children:
@@ -483,28 +460,25 @@ class Model(GraphProvider):
             if not action:
                 continue
 
-            def handle_shift(shift_to_state_id, gss_to_shift):
-                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-            def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                popped_gss = gss_to_reduce
-                for _ in range(reduce_action.len):
-                    popped_gss = popped_gss.pop()
-                for from_state_id in popped_gss.peek():
-                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                    goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                    heads_by_state[goto_state_id].append(goto_gss)
-
             if isinstance(action, int):
-                handle_shift(action, state_gss)
+                shifted_gsses.append(state_gss.push(action))
             elif isinstance(action, Reduce):
-                handle_reduce(action, state_gss)
+                popped = state_gss.popn(action.len)
+                for from_state_id in popped.peek():
+                    goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
+                    goto_gss = popped.isolate(from_state_id).push(goto_state_id)
+                    heads_by_state[goto_state_id].append(goto_gss)
             elif isinstance(action, Split):
                 if action.shift is not None:
-                    handle_shift(action.shift, state_gss)
+                    shifted_gsses.append(state_gss.push(action.shift))
                 for length, nts in action.reduces.items():
-                    for nt_id, pids in nts.items():
-                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
+                    popped = state_gss.popn(length)
+                    for from_state_id in popped.peek():
+                        table_row = self.parser_table.table[from_state_id]
+                        for nt_id in nts.keys():
+                            goto_state_id = table_row.gotos[nt_id]
+                            goto_gss = popped.isolate(from_state_id).push(goto_state_id)
+                            heads_by_state[goto_state_id].append(goto_gss)
 
         return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
 
@@ -600,9 +574,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    gss_active_tokens = all_ones_mask
-                    glr_active_tokens = llm_mask.intersection(gss_active_tokens)
-                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                    final_allowed_tokens = llm_mask.difference(forbidden_llm_tokens)
                     if not final_allowed_tokens.is_empty():
                         final_mask = final_mask.union(final_allowed_tokens)
 
