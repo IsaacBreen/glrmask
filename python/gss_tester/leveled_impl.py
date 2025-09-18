@@ -243,7 +243,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self._create(gss._empty_acc, {})
         else:
             child = cast(Dict, gss._children).get(value)
-            return child if child is not None else self._empty()
+            if child is None:
+                return self._empty()
+            return self._create(None, {value: child})
 
     def apply(
         self, func: Callable[[Acc], Acc], *, _memo: Optional[Dict[int, Any]] = None
