@@ -1,13 +1,13 @@
+from __future__ import annotations
 import json
 import heapq
 import collections
 import time
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, Type
 from dataclasses import dataclass, field
-
+from functools import reduce
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
-from gss_tester.leveled_impl import LeveledGSS as GSS
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,181 @@ class PyAcc:
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
+
+# GSS implementation, tailored from LeveledGSS for this model.
+
+@dataclass(frozen=True, eq=False)
+class _StackNode:
+    """A single structural node representing one stack cell."""
+    prev: Optional["_StackNode"]
+    value: int
+
+    def __repr__(self) -> str:
+        return f"_StackNode(value={self.value!r}, prev_id={id(self.prev) if self.prev else None})"
+
+
+class _NodeFactory:
+    """Interns _StackNode(prev, value) so identical pairs share the same object."""
+    def __init__(self) -> None:
+        self._table: Dict[Tuple[Optional[_StackNode], int], _StackNode] = {}
+
+    def get(self, prev: Optional[_StackNode], value: int) -> _StackNode:
+        key = (prev, value)
+        node = self._table.get(key)
+        if node is None:
+            node = _StackNode(prev, value)
+            self._table[key] = node
+        return node
+
+
+class GSS:
+    """A Graph-Structured Stack (GSS) implementation using a persistent linked-DAG."""
+
+    def __init__(
+        self,
+        node_factory: Optional[_NodeFactory] = None,
+        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
+        empty_accs: Optional[List[PyAcc]] = None,
+    ) -> None:
+        self._factory: _NodeFactory = node_factory if node_factory is not None else _NodeFactory()
+        self._heads: Dict[_StackNode, List[PyAcc]] = heads if heads is not None else {}
+        self._empty_accs: List[PyAcc] = empty_accs if empty_accs is not None else []
+
+    @classmethod
+    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]]) -> "GSS":
+        factory = _NodeFactory()
+        heads: Dict[_StackNode, List[PyAcc]] = {}
+        empty_accs: List[PyAcc] = []
+        for vals, acc in stacks:
+            if not vals:
+                empty_accs.append(acc)
+                continue
+            prev: Optional[_StackNode] = None
+            for v in vals:
+                prev = factory.get(prev, v)
+            if prev in heads:
+                heads[prev].append(acc)
+            else:
+                heads[prev] = [acc]
+        return cls(factory, heads, empty_accs)
+
+    def _clone_with(
+        self,
+        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
+        empty_accs: Optional[List[PyAcc]] = None,
+    ) -> "GSS":
+        return GSS(
+            self._factory,
+            heads if heads is not None else dict(self._heads),
+            empty_accs if empty_accs is not None else list(self._empty_accs),
+        )
+
+    def push(self, value: int) -> "GSS":
+        new_heads: Dict[_StackNode, List[PyAcc]] = {}
+        for head, accs in self._heads.items():
+            new_head = self._factory.get(head, value)
+            if new_head in new_heads:
+                new_heads[new_head].extend(accs)
+            else:
+                new_heads[new_head] = list(accs)
+        if self._empty_accs:
+            first_head = self._factory.get(None, value)
+            if first_head in new_heads:
+                new_heads[first_head].extend(self._empty_accs)
+            else:
+                new_heads[first_head] = list(self._empty_accs)
+        return self._clone_with(heads=new_heads, empty_accs=[])
+
+    def pop(self) -> "GSS":
+        new_heads: Dict[_StackNode, List[PyAcc]] = {}
+        new_empty: List[PyAcc] = []
+        for head, accs in self._heads.items():
+            prev = head.prev
+            if prev is None:
+                new_empty.extend(accs)
+            else:
+                if prev in new_heads:
+                    new_heads[prev].extend(accs)
+                else:
+                    new_heads[prev] = list(accs)
+        return self._clone_with(heads=new_heads, empty_accs=new_empty)
+
+    def popn(self, n: int) -> "GSS":
+        gss = self
+        for _ in range(n):
+            gss = gss.pop()
+        return gss
+
+    def is_empty(self) -> bool:
+        """Checks if the GSS contains no stacks."""
+        if self._empty_accs:
+            return False
+        return not any(self._heads.values())
+
+    def isolate(self, value: Optional[int]) -> "GSS":
+        if value is None:
+            return self._clone_with(heads={}, empty_accs=list(self._empty_accs))
+        new_heads: Dict[_StackNode, List[PyAcc]] = {}
+        for head, accs in self._heads.items():
+            if head.value == value:
+                new_heads[head] = list(accs)
+        return self._clone_with(heads=new_heads, empty_accs=[])
+
+    def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
+        new_heads = {h: [func(a) for a in accs] for h, accs in self._heads.items()}
+        new_empty = [func(a) for a in self._empty_accs]
+        return self._clone_with(heads=new_heads, empty_accs=new_empty)
+
+    def prune(self, predicate: Callable[[PyAcc], bool]) -> "GSS":
+        new_heads: Dict[_StackNode, List[PyAcc]] = {}
+        for head, accs in self._heads.items():
+            kept = [a for a in accs if predicate(a)]
+            if kept:
+                new_heads[head] = kept
+        new_empty = [a for a in self._empty_accs if predicate(a)]
+        return self._clone_with(heads=new_heads, empty_accs=new_empty)
+
+    def peek(self) -> Set[int]:
+        return {head.value for head, accs in self._heads.items() if accs}
+
+    def reduce_acc(self) -> Optional[PyAcc]:
+        items: List[PyAcc] = []
+        for accs in self._heads.values():
+            items.extend(accs)
+        items.extend(self._empty_accs)
+        if not items:
+            return None
+        return reduce(lambda a, b: a.merge(b), items)
+
+    @staticmethod
+    def merge(gss_list: Iterable["GSS"]) -> "GSS":
+        all_stacks: List[Tuple[List[int], PyAcc]] = []
+        for gss in gss_list:
+            for head, accs in gss._heads.items():
+                vals: List[int] = []
+                cur: Optional[_StackNode] = head
+                while cur is not None:
+                    vals.append(cur.value)
+                    cur = cur.prev
+                vals.reverse()
+                for a in accs:
+                    all_stacks.append((vals, a))
+            for a in gss._empty_accs:
+                all_stacks.append(([], a))
+
+        if not all_stacks:
+            return GSS()
+
+        merged_stacks: Dict[Tuple[int, ...], PyAcc] = {}
+        for stack_vals, acc in all_stacks:
+            key = tuple(stack_vals)
+            if key in merged_stacks:
+                merged_stacks[key] = merged_stacks[key].merge(acc)
+            else:
+                merged_stacks[key] = acc
+        
+        final_stacks = [(list(key), acc) for key, acc in merged_stacks.items()]
+        return GSS.from_stacks(final_stacks)
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
