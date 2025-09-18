@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python.py: |
@@ -1383,7 +1383,24 @@ local_system:
           # Active profiler for merge instrumentation (set by _CommitProfiler)
           _active_profiler: Optional[_CommitProfiler] = None
 
+          _intern: Dict[frozenset, "GSS"] = {}
+          _EMPTY_GSS: "GSS"  # To be initialized after class definition
+
+          def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
+              heads = heads or {}
+              if not heads:
+                  return cls._EMPTY_GSS
+
+              key = frozenset(heads.items())
+              obj = cls._intern.get(key)
+              if obj is None:
+                  obj = object.__new__(cls)
+                  cls._intern[key] = obj
+              return obj
+
           def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+              if hasattr(self, '_heads'):
+                  return
               self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
 
           @classmethod
@@ -1615,6 +1632,11 @@ local_system:
                   GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, output_stacks)
 
               return GSS(merged)
+
+
+      # Initialize GSS._EMPTY_GSS singleton
+      GSS._EMPTY_GSS = object.__new__(GSS)
+      GSS._EMPTY_GSS.__init__({})
 
 
       def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
@@ -2167,7 +2189,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -3404,5 +3426,144 @@ messages:
     metadata:
   - user: 'Changes committed with message: "perf: Deduplicate GSS objects in merge
       to prevent exponential compute time"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      We're getting exponential increase in compute time with an input string that consists of nested if-statements `if (true) { if (true) { if (true) {`. Investigate this.
+      The full input is
+      ```js
+      if (true) { if (true) { if (true) { if (true) { if (true) { if (true) {
+      ```
+      The ffi stuff should already be well-optimized.
+      Note that this benchmark code must strictly adhere to the current interface or it will fail to run at all.
+      We're focussing on commit. And on the size/complexity of the GSS.
+      Focus on time complexity, exponential speedups, not just 'linear' speedups.
+      We need to STOP that happening.
+
+      Actually, I think the reason is to do with MERGING.
+      Think about what happens if we merge two identical GSSs. Right now, it'll merge right down to the leaves. Merge time is proportional to the size of the GSS. This is very bad.
+      But suppose those GSSs are not only identical, but are actually the same object in memory.
+      Then we should just be able to do a pointer check and call it a day.
+      Do this.
+    metadata:
+  - user: Hmm.. Something went wrong. Maybe give every node a unique ID.
+    metadata:
+  - assistant: |-
+      I see, it seems the previous optimization wasn't sufficient to tackle the exponential complexity. Your intuition about giving nodes a unique ID is excellent—it points towards canonicalizing parser states to avoid redundant work. The issue is likely that we are creating many structurally identical, but distinct, `GSS` objects, and then re-processing them.
+
+      By "interning" `GSS` objects, we can ensure that any two `GSS` instances with the same internal structure are, in fact, the same single object in memory. This gives each unique GSS structure a unique object ID. The existing check in the `commit` method's processing queue (`visited_q_items`) already uses `id(gss)`, so it will automatically start pruning redundant computations once `GSS` objects are interned. This should effectively cut off the exponential growth.
+
+      Here are the step-by-step instructions to implement `GSS` interning.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python.py`.
+
+      2.  **Navigate to the `GSS` class definition** (around line 342).
+
+      3.  **Replace the `__init__` method with an interning mechanism**: We will use Python's `__new__` method to control object creation. This method will check a cache for an existing, structurally identical `GSS` object before creating a new one. The `__init__` method will be modified to ensure it only initializes newly created objects.
+
+          -   Delete the existing `__init__` method inside the `GSS` class.
+          -   In its place, add the following code, which includes class attributes for the cache, the `__new__` constructor, and the new idempotent `__init__` method:
+
+          ```python
+              _intern: Dict[frozenset, "GSS"] = {}
+              _EMPTY_GSS: "GSS"  # To be initialized after class definition
+          
+              def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
+                  heads = heads or {}
+                  if not heads:
+                      return cls._EMPTY_GSS
+          
+                  key = frozenset(heads.items())
+                  obj = cls._intern.get(key)
+                  if obj is None:
+                      obj = object.__new__(cls)
+                      cls._intern[key] = obj
+                  return obj
+          
+              def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+                  if hasattr(self, '_heads'):
+                      return
+                  self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+          ```
+
+      4.  **Initialize the empty GSS singleton**: The interning logic relies on a pre-existing singleton for the empty GSS. Add the initialization code for it immediately after the `GSS` class definition ends (around line 648, before `def get_disallowed_terminals_py(...)`).
+
+          ```python
+          # Initialize GSS._EMPTY_GSS singleton
+          GSS._EMPTY_GSS = object.__new__(GSS)
+          GSS._EMPTY_GSS.__init__({})
+          ```
+
+      These changes will ensure that any time a `GSS` is created, we reuse an existing object if one with the same content already exists, preventing the exponential re-computation that was causing the slowdown.
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -342,8 +342,29 @@
+           # Active profiler for merge instrumentation (set by _CommitProfiler)
+           _active_profiler: Optional[_CommitProfiler] = None
+       
+      -    def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+      -        self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+      +    _intern: Dict[frozenset, "GSS"] = {}
+      +    _EMPTY_GSS: "GSS"  # To be initialized after class definition
+      +
+      +    def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
+      +        heads = heads or {}
+      +        if not heads:
+      +            return cls._EMPTY_GSS
+      +
+      +        key = frozenset(heads.items())
+      +        obj = cls._intern.get(key)
+      +        if obj is None:
+      +            obj = object.__new__(cls)
+      +            cls._intern[key] = obj
+      +        return obj
+      +
+      +    def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+      +        if hasattr(self, '_heads'):
+      +            return
+      +        self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+       
+           @classmethod
+           def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
+      @@ -648,6 +669,12 @@
+               return GSS(merged)
+       
+       
+      +# Initialize GSS._EMPTY_GSS singleton
+      +GSS._EMPTY_GSS = object.__new__(GSS)
+      +GSS._EMPTY_GSS.__init__({})
+      +
+      +
+       def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
+           acc = gss.reduce_acc()
+           return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "feat: Intern GSS objects to ensure structural
+      identity"'
     metadata:
 ...

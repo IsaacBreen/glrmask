@@ -304,7 +304,24 @@ class GSS:
     # Active profiler for merge instrumentation (set by _CommitProfiler)
     _active_profiler: Optional[_CommitProfiler] = None
 
+    _intern: Dict[frozenset, "GSS"] = {}
+    _EMPTY_GSS: "GSS"  # To be initialized after class definition
+
+    def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
+        heads = heads or {}
+        if not heads:
+            return cls._EMPTY_GSS
+
+        key = frozenset(heads.items())
+        obj = cls._intern.get(key)
+        if obj is None:
+            obj = object.__new__(cls)
+            cls._intern[key] = obj
+        return obj
+
     def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+        if hasattr(self, '_heads'):
+            return
         self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
 
     @classmethod
@@ -536,6 +553,11 @@ class GSS:
             GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, output_stacks)
 
         return GSS(merged)
+
+
+# Initialize GSS._EMPTY_GSS singleton
+GSS._EMPTY_GSS = object.__new__(GSS)
+GSS._EMPTY_GSS.__init__({})
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
