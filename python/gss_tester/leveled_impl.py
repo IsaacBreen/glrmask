@@ -15,7 +15,6 @@ from typing import (
     Set,
     Tuple,
     Type,
-    frozenset,
 )
 
 from .interface import GSS, T, Acc
@@ -300,17 +299,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
         all_heads: Dict[_A[T], Acc] = {}
         root: _A[T] = _A_ROOT
-        gss_list = list(gss_list) # Consume iterator
 
         for gss in gss_list:
             # To merge different GSS types, we convert them to a common
             # representation of (stack_values, acc) pairs via ReferenceGSS.
             ref_gss = gss.to_reference_impl()
             for vals, acc in ref_gss._stacks:
-                # Skip the empty stack; it's handled specially below.
-                if not vals:
-                    continue
-                
                 # Reconstruct the _A node structure for this stack
                 cur = root
                 for v in vals:
@@ -320,18 +314,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     all_heads[cur] = all_heads[cur].merge(acc)
                 else:
                     all_heads[cur] = acc
-
-        # If the merge result has no stacks, we must check if the output should
-        # be a GSS with no stacks (EMPTY) or a GSS with one empty stack.
-        if not all_heads:
-            # If any input was an "empty GSS", the result should be too.
-            for g in gss_list:
-                if g.is_empty():
-                    # Find the accumulator for the empty stack and create it.
-                    ref = g.to_reference_impl()
-                    _, acc = ref._stacks[0]
-                    all_heads[root] = acc
-                    break
 
         return LeveledGSS._from_heads_map(all_heads)
 
