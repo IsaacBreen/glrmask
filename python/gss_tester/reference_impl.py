@@ -1,49 +1,174 @@
 from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Optional
 from functools import reduce
+import json
+
 from .interface import GSS, T, Acc
+
 
 class ReferenceGSS(GSS[T, Acc]):
     """
     A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
     Its behavior is the gold standard for the consistency tests.
+    Internally, each active stack is represented as a tuple of values (the stack) paired with an
+    accumulator of generic type Acc.
+
+    Notes:
+    - All operations are purely functional and return a new GSS state; the current instance is not mutated.
+    - Duplicate stacks (identical sequences of T) are allowed unless explicitly merged via `merge`.
+    - `to_json_serializable` returns a stable, canonical representation suitable for equality checks.
     """
-    def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Acc):
-        pass
+
+    def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Optional[Acc]):
+        # Store stacks as immutable tuples for stable hashing/keys; copy input to avoid aliasing.
+        processed: List[Tuple[Tuple[T, ...], Acc]] = []
+        computed_root_acc: Optional[Acc] = root_acc
+        for st, acc in stacks:
+            st_tuple: Tuple[T, ...] = tuple(st)
+            processed.append((st_tuple, acc))
+            if computed_root_acc is None and len(st_tuple) == 0:
+                computed_root_acc = acc
+        self._stacks: List[Tuple[Tuple[T, ...], Acc]] = processed
+        self._root_acc: Optional[Acc] = computed_root_acc
 
     @classmethod
     def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-        pass
+        # Derive a root_acc if any empty stack is present; otherwise None.
+        root_acc: Optional[Acc] = None
+        for st, acc in stacks:
+            if len(st) == 0:
+                root_acc = acc
+                break
+        return cls(stacks, root_acc)
 
     def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        Pushes a value onto all active stack heads, returning a new GSS state.
+        Accumulators remain unchanged.
+        """
+        new_stacks: List[Tuple[List[T], Acc]] = [([*stack, value], acc) for (stack, acc) in self._stacks]
+        # root_acc persists, but recalculation is harmless.
+        return ReferenceGSS(new_stacks, self._root_acc)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        For all active stacks, creates new stacks by removing the top value.
+        Returns a new GSS state containing the popped stacks. Empty stacks are ignored for popping.
+        """
+        new_stacks: List[Tuple[List[T], Acc]] = [([*stack[:-1]], acc) for (stack, acc) in self._stacks if len(stack) > 0]
+        # Recalculate root_acc if an empty stack appears in the result.
+        new_root: Optional[Acc] = None
+        for st, acc in new_stacks:
+            if len(st) == 0:
+                new_root = acc
+                break
+        return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
 
     def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        Keeps only the stacks that have `value` at the top.
+        Returns a new GSS state containing only these stacks.
+        """
+        filtered: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks if len(stack) > 0 and stack[-1] == value]
+        # After isolation, empty stacks do not exist; keep prior root_acc.
+        return ReferenceGSS(filtered, self._root_acc)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        Applies a function to each accumulator, returning a new GSS state.
+        """
+        new_stacks: List[Tuple[List[T], Acc]] = []
+        new_root: Optional[Acc] = None
+        for stack, acc in self._stacks:
+            new_acc = func(acc)
+            if new_root is None and len(stack) == 0:
+                new_root = new_acc
+            new_stacks.append(([*stack], new_acc))
+        return ReferenceGSS(new_stacks, new_root if new_root is not None else self._root_acc)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        Removes stacks from the GSS based on a predicate on their accumulator.
+        If `predicate(acc)` returns False, the stack is removed.
+        """
+        kept: List[Tuple[List[T], Acc]] = []
+        new_root: Optional[Acc] = None
+        for stack, acc in self._stacks:
+            if predicate(acc):
+                if new_root is None and len(stack) == 0:
+                    new_root = acc
+                kept.append(([*stack], acc))
+        return ReferenceGSS(kept, new_root if new_root is not None else self._root_acc)
 
     def peek(self) -> Set[T]:
-        pass
+        """
+        Returns the set of all values at the top of any stack.
+        """
+        return {stack[-1] for (stack, _acc) in self._stacks if len(stack) > 0}
 
     def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-        pass
+        """
+        Merges the accumulators of all active stacks into a single optional value.
+        Returns None if there are no active stacks.
+
+        Note: The caller should ensure `merge_func` is associative/commutative if deterministic results
+        are required across implementations, as order of reduction is unspecified.
+        """
+        if not self._stacks:
+            return None
+        it = iter(self._stacks)
+        _first_stack, first_acc = next(it)
+        result = first_acc
+        for _stack, acc in it:
+            result = merge_func(result, acc)
+        return result
 
     @staticmethod
     def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-        pass
+        """
+        Merges multiple GSS instances into one, combining accumulators for identical stacks.
+        If the same stack appears multiple times, their accumulators are merged via `merge_func`.
+        """
+        acc_by_stack: Dict[Tuple[T, ...], Acc] = {}
+        for gss in gss_list:
+            for stack, acc in gss._stacks:
+                if stack in acc_by_stack:
+                    acc_by_stack[stack] = merge_func(acc_by_stack[stack], acc)
+                else:
+                    acc_by_stack[stack] = acc
+
+        # Build the merged list; derive a root_acc if an empty stack is present.
+        merged_stacks: List[Tuple[List[T], Acc]] = [([*stack], acc) for stack, acc in acc_by_stack.items()]
+        root_acc: Optional[Acc] = acc_by_stack.get(()) if () in acc_by_stack else None
+        return ReferenceGSS(merged_stacks, root_acc)
 
     def to_json_serializable(self) -> Any:
-        pass
+        """
+        Returns a JSON-serializable, canonical representation of the GSS state for comparison.
+        Representation: a list of [stack_as_list, acc] pairs, sorted deterministically.
+        """
+        entries: List[Tuple[List[T], Acc]] = [([*stack], acc) for (stack, acc) in self._stacks]
+
+        def sort_key(item: Tuple[List[T], Acc]):
+            st_list, acc = item
+            # Use JSON strings as stable, type-agnostic ordering keys.
+            st_json = json.dumps(st_list, sort_keys=True, separators=(",", ":"))
+            acc_json = json.dumps(acc, sort_keys=True, separators=(",", ":"))
+            return (len(st_list), st_json, acc_json)
+
+        entries_sorted = sorted(entries, key=sort_key)
+        # Output as list of pairs: [stack, acc]
+        return [[stack, acc] for stack, acc in entries_sorted]
 
     def __hash__(self):
-        pass
+        """
+        Hash based on the canonical JSON representation.
+        """
+        data = self.to_json_serializable()
+        s = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        return hash(s)
 
     def is_empty(self) -> bool:
-        pass
+        """
+        Checks if the GSS contains only the initial empty stack.
+        """
+        return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
