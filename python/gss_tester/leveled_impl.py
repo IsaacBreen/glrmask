@@ -15,98 +15,69 @@ from typing import (
     Set,
     Tuple,
     Type,
+    cast,
 )
 
-from .interface import GSS, T, Acc
+from .interface import GSS, Acc, T
 from .reference_impl import ReferenceGSS
 
-
 # ------------------------------
-# Structural DAG definition (_A nodes)
+# Structural Trie (_A nodes)
 #
-# These nodes represent the stack structure. They are immutable and are not
-# interned in an arena; they behave as value types.
+# These nodes represent the shared structure of stacks as a prefix tree (trie).
+# They are immutable and behave as value types. They do not contain accumulators.
 # ------------------------------
 
 
 @dataclass(frozen=True, eq=True)
 class _A(ABC, Generic[T]):
-    """Abstract base class for a structural stack node."""
+    """Abstract base class for a structural stack node (prefix trie)."""
 
     __slots__ = ()
 
     @abstractmethod
-    def depth(self) -> int:
+    def _iter_stacks(self) -> Iterable[List[T]]:
+        """Iterates through the stack lists represented by this structural node."""
         ...
-
-    @abstractmethod
-    def prev(self) -> Optional[_A[T]]:
-        ...
-
-    def is_root(self) -> bool:
-        return self.depth() == 0
 
 
 @dataclass(frozen=True, eq=True)
 class _ARoot(_A[T]):
-    """Represents the root of a stack (the empty stack)."""
+    """Represents the end of a stack path (the empty stack suffix)."""
 
     __slots__ = ()
 
-    def depth(self) -> int:
-        return 0
-
-    def prev(self) -> Optional[_A[T]]:
-        return None
-
-    def __repr__(self) -> str:
-        return "_ARoot()"
+    def _iter_stacks(self) -> Iterable[List[T]]:
+        yield []
 
 
 _A_ROOT: _ARoot = _ARoot()
 
 
 @dataclass(frozen=True, eq=True)
-class _ACell(_A[T], Generic[T]):
-    """A single stack cell: holds a value and a pointer to the previous node."""
+class _AInternal(_A[T], Generic[T]):
+    """Represents an internal node in the prefix trie, with children."""
 
-    _prev: _A[T]
-    _value: T
-    _depth: int
+    # Children are stored as a sorted tuple to ensure hashability and canonical form.
+    _children: Tuple[Tuple[T, _A[T]], ...]
+    __slots__ = ("_children",)
 
-    __slots__ = ("_prev", "_value", "_depth")
+    @classmethod
+    def from_dict(cls, children: Dict[T, _A[T]]) -> _A[T]:
+        """Creates a structural node from a dictionary of children."""
+        if not children:
+            return _A_ROOT
+        # Sort items by key for a canonical representation.
+        sorted_items = tuple(sorted(children.items()))
+        return cls(sorted_items)
 
-    def __init__(self, prev: _A[T], value: T):
-        # We need a custom __init__ to compute the depth, as frozen dataclasses
-        # don't easily support fields calculated in __post_init__.
-        # object.__setattr__ is used to bypass the frozen attribute restriction
-        # during initialization.
-        object.__setattr__(self, "_prev", prev)
-        object.__setattr__(self, "_value", value)
-        object.__setattr__(self, "_depth", prev.depth() + 1)
+    def get_children(self) -> Dict[T, _A[T]]:
+        return dict(self._children)
 
-    def depth(self) -> int:
-        return self._depth
-
-    def prev(self) -> Optional[_A[T]]:
-        return self._prev
-
-    def value(self) -> T:
-        return self._value
-
-    def __repr__(self) -> str:
-        return f"_ACell(value={self._value!r}, depth={self._depth})"
-
-
-def _reconstruct_list(node: _A[T]) -> List[T]:
-    """Return the explicit stack list for a given structural head node."""
-    vals: List[T] = []
-    cur: Optional[_A[T]] = node
-    while isinstance(cur, _ACell):
-        vals.append(cur.value())
-        cur = cur.prev()
-    vals.reverse()
-    return vals
+    def _iter_stacks(self) -> Iterable[List[T]]:
+        for value, child_node in self._children:
+            for stack_suffix in child_node._iter_stacks():
+                yield [value] + stack_suffix
 
 
 # ------------------------------
@@ -114,83 +85,102 @@ def _reconstruct_list(node: _A[T]) -> List[T]:
 # ------------------------------
 
 
-class _BKind:
-    EMPTY = "empty"  # Represents a GSS with no active stacks
-    GROUP = "group"  # Multiple heads, one common accumulator ("sucked-up")
-    BRANCH = "branch"  # Multiple heads, multiple distinct accumulators
-
-
-@dataclass(eq=False)
+@dataclass(eq=False, frozen=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     """
-    A GSS implementation using a leveled, "sucked-up" representation.
+    A GSS implementation using a recursive, "leveled" representation.
 
-    - Stack structure is a persistent DAG of immutable `_A` nodes (value types).
-    - The `LeveledGSS` object represents the set of active stack heads and their
-      accumulators, using one of three variants for efficiency:
-        1) EMPTY: Represents no stacks.
-        2) GROUP: Multiple stack heads that share a common accumulator.
-        3) BRANCH: Multiple stack heads with different accumulators.
+    This class is a union of three variants, identified by `_kind`:
+    1. EMPTY: Represents a GSS with no active stacks.
+    2. GROUP: A "sucked-up" state where multiple stack structures (`_A` node)
+       share a single, common accumulator. This is a compact leaf in the GSS tree.
+    3. BRANCH: A "distributed" state representing a fork in the GSS. It holds
+       an optional accumulator for the empty stack and a dictionary mapping
+       stack prefixes (`T`) to sub-GSS instances.
 
-    The factory method `_from_heads_map` ensures the most compact representation
-    is always used, which is how the "suck-up" logic is implemented.
+    A canonical factory `_create` ensures that the most compact representation
+    (GROUP) is used whenever possible by applying the "suck-up" logic automatically.
     """
 
     _kind: str
-
-    # Variant payloads
-    _heads: Optional[frozenset[_A[T]]] = None
+    # GROUP payload
+    _node: Optional[_A[T]] = None
     _acc: Optional[Acc] = None
-    _children: Optional[Dict[_A[T], Acc]] = None
+    # BRANCH payload
+    _empty_acc: Optional[Acc] = None
+    _children: Optional[Dict[T, LeveledGSS[T, Acc]]] = None
 
     # -------------------------
-    # Construction and helpers
+    # Construction and Canonicalization
     # -------------------------
 
     @classmethod
     def _empty(cls) -> LeveledGSS[T, Acc]:
-        return cls(_BKind.EMPTY)
+        return cls(_kind="EMPTY")
 
     @classmethod
-    def _group(cls, heads: frozenset[_A[T]], acc: Acc) -> LeveledGSS[T, Acc]:
-        return cls(_BKind.GROUP, _heads=heads, _acc=acc)
+    def _group(cls, node: _A[T], acc: Acc) -> LeveledGSS[T, Acc]:
+        return cls(_kind="GROUP", _node=node, _acc=acc)
 
     @classmethod
-    def _branch(cls, children: Dict[_A[T], Acc]) -> LeveledGSS[T, Acc]:
-        return cls(_BKind.BRANCH, _children=children)
+    def _branch(
+        cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+    ) -> LeveledGSS[T, Acc]:
+        return cls(_kind="BRANCH", _empty_acc=empty_acc, _children=children)
 
     @classmethod
-    def _from_heads_map(cls, heads_to_acc: Dict[_A[T], Acc]) -> LeveledGSS[T, Acc]:
+    def _create(
+        cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+    ) -> LeveledGSS[T, Acc]:
         """
-        Canonical factory for LeveledGSS. Analyzes the heads and creates the
-        most compact representation (GROUP or BRANCH). This implements the
-        "suck-up" logic.
+        Canonical factory for LeveledGSS. This is the sole entry point for
+        creating instances, ensuring invariants are maintained.
         """
-        if not heads_to_acc:
+        # Filter out any empty children, as they don't represent any stacks.
+        live_children = {
+            v: c for v, c in children.items() if not c._is_structurally_empty()
+        }
+
+        if empty_acc is None and not live_children:
             return cls._empty()
 
-        # Check if all accumulators are the same to enable "suck-up"
-        first_acc = next(iter(heads_to_acc.values()))
-        all_same = all(acc == first_acc for acc in heads_to_acc.values())
+        # "Suck-up" logic: If there's no empty stack accumulator and all children
+        # are GROUP nodes with the same accumulator, merge them into a single GROUP.
+        can_suck_up = empty_acc is None and live_children
+        if can_suck_up:
+            child_vals = list(live_children.values())
+            first_child = child_vals[0]
+            if first_child._kind == "GROUP":
+                first_acc = first_child._acc
+                if all(
+                    c._kind == "GROUP" and c._acc == first_acc for c in child_vals[1:]
+                ):
+                    new_a_children = {
+                        v: cast(_A[T], c._node) for v, c in live_children.items()
+                    }
+                    new_a_node = _AInternal.from_dict(new_a_children)
+                    return cls._group(new_a_node, first_acc)
 
-        if all_same:
-            # All heads share one accumulator: suck up into a GROUP
-            return cls._group(frozenset(heads_to_acc.keys()), first_acc)
-        else:
-            # Multiple accumulators: create a BRANCH
-            return cls._branch(heads_to_acc)
+        return cls._branch(empty_acc, live_children)
 
-    def _iter_heads(self) -> Iterable[Tuple[_A[T], Acc]]:
-        """Helper to iterate through all (head, acc) pairs, abstracting over variants."""
-        if self._kind == _BKind.EMPTY:
-            return
-        elif self._kind == _BKind.GROUP:
-            assert self._heads is not None and self._acc is not None
-            for head in self._heads:
-                yield (head, self._acc)
-        elif self._kind == _BKind.BRANCH:
-            assert self._children is not None
-            yield from self._children.items()
+    def _distribute(self) -> LeveledGSS[T, Acc]:
+        """Converts a GROUP node into its equivalent BRANCH representation."""
+        if self._kind != "GROUP":
+            return self
+
+        node, acc = cast(_A[T], self._node), cast(Acc, self._acc)
+        if isinstance(node, _ARoot):
+            return self._create(acc, {})
+        if isinstance(node, _AInternal):
+            new_children = {
+                v: self._group(c, acc) for v, c in node.get_children().items()
+            }
+            return self._create(None, new_children)
+        return self._empty()  # Should be unreachable
+
+    def _is_structurally_empty(self) -> bool:
+        """Checks if the GSS represents any stacks."""
+        return self._kind == "EMPTY"
 
     # -------------------------
     # GSS interface
@@ -200,161 +190,171 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def from_stacks(
         cls: Type[LeveledGSS], stacks: List[Tuple[List[T], Acc]]
     ) -> LeveledGSS[T, Acc]:
-        heads_to_acc: Dict[_A[T], Acc] = {}
-        root: _A[T] = _A_ROOT
-        for vals, acc in stacks:
-            cur = root
-            for v in vals:
-                cur = _ACell(cur, v)
+        if not stacks:
+            return cls._empty()
 
-            if cur in heads_to_acc:
-                heads_to_acc[cur] = heads_to_acc[cur].merge(acc)
+        empty_acc: Optional[Acc] = None
+        by_prefix: Dict[T, List[Tuple[List[T], Acc]]] = defaultdict(list)
+
+        for stack, acc in stacks:
+            if not stack:
+                empty_acc = acc if empty_acc is None else empty_acc.merge(acc)
             else:
-                heads_to_acc[cur] = acc
-        return cls._from_heads_map(heads_to_acc)
+                by_prefix[stack[0]].append((stack[1:], acc))
+
+        children = {
+            prefix: cls.from_stacks(s_list) for prefix, s_list in by_prefix.items()
+        }
+        return cls._create(empty_acc, children)
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
-        new_map: Dict[_A[T], Acc] = {}
-        for head, acc in self._iter_heads():
-            child = _ACell(head, value)
-            if child in new_map:
-                new_map[child] = new_map[child].merge(acc)
-            else:
-                new_map[child] = acc
-        return self._from_heads_map(new_map)
+        if self._is_structurally_empty():
+            return self._empty()
+        return self._create(None, {value: self})
 
     def pop(self) -> LeveledGSS[T, Acc]:
-        new_map: Dict[_A[T], Acc] = {}
-        for head, acc in self._iter_heads():
-            if not head.is_root():
-                prev = head.prev()
-                assert prev is not None
-                if prev in new_map:
-                    new_map[prev] = new_map[prev].merge(acc)
-                else:
-                    new_map[prev] = acc
-        return self._from_heads_map(new_map)
+        if self._kind == "EMPTY":
+            return self
+        if self._kind == "GROUP":
+            node = cast(_A[T], self._node)
+            if isinstance(node, _ARoot):  # Popping the empty stack
+                return self._empty()
+            # Distribute and merge the children
+            distributed = self._distribute()
+            return self.merge(cast(Dict, distributed._children).values())
+        # BRANCH
+        return self.merge(cast(Dict, self._children).values())
 
     def is_empty(self) -> bool:
-        if self._kind == _BKind.GROUP:
-            # A GSS is "empty" if it contains exactly one stack, which is empty.
-            assert self._heads is not None
-            return len(self._heads) == 1 and next(iter(self._heads)).is_root()
+        if self._kind == "GROUP":
+            return self._node == _A_ROOT
+        if self._kind == "BRANCH":
+            return self._empty_acc is not None and not self._children
         return False
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        new_map: Dict[_A[T], Acc] = {}
-        for head, acc in self._iter_heads():
-            if value is None:
-                if head.is_root():
-                    new_map[head] = (
-                        acc if head not in new_map else new_map[head].merge(acc)
-                    )
-            else:
-                if isinstance(head, _ACell) and head.value() == value:
-                    new_map[head] = (
-                        acc if head not in new_map else new_map[head].merge(acc)
-                    )
-        return self._from_heads_map(new_map)
+        gss = self._distribute()
+        if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
+            if gss.is_empty() and value is None:
+                return gss
+            return self._empty()
 
-    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        if self._kind == _BKind.EMPTY:
-            return self
-        if self._kind == _BKind.GROUP:
-            assert self._heads is not None and self._acc is not None
-            return self._group(self._heads, func(self._acc))
+        if value is None:
+            return self._create(gss._empty_acc, {})
+        else:
+            child = cast(Dict, gss._children).get(value)
+            return child if child is not None else self._empty()
 
-        assert self._children is not None
-        # Memoize calls to func for each unique accumulator to preserve sharing.
-        unique_accs = set(self._children.values())
-        memo = {acc: func(acc) for acc in unique_accs}
-        new_children = {head: memo[acc] for head, acc in self._children.items()}
+    def apply(
+        self, func: Callable[[Acc], Acc], *, _memo: Optional[Dict[int, Any]] = None
+    ) -> LeveledGSS[T, Acc]:
+        if _memo is None:
+            _memo = {}
+        if id(self) in _memo:
+            return _memo[id(self)]
 
-        # Re-canonicalize in case func makes some accumulators equal
-        return self._from_heads_map(new_children)
+        if self._kind == "EMPTY":
+            result = self
+        elif self._kind == "GROUP":
+            result = self._group(cast(_A[T], self._node), func(cast(Acc, self._acc)))
+        else:  # BRANCH
+            new_empty_acc = (
+                func(self._empty_acc) if self._empty_acc is not None else None
+            )
+            new_children = {
+                v: c.apply(func, _memo=_memo)
+                for v, c in cast(Dict, self._children).items()
+            }
+            result = self._create(new_empty_acc, new_children)
+
+        _memo[id(self)] = result
+        return result
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-        new_map: Dict[_A[T], Acc] = {
-            h: a for h, a in self._iter_heads() if predicate(a)
+        if self._kind == "EMPTY":
+            return self
+        if self._kind == "GROUP":
+            return self if predicate(cast(Acc, self._acc)) else self._empty()
+
+        # BRANCH
+        new_empty_acc = (
+            self._empty_acc
+            if self._empty_acc is not None and predicate(self._empty_acc)
+            else None
+        )
+        new_children = {
+            v: c.prune(predicate) for v, c in cast(Dict, self._children).items()
         }
-        return self._from_heads_map(new_map)
+        return self._create(new_empty_acc, new_children)
 
     def peek(self) -> Set[T]:
-        tops: Set[T] = set()
-        for head, _ in self._iter_heads():
-            if isinstance(head, _ACell):
-                tops.add(head.value())
-        return tops
+        gss = self._distribute()
+        if gss._kind == "BRANCH":
+            return set(cast(Dict, gss._children).keys())
+        return set()
+
+    def _iter_stacks(self) -> Iterable[Tuple[List[T], Acc]]:
+        if self._kind == "EMPTY":
+            return
+        if self._kind == "GROUP":
+            acc = cast(Acc, self._acc)
+            for stack_list in cast(_A[T], self._node)._iter_stacks():
+                yield stack_list, acc
+        else:  # BRANCH
+            if self._empty_acc is not None:
+                yield [], self._empty_acc
+            for value, child_gss in cast(Dict, self._children).items():
+                for stack_suffix, acc in child_gss._iter_stacks():
+                    yield [value] + stack_suffix, acc
 
     def reduce_acc(self) -> Optional[Acc]:
-        accs = [acc for _, acc in self._iter_heads()]
+        accs = [acc for _, acc in self._iter_stacks()]
         if not accs:
             return None
         return reduce(lambda a, b: a.merge(b), accs)
 
     def to_reference_impl(self) -> ReferenceGSS[T, Acc]:
-        stacks: List[Tuple[List[T], Acc]] = []
-        for head, acc in self._iter_heads():
-            vals = _reconstruct_list(head)
-            stacks.append((vals, acc))
-        return ReferenceGSS.from_stacks(stacks)
+        return ReferenceGSS.from_stacks(list(self._iter_stacks()))
 
     @staticmethod
     def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-        # Stage 1: Partition GSSs by type and structure for optimization.
-        # We can efficiently merge GROUPs that share the same set of heads.
-        groups_by_heads: Dict[frozenset[_A[T]], List[Acc]] = defaultdict(list)
-        others: List[GSS[T, Acc]] = []
+        live_gss_list = [
+            g for g in gss_list if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
+        ]
+        if not live_gss_list:
+            return LeveledGSS._empty()
+        if len(live_gss_list) == 1:
+            gss = live_gss_list[0]
+            return gss if isinstance(gss, LeveledGSS) else LeveledGSS.from_stacks(list(gss.to_reference_impl()._iter_stacks()))
 
-        for gss in gss_list:
+
+        dist_gss_list = []
+        for gss in live_gss_list:
             if isinstance(gss, LeveledGSS):
-                if gss._kind == _BKind.GROUP:
-                    assert gss._heads is not None and gss._acc is not None
-                    groups_by_heads[gss._heads].append(gss._acc)
-                elif gss._kind != _BKind.EMPTY:
-                    # This will be BRANCH GSSs. EMPTY GSSs are ignored.
-                    others.append(gss)
+                dist_gss_list.append(gss._distribute())
             else:
-                others.append(gss)
-
-        # Stage 2: Build the initial `all_heads` from the partitioned GROUPs.
-        all_heads: Dict[_A[T], Acc] = {}
-        for heads, acc_list in groups_by_heads.items():
-            if not acc_list:
-                continue
-            # Merge all accumulators for this single head structure.
-            merged_acc = reduce(lambda a, b: a.merge(b), acc_list)
-            # Apply this merged accumulator to all heads in the set.
-            for head in heads:
-                if head in all_heads:
-                    all_heads[head] = all_heads[head].merge(merged_acc)
-                else:
-                    all_heads[head] = merged_acc
-
-        # Stage 3: Merge the remaining GSSs (BRANCH, other types) head by head.
-        root: _A[T] = _A_ROOT
-        for gss in others:
-            if isinstance(gss, LeveledGSS):
-                # Fast path for remaining LeveledGSS (i.e., BRANCH)
-                for head, acc in gss._iter_heads():
-                    if head in all_heads:
-                        all_heads[head] = all_heads[head].merge(acc)
-                    else:
-                        all_heads[head] = acc
-            else:
-                # Slow path for other GSS types
+                # Convert non-LeveledGSS types via from_stacks
                 ref_gss = gss.to_reference_impl()
-                for vals, acc in ref_gss._stacks:
-                    # Reconstruct the _A node structure for this stack
-                    cur = root
-                    for v in vals:
-                        cur = _ACell(cur, v)
+                dist_gss_list.append(LeveledGSS.from_stacks(ref_gss._stacks)._distribute())
 
-                    if cur in all_heads:
-                        all_heads[cur] = all_heads[cur].merge(acc)
-                    else:
-                        all_heads[cur] = acc
-        return LeveledGSS._from_heads_map(all_heads)
+        merged_empty_acc: Optional[Acc] = None
+        all_children_by_key: Dict[T, List[LeveledGSS[T, Acc]]] = defaultdict(list)
+
+        for gss in dist_gss_list:
+            if gss._kind == "BRANCH":
+                if gss._empty_acc is not None:
+                    merged_empty_acc = (
+                        gss._empty_acc
+                        if merged_empty_acc is None
+                        else merged_empty_acc.merge(gss._empty_acc)
+                    )
+                for k, v in cast(Dict, gss._children).items():
+                    all_children_by_key[k].append(v)
+
+        merged_children = {
+            k: LeveledGSS.merge(v_list) for k, v_list in all_children_by_key.items()
+        }
+        return LeveledGSS._create(merged_empty_acc, merged_children)
 
     # -------------------------
     # Dunder methods
@@ -362,38 +362,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, LeveledGSS):
-            # Fast path for LeveledGSS vs LeveledGSS
-            if self._kind != other._kind:
-                return False
-            if self._kind == _BKind.EMPTY:
-                return True
-            if self._kind == _BKind.GROUP:
-                return self._heads == other._heads and self._acc == other._acc
-            if self._kind == _BKind.BRANCH:
-                return self._children == other._children
-            return False  # Should be unreachable
-
-        if not isinstance(other, GSS):
-            return NotImplemented
-        # Compare via ReferenceGSS for robust, canonical semantics
-        return self.to_reference_impl() == other.to_reference_impl()
+            # Fast path for two canonical LeveledGSS instances
+            return (
+                self._kind == other._kind
+                and self._node == other._node
+                and self._acc == other._acc
+                and self._empty_acc == other._empty_acc
+                and self._children == other._children
+            )
+        if isinstance(other, GSS):
+            return self.to_reference_impl() == other.to_reference_impl()
+        return NotImplemented
 
     def __repr__(self) -> str:
-        if self._kind == _BKind.EMPTY:
+        if self._kind == "EMPTY":
             return "LeveledGSS(EMPTY)"
-        if self._kind == _BKind.GROUP:
-            assert self._heads is not None and self._acc is not None
-            stacks = sorted([_reconstruct_list(h) for h in self._heads])
-            return f"LeveledGSS(GROUP stacks={stacks!r} acc={self._acc!r})"
-
+        if self._kind == "GROUP":
+            stacks = sorted(list(cast(_A[T], self._node)._iter_stacks()))
+            return f"LeveledGSS(GROUP stacks={stacks!r}, acc={self._acc!r})"
         # BRANCH
-        assert self._children is not None
         parts = []
+        if self._empty_acc is not None:
+            parts.append(f"[]: {self._empty_acc!r}")
         # Sort for deterministic output
-        sorted_children = sorted(
-            self._children.items(),
-            key=lambda p: (_reconstruct_list(p[0]), repr(p[1])),
-        )
-        for h, a in sorted_children:
-            parts.append(f"{_reconstruct_list(h)!r}:{a!r}")
+        sorted_children = sorted(cast(Dict, self._children).items())
+        for v, c in sorted_children:
+            parts.append(f"{v!r}: {c!r}")
         return f"LeveledGSS(BRANCH {{{', '.join(parts)}}})"
