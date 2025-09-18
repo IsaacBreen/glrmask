@@ -321,11 +321,14 @@ class Model(GraphProvider):
             return
 
         # --- Python implementation starts here ---
+        py_states = list(self.state.keys())
+        rust_states = list(self.constraint_state.get_state_map().keys())
+        assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
 
         # --- Start: Added pre-processing steps to match Rust ---
         terminals_map: Dict[int, ffi.Bitset] = {}
         state_map: Dict[int, int] = {}
-        
+
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
             if end_state is not None:
