@@ -214,15 +214,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # Popping an empty stack yields nothing (as in reference implementation)
         return self._clone_with(heads=new_heads, empty_accs=new_empty)
 
-    def popn(self, n: int) -> "LeveledGSS[T, Acc]":
-        """
-        Pops n times.
-        """
-        gss = self
-        for _ in range(n):
-            gss = gss.pop()
-        return gss
-
     def is_empty(self) -> bool:
         """
         True iff there is exactly one active stack and that stack is the empty stack.
@@ -319,37 +310,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(gss_list: Iterable["GSS[T, Acc]"]) -> "LeveledGSS[T, Acc]":
         """
         Merges multiple GSS instances, combining accumulators for identical stacks.
+        Implementation strategy:
+          - Convert each input to ReferenceGSS (or accept one directly),
+          - Use ReferenceGSS.merge to coalesce duplicates,
+          - Convert the merged result back into a LeveledGSS.
         """
-        # Fast path for when all inputs are LeveledGSS with a shared factory.
-        leveled_gss_list = list(gss_list)
-        if not leveled_gss_list:
-            return LeveledGSS()
-
-        if all(isinstance(g, LeveledGSS) for g in leveled_gss_list):
-            # Cast for type checker.
-            leveled_gss_list_typed: List[LeveledGSS[T, Acc]] = leveled_gss_list  # type: ignore
-
-            first_gss = leveled_gss_list_typed[0]
-            factory = first_gss._factory
-            if all(g._factory is factory for g in leveled_gss_list_typed):
-                new_heads: Dict[_StackNode[T], List[Acc]] = {}
-                new_empty_accs: List[Acc] = []
-                for g in leveled_gss_list_typed:
-                    new_empty_accs.extend(g._empty_accs)
-                    for head, accs in g._heads.items():
-                        if head in new_heads:
-                            new_heads[head].extend(accs)
-                        else:
-                            new_heads[head] = list(accs)
-                return LeveledGSS(factory, new_heads, new_empty_accs)
-
-        # Fallback for mixed GSS types or different factories.
         ref_inputs: List[ReferenceGSS[T, Acc]] = []
-        for g in leveled_gss_list:
+        for g in gss_list:
             if isinstance(g, ReferenceGSS):
                 ref_inputs.append(g)
             else:
-                ref_inputs.append(g.to_reference_impl())
+                ref_inputs.append(g.to_reference_impl())  # type: ignore[arg-type]
         merged_ref: ReferenceGSS[T, Acc] = ReferenceGSS.merge(ref_inputs)
         return LeveledGSS.from_stacks(merged_ref._stacks)  # _stacks are already canonical
 

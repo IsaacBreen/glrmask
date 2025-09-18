@@ -250,7 +250,7 @@ class Model(GraphProvider):
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
-            q_item_key = (offset, tokenizer_sid, gss)
+            q_item_key = (offset, tokenizer_sid, id(gss))
             if q_item_key in visited_q_items:
                 continue
             visited_q_items.add(q_item_key)
