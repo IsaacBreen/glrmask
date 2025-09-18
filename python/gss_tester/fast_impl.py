@@ -40,31 +40,29 @@ class FastGSS(GSS[T, Acc]):
 
     def __init__(self, 
                  heads: FrozenSet[_Node[T, Acc]], 
-                 acc_default_factory: Callable[[], Acc], 
                  root: _Node[T, Acc],
                  child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
                  path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
         self._heads = heads
-        self._acc_default_factory = acc_default_factory
         self._root = root
         self._child_to_parents = child_to_parents
         self._path_cache = path_cache
 
     @classmethod
-    def initial(cls: Type['FastGSS'], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
-        root = _Node(acc=acc_default_factory(), depth=0)
-        return cls(
-            heads=frozenset([root]),
-            acc_default_factory=acc_default_factory,
-            root=root,
-            child_to_parents={},
-            path_cache={root.id: frozenset([tuple()])}
-        )
-
-    @classmethod
-    def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
+    def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
         """Creates a GSS from a list of explicit stacks by building the node graph."""
-        root = _Node(acc=acc_default_factory(), depth=0)
+        root_acc: Acc = None
+        has_empty_stack = False
+        for s, acc in stacks:
+            if not s:
+                has_empty_stack = True
+                root_acc = acc
+                break
+        
+        if not has_empty_stack:
+            raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
+
+        root = _Node(acc=root_acc, depth=0)
         child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
         path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
         heads: Set[_Node[T, Acc]] = set()
@@ -104,7 +102,7 @@ class FastGSS(GSS[T, Acc]):
                     child_to_parents[new_head] = child_to_parents[current_node]
                 heads.add(new_head)
 
-        return cls(frozenset(heads), acc_default_factory, root, child_to_parents, path_cache)
+        return cls(frozenset(heads), root, child_to_parents, path_cache)
 
     def push(self, value: T) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
@@ -127,7 +125,7 @@ class FastGSS(GSS[T, Acc]):
             new_heads.add(new_node)
             memo[head] = new_node
 
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+        return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
 
     def pop(self) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
@@ -138,22 +136,13 @@ class FastGSS(GSS[T, Acc]):
 
         if not new_heads:
             # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
 
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-    def popn(self, n: int) -> 'FastGSS[T, Acc]':
-        gss = self
-        for _ in range(n):
-            gss = gss.pop()
-        return gss
+        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
 
     def is_empty(self) -> bool:
         """Checks if the GSS contains only the initial empty stack."""
         return self._heads == frozenset([self._root])
-
-    def get_acc_factory(self) -> Callable[[], Acc]:
-        return self._acc_default_factory
 
     def isolate(self, value: T) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
@@ -164,8 +153,8 @@ class FastGSS(GSS[T, Acc]):
 
         if not new_heads:
             # If no stacks match, the result is an empty GSS (represented by the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
@@ -186,20 +175,16 @@ class FastGSS(GSS[T, Acc]):
             new_heads.add(new_node)
             memo[head] = new_node
             
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+        return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
         new_heads = {head for head in self._heads if predicate(head.acc)}
 
         if not new_heads:
             # If all stacks are pruned, the result is an empty GSS (represented by the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
 
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-    def split_heads(self) -> Iterable['FastGSS[T, Acc]']:
-        for head in self._heads:
-            yield FastGSS(frozenset([head]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
 
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
@@ -273,7 +258,7 @@ class FastGSS(GSS[T, Acc]):
                     all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
                 final_heads.add(new_node)
 
-        return FastGSS(frozenset(final_heads), first_gss._acc_default_factory, first_gss._root, all_child_to_parents, all_path_caches)
+        return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
 
     def to_json_serializable(self) -> Any:
         all_stacks = []

@@ -10,13 +10,7 @@ class GSS(ABC, Generic[T, Acc]):
 
     @classmethod
     @abstractmethod
-    def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
-        """Creates an initial GSS, typically with one empty stack."""
-        pass
-
-    @classmethod
-    @abstractmethod
-    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
         """Creates a GSS from a list of explicit stacks."""
         pass
 
@@ -33,22 +27,19 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
-    @abstractmethod
     def popn(self, n: int) -> 'GSS[T, Acc]':
         """
         For all active stacks, creates new stacks by removing the top `n` values.
         Returns a new GSS state containing the popped stacks.
         """
-        pass
+        gss = self
+        for _ in range(n):
+            gss = gss.pop()
+        return gss
 
     @abstractmethod
     def is_empty(self) -> bool:
         """Checks if the GSS contains only the initial empty stack."""
-        pass
-
-    @abstractmethod
-    def get_acc_factory(self) -> Callable[[], Acc]:
-        """Returns the accumulator default factory used by this GSS instance."""
         pass
 
     @abstractmethod
@@ -69,14 +60,6 @@ class GSS(ABC, Generic[T, Acc]):
         """
         Removes stacks from the GSS based on a predicate on their accumulator.
         If `predicate(acc)` returns False, the stack is removed.
-        """
-        pass
-
-    @abstractmethod
-    def split_heads(self) -> Iterable['GSS[T, Acc]']:
-        """
-        Splits the GSS into an iterable of GSS instances, each representing a single stack head.
-        This allows operating on each stack individually.
         """
         pass
 

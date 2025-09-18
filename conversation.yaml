@@ -294,1460 +294,6 @@ local_system:
                   gss = gss.pop()
               return gss
 
-          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      if any(v == value for v, _ in self._child_to_parents[head]):
-                          new_heads.add(head)
-
-              if not new_heads:
-                  # If no stacks match, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-              new_heads = {head for head in self._heads if predicate(head.acc)}
-
-              if not new_heads:
-                  # If all stacks are pruned, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-          def split_heads(self) -> Iterable['FastGSS[T, Acc]']:
-              for head in self._heads:
-                  yield FastGSS(frozenset([head]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-          def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for value, _ in self._child_to_parents[head]:
-                          peek_values.add(value)
-              return peek_values
-
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [head.acc for head in self._heads]
-              return reduce(merge_func, accumulators)
-
-          @staticmethod
-          def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
-              gss_list = list(gss_list)
-              if not gss_list:
-                  raise ValueError("Cannot merge an empty list of GSS instances.")
-              
-              first_gss = gss_list[0]
-              
-              if len(gss_list) == 1:
-                  return first_gss
-
-              # Filter out GSSs that only contain an empty stack if there are others with content.
-              gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
-
-              if gss_with_content:
-                  gss_list_to_merge = gss_with_content
-              else:
-                  # All GSSs only contain empty stacks, so merge them all.
-                  gss_list_to_merge = gss_list
-
-              # Combine all structural information and heads
-              all_child_to_parents = {}
-              all_path_caches = {}
-              all_heads = set()
-              for gss in gss_list_to_merge:
-                  all_child_to_parents.update(gss._child_to_parents)
-                  all_path_caches.update(gss._path_cache)
-                  all_heads.update(gss._heads)
-
-              # Group heads by their structural path
-              heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
-              for head in all_heads:
-                  paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
-                  if paths not in heads_by_path:
-                      heads_by_path[paths] = []
-                  heads_by_path[paths].append(head)
-
-              final_heads: Set[_Node[T, Acc]] = set()
-              for paths, nodes in heads_by_path.items():
-                  if len(nodes) == 1:
-                      final_heads.add(nodes[0])
-                      continue
-                  
-                  # Merge accumulators for nodes on the same path
-                  merged_acc = reduce(merge_func, (n.acc for n in nodes))
-                  
-                  # Try to find an existing node with the merged accumulator to reuse
-                  reused_node = next((n for n in nodes if n.acc == merged_acc), None)
-                  
-                  if reused_node:
-                      final_heads.add(reused_node)
-                  else:
-                      # Create a new node representing the merged state
-                      canonical_node = nodes[0]
-                      new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
-                      if canonical_node in all_child_to_parents:
-                          all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
-                      final_heads.add(new_node)
-
-              return FastGSS(frozenset(final_heads), first_gss._acc_default_factory, first_gss._root, all_child_to_parents, all_path_caches)
-
-          def to_json_serializable(self) -> Any:
-              all_stacks = []
-              for head in self._heads:
-                  paths = self._reconstruct_paths(head, self._child_to_parents, self._path_cache)
-                  for path in paths:
-                      all_stacks.append({"stack": list(path), "acc": head.acc})
-              
-              # Sort for a canonical representation
-              return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
-
-          def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
-              if node.id in cache:
-                  return cache[node.id]
-
-              if node == self._root:
-                  return frozenset([tuple()])
-
-              if node not in child_to_parents:
-                  # This can happen if a GSS is empty (has no heads pointing to this node's parents)
-                  return frozenset()
-
-              paths: Set[Tuple[T, ...]] = set()
-              for value, parent in child_to_parents[node]:
-                  parent_paths = self._reconstruct_paths(parent, child_to_parents, cache)
-                  for p_path in parent_paths:
-                      paths.add(p_path + (value,))
-              
-              result = frozenset(paths)
-              cache[node.id] = result
-              return result
-
-          def __hash__(self):
-              serial = self.to_json_serializable()
-              hashable_serial = tuple(
-                  (tuple(item['stack']), item['acc']) for item in serial
-              )
-              return hash(hashable_serial)
-
-          def __eq__(self, other):
-              if not isinstance(other, FastGSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __repr__(self):
-              return f"FastGSS({self.to_json_serializable()})"
-    python/gss_tester/interface.py: |-
-      from abc import ABC, abstractmethod
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
-      import json
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc') # Accumulator type
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
-              """Creates an initial GSS, typically with one empty stack."""
-              pass
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def push(self, value: T) -> 'GSS[T, Acc]':
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def split_heads(self) -> Iterable['GSS[T, Acc]']:
-              """
-              Splits the GSS into an iterable of GSS instances, each representing a single stack head.
-              This allows operating on each stack individually.
-              """
-              pass
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              pass
-
-          @staticmethod
-          @abstractmethod
-          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
-              pass
-
-          @abstractmethod
-          def to_json_serializable(self) -> Any:
-              """Returns a JSON-serializable representation of the GSS state for comparison."""
-              pass
-
-          def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
-              except Exception:
-                  return super().__str__()
-
-          def __eq__(self, other):
-              """Defines equality based on the canonical JSON representation."""
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __hash__(self):
-              """Defines hash based on the canonical JSON representation."""
-              pass
-    python/gss_tester/reference_impl.py: |-
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
-      from functools import reduce
-      from .interface import GSS, T, Acc
-
-      class ReferenceGSS(GSS[T, Acc]):
-          """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Its behavior is the gold standard for the consistency tests.
-          """
-          def __init__(self, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]):
-              self.stacks = stacks
-              self._acc_default_factory = acc_default_factory
-              if not self.stacks:
-                  self.stacks.append(([], self._acc_default_factory()))
-
-          @classmethod
-          def initial(cls: Type['ReferenceGSS'], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """Creates a GSS with a single empty stack and a default accumulator."""
-              return cls([], acc_default_factory)
-
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              return cls(stacks, acc_default_factory)
-
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
-              return ReferenceGSS(new_stacks, self._acc_default_factory)
-
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = []
-              for stack, acc in self.stacks:
-                  if stack:
-                      new_stacks.append((stack[:-1], acc))
-
-              return ReferenceGSS(new_stacks, self._acc_default_factory)
-
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = []
-              for stack, acc in self.stacks:
-                  if stack and stack[-1] == value:
-                      new_stacks.append((stack, acc))
-
-              return ReferenceGSS(new_stacks, self._acc_default_factory)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
-              return ReferenceGSS(new_stacks, self._acc_default_factory)
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
-              return ReferenceGSS(new_stacks, self._acc_default_factory)
-
-          def split_heads(self) -> Iterable['ReferenceGSS[T, Acc]']:
-              for stack, acc in self.stacks:
-                  yield ReferenceGSS([(stack, acc)], self._acc_default_factory)
-
-          def peek(self) -> Set[T]:
-              return {stack[-1] for stack, acc in self.stacks if stack}
-
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [acc for _, acc in self.stacks]
-              return reduce(merge_func, accumulators)
-
-          @staticmethod
-          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              factory = None
-              
-              gss_list = list(gss_list)
-              if not gss_list:
-                  raise ValueError("Cannot merge empty list of GSS")
-
-              for gss in gss_list:
-                  if isinstance(gss, ReferenceGSS):
-                      # Don't add the default empty stack if there are other stacks
-                      if len(gss.stacks) > 1 or gss.stacks[0][0]:
-                          all_stacks.extend(gss.stacks)
-                      if factory is None:
-                          factory = gss._acc_default_factory
-              
-              if factory is None:
-                   # This can happen if all GSSs were empty.
-                   factory = gss_list[0]._acc_default_factory
-
-              merged_map: Dict[Tuple[T, ...], Acc] = {}
-              for stack, acc in all_stacks:
-                  key = tuple(stack)
-                  if key in merged_map:
-                      merged_map[key] = merge_func(merged_map[key], acc)
-                  else:
-                      merged_map[key] = acc
-              
-              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
-              return ReferenceGSS(final_stacks, factory)
-
-          def to_json_serializable(self) -> Any:
-              # Sort stacks for a canonical representation, making comparisons reliable.
-              # Stacks (lists) are converted to tuples to be sortable keys.
-              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
-              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
-
-          def __hash__(self):
-              return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
-    python/gss_tester/runner.py: |
-      import argparse
-      import importlib
-      import json
-      from pathlib import Path
-      import sys
-
-      from .test_spec import run_test_spec
-
-      def main():
-          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
-          parser.add_argument(
-              "implementation_module",
-              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
-          )
-          parser.add_argument(
-              "implementation_class",
-              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
-          )
-          parser.add_argument(
-              "-o", "--output",
-              type=Path,
-              required=True,
-              help="Path to the output JSON file for the results."
-          )
-          args = parser.parse_args()
-
-          try:
-              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
-              module = importlib.import_module(args.implementation_module)
-              gss_class = getattr(module, args.implementation_class)
-          except (ImportError, AttributeError) as e:
-              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
-              sys.exit(1)
-
-          print("Running test specification...")
-          results = []
-          for state, line_no in run_test_spec(gss_class):
-              results.append({
-                  "line": line_no,
-                  "state": state
-              })
-
-          output_data = {
-              "implementation": f"{args.implementation_module}.{args.implementation_class}",
-              "results": results
-          }
-
-          args.output.parent.mkdir(parents=True, exist_ok=True)
-          with open(args.output, 'w') as f:
-              json.dump(output_data, f, indent=2)
-
-          print(f"Successfully ran {len(results)} checks.")
-          print(f"Results saved to {args.output}")
-
-      if __name__ == "__main__":
-          main()
-    python/gss_tester/test_spec.py: |
-      import inspect
-      from typing import Generator, Tuple, Any, Type
-      from .interface import GSS
-
-      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-          """
-          A generator that defines a sequence of GSS operations and yields states at
-          various points for consistency checking.
-
-          Yields:
-              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-          """
-          
-          # For this test, the accumulator is an integer and stack items are integers.
-          acc_factory = lambda: 0
-          merge_func = lambda a, b: a + b
-
-          def _yield_state(gss_state: GSS):
-              """Helper to yield the state and the caller's line number."""
-              caller_frame = inspect.currentframe().f_back
-              line_no = caller_frame.f_lineno
-              yield (gss_state.to_json_serializable(), line_no)
-
-          # --- Test 1: Basic push/pop ---
-          gss1 = gss_class.initial(acc_factory)
-          yield from _yield_state(gss1)
-
-          gss1 = gss1.push(10)
-          yield from _yield_state(gss1)
-
-          gss1 = gss1.push(20)
-          yield from _yield_state(gss1)
-
-          gss_popped_20 = gss1.isolate(20).pop()
-          yield from _yield_state(gss_popped_20)
-
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-          yield from _yield_state(gss_popped_10)
-
-          # --- Test 2: Forking and Merging ---
-          gss_a = gss_class.initial(acc_factory).push(1).push(2)
-          gss_b = gss_class.initial(acc_factory).push(1).push(3)
-          
-          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
-          yield from _yield_state(merged1)
-          
-          # Merge a stack that already exists to test accumulator merging
-          gss_c = gss_class.initial(acc_factory).push(1).push(2).apply(lambda acc: acc + 5)
-          merged2 = gss_class.merge([merged1, gss_c], merge_func)
-          yield from _yield_state(merged2)
-
-          # --- Test 3: Apply accumulator function ---
-          gss_to_apply = gss_class.initial(acc_factory).push(5)
-          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
-          yield from _yield_state(gss_to_apply)
-
-          # --- Test 4: Pop with no match ---
-          gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-          yield from _yield_state(gss_after_failed_pop)
-
-          # --- Test 5: Complex sequence (diamond pattern) ---
-          s0 = gss_class.initial(acc_factory)
-          s1 = s0.push(1)
-          s2 = s1.push(2)
-          s3 = s1.push(3)
-          s4 = gss_class.merge([s2, s3], merge_func)
-          yield from _yield_state(s4)
-          
-          s5 = s4.push(4)
-          yield from _yield_state(s5)
-          
-          s6 = s5.isolate(4).pop()
-          yield from _yield_state(s6) # should be same as s4
-          
-          s7 = s6.isolate(2).pop()
-          s8 = s6.isolate(3).pop()
-          yield from _yield_state(s7)
-          yield from _yield_state(s8)
-          
-          s9 = gss_class.merge([s7, s8], merge_func)
-          yield from _yield_state(s9) # should be same as s1
-          
-          # --- Test 6: Merging empty GSS ---
-          gss_d = gss_class.initial(acc_factory).push(1)
-          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-          yield from _yield_state(gss_empty)
-          
-          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
-          yield from _yield_state(merged_with_empty) # should be same as gss_d
-
-          # --- Test 7: Pruning ---
-          gss_e = gss_class.initial(acc_factory).push(1).apply(lambda acc: 5)
-          gss_f = gss_class.initial(acc_factory).push(2).apply(lambda acc: 10)
-          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
-          yield from _yield_state(gss_to_prune)
-
-          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
-          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
-
-          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
-    python/aug25/models/precompute3_model_pure_python.py: |-
-      import json
-      import heapq
-      import collections
-      from typing import Dict, List, Tuple, Optional, Set, Union
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi  # the compiled module
-      from tqdm.auto import tqdm
-      from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-
-      def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
-          flattened_stacks = rust_gss_node.flatten()
-          
-          stacks_for_from_stacks = []
-          for path_ids, terminals_union in flattened_stacks:
-              py_acc = PyAcc(terminals_union=terminals_union)
-              stacks_for_from_stacks.append((path_ids, py_acc))
-
-          def acc_factory():
-              return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-
-          return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
-
-          def __hash__(self):
-              return hash(self.terminals_union)
-
-          def to_json_serializable(self):
-              return {"terminals_union": self.terminals_union.to_json_serializable()}
-
-          def __repr__(self):
-              return f"PyAcc({self.terminals_union})"
-
-
-      def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-          return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
-      def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
-          merged_acc = gss.get_acc(merge_acc)
-          return merged_acc.terminals_union.complement()
-
-      def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-          result = gss
-          for _ in range(n):
-              result = result.pop()
-          return result
-
-
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation).
-          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
-          and provides graph traversal and mask computation interfaces.
-          """
-
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              # Map tokenizer state -> trie root node
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, FastGSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
-              self.constraint_state: Optional[ffi.GrammarConstraintState] = None
-
-              # Normalize arena children bitsets and cache max_depth
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              for uid, node in tqdm(
-                  self.arena.items(),
-                  desc="Normalizing precompute3 BVs",
-                  total=len(self.arena),
-              ):
-                  uid_int = int(uid)
-                  try:
-                      md = node.get("max_depth", 0)
-                      self.max_depth[uid_int] = int(md)
-                  except Exception:
-                      self.max_depth[uid_int] = 0
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
-
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv = bs_from_json(dumps(llm_bv_json))
-
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv = bs_from_json(dumps(state_bv_json))
-                          new_dest_map.append((int(dest_idx), state_bv))
-
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  # Parse actions from 'shifts_and_reduces_full'
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  # Parse gotos
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              def acc_factory():
-                  return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-              initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              model.possible_matches_cache = constraint.possible_matches()
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-
-              model.constraint_state = ffi.GrammarConstraintState(constraint)
-
-              return model
-
-          def _prune_disallowed_terminals(self, gss: FastGSS, terminals_map: Dict[int, ffi.Bitset]) -> FastGSS:
-              def predicate(acc: PyAcc) -> bool:
-                  allowed_terminals_l2 = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
-                      if not matched_bv.is_subset(allowed_for_state):
-                          return False  # Prune this path
-                  return True
-              return gss.prune(predicate)
-
-          def _map_allowed_terminals_tokenizer_states(self, gss: FastGSS, state_map: Dict[int, int]) -> FastGSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_l2 = acc.terminals_union
-                  new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-                  
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_l2.get_l2_bitset(old_sid)
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-                  
-                  new_l2 = ffi.HybridL2Bitset.all()
-                  for new_sid, bv in new_bvs.items():
-                      new_l2.insert_l2_bitset(new_sid, bv)
-                  
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_map)
-
-          def _disallow_terminal_in_state(self, gss: FastGSS, state_id: int, terminal_id: int) -> FastGSS:
-              """
-              Mirror Rust: disallow_terminals_and_prune_arc over a single tokenizer state
-              by clearing 'terminal_id' for that specific 'state_id' in the L2 bitset of the GSS acc.
-              We clone the L2 bitset first (union with itself) to avoid in-place aliasing.
-              """
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_l2 = acc.terminals_union
-                  # Clone the L2 bitset by OR-ing with itself (returns a new object)
-                  new_l2 = current_l2.union(current_l2)
-                  # Fetch current allowed terminals for this tokenizer state
-                  curr_bv = current_l2.get_l2_bitset(state_id)
-                  # Remove the matched terminal id from that state's allowed set if present
-                  if curr_bv.contains(terminal_id):
-                      to_remove = ffi.Bitset.from_indices([terminal_id])
-                      new_bv = curr_bv.difference(to_remove)
-                      new_l2.insert_l2_bitset(state_id, new_bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              Only used by equivalence checking; not performance-critical.
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():  # Epsilon on GSS stack
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          def commit(self, token_id: int):
-              print(f"\n--- commit token_id={token_id} ---")
-              # Get Rust state before commit for comparison
-              rust_state_map_before_commit = self.constraint_state.get_state_map()
-
-              token_bytes = self.id_to_token[token_id]
-
-              # --- Python implementation starts here ---
-              py_states = list(self.state.keys())
-              rust_states = list(self.constraint_state.get_state_map().keys())
-              assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
-
-              # --- Start: Added pre-processing steps to match Rust ---
-              terminals_map: Dict[int, ffi.Bitset] = {}
-              state_map: Dict[int, int] = {}
-
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              # === ASSERTION 1: Compare maps ===
-              rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-              if state_map != rust_state_map:
-                  print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
-              
-              py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
-              rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-              if py_terminals_map_serializable != rust_terminals_map_serializable:
-                  print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
-
-              if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
-                  raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
-
-              # =================================
-
-              temp_states: Dict[int, FastGSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-
-                  # === ASSERTION 2: Compare pruned GSS ===
-                  rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-                  ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-                  py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-                  assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
-                  # =======================================
-
-                  if any(h is not pruned_gss._root for h in pruned_gss._heads):
-                       mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-
-                       # === ASSERTION 3: Compare mapped GSS ===
-                       rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-                       ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                       py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                       assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
-                       # =======================================
-
-                       temp_states[tokenizer_sid] = mapped_gss
-              
-              current_state_for_processing = temp_states
-              # --- End: Added pre-processing steps ---
-
-              new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
-              pm_cache = self.possible_matches_cache
-              visited_q_items = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-
-                  # GSS is not hashable, use its serializable form for visited check
-                  q_item = (offset, tokenizer_sid, gss)
-                  if q_item in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = self._process_token(gss, terminal_id)
-                      # Mirror Rust's immediate re-match disallow:
-                      # If after consuming the remainder from this offset we end in a tokenizer state
-                      # that can produce this same terminal immediately, forbid it for that state.
-                      if end_state is not None:
-                          # Use the tokenizer's accessible terminals (exactly as Rust does),
-                          # not possible_matches_cache (which depends on vocab coverage).
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(
-                                  processed_gss, end_state, terminal_id
-                              )
-
-                      if any(h is not processed_gss._root for h in processed_gss._heads):
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: FastGSS.merge(gss_list, merge_acc)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-
-              self.state = merged_states
-
-              self.constraint_state.commit(token_id)
-
-              print("state_map after commit:")
-              for sid, gss in self.state.items():
-                  print(f"  sid={sid}, gss={gss}")
-
-              print("Rust state_map after commit:")
-              expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-              for sid, rust_gss in expected_state_map.items():
-                  print(f"  sid={sid}, gss={rust_gss}")
-
-              assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
-              assert self.state == expected_state_map, f"GSS state mismatch after commit."
-
-          def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-              heads_by_state: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses = []
-              reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
-
-              for state_id, state_gsss in heads_by_state.items():
-                  for state_gss in state_gsss:
-                      row = self.parser_table.table.get(state_id)
-                      if not row: continue
-                      action = row.actions.get(terminal_id)
-                      if not action: continue
-
-                      def handle_shift(shift_to_state_id, gss_to_shift):
-                          shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                      def handle_reduce(reduce_action, gss_to_reduce):
-                          popped_gss = gss_to_reduce.popn(reduce_action.len)
-                          reductions_to_do[reduce_action].append(popped_gss)
-
-                      if isinstance(action, int):
-                          handle_shift(action, state_gss)
-                      elif isinstance(action, Reduce):
-                          handle_reduce(action, state_gss)
-                      elif isinstance(action, Split):
-                          if action.shift is not None:
-                              handle_shift(action.shift, state_gss)
-                          for length, nts in action.reduces.items():
-                              for nt_id, pids in nts.items():
-                                  handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-                  for reduce_action, gss_list in reductions_to_do.items():
-                      merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
-                      for from_state_id in merged_popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
-
-              return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
-
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask given a mapping from tokenizer state to
-              GSS nodes. This is the performance-critical routine.
-              """
-
-              print("\n--- get_mask START ---")
-              print("GSS at start of get_mask:")
-              state_map = self.state
-
-              expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-
-              print(f"state_map:")
-              for sid, gss in state_map.items():
-                  print(gss)
-
-              print(f"expected_state_map:")
-              for sid, gss in expected_state_map.items():
-                  print(gss)
-
-              assert state_map == expected_state_map, f"state_map != expected_state_map:\n{state_map}\n{expected_state_map}"
-
-              all_ones_mask = self.all_internal_llm_tokens_bitset
-
-              final_mask = ffi.Bitset.zeros()
-
-              # node_idx -> (FastGSS, Bitset)
-              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
-
-              stopped: set[int] = set()  # nodes that stopped (no gss parents)
-              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
-
-              # Seed: map tokenizer states and their filtered GSS to trie roots
-              heappush = heapq.heappush
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-
-              # print("\n--- Seeding work queue ---")
-              for sid, gss in state_map.items():
-                  new_mask = all_ones_mask
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
-
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      existing_gss, existing_mask = existing
-                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
-                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = (gss, new_mask)
-
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
-
-              # Main scheduler
-
-              # Helper to enqueue a node at a given depth
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
-
-              heappop = heapq.heappop
-              arena = self.arena
-              is_end = self.is_end
-
-              # print("\n--- Main loop ---")
-              iter_count = 0
-              while True:
-                  iter_count += 1
-                  # Pop the smallest depth bucket (skip stale heap entries)
-                  node_indices: Optional[set[int]] = None
-                  current_depth = -1
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      # print(f"[{iter_count}] Loop finished: no more nodes to process.")
-                      break  # nothing left to process
-
-                  # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
-
-                  # Process all nodes in this depth bucket
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
-                          continue
-
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          # print(f"  - Node {node_idx}: SKIPPING (no value)")
-                          continue
-                      gss_node, llm_mask = item
-                      # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
-
-                      # End-node handling
-                      if is_end(node_idx):
-                          # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
-                          forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
-                          possible_matches = self.possible_matches_cache
-
-                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
-                              if disallowed_bv.is_empty():
-                                  continue
-
-                              for tsid in range(start, end + 1):
-                                  possible_matches_for_state = possible_matches.get(tsid)
-                                  if not possible_matches_for_state:
-                                      continue
-
-                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                      terminal_id = int(terminal_id_str)
-                                      if disallowed_bv.contains(terminal_id):
-                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
-
-                          gss_active_tokens = all_ones_mask
-                          glr_active_tokens = llm_mask.intersection(gss_active_tokens)
-                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                          if not final_allowed_tokens.is_empty():
-                              before_len = final_mask.len()
-                              final_mask = final_mask.union(final_allowed_tokens)
-                              after_len = final_mask.len()
-                              # if after_len > before_len:
-                              #     print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
-
-                      if llm_mask.is_empty():
-                          stopped.add(node_idx)
-                          # print(f"    - STOPPING node {node_idx} (GSS not alive)")
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      # if not children:
-                      #     # print(f"    - No children for node {node_idx}")
-                      for (pop, llm_bv), dests in children:
-                          # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
-                          # Collect all pops from GSS parents
-                          popped = popn_fast_py(gss_node, pop)
-
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              # Filter peeks by destination state bitset
-                              matched = []
-                              if not state_bv.is_empty():
-                                  for sid_val in popped.peek():
-                                      if state_bv.contains(sid_val):
-                                          matched.append(popped.isolate(sid_val))
-                              if not matched:
-                                  continue
-
-                              # Merge matched parent GSS nodes
-                              child_gss_node = FastGSS.merge(matched, merge_acc)
-
-                              # Compute child mask (intersection with llm_bv when present)
-                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-
-                              d = int(dest_idx)
-                              existing = values.get(d)
-                              if existing is not None:
-                                  existing_gss, existing_mask = existing
-                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (merged_gss, combined_mask)
-                                  # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                                  # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
-                              else:
-                                  values[d] = (child_gss_node, child_llm_mask)
-                                  # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                                  # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
-
-                              enqueue(max_depth[d], d)
-
-              original_mask = ffi.Bitset.zeros()
-              for internal_id in final_mask.to_indices():
-                  if internal_id in self.internal_to_original_map:
-                      original_mask.insert(self.internal_to_original_map[internal_id])
-              temp = RangeSet.from_ranges(original_mask.to_ranges())
-              print(f"\n--- get_mask END ---")
-              print(f"Final mask: {temp.to_ranges()}")
-              return temp
-  prev_file_contents:
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/analyzer.py: |
-      import argparse
-      import json
-      from pathlib import Path
-      from typing import List, Dict, Any, Tuple
-      import itertools
-
-      def analyze_results(result_files: List[Path], reference_file: Path = None):
-          all_results: Dict[str, List[Dict[str, Any]]] = {}
-          implementations: List[str] = []
-
-          for file_path in result_files:
-              try:
-                  data = json.loads(file_path.read_text())
-                  impl_name = data["implementation"]
-                  all_results[impl_name] = data["results"]
-                  implementations.append(impl_name)
-              except (json.JSONDecodeError, KeyError) as e:
-                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
-
-
-          if not implementations:
-              print("No valid result files found to analyze.")
-              return
-
-          # --- Equivalence Partitioning ---
-          # A signature is a tuple of all yielded states and their line numbers.
-          Signature = Tuple[Tuple[int, str], ...]
-
-          def get_signature(results: List[Dict[str, Any]]) -> Signature:
-              # Serialize state to a string to make it hashable and canonical.
-              return tuple(
-                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
-              )
-
-          partitions: Dict[Signature, List[str]] = {}
-          for impl_name, results in all_results.items():
-              sig = get_signature(results)
-              if sig not in partitions:
-                  partitions[sig] = []
-              partitions[sig].append(impl_name)
-
-          print("--- Consistency Analysis ---")
-          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
-
-          # --- Reference Comparison ---
-          ref_sig: Signature = None
-          ref_impl_name: str = None
-          if reference_file:
-              try:
-                  ref_data = json.loads(reference_file.read_text())
-                  ref_impl_name = ref_data["implementation"]
-                  ref_sig = get_signature(ref_data["results"])
-                  print(f"Reference implementation: {ref_impl_name}\n")
-              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
-                  print(f"Warning: Could not load reference file {reference_file}: {e}")
-
-
-          # --- Display Partitions ---
-          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
-          for i, (sig, impls) in enumerate(sorted_partitions):
-              header = f"Class {i+1} ({len(impls)} implementation(s))"
-              if ref_sig:
-                  match_icon = "✅" if sig == ref_sig else "❌"
-                  header += f" [Ref Match: {match_icon}]"
-              
-              print(header)
-              print("-" * len(header))
-              for impl in sorted(impls):
-                  print(f"  - {impl}")
-              print()
-
-          # --- Detailed Divergence Report ---
-          if len(partitions) > 1:
-              print("\n--- Divergence Report ---")
-              # Compare every pair of partitions
-              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
-                  impl_name1 = sorted(impls1)[0]
-                  impl_name2 = sorted(impls2)[0]
-                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
-                  
-                  results1 = all_results[impl_name1]
-                  results2 = all_results[impl_name2]
-                  
-                  max_len = max(len(results1), len(results2))
-                  for i in range(max_len):
-                      res1 = results1[i] if i < len(results1) else None
-                      res2 = results2[i] if i < len(results2) else None
-
-                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
-                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
-
-                      if sig_item1 != sig_item2:
-                          print(f"  - First divergence at yield index {i}:")
-                          if res1:
-                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
-                          else:
-                              print(f"    - {impl_name1}: No yield at this index.")
-                          
-                          if res2:
-                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
-                          else:
-                              print(f"    - {impl_name2}: No yield at this index.")
-                          break # Show only the first divergence for this pair
-
-      def main():
-          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
-          parser.add_argument(
-              "result_files",
-              nargs='+',
-              type=Path,
-              help="Paths to result JSON files."
-          )
-          parser.add_argument(
-              "-r", "--reference",
-              type=Path,
-              default=None,
-              help="Path to a reference result file for comparison."
-          )
-          args = parser.parse_args()
-
-          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
-          if not valid_files:
-              print("Error: No valid result files found.")
-              return
-
-          analyze_results(valid_files, args.reference)
-
-      if __name__ == "__main__":
-          main()
-    python/gss_tester/fast_impl.py: |
-      import itertools
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
-
-      from .interface import GSS, T, Acc
-
-      class _Node(Generic[T, Acc]):
-          """Represents a node in the GSS graph. Each node is a unique state."""
-          _id_counter = itertools.count()
-
-          def __init__(self, acc: Acc, depth: int):
-              self.id = next(self._id_counter)
-              self.acc = acc
-              self.depth = depth
-          
-          def __hash__(self):
-              return self.id
-
-          def __eq__(self, other):
-              if not isinstance(other, _Node):
-                  return NotImplemented
-              return self.id == other.id
-          
-          def __repr__(self):
-              return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
-
-          def __str__(self):
-              return self.__repr__()
-
-      class FastGSS(GSS[T, Acc]):
-          """
-          A performant GSS implementation using a graph of shared nodes.
-          
-          - The GSS is represented as a DAG where nodes are states and edges are stack operations.
-          - Nodes store accumulators and their depth from the root.
-          - The structure is represented by a child-to-parents mapping, allowing efficient `pop` operations.
-          - GSS instances are immutable. Operations return new instances with updated heads or structure maps.
-          - Path reconstruction for `merge` and `to_json_serializable` is memoized for performance.
-          """
-
-          def __init__(self, 
-                       heads: FrozenSet[_Node[T, Acc]], 
-                       acc_default_factory: Callable[[], Acc], 
-                       root: _Node[T, Acc],
-                       child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
-                       path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
-              self._heads = heads
-              self._acc_default_factory = acc_default_factory
-              self._root = root
-              self._child_to_parents = child_to_parents
-              self._path_cache = path_cache
-
-          @classmethod
-          def initial(cls: Type['FastGSS'], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
-              root = _Node(acc=acc_default_factory(), depth=0)
-              return cls(
-                  heads=frozenset([root]),
-                  acc_default_factory=acc_default_factory,
-                  root=root,
-                  child_to_parents={},
-                  path_cache={root.id: frozenset([tuple()])}
-              )
-
-          @classmethod
-          def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks by building the node graph."""
-              root = _Node(acc=acc_default_factory(), depth=0)
-              child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-              path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
-              heads: Set[_Node[T, Acc]] = set()
-
-              # Memoize nodes created for stack prefixes to ensure structure is shared.
-              # key: tuple(stack_prefix), value: _Node
-              memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
-
-              if not stacks:
-                  heads.add(root)
-
-              for stack_list, acc in stacks:
-                  stack_list.reverse()
-                  current_node = root
-                  stack_tuple = tuple(stack_list)
-
-                  # Traverse/create nodes for the path
-                  for i, value in enumerate(stack_tuple):
-                      prefix = stack_tuple[:i + 1]
-                      if prefix in memoized_nodes:
-                          current_node = memoized_nodes[prefix]
-                      else:
-                          # Create a new node. Its accumulator is temporary; only head accumulators matter.
-                          new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
-                          child_to_parents[new_node] = {(value, current_node)}
-                          memoized_nodes[prefix] = new_node
-                          current_node = new_node
-                  
-                  # Now `current_node` is the shared node for this stack path.
-                  # We need a head with the specific accumulator.
-                  if current_node.acc == acc:
-                      heads.add(current_node)
-                  else:
-                      # Create a new head node with the correct accumulator but same structure.
-                      new_head = _Node(acc=acc, depth=current_node.depth)
-                      if current_node in child_to_parents:
-                          child_to_parents[new_head] = child_to_parents[current_node]
-                      heads.add(new_head)
-
-              return cls(frozenset(heads), acc_default_factory, root, child_to_parents, path_cache)
-
-          def push(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              
-              # Memoize node creation within a single push operation
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_node = _Node(acc=head.acc, depth=head.depth + 1)
-                  
-                  if new_node not in new_child_to_parents:
-                      new_child_to_parents[new_node] = set()
-                  new_child_to_parents[new_node].add((value, head))
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
-
-          def pop(self) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for _, parent in self._child_to_parents[head]:
-                          new_heads.add(parent)
-
-              if not new_heads:
-                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                  return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
-
-          def popn(self, n: int) -> 'FastGSS[T, Acc]':
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
           def is_empty(self) -> bool:
               """Checks if the GSS contains only the initial empty stack."""
               return self._heads == frozenset([self._root])
@@ -2749,7 +1295,1456 @@ local_system:
                           goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                           shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-              return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else type(gss).initial(gss.get_acc_factory())
+              return FastGSS.merge(shifted_gsses, merge_acc)
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This is the performance-critical routine.
+              """
+
+              print("\n--- get_mask START ---")
+              print("GSS at start of get_mask:")
+              state_map = self.state
+
+              expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+
+              print(f"state_map:")
+              for sid, gss in state_map.items():
+                  print(gss)
+
+              print(f"expected_state_map:")
+              for sid, gss in expected_state_map.items():
+                  print(gss)
+
+              assert state_map == expected_state_map, f"state_map != expected_state_map:\n{state_map}\n{expected_state_map}"
+
+              all_ones_mask = self.all_internal_llm_tokens_bitset
+
+              final_mask = ffi.Bitset.zeros()
+
+              # node_idx -> (FastGSS, Bitset)
+              values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              # print("\n--- Seeding work queue ---")
+              for sid, gss in state_map.items():
+                  new_mask = all_ones_mask
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+
+                  # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = (gss, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              # Main scheduler
+
+              # Helper to enqueue a node at a given depth
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+
+              # print("\n--- Main loop ---")
+              iter_count = 0
+              while True:
+                  iter_count += 1
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  current_depth = -1
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      # print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                      break  # nothing left to process
+
+                  # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          # print(f"  - Node {node_idx}: SKIPPING (no value)")
+                          continue
+                      gss_node, llm_mask = item
+                      # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                          forbidden_llm_tokens = ffi.Bitset.zeros()
+                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
+                          possible_matches = self.possible_matches_cache
+
+                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                              if disallowed_bv.is_empty():
+                                  continue
+
+                              for tsid in range(start, end + 1):
+                                  possible_matches_for_state = possible_matches.get(tsid)
+                                  if not possible_matches_for_state:
+                                      continue
+
+                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                      terminal_id = int(terminal_id_str)
+                                      if disallowed_bv.contains(terminal_id):
+                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                          gss_active_tokens = all_ones_mask
+                          glr_active_tokens = llm_mask.intersection(gss_active_tokens)
+                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                          if not final_allowed_tokens.is_empty():
+                              before_len = final_mask.len()
+                              final_mask = final_mask.union(final_allowed_tokens)
+                              after_len = final_mask.len()
+                              # if after_len > before_len:
+                              #     print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
+
+                      if llm_mask.is_empty():
+                          stopped.add(node_idx)
+                          # print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                          continue
+
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      # if not children:
+                      #     # print(f"    - No children for node {node_idx}")
+                      for (pop, llm_bv), dests in children:
+                          # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                          # Collect all pops from GSS parents
+                          popped = gss_node.popn(pop)
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              # Filter peeks by destination state bitset
+                              matched = []
+                              if not state_bv.is_empty():
+                                  for sid_val in popped.peek():
+                                      if state_bv.contains(sid_val):
+                                          matched.append(popped.isolate(sid_val))
+                              if not matched:
+                                  continue
+
+                              # Merge matched parent GSS nodes
+                              child_gss_node = FastGSS.merge(matched, merge_acc)
+
+                              # Compute child mask (intersection with llm_bv when present)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+
+                              d = int(dest_idx)
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss, existing_mask = existing
+                                  merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                                  combined_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (merged_gss, combined_mask)
+                                  # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                                  # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
+                              else:
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                                  # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
+
+                              enqueue(max_depth[d], d)
+
+              original_mask = ffi.Bitset.zeros()
+              for internal_id in final_mask.to_indices():
+                  if internal_id in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[internal_id])
+              temp = RangeSet.from_ranges(original_mask.to_ranges())
+              print(f"\n--- get_mask END ---")
+              print(f"Final mask: {temp.to_ranges()}")
+              return temp
+  prev_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/fast_impl.py: |
+      import itertools
+      from functools import reduce
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
+
+      from .interface import GSS, T, Acc
+
+      class _Node(Generic[T, Acc]):
+          """Represents a node in the GSS graph. Each node is a unique state."""
+          _id_counter = itertools.count()
+
+          def __init__(self, acc: Acc, depth: int):
+              self.id = next(self._id_counter)
+              self.acc = acc
+              self.depth = depth
+          
+          def __hash__(self):
+              return self.id
+
+          def __eq__(self, other):
+              if not isinstance(other, _Node):
+                  return NotImplemented
+              return self.id == other.id
+          
+          def __repr__(self):
+              return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
+
+          def __str__(self):
+              return self.__repr__()
+
+      class FastGSS(GSS[T, Acc]):
+          """
+          A performant GSS implementation using a graph of shared nodes.
+          
+          - The GSS is represented as a DAG where nodes are states and edges are stack operations.
+          - Nodes store accumulators and their depth from the root.
+          - The structure is represented by a child-to-parents mapping, allowing efficient `pop` operations.
+          - GSS instances are immutable. Operations return new instances with updated heads or structure maps.
+          - Path reconstruction for `merge` and `to_json_serializable` is memoized for performance.
+          """
+
+          def __init__(self, 
+                       heads: FrozenSet[_Node[T, Acc]], 
+                       root: _Node[T, Acc],
+                       child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
+                       path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
+              self._heads = heads
+              self._root = root
+              self._child_to_parents = child_to_parents
+              self._path_cache = path_cache
+
+          @classmethod
+          def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks by building the node graph."""
+              root_acc: Acc = None
+              has_empty_stack = False
+              for s, acc in stacks:
+                  if not s:
+                      has_empty_stack = True
+                      root_acc = acc
+                      break
+              
+              if not has_empty_stack:
+                  raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
+
+              root = _Node(acc=root_acc, depth=0)
+              child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+              path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
+              heads: Set[_Node[T, Acc]] = set()
+
+              # Memoize nodes created for stack prefixes to ensure structure is shared.
+              # key: tuple(stack_prefix), value: _Node
+              memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
+
+              if not stacks:
+                  heads.add(root)
+
+              for stack_list, acc in stacks:
+                  stack_list.reverse()
+                  current_node = root
+                  stack_tuple = tuple(stack_list)
+
+                  # Traverse/create nodes for the path
+                  for i, value in enumerate(stack_tuple):
+                      prefix = stack_tuple[:i + 1]
+                      if prefix in memoized_nodes:
+                          current_node = memoized_nodes[prefix]
+                      else:
+                          # Create a new node. Its accumulator is temporary; only head accumulators matter.
+                          new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
+                          child_to_parents[new_node] = {(value, current_node)}
+                          memoized_nodes[prefix] = new_node
+                          current_node = new_node
+                  
+                  # Now `current_node` is the shared node for this stack path.
+                  # We need a head with the specific accumulator.
+                  if current_node.acc == acc:
+                      heads.add(current_node)
+                  else:
+                      # Create a new head node with the correct accumulator but same structure.
+                      new_head = _Node(acc=acc, depth=current_node.depth)
+                      if current_node in child_to_parents:
+                          child_to_parents[new_head] = child_to_parents[current_node]
+                      heads.add(new_head)
+
+              return cls(frozenset(heads), root, child_to_parents, path_cache)
+
+          def push(self, value: T) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              new_child_to_parents = self._child_to_parents.copy()
+              
+              # Memoize node creation within a single push operation
+              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+
+              for head in self._heads:
+                  if head in memo:
+                      new_heads.add(memo[head])
+                      continue
+
+                  new_node = _Node(acc=head.acc, depth=head.depth + 1)
+                  
+                  if new_node not in new_child_to_parents:
+                      new_child_to_parents[new_node] = set()
+                  new_child_to_parents[new_node].add((value, head))
+                  
+                  new_heads.add(new_node)
+                  memo[head] = new_node
+
+              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
+
+          def pop(self) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      for _, parent in self._child_to_parents[head]:
+                          new_heads.add(parent)
+
+              if not new_heads:
+                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
+                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+
+              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              return self._heads == frozenset([self._root])
+
+          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      if any(v == value for v, _ in self._child_to_parents[head]):
+                          new_heads.add(head)
+
+              if not new_heads:
+                  # If no stacks match, the result is an empty GSS (represented by the root).
+                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+              new_heads: Set[_Node[T, Acc]] = set()
+              new_child_to_parents = self._child_to_parents.copy()
+              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+
+              for head in self._heads:
+                  if head in memo:
+                      new_heads.add(memo[head])
+                      continue
+
+                  new_acc = func(head.acc)
+                  new_node = _Node(acc=new_acc, depth=head.depth)
+                  
+                  if head in self._child_to_parents:
+                      new_child_to_parents[new_node] = self._child_to_parents[head]
+                  
+                  new_heads.add(new_node)
+                  memo[head] = new_node
+                  
+              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
+              new_heads = {head for head in self._heads if predicate(head.acc)}
+
+              if not new_heads:
+                  # If all stacks are pruned, the result is an empty GSS (represented by the root).
+                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+
+              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+
+          def peek(self) -> Set[T]:
+              peek_values: Set[T] = set()
+              for head in self._heads:
+                  if head in self._child_to_parents:
+                      for value, _ in self._child_to_parents[head]:
+                          peek_values.add(value)
+              return peek_values
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              accumulators = [head.acc for head in self._heads]
+              return reduce(merge_func, accumulators)
+
+          @staticmethod
+          def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
+              gss_list = list(gss_list)
+              if not gss_list:
+                  raise ValueError("Cannot merge an empty list of GSS instances.")
+              
+              first_gss = gss_list[0]
+              
+              if len(gss_list) == 1:
+                  return first_gss
+
+              # Filter out GSSs that only contain an empty stack if there are others with content.
+              gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
+
+              if gss_with_content:
+                  gss_list_to_merge = gss_with_content
+              else:
+                  # All GSSs only contain empty stacks, so merge them all.
+                  gss_list_to_merge = gss_list
+
+              # Combine all structural information and heads
+              all_child_to_parents = {}
+              all_path_caches = {}
+              all_heads = set()
+              for gss in gss_list_to_merge:
+                  all_child_to_parents.update(gss._child_to_parents)
+                  all_path_caches.update(gss._path_cache)
+                  all_heads.update(gss._heads)
+
+              # Group heads by their structural path
+              heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
+              for head in all_heads:
+                  paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
+                  if paths not in heads_by_path:
+                      heads_by_path[paths] = []
+                  heads_by_path[paths].append(head)
+
+              final_heads: Set[_Node[T, Acc]] = set()
+              for paths, nodes in heads_by_path.items():
+                  if len(nodes) == 1:
+                      final_heads.add(nodes[0])
+                      continue
+                  
+                  # Merge accumulators for nodes on the same path
+                  merged_acc = reduce(merge_func, (n.acc for n in nodes))
+                  
+                  # Try to find an existing node with the merged accumulator to reuse
+                  reused_node = next((n for n in nodes if n.acc == merged_acc), None)
+                  
+                  if reused_node:
+                      final_heads.add(reused_node)
+                  else:
+                      # Create a new node representing the merged state
+                      canonical_node = nodes[0]
+                      new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
+                      if canonical_node in all_child_to_parents:
+                          all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
+                      final_heads.add(new_node)
+
+              return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
+
+          def to_json_serializable(self) -> Any:
+              all_stacks = []
+              for head in self._heads:
+                  paths = self._reconstruct_paths(head, self._child_to_parents, self._path_cache)
+                  for path in paths:
+                      all_stacks.append({"stack": list(path), "acc": head.acc})
+              
+              # Sort for a canonical representation
+              return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
+
+          def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
+              if node.id in cache:
+                  return cache[node.id]
+
+              if node == self._root:
+                  return frozenset([tuple()])
+
+              if node not in child_to_parents:
+                  # This can happen if a GSS is empty (has no heads pointing to this node's parents)
+                  return frozenset()
+
+              paths: Set[Tuple[T, ...]] = set()
+              for value, parent in child_to_parents[node]:
+                  parent_paths = self._reconstruct_paths(parent, child_to_parents, cache)
+                  for p_path in parent_paths:
+                      paths.add(p_path + (value,))
+              
+              result = frozenset(paths)
+              cache[node.id] = result
+              return result
+
+          def __hash__(self):
+              serial = self.to_json_serializable()
+              hashable_serial = tuple(
+                  (tuple(item['stack']), item['acc']) for item in serial
+              )
+              return hash(hashable_serial)
+
+          def __eq__(self, other):
+              if not isinstance(other, FastGSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __repr__(self):
+              return f"FastGSS({self.to_json_serializable()})"
+    python/gss_tester/interface.py: |-
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+      import json
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc') # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self, n: int) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              pass
+
+          @abstractmethod
+          def isolate(self, value: T) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          @abstractmethod
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              pass
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              try:
+                  data = self.to_json_serializable()
+                  return json.dumps(data, indent=2, sort_keys=True)
+              except Exception:
+                  return super().__str__()
+
+          def __eq__(self, other):
+              """Defines equality based on the canonical JSON representation."""
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __hash__(self):
+              """Defines hash based on the canonical JSON representation."""
+              pass
+    python/gss_tester/reference_impl.py: |+
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from functools import reduce
+      from .interface import GSS, T, Acc
+
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Its behavior is the gold standard for the consistency tests.
+          """
+          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Acc):
+              self.stacks = stacks
+              self._root_acc = root_acc
+              if not self.stacks:
+                  self.stacks.append(([], self._root_acc))
+
+          @classmethod
+          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              root_acc: Acc = None
+              has_empty_stack = False
+              for s, acc in stacks:
+                  if not s:
+                      has_empty_stack = True
+                      root_acc = acc
+                      break
+              if not has_empty_stack:
+                  raise ValueError("ReferenceGSS.from_stacks requires an empty stack to determine the root accumulator.")
+              return cls(stacks, root_acc)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack:
+                      new_stacks.append((stack[:-1], acc))
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack and stack[-1] == value:
+                      new_stacks.append((stack, acc))
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def peek(self) -> Set[T]:
+              return {stack[-1] for stack, acc in self.stacks if stack}
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              accumulators = [acc for _, acc in self.stacks]
+              return reduce(merge_func, accumulators)
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              root_acc = None
+              
+              gss_list = list(gss_list)
+              if not gss_list:
+                  raise ValueError("Cannot merge empty list of GSS")
+
+              root_acc = gss_list[0]._root_acc
+
+              for gss in gss_list:
+                  if isinstance(gss, ReferenceGSS):
+                      # Don't add the default empty stack if there are other stacks
+                      if len(gss.stacks) > 1 or gss.stacks[0][0]:
+                          all_stacks.extend(gss.stacks)
+              
+              if root_acc is None:
+                   # This can happen if all GSSs were empty.
+                   root_acc = gss_list[0]._root_acc
+
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for stack, acc in all_stacks:
+                  key = tuple(stack)
+                  if key in merged_map:
+                      merged_map[key] = merge_func(merged_map[key], acc)
+                  else:
+                      merged_map[key] = acc
+              
+              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+              return ReferenceGSS(final_stacks, root_acc)
+
+          def to_json_serializable(self) -> Any:
+              # Sort stacks for a canonical representation, making comparisons reliable.
+              # Stacks (lists) are converted to tuples to be sortable keys.
+              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
+              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+
+          def __hash__(self):
+              return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
+
+          def is_empty(self) -> bool:
+              return len(self.stacks) == 1 and not self.stacks[0][0]
+
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+    python/aug25/models/precompute3_model_pure_python.py: |-
+      import json
+      import heapq
+      import collections
+      from typing import Dict, List, Tuple, Optional, Set, Union
+      from dataclasses import dataclass, field
+
+      from ..common_interface import GraphProvider, RangeSet
+      import _sep1 as ffi  # the compiled module
+      from tqdm.auto import tqdm
+      from gss_tester.interface import GSS
+      from gss_tester.fast_impl import FastGSS
+
+      def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+          flattened_stacks = rust_gss_node.flatten()
+          
+          stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
+          for path_ids, terminals_union in flattened_stacks:
+              py_acc = PyAcc(terminals_union=terminals_union)
+              stacks_for_from_stacks.append((path_ids, py_acc))
+
+          # Ensure there's an empty stack to define the root accumulator.
+          if not any(not s for s, _ in stacks_for_from_stacks):
+              root_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+              stacks_for_from_stacks.append(([], root_acc))
+
+          return FastGSS.from_stacks(stacks_for_from_stacks)
+
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]] # len -> nt_id -> pids
+
+      # Action can be a Shift (int), Reduce, or Split
+      Action = Union[int, Reduce, Split]
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict) # terminal_id -> Action
+          gotos: Dict[int, int] = field(default_factory=dict) # nonterminal_id -> state_id
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+      @dataclass(frozen=True)
+      class PyAcc:
+          terminals_union: ffi.HybridL2Bitset
+
+          def __hash__(self):
+              return hash(self.terminals_union)
+
+          def to_json_serializable(self):
+              return {"terminals_union": self.terminals_union.to_json_serializable()}
+
+          def __repr__(self):
+              return f"PyAcc({self.terminals_union})"
+
+
+      def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+          return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+
+      def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
+          merged_acc = gss.get_acc(merge_acc)
+          return merged_acc.terminals_union.complement()
+
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation).
+          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
+          and provides graph traversal and mask computation interfaces.
+          """
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+              self.tokenizer: Optional[ffi.Regex] = None
+              self.parser_table: Optional[ParserTable] = None
+              self.state: Dict[int, FastGSS] = {}
+              self.internal_to_original_map: Dict[int, int] = {}
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
+              self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+
+              # Normalize arena children bitsets and cache max_depth
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing precompute3 BVs",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      continue
+
+                  new_children = []
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((int(dest_idx), state_bv))
+
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              model = Model(roots_map, arena)
+
+              # Load tokenizer and parser table from the full constraint JSON
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.tokenizer = constraint.tokenizer()
+              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
+
+              parser_data = data['parser']
+              table_data = parser_data['stage_7_table']
+              start_state_id = parser_data['start_state_id']
+              py_table = {}
+              for state_id_str, row_data in table_data:
+                  state_id = int(state_id_str)
+                  py_row = Row()
+                  # Parse actions from 'shifts_and_reduces_full'
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id = int(term_id_str)
+                      variant = action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          pids = tuple(sorted(action_data['production_ids']))
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                      elif variant == 'Split':
+                          shift = action_data['shift']
+                          reduces = {}
+                          for len_str, nts_data in action_data['reduces']:
+                              len_int = int(len_str)
+                              nts = {}
+                              for nt_id_str, pids in nts_data:
+                                  nt_id_int = int(nt_id_str)
+                                  nts[nt_id_int] = tuple(sorted(pids))
+                              reduces[len_int] = nts
+                          py_row.actions[term_id] = Split(shift, reduces)
+                  # Parse gotos
+                  for nt_id_str, goto_data in row_data['gotos']:
+                      nt_id = int(nt_id_str)
+                      if goto_data['state_id'] is not None:
+                          py_row.gotos[nt_id] = goto_data['state_id']
+                  py_table[state_id] = py_row
+              model.parser_table = ParserTable(start_state_id, py_table)
+
+              initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+              initial_gss = FastGSS.from_stacks([([], initial_acc)])
+              initial_gss = initial_gss.push(model.parser_table.start_state_id)
+              model.state = {model.tokenizer_initial_state: initial_gss}
+
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              model.possible_matches_cache = constraint.possible_matches()
+              model.internal_to_original_map = constraint.internal_to_original_map()
+              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
+
+              model.constraint_state = ffi.GrammarConstraintState(constraint)
+
+              return model
+
+          def _prune_disallowed_terminals(self, gss: FastGSS, terminals_map: Dict[int, ffi.Bitset]) -> FastGSS:
+              def predicate(acc: PyAcc) -> bool:
+                  allowed_terminals_l2 = acc.terminals_union
+                  for state_id, matched_bv in terminals_map.items():
+                      allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
+                      if not matched_bv.is_subset(allowed_for_state):
+                          return False  # Prune this path
+                  return True
+              return gss.prune(predicate)
+
+          def _map_allowed_terminals_tokenizer_states(self, gss: FastGSS, state_map: Dict[int, int]) -> FastGSS:
+              def apply_map(acc: PyAcc) -> PyAcc:
+                  old_l2 = acc.terminals_union
+                  new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
+                  
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = old_l2.get_l2_bitset(old_sid)
+                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                  
+                  new_l2 = ffi.HybridL2Bitset.all()
+                  for new_sid, bv in new_bvs.items():
+                      new_l2.insert_l2_bitset(new_sid, bv)
+                  
+                  return PyAcc(terminals_union=new_l2)
+              return gss.apply(apply_map)
+
+          def _disallow_terminal_in_state(self, gss: FastGSS, state_id: int, terminal_id: int) -> FastGSS:
+              """
+              Mirror Rust: disallow_terminals_and_prune_arc over a single tokenizer state
+              by clearing 'terminal_id' for that specific 'state_id' in the L2 bitset of the GSS acc.
+              We clone the L2 bitset first (union with itself) to avoid in-place aliasing.
+              """
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current_l2 = acc.terminals_union
+                  # Clone the L2 bitset by OR-ing with itself (returns a new object)
+                  new_l2 = current_l2.union(current_l2)
+                  # Fetch current allowed terminals for this tokenizer state
+                  curr_bv = current_l2.get_l2_bitset(state_id)
+                  # Remove the matched terminal id from that state's allowed set if present
+                  if curr_bv.contains(terminal_id):
+                      to_remove = ffi.Bitset.from_indices([terminal_id])
+                      new_bv = curr_bv.difference(to_remove)
+                      new_l2.insert_l2_bitset(state_id, new_bv)
+                  return PyAcc(terminals_union=new_l2)
+              return gss.apply(apply_disallow)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def commit(self, token_id: int):
+              print(f"\n--- commit token_id={token_id} ---")
+              # Get Rust state before commit for comparison
+              rust_state_map_before_commit = self.constraint_state.get_state_map()
+
+              token_bytes = self.id_to_token[token_id]
+
+              # --- Python implementation starts here ---
+              py_states = list(self.state.keys())
+              rust_states = list(self.constraint_state.get_state_map().keys())
+              assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
+
+              # --- Start: Added pre-processing steps to match Rust ---
+              terminals_map: Dict[int, ffi.Bitset] = {}
+              state_map: Dict[int, int] = {}
+
+              for tokenizer_sid in self.state.keys():
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+                  if end_state is not None:
+                      state_map[tokenizer_sid] = end_state
+                  
+                  terminals = ffi.Bitset.zeros()
+                  for terminal_id, _ in matches:
+                      terminals.insert(terminal_id)
+                  terminals_map[tokenizer_sid] = terminals
+
+              # === ASSERTION 1: Compare maps ===
+              rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
+              if state_map != rust_state_map:
+                  print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
+              
+              py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
+              rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+              if py_terminals_map_serializable != rust_terminals_map_serializable:
+                  print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
+
+              if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
+                  raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
+
+              # =================================
+
+              temp_states: Dict[int, FastGSS] = {}
+              for tokenizer_sid, gss in self.state.items():
+                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+
+                  # === ASSERTION 2: Compare pruned GSS ===
+                  rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
+                  ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
+                  py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
+                  assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+                  # =======================================
+
+                  if not pruned_gss.is_empty():
+                       mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+
+                       # === ASSERTION 3: Compare mapped GSS ===
+                       rust_gss_after_prune = rust_gss_before_prune # it was modified in place
+                       ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
+                       py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+                       assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                       # =======================================
+
+                       temp_states[tokenizer_sid] = mapped_gss
+              
+              current_state_for_processing = temp_states
+              # --- End: Added pre-processing steps ---
+
+              new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state_for_processing.items():
+                  q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
+              pm_cache = self.possible_matches_cache
+              visited_q_items = set()
+
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+
+                  # GSS is not hashable, use its serializable form for visited check
+                  q_item = (offset, tokenizer_sid, gss)
+                  if q_item in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item)
+
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+
+                  for terminal_id, width in matches:
+                      processed_gss = self._process_token(gss, terminal_id)
+                      # Mirror Rust's immediate re-match disallow:
+                      # If after consuming the remainder from this offset we end in a tokenizer state
+                      # that can produce this same terminal immediately, forbid it for that state.
+                      if end_state is not None:
+                          # Use the tokenizer's accessible terminals (exactly as Rust does),
+                          # not possible_matches_cache (which depends on vocab coverage).
+                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                          if terminal_id in accessible_terms:
+                              processed_gss = self._disallow_terminal_in_state(
+                                  processed_gss, end_state, terminal_id
+                              )
+
+                      if not processed_gss.is_empty():
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged_states = {
+                  sid: FastGSS.merge(gss_list, merge_acc)
+                  for sid, gss_list in new_states.items()
+                  if gss_list
+              }
+
+              self.state = merged_states
+
+              self.constraint_state.commit(token_id)
+
+              print("state_map after commit:")
+              for sid, gss in self.state.items():
+                  print(f"  sid={sid}, gss={gss}")
+
+              print("Rust state_map after commit:")
+              expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+              for sid, rust_gss in expected_state_map.items():
+                  print(f"  sid={sid}, gss={rust_gss}")
+
+              assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
+              assert self.state == expected_state_map, f"GSS state mismatch after commit."
+
+          def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
+              heads_by_state: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted_gsses = []
+              reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
+
+              for state_id, state_gsss in heads_by_state.items():
+                  for state_gss in state_gsss:
+                      row = self.parser_table.table.get(state_id)
+                      if not row: continue
+                      action = row.actions.get(terminal_id)
+                      if not action: continue
+
+                      def handle_shift(shift_to_state_id, gss_to_shift):
+                          shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+                      def handle_reduce(reduce_action, gss_to_reduce):
+                          popped_gss = gss_to_reduce.popn(reduce_action.len)
+                          reductions_to_do[reduce_action].append(popped_gss)
+
+                      if isinstance(action, int):
+                          handle_shift(action, state_gss)
+                      elif isinstance(action, Reduce):
+                          handle_reduce(action, state_gss)
+                      elif isinstance(action, Split):
+                          if action.shift is not None:
+                              handle_shift(action.shift, state_gss)
+                          for length, nts in action.reduces.items():
+                              for nt_id, pids in nts.items():
+                                  handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+                  for reduce_action, gss_list in reductions_to_do.items():
+                      merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+                      for from_state_id in merged_popped_gss.peek():
+                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                          shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+
+              if not shifted_gsses:
+                  # Return an empty GSS, preserving the structure and root from the input GSS.
+                  return FastGSS(frozenset([gss._root]), gss._root, gss._child_to_parents, gss._path_cache)
+              else:
+                  return FastGSS.merge(shifted_gsses, merge_acc)
 
           def get_mask(self) -> RangeSet:
               """
@@ -2959,7 +2954,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -3287,6 +3282,13 @@ messages:
                   gss = gss.pop()
               return gss
 
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              return self._heads == frozenset([self._root])
+
+          def get_acc_factory(self) -> Callable[[], Acc]:
+              return self._acc_default_factory
+
           def isolate(self, value: T) -> 'FastGSS[T, Acc]':
               new_heads: Set[_Node[T, Acc]] = set()
               for head in self._heads:
@@ -3494,6 +3496,24 @@ messages:
               pass
 
           @abstractmethod
+          def popn(self, n: int) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              pass
+
+          @abstractmethod
+          def get_acc_factory(self) -> Callable[[], Acc]:
+              """Returns the accumulator default factory used by this GSS instance."""
+              pass
+
+          @abstractmethod
           def isolate(self, value: T) -> 'GSS[T, Acc]':
               """
               Keeps only the stacks that have `value` at the top.
@@ -3602,6 +3622,12 @@ messages:
 
               return ReferenceGSS(new_stacks, self._acc_default_factory)
 
+          def popn(self, n: int) -> 'ReferenceGSS[T, Acc]':
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
               new_stacks = []
               for stack, acc in self.stacks:
@@ -3670,6 +3696,13 @@ messages:
 
           def __hash__(self):
               return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
+
+          def is_empty(self) -> bool:
+              return len(self.stacks) == 1 and not self.stacks[0][0]
+
+          def get_acc_factory(self) -> Callable[[], Acc]:
+              return self._acc_default_factory
+
       ```
     metadata:
       filename: python/gss_tester/reference_impl.py
@@ -3854,7 +3887,8 @@ messages:
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi  # the compiled module
       from tqdm.auto import tqdm
-      from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+      from gss_tester.interface import GSS
+      from gss_tester.fast_impl import FastGSS
 
       def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
           flattened_stacks = rust_gss_node.flatten()
@@ -3911,16 +3945,9 @@ messages:
       def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
           return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
-      def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+      def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
           merged_acc = gss.get_acc(merge_acc)
           return merged_acc.terminals_union.complement()
-
-      def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-          result = gss
-          for _ in range(n):
-              result = result.pop()
-          return result
-
 
       class Model(GraphProvider):
           """
@@ -4160,7 +4187,7 @@ messages:
                   assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
                   # =======================================
 
-                  if any(h is not pruned_gss._root for h in pruned_gss._heads):
+                  if not pruned_gss.is_empty():
                        mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
 
                        # === ASSERTION 3: Compare mapped GSS ===
@@ -4208,7 +4235,7 @@ messages:
                                   processed_gss, end_state, terminal_id
                               )
 
-                      if any(h is not processed_gss._root for h in processed_gss._heads):
+                      if not processed_gss.is_empty():
                           new_offset = offset + width
                           next_tokenizer_sid = self.tokenizer_initial_state
                           if new_offset == len(token_bytes):
@@ -4280,7 +4307,7 @@ messages:
                           goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                           shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-              return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
+              return FastGSS.merge(shifted_gsses, merge_acc)
 
           def get_mask(self) -> RangeSet:
               """
@@ -4436,7 +4463,7 @@ messages:
                       for (pop, llm_bv), dests in children:
                           # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
                           # Collect all pops from GSS parents
-                          popped = popn_fast_py(gss_node, pop)
+                          popped = gss_node.popn(pop)
 
                           llm_empty = llm_bv.is_empty()
 
@@ -4483,11 +4510,13 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: None of the code in python/aug25/models/precompute3_model_pure_python.py
-      should be using private symbols in python/gss_tester/fast_impl.py, or really
-      anything other than the publicly exposed methods of python/gss_tester/interface.py.
-      Fix this. If additional methods are needed in python/gss_tester/interface.py,
-      add them. Keep them minimal. And try to make sure they're reasonable - generalish.
+  - user: |-
+      Remove `peek_from_head`.
+      Remove `get_acc_factory`.
+      Don't require `from_stacks` to take `acc_default_factory`.
+      Remove `initial`. Where it's used, instead do `from_stacks([[], your_acc_here])` (ie not acc factory, just initialize an acc).
+      Don't implement popn in the impls, just have a default impl in the abstract class.
+      Remove `split_heads`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4506,191 +4535,510 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Using private implementation details of a library is a bad practice as it makes the code brittle to library updates. Here are the step-by-step instructions and corresponding git diffs to refactor the code to only use the public GSS interface.
+      This is a significant refactoring of the GSS interface to simplify its initialization and remove redundant methods. Here are the step-by-step instructions to apply these changes, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
       1.  **File: `python/gss_tester/interface.py`**
-          -   In the `GSS` abstract base class, add three new abstract methods to provide needed functionality without exposing implementation details:
-              -   `popn(self, n: int) -> 'GSS[T, Acc]'`: A method to pop `n` elements from the stacks.
-              -   `is_empty(self) -> bool`: A method to check if the GSS is in its default "empty" state (containing just a single, empty stack).
-              -   `get_acc_factory(self) -> Callable[[], Acc]`: A method to access the accumulator factory, which is needed to create new initial GSS instances of the same type.
+          *   In the `GSS` abstract base class:
+              *   Remove the `initial` abstract class method.
+              *   Modify the `from_stacks` signature to remove the `acc_default_factory` parameter.
+              *   Convert the `popn` abstract method into a concrete method with a default implementation that repeatedly calls `pop`.
+              *   Remove the `get_acc_factory` abstract method.
+              *   Remove the `split_heads` abstract method.
 
-      2.  **File: `python/gss_tester/fast_impl.py`**
-          -   Implement the `is_empty` method by checking if the current heads are exactly the root node: `return self._heads == frozenset([self._root])`.
-          -   Implement the `get_acc_factory` method to return the stored factory: `return self._acc_default_factory`.
-          -   The `popn` method is already implemented in this file, so no changes are needed for it.
+      2.  **File: `python/gss_tester/reference_impl.py`**
+          *   Update the `__init__` method to accept a `root_acc` parameter instead of `acc_default_factory`. This `root_acc` will be used to create the canonical empty stack if the GSS becomes empty.
+          *   Remove the `initial` class method.
+          *   Modify the `from_stacks` class method to no longer accept `acc_default_factory`. It should now infer the `root_acc` from the accumulator of the first empty stack provided in the `stacks` list. It should raise a `ValueError` if no empty stack is given.
+          *   Update all internal constructor calls within methods like `push`, `pop`, `isolate`, `apply`, and `prune` to pass `self._root_acc` instead of `self._acc_default_factory`.
+          *   In the static `merge` method, determine the `root_acc` from the first GSS instance in the input list.
+          *   Remove the `popn`, `get_acc_factory`, and `split_heads` methods to rely on the base class or because they are no longer part of the interface.
 
-      3.  **File: `python/gss_tester/reference_impl.py`**
-          -   Implement the `popn` method by calling `pop()` in a loop `n` times.
-          -   Implement the `is_empty` method by checking that there is exactly one stack and that it is empty: `return len(self.stacks) == 1 and not self.stacks[0][0]`.
-          -   Implement the `get_acc_factory` method to return the stored factory: `return self._acc_default_factory`.
+      3.  **File: `python/gss_tester/fast_impl.py`**
+          *   Update the `__init__` method to remove the `acc_default_factory` parameter and the corresponding `self._acc_default_factory` instance variable. The `_root` node now serves as the sole source for the "empty stack" state.
+          *   Remove the `initial` class method.
+          *   Modify the `from_stacks` class method to no longer accept `acc_default_factory`. It should now create the `root` node using the accumulator from the first empty stack found in the `stacks` list. It should raise a `ValueError` if no empty stack is provided.
+          *   Update all internal constructor calls to `FastGSS(...)` to remove the `acc_default_factory` argument.
+          *   In the static `merge` method, pass the `_root` from the first GSS instance to the merged `FastGSS` constructor.
+          *   Remove the `popn`, `get_acc_factory`, and `split_heads` methods.
 
-      4.  **File: `python/aug25/models/precompute3_model_pure_python.py`**
-          -   **Imports**: Modify the imports at the top of the file. Remove the import of the private `_Node` class from `fast_impl.py` and add an import for the `GSS` interface.
-          -   **Remove `popn_fast_py`**: Delete the standalone `popn_fast_py` function, as its functionality is now part of the `GSS` interface.
-          -   **Update Type Hint**: In the `get_disallowed_terminals_py` function signature, change the type hint for the `gss` parameter from `FastGSS` to the generic `GSS`.
-          -   **Replace Emptiness Checks**: In the `commit` method, replace the two checks that access the private `_root` and `_heads` attributes (`if any(h is not ... for h in ...):`) with calls to the new `if not gss.is_empty():`.
-          -   **Update GSS Creation**: In the `_process_token` method, modify the `return` statement. Instead of creating a new initial GSS with `FastGSS.initial(gss._acc_default_factory)`, use `type(gss).initial(gss.get_acc_factory())` to do so generically without accessing private members.
-          -   **Update `popn` Call**: In the `get_mask` method, change the call `popped = popn_fast_py(gss_node, pop)` to `popped = gss_node.popn(pop)`.
+      4.  **File: `python/gss_tester/test_spec.py`**
+          *   In `run_test_spec`, replace all calls to `gss_class.initial(acc_factory)` with `gss_class.from_stacks([([], 0)])` to reflect the new initialization pattern.
+
+      5.  **File: `python/aug25/models/precompute3_model_pure_python.py`**
+          *   In `convert_rust_gss_to_python_gss`, update the call to `FastGSS.from_stacks` to remove the `acc_factory`. Ensure an empty stack is always present in the list passed to `from_stacks` by adding one with a default `PyAcc` if necessary.
+          *   In `Model.from_json_string`, change the GSS initialization from `FastGSS.initial(...).push(...)` to `FastGSS.from_stacks(...).push(...)`, providing an explicit empty stack with its accumulator.
+          *   In `Model._process_token`, add a check before the final `merge` call. If the list of `shifted_gsses` is empty, return a new empty GSS to avoid an error from merging an empty list. This new empty GSS can be constructed using the `_root` node of the `gss` passed into the method.
 
       ### Git Diffs
-
-      Here are the git diffs to apply these changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -4,8 +4,8 @@
-       from dataclasses import dataclass, field
-       
-       from ..common_interface import GraphProvider, RangeSet
-       import _sep1 as ffi  # the compiled module
-       from tqdm.auto import tqdm
-      -from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
-      +from gss_tester.interface import GSS
-      +from gss_tester.fast_impl import FastGSS
-       
+      @@ -10,14 +10,16 @@
        def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
            flattened_stacks = rust_gss_node.flatten()
-      @@ -62,17 +62,9 @@
-       def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-           return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+           
+      -    stacks_for_from_stacks = []
+      +    stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
+           for path_ids, terminals_union in flattened_stacks:
+               py_acc = PyAcc(terminals_union=terminals_union)
+               stacks_for_from_stacks.append((path_ids, py_acc))
        
-      -def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
-      +def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-           merged_acc = gss.get_acc(merge_acc)
-           return merged_acc.terminals_union.complement()
+      -    def acc_factory():
+      -        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
       -
-      -def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-      -    result = gss
-      -    for _ in range(n):
-      -        result = result.pop()
-      -    return result
-      -
+      -    return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
+      +    # Ensure there's an empty stack to define the root accumulator.
+      +    if not any(not s for s, _ in stacks_for_from_stacks):
+      +        root_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+      +        stacks_for_from_stacks.append(([], root_acc))
+      +
+      +    return FastGSS.from_stacks(stacks_for_from_stacks)
        
-       class Model(GraphProvider):
-           """
-      @@ -339,7 +331,7 @@
-                   assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
-                   # =======================================
        
-      -            if any(h is not pruned_gss._root for h in pruned_gss._heads):
-      +            if not pruned_gss.is_empty():
-                        mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+       @dataclass(frozen=True)
+      @@ -165,9 +167,9 @@
+                   py_table[state_id] = py_row
+               model.parser_table = ParserTable(start_state_id, py_table)
        
-                        # === ASSERTION 3: Compare mapped GSS ===
-      @@ -382,7 +374,7 @@
-                                   processed_gss, end_state, terminal_id
-                               )
+      -        def acc_factory():
+      -            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+      -        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+      +        initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+      +        initial_gss = FastGSS.from_stacks([([], initial_acc)])
+      +        initial_gss = initial_gss.push(model.parser_table.start_state_id)
+               model.state = {model.tokenizer_initial_state: initial_gss}
        
-      -                if any(h is not processed_gss._root for h in processed_gss._heads):
-      +                if not processed_gss.is_empty():
-                           new_offset = offset + width
-                           next_tokenizer_sid = self.tokenizer_initial_state
-                           if new_offset == len(token_bytes):
-      @@ -443,7 +435,7 @@
+               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+      @@ -411,7 +413,11 @@
                            goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                            shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
        
-      -        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
-      +        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else type(gss).initial(gss.get_acc_factory())
+      -        return FastGSS.merge(shifted_gsses, merge_acc)
+      +        if not shifted_gsses:
+      +            # Return an empty GSS, preserving the structure and root from the input GSS.
+      +            return FastGSS(frozenset([gss._root]), gss._root, gss._child_to_parents, gss._path_cache)
+      +        else:
+      +            return FastGSS.merge(shifted_gsses, merge_acc)
        
            def get_mask(self) -> RangeSet:
                """
-      @@ -581,7 +573,7 @@
-                       for (pop, llm_bv), dests in children:
-                           # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
-                           # Collect all pops from GSS parents
-      -                    popped = popn_fast_py(gss_node, pop)
-      +                    popped = gss_node.popn(pop)
-       
-                           llm_empty = llm_bv.is_empty()
-       
 
-      ``````diff
+      ```
+      ```diff
       diff --git a/python/gss_tester/fast_impl.py b/python/gss_tester/fast_impl.py
       --- a/python/gss_tester/fast_impl.py
       +++ b/python/gss_tester/fast_impl.py
-      @@ -155,6 +155,13 @@
-                   gss = gss.pop()
-               return gss
+      @@ -36,33 +36,33 @@
        
-      +    def is_empty(self) -> bool:
-      +        """Checks if the GSS contains only the initial empty stack."""
-      +        return self._heads == frozenset([self._root])
+           def __init__(self, 
+                        heads: FrozenSet[_Node[T, Acc]], 
+      -                 acc_default_factory: Callable[[], Acc], 
+                        root: _Node[T, Acc],
+                        child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
+                        path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
+               self._heads = heads
+      -        self._acc_default_factory = acc_default_factory
+               self._root = root
+               self._child_to_parents = child_to_parents
+               self._path_cache = path_cache
+       
+           @classmethod
+      -    def initial(cls: Type['FastGSS'], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
+      -        root = _Node(acc=acc_default_factory(), depth=0)
+      -        return cls(
+      -            heads=frozenset([root]),
+      -            acc_default_factory=acc_default_factory,
+      -            root=root,
+      -            child_to_parents={},
+      -            path_cache={root.id: frozenset([tuple()])}
+      -        )
+      -
+      -    @classmethod
+      -    def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
+      +    def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
+               """Creates a GSS from a list of explicit stacks by building the node graph."""
+      -        root = _Node(acc=acc_default_factory(), depth=0)
+      +        root_acc: Acc = None
+      +        has_empty_stack = False
+      +        for s, acc in stacks:
+      +            if not s:
+      +                has_empty_stack = True
+      +                root_acc = acc
+      +                break
+      +        
+      +        if not has_empty_stack:
+      +            raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
       +
-      +    def get_acc_factory(self) -> Callable[[], Acc]:
-      +        return self._acc_default_factory
+      +        root = _Node(acc=root_acc, depth=0)
+               child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+               path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
+               heads: Set[_Node[T, Acc]] = set()
+      @@ -102,7 +102,7 @@
+                           child_to_parents[new_head] = child_to_parents[current_node]
+                       heads.add(new_head)
+       
+      -        return cls(frozenset(heads), acc_default_factory, root, child_to_parents, path_cache)
+      +        return cls(frozenset(heads), root, child_to_parents, path_cache)
+       
+           def push(self, value: T) -> 'FastGSS[T, Acc]':
+               new_heads: Set[_Node[T, Acc]] = set()
+      @@ -123,7 +123,7 @@
+                   new_heads.add(new_node)
+                   memo[head] = new_node
+       
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+      +        return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
+       
+           def pop(self) -> 'FastGSS[T, Acc]':
+               new_heads: Set[_Node[T, Acc]] = set()
+      @@ -134,21 +134,12 @@
+       
+               if not new_heads:
+                   # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
+      -            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      -
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      -
+      -    def popn(self, n: int) -> 'FastGSS[T, Acc]':
+      -        gss = self
+      -        for _ in range(n):
+      -            gss = gss.pop()
+      -        return gss
+      +            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
       +
+      +        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+       
+           def is_empty(self) -> bool:
+               """Checks if the GSS contains only the initial empty stack."""
+               return self._heads == frozenset([self._root])
+      -
+      -    def get_acc_factory(self) -> Callable[[], Acc]:
+      -        return self._acc_default_factory
+       
            def isolate(self, value: T) -> 'FastGSS[T, Acc]':
                new_heads: Set[_Node[T, Acc]] = set()
-               for head in self._heads:
+      @@ -159,8 +150,8 @@
+       
+               if not new_heads:
+                   # If no stacks match, the result is an empty GSS (represented by the root).
+      -            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      +            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+      +        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+               new_heads: Set[_Node[T, Acc]] = set()
+      @@ -180,21 +171,17 @@
+                   new_heads.add(new_node)
+                   memo[head] = new_node
+                   
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+      +        return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
+       
+           def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
+               new_heads = {head for head in self._heads if predicate(head.acc)}
+       
+               if not new_heads:
+                   # If all stacks are pruned, the result is an empty GSS (represented by the root).
+      -            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      -
+      -        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      -
+      -    def split_heads(self) -> Iterable['FastGSS[T, Acc]']:
+      -        for head in self._heads:
+      -            yield FastGSS(frozenset([head]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+      +            return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+      +
+      +        return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+       
+           def peek(self) -> Set[T]:
+               peek_values: Set[T] = set()
+      @@ -260,7 +247,7 @@
+                           all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
+                       final_heads.add(new_node)
+       
+      -        return FastGSS(frozenset(final_heads), first_gss._acc_default_factory, first_gss._root, all_child_to_parents, all_path_caches)
+      +        return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
+       
+           def to_json_serializable(self) -> Any:
+               all_stacks = []
 
-      ``````diff
+      ```
+      ```diff
       diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
       --- a/python/gss_tester/interface.py
       +++ b/python/gss_tester/interface.py
-      @@ -31,6 +31,25 @@
+      @@ -8,14 +8,9 @@
+       
+           @classmethod
+           @abstractmethod
+      -    def initial(cls, acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+      -        """Creates an initial GSS, typically with one empty stack."""
+      -        pass
+      -
+      -    @classmethod
+      -    @abstractmethod
+      -    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+      +    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+               """Creates a GSS from a list of explicit stacks."""
+               pass
+       
+           @abstractmethod
+      @@ -30,22 +25,15 @@
                """
                pass
        
-      +    @abstractmethod
-      +    def popn(self, n: int) -> 'GSS[T, Acc]':
-      +        """
-      +        For all active stacks, creates new stacks by removing the top `n` values.
-      +        Returns a new GSS state containing the popped stacks.
-      +        """
-      +        pass
-      +
-      +    @abstractmethod
-      +    def is_empty(self) -> bool:
-      +        """Checks if the GSS contains only the initial empty stack."""
-      +        pass
-      +
-      +    @abstractmethod
-      +    def get_acc_factory(self) -> Callable[[], Acc]:
-      +        """Returns the accumulator default factory used by this GSS instance."""
-      +        pass
-      +
-           @abstractmethod
-           def isolate(self, value: T) -> 'GSS[T, Acc]':
+      -    @abstractmethod
+           def popn(self, n: int) -> 'GSS[T, Acc]':
                """
-
-      ``````diff
-      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
-      --- a/python/gss_tester/reference_impl.py
-      +++ b/python/gss_tester/reference_impl.py
-      @@ -35,6 +35,12 @@
-       
-               return ReferenceGSS(new_stacks, self._acc_default_factory)
-       
-      +    def popn(self, n: int) -> 'ReferenceGSS[T, Acc]':
+               For all active stacks, creates new stacks by removing the top `n` values.
+               Returns a new GSS state containing the popped stacks.
+               """
+      -        pass
       +        gss = self
       +        for _ in range(n):
       +            gss = gss.pop()
       +        return gss
-      +
+       
+           @abstractmethod
+           def is_empty(self) -> bool:
+      @@ -53,11 +41,6 @@
+               pass
+       
+           @abstractmethod
+      -    def get_acc_factory(self) -> Callable[[], Acc]:
+      -        """Returns the accumulator default factory used by this GSS instance."""
+      -        pass
+      -
+      -    @abstractmethod
+           def isolate(self, value: T) -> 'GSS[T, Acc]':
+               """
+               Keeps only the stacks that have `value` at the top.
+      @@ -75,14 +58,6 @@
+               If `predicate(acc)` returns False, the stack is removed.
+               """
+               pass
+      -
+      -    @abstractmethod
+      -    def split_heads(self) -> Iterable['GSS[T, Acc]']:
+      -        """
+      -        Splits the GSS into an iterable of GSS instances, each representing a single stack head.
+      -        This allows operating on each stack individually.
+      -        """
+      -        pass
+       
+           @abstractmethod
+           def peek(self) -> Set[T]:
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
+      --- a/python/gss_tester/reference_impl.py
+      +++ b/python/gss_tester/reference_impl.py
+      @@ -6,61 +6,55 @@
+           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+           Its behavior is the gold standard for the consistency tests.
+           """
+      -    def __init__(self, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]):
+      +    def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Acc):
+               self.stacks = stacks
+      -        self._acc_default_factory = acc_default_factory
+      +        self._root_acc = root_acc
+               if not self.stacks:
+      -            self.stacks.append(([], self._acc_default_factory()))
+      +            self.stacks.append(([], self._root_acc))
+       
+           @classmethod
+      -    def initial(cls: Type['ReferenceGSS'], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+      -        """Creates a GSS with a single empty stack and a default accumulator."""
+      -        return cls([], acc_default_factory)
+      -
+      -    @classmethod
+      -    def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+      +    def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
+               """Creates a GSS from a list of explicit stacks."""
+      -        return cls(stacks, acc_default_factory)
+      +        root_acc: Acc = None
+      +        has_empty_stack = False
+      +        for s, acc in stacks:
+      +            if not s:
+      +                has_empty_stack = True
+      +                root_acc = acc
+      +                break
+      +        if not has_empty_stack:
+      +            raise ValueError("ReferenceGSS.from_stacks requires an empty stack to determine the root accumulator.")
+      +        return cls(stacks, root_acc)
+       
+           def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+               new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+      -        return ReferenceGSS(new_stacks, self._acc_default_factory)
+      +        return ReferenceGSS(new_stacks, self._root_acc)
+       
+           def pop(self) -> 'ReferenceGSS[T, Acc]':
+               new_stacks = []
+               for stack, acc in self.stacks:
+                   if stack:
+                       new_stacks.append((stack[:-1], acc))
+      -
+      -        return ReferenceGSS(new_stacks, self._acc_default_factory)
+      -
+      -    def popn(self, n: int) -> 'ReferenceGSS[T, Acc]':
+      -        gss = self
+      -        for _ in range(n):
+      -            gss = gss.pop()
+      -        return gss
+      +        return ReferenceGSS(new_stacks, self._root_acc)
+       
            def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
                new_stacks = []
                for stack, acc in self.stacks:
-      @@ -102,3 +108,9 @@
+                   if stack and stack[-1] == value:
+                       new_stacks.append((stack, acc))
+      -
+      -        return ReferenceGSS(new_stacks, self._acc_default_factory)
+      +        return ReferenceGSS(new_stacks, self._root_acc)
        
-           def __hash__(self):
-               return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
+           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+               new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+      -        return ReferenceGSS(new_stacks, self._acc_default_factory)
+      +        return ReferenceGSS(new_stacks, self._root_acc)
+       
+           def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
+               new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
+      -        return ReferenceGSS(new_stacks, self._acc_default_factory)
+      -
+      -    def split_heads(self) -> Iterable['ReferenceGSS[T, Acc]']:
+      -        for stack, acc in self.stacks:
+      -            yield ReferenceGSS([(stack, acc)], self._acc_default_factory)
+      +        return ReferenceGSS(new_stacks, self._root_acc)
+       
+           def peek(self) -> Set[T]:
+               return {stack[-1] for stack, acc in self.stacks if stack}
+      @@ -72,22 +66,22 @@
+           @staticmethod
+           def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+               all_stacks: List[Tuple[List[T], Acc]] = []
+      -        factory = None
+      +        root_acc = None
+               
+               gss_list = list(gss_list)
+               if not gss_list:
+                   raise ValueError("Cannot merge empty list of GSS")
+       
+      +        root_acc = gss_list[0]._root_acc
       +
-      +    def is_empty(self) -> bool:
-      +        return len(self.stacks) == 1 and not self.stacks[0][0]
-      +
-      +    def get_acc_factory(self) -> Callable[[], Acc]:
-      +        return self._acc_default_factory
+               for gss in gss_list:
+                   if isinstance(gss, ReferenceGSS):
+                       # Don't add the default empty stack if there are other stacks
+                       if len(gss.stacks) > 1 or gss.stacks[0][0]:
+                           all_stacks.extend(gss.stacks)
+      -                if factory is None:
+      -                    factory = gss._acc_default_factory
+               
+      -        if factory is None:
+      +        if root_acc is None:
+                    # This can happen if all GSSs were empty.
+      -             factory = gss_list[0]._acc_default_factory
+      +             root_acc = gss_list[0]._root_acc
+       
+               merged_map: Dict[Tuple[T, ...], Acc] = {}
+               for stack, acc in all_stacks:
+      @@ -98,7 +92,7 @@
+                       merged_map[key] = acc
+               
+               final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+      -        return ReferenceGSS(final_stacks, factory)
+      +        return ReferenceGSS(final_stacks, root_acc)
+       
+           def to_json_serializable(self) -> Any:
+               # Sort stacks for a canonical representation, making comparisons reliable.
+      @@ -112,7 +106,4 @@
+           def is_empty(self) -> bool:
+               return len(self.stacks) == 1 and not self.stacks[0][0]
+       
+      -    def get_acc_factory(self) -> Callable[[], Acc]:
+      -        return self._acc_default_factory
+      -
+      ```
+      ```diff
+      diff --git a/python/gss_tester/test_spec.py b/python/gss_tester/test_spec.py
+      --- a/python/gss_tester/test_spec.py
+      +++ b/python/gss_tester/test_spec.py
+      @@ -19,8 +19,8 @@
+               yield (gss_state.to_json_serializable(), line_no)
+       
+           # --- Test 1: Basic push/pop ---
+      -    gss1 = gss_class.initial(acc_factory)
+      +    gss1 = gss_class.from_stacks([([], acc_factory())])
+           yield from _yield_state(gss1)
+       
+           gss1 = gss1.push(10)
+      @@ -35,29 +35,29 @@
+           yield from _yield_state(gss_popped_10)
+       
+           # --- Test 2: Forking and Merging ---
+      -    gss_a = gss_class.initial(acc_factory).push(1).push(2)
+      -    gss_b = gss_class.initial(acc_factory).push(1).push(3)
+      +    gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+      +    gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+           
+           merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+           yield from _yield_state(merged1)
+           
+           # Merge a stack that already exists to test accumulator merging
+      -    gss_c = gss_class.initial(acc_factory).push(1).push(2).apply(lambda acc: acc + 5)
+      +    gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+           merged2 = gss_class.merge([merged1, gss_c], merge_func)
+           yield from _yield_state(merged2)
+       
+           # --- Test 3: Apply accumulator function ---
+      -    gss_to_apply = gss_class.initial(acc_factory).push(5)
+      +    gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+           gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+           yield from _yield_state(gss_to_apply)
+       
+           # --- Test 4: Pop with no match ---
+      -    gss_no_match = gss_class.initial(acc_factory).push(88).push(99)
+      +    gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+           gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+           yield from _yield_state(gss_after_failed_pop)
+       
+           # --- Test 5: Complex sequence (diamond pattern) ---
+      -    s0 = gss_class.initial(acc_factory)
+      +    s0 = gss_class.from_stacks([([], acc_factory())])
+           s1 = s0.push(1)
+           s2 = s1.push(2)
+           s3 = s1.push(3)
+      @@ -78,7 +78,7 @@
+           yield from _yield_state(s9) # should be same as s1
+           
+           # --- Test 6: Merging empty GSS ---
+      -    gss_d = gss_class.initial(acc_factory).push(1)
+      +    gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+           gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+           yield from _yield_state(gss_empty)
+           
+      @@ -86,8 +86,8 @@
+           yield from _yield_state(merged_with_empty) # should be same as gss_d
+       
+           # --- Test 7: Pruning ---
+      -    gss_e = gss_class.initial(acc_factory).push(1).apply(lambda acc: 5)
+      -    gss_f = gss_class.initial(acc_factory).push(2).apply(lambda acc: 10)
+      +    gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+      +    gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+           gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+           yield from _yield_state(gss_to_prune)
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 5 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
@@ -4711,8 +5059,13 @@ messages:
       Identified target file: python/gss_tester/reference_impl.py
       Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: python/gss_tester/test_spec.py
+      Applying patch to 'python/gss_tester/test_spec.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/test_spec.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS implementations to use public
-      interface"'
+  - user: 'Changes committed with message: "Refactor GSS interface: Simplify initialization
+      and remove redundant methods"'
     metadata:
 ...

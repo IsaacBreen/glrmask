@@ -13,15 +13,17 @@ from gss_tester.fast_impl import FastGSS
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     flattened_stacks = rust_gss_node.flatten()
     
-    stacks_for_from_stacks = []
+    stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
     for path_ids, terminals_union in flattened_stacks:
         py_acc = PyAcc(terminals_union=terminals_union)
         stacks_for_from_stacks.append((path_ids, py_acc))
 
-    def acc_factory():
-        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+    # Ensure there's an empty stack to define the root accumulator.
+    if not any(not s for s, _ in stacks_for_from_stacks):
+        root_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        stacks_for_from_stacks.append(([], root_acc))
 
-    return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
+    return FastGSS.from_stacks(stacks_for_from_stacks)
 
 
 @dataclass(frozen=True)
@@ -173,9 +175,9 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
-        def acc_factory():
-            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-        initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
+        initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        initial_gss = FastGSS.from_stacks([([], initial_acc)])
+        initial_gss = initial_gss.push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
@@ -427,7 +429,11 @@ class Model(GraphProvider):
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-        return FastGSS.merge(shifted_gsses, merge_acc)
+        if not shifted_gsses:
+            # Return an empty GSS, preserving the structure and root from the input GSS.
+            return FastGSS(frozenset([gss._root]), gss._root, gss._child_to_parents, gss._path_cache)
+        else:
+            return FastGSS.merge(shifted_gsses, merge_acc)
 
     def get_mask(self) -> RangeSet:
         """
