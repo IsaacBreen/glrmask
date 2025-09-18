@@ -140,6 +140,9 @@ fn print_node_recursive(
 
 /// Prints a summary of the collected profiling data to stdout.
 pub fn print_summary() {
+    if !PROFILING_ENABLED {
+        return;
+    }
     let data = profiler().lock().unwrap();
     println!("--- Profiler Summary ---");
 
@@ -211,6 +214,9 @@ fn flatten_tree_recursive(
 
 /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
 pub fn print_summary_flat() {
+    if !PROFILING_ENABLED {
+        return;
+    }
     let data = profiler().lock().unwrap();
     println!("--- Profiler Summary (Flat) ---");
 
