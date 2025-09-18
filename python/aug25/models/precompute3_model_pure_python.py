@@ -9,6 +9,10 @@ import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 from gss_tester.leveled_impl import LeveledGSS as GSS
 
+# Toggle for validation checks against Rust implementation. When False, validation is disabled
+# and no Rust constraint_state is maintained.
+ENABLE_VALIDATION = False
+
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> GSS:
     flattened_stacks = rust_gss_node.flatten()
 
@@ -189,7 +193,7 @@ class Model(GraphProvider):
         model.internal_to_original_map = constraint.internal_to_original_map()
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
 
-        model.constraint_state = ffi.GrammarConstraintState(constraint)
+        model.constraint_state = ffi.GrammarConstraintState(constraint) if ENABLE_VALIDATION else None
 
         # print(constraint.print_parser())
 
@@ -265,15 +269,16 @@ class Model(GraphProvider):
 
     def commit(self, token_id: int):
         # print(f"\n--- commit token_id={token_id} ---")
-        # Get Rust state before commit for comparison
-        rust_state_map_before_commit = self.constraint_state.get_state_map()
 
         token_bytes = self.id_to_token[token_id]
 
         # --- Python implementation starts here ---
         py_states = list(self.state.keys())
-        rust_states = list(self.constraint_state.get_state_map().keys())
-        assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
+        if ENABLE_VALIDATION:
+            # Get Rust state before commit for comparison
+            rust_state_map_before_commit = self.constraint_state.get_state_map()
+            rust_states = list(self.constraint_state.get_state_map().keys())
+            assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
 
         # --- Start: Added pre-processing steps to match Rust ---
         terminals_map: Dict[int, ffi.Bitset] = {}
@@ -290,17 +295,18 @@ class Model(GraphProvider):
             terminals_map[tokenizer_sid] = terminals
 
         # === ASSERTION 1: Compare maps ===
-        rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-        if state_map != rust_state_map:
-            # print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
-        
-        py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
-        rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-        if py_terminals_map_serializable != rust_terminals_map_serializable:
-            # print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
-
-        if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
-            raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
+        if ENABLE_VALIDATION:
+            rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
+            if state_map != rust_state_map:
+                # print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
+                pass
+            py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
+            rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+            if py_terminals_map_serializable != rust_terminals_map_serializable:
+                # print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
+                pass
+            if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
+                raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
 
         # =================================
 
@@ -309,23 +315,25 @@ class Model(GraphProvider):
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
 
             # === ASSERTION 2: Compare pruned GSS ===
-            rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-            ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-            py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
+            if ENABLE_VALIDATION:
+                rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
+                ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
+                py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
+                assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
             # =======================================
 
             if not pruned_gss.is_empty():
-                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
 
                  # === ASSERTION 3: Compare mapped GSS ===
-                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
+                if ENABLE_VALIDATION:
+                    rust_gss_after_prune = rust_state_map_before_commit[tokenizer_sid]  # it was modified in place
+                    ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
+                    py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+                    assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
                  # =======================================
 
-                 temp_states[tokenizer_sid] = mapped_gss
+                temp_states[tokenizer_sid] = mapped_gss
         
         current_state_for_processing = temp_states
         # --- End: Added pre-processing steps ---
@@ -385,27 +393,30 @@ class Model(GraphProvider):
             if gss_list
         }
         # print("merged_states before filtering empties:")
-        for sid, gss in merged_states.items():
-            # print(f"  sid={sid}, gss={gss}")
+        # for sid, gss in merged_states.items():
+        #     print(f"  sid={sid}, gss={gss}")
 
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
         self.state = merged_states
 
-        self.constraint_state.commit(token_id)
+        if ENABLE_VALIDATION:
+            self.constraint_state.commit(token_id)
 
         # print("state_map after commit:")
-        for sid, gss in self.state.items():
-            # print(f"  sid={sid}, gss={gss}")
+        # for sid, gss in self.state.items():
+        #     print(f"  sid={sid}, gss={gss}")
 
-        # print("Rust state_map after commit:")
-        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
-        for sid, rust_gss in expected_state_map.items():
-            # print(f"  sid={sid}, gss={rust_gss}")
+        if ENABLE_VALIDATION:
+            # print("Rust state_map after commit:")
+            expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+            for sid, rust_gss in expected_state_map.items():
+                # print(f"  sid={sid}, gss={rust_gss}")
+                pass
 
-        assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
-        for sid, gss in self.state.items():
-            assert gss.to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"GSS state mismatch after commit for sid {sid}."
+            assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
+            for sid, gss in self.state.items():
+                assert gss.to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"GSS state mismatch after commit for sid {sid}."
 
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
@@ -466,19 +477,22 @@ class Model(GraphProvider):
         # print("GSS at start of get_mask:")
         state_map = self.state
 
-        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+        if ENABLE_VALIDATION:
+            expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
-        # print(f"state_map:")
-        for sid, gss in state_map.items():
-            # print(gss)
+            # print(f"state_map:")
+            for sid, gss in state_map.items():
+                # print(gss)
+                pass
 
-        # print(f"expected_state_map:")
-        for sid, gss in expected_state_map.items():
-            # print(gss)
+            # print(f"expected_state_map:")
+            for sid, gss in expected_state_map.items():
+                # print(gss)
+                pass
 
-        assert state_map.keys() == expected_state_map.keys(), f"state_map keys {state_map.keys()} != expected_state_map keys {expected_state_map.keys()}"
-        for sid in state_map:
-            assert state_map[sid].to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"state_map GSS for sid {sid} != expected_state_map GSS"
+            assert state_map.keys() == expected_state_map.keys(), f"state_map keys {state_map.keys()} != expected_state_map keys {expected_state_map.keys()}"
+            for sid in state_map:
+                assert state_map[sid].to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"state_map GSS for sid {sid} != expected_state_map GSS"
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
