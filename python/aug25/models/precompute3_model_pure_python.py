@@ -86,6 +86,8 @@ class Model(GraphProvider):
         self.max_depth: Dict[int, int] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
         self.tokenizer: Optional[ffi.Regex] = None
+        self.glr_parser: Optional[ffi.GLRParser] = None
+        self.ignore_terminal_id: Optional[int] = None
         self.parser_table: Optional[ParserTable] = None
         self.state: Dict[int, GSS] = {}
         self.internal_to_original_map: Dict[int, int] = {}
@@ -138,6 +140,8 @@ class Model(GraphProvider):
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         model.tokenizer = constraint.tokenizer()
+        model.glr_parser = constraint.glr_parser()
+        model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
         model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
         parser_data = data['parser']
@@ -186,6 +190,8 @@ class Model(GraphProvider):
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
 
         model.constraint_state = ffi.GrammarConstraintState(constraint)
+
+        print(constraint.print_parser())
 
         return model
 
@@ -344,7 +350,12 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                processed_gss = self._process_token(gss, terminal_id)
+                if terminal_id == self.ignore_terminal_id:
+                    # This is an ignore token. The GSS state does not change.
+                    processed_gss = gss
+                else:
+                    processed_gss = self._process_token(gss, terminal_id)
+
                 # Mirror Rust's immediate re-match disallow:
                 # If after consuming the remainder from this offset we end in a tokenizer state
                 # that can produce this same terminal immediately, forbid it for that state.
@@ -409,9 +420,13 @@ class Model(GraphProvider):
             state_id, state_gsss = heads_by_state.popitem()
             state_gss = GSS.merge(state_gsss)
             row = self.parser_table.table.get(state_id)
-            if not row: continue
+            if not row:
+                print(f"No parser table row for state_id {state_id}, skipping.")
+                continue
             action = row.actions.get(terminal_id)
-            if not action: continue
+            if not action:
+                print(f"No action for terminal_id {terminal_id} in state_id {state_id}, skipping.")
+                continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))

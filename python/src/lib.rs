@@ -378,6 +378,11 @@ impl PyGLRParser {
 
         Ok(result_dict)
     }
+
+    #[getter]
+    fn ignore_terminal_id(&self) -> Option<usize> {
+        self.inner.ignore_terminal_id.map(|tid| tid.0)
+    }
 }
 
 #[pyclass(name = "GrammarConstraint")]
@@ -419,6 +424,10 @@ impl PyGrammarConstraint {
         // Printing GrammarConstraint can be complex.
         // Consider what information is useful to expose.
         println!("PyGrammarConstraint (details not implemented for print)");
+    }
+
+    fn print_parser(&self) {
+        println!("{}", self.inner.parser);
     }
 
     fn to_json_string(&self) -> PyResult<String> {
