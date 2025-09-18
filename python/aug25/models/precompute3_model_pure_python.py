@@ -432,11 +432,11 @@ class Model(GraphProvider):
                         for nt_id, pids in nts.items():
                             handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-            for reduce_action, gss_list in reductions_to_do.items():
-                merged_popped_gss = GSS.merge(gss_list)
-                for from_state_id in merged_popped_gss.peek():
-                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+        for reduce_action, gss_list in reductions_to_do.items():
+            merged_popped_gss = GSS.merge(gss_list)
+            for from_state_id in merged_popped_gss.peek():
+                goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
         if not shifted_gsses:
             # Return an empty GSS, preserving the structure and root from the input GSS.

@@ -8344,7 +8344,7 @@ local_system:
               regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
           }
 
-          fn max_state(&self) -> usize {
+          pub fn max_state(&self) -> usize {
               self.dfa.states.len()
           }
 
@@ -8574,6 +8574,10 @@ local_system:
 
           fn initial_state_id(&self) -> usize {
               self.inner.initial_state_id().0
+          }
+
+          fn max_state(&self) -> usize {
+              self.inner.max_state()
           }
       }
 
@@ -14134,6 +14138,8 @@ local_system:
                           for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
                               if disallowed_bv.is_empty():
                                   continue
+
+                              end = min(end, self.tokenizer.max_state())
 
                               for tsid in range(start, end + 1):
                                   possible_matches_for_state = possible_matches.get(tsid)
@@ -20761,14 +20767,14 @@ local_system:
           let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
               let mut new_terminals_btreemap = BTreeMap::new();
 
-              for (old_state_id, new_state_id) in map { // This unwrap is probably wrong.
-                  let bv_source = terminals.get_l2_bitset(old_state_id.0).cloned().unwrap_or_else(HybridBitset::zeros);
+              for (old_state_id, new_state_id) in map {
+                  let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
                   new_terminals_btreemap.entry(*new_state_id)
-                      .and_modify(|bv| *bv |= &bv_source)
+                      .and_modify(|bv| *bv |= bv_source)
                       .or_insert_with(|| bv_source.clone());
               }
 
-              let mut new_terminals_l2_bitset = HybridL2Bitset::new();
+              let mut new_terminals_l2_bitset = HybridL2Bitset::all();
               for (state_id, bv) in new_terminals_btreemap {
                   new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
               }
@@ -22544,7 +22550,7 @@ local_system:
               regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
           }
 
-          fn max_state(&self) -> usize {
+          pub fn max_state(&self) -> usize {
               self.dfa.states.len()
           }
 
@@ -22774,6 +22780,10 @@ local_system:
 
           fn initial_state_id(&self) -> usize {
               self.inner.initial_state_id().0
+          }
+
+          fn max_state(&self) -> usize {
+              self.inner.max_state()
           }
       }
 
@@ -23204,11 +23214,6 @@ local_system:
 
       #[pymethods]
       impl PyHybridL2Bitset {
-          #[new]
-          fn new() -> Self {
-              Self { inner: RustHybridL2Bitset::new() }
-          }
-
           fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
               self.inner.range_values().map(|(range, bv)| {
                   let py_range = (*range.start(), *range.end());
@@ -23231,7 +23236,7 @@ local_system:
           }
 
           fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-              PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).cloned().unwrap_or_else(RustHybridBitset::zeros) }
+              PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
           }
 
           fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
@@ -27976,12 +27981,15 @@ local_system:
               def apply_map(acc: PyAcc) -> PyAcc:
                   old_l2 = acc.terminals_union
                   new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
+                  
                   for old_sid, new_sid in state_map.items():
                       bv_source = old_l2.get_l2_bitset(old_sid)
                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-                  new_l2 = ffi.HybridL2Bitset()
+                  
+                  new_l2 = ffi.HybridL2Bitset.all()
                   for new_sid, bv in new_bvs.items():
                       new_l2.insert_l2_bitset(new_sid, bv)
+                  
                   return PyAcc(terminals_union=new_l2)
               return gss.apply(apply_map)
 
@@ -28071,10 +28079,26 @@ local_system:
               temp_states: Dict[int, GSS] = {}
               for tokenizer_sid, gss in self.state.items():
                   pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  # if not pruned_gss.is_empty(): # This was a bug. An empty GSS might still be carried over.
-                  mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                  temp_states[tokenizer_sid] = mapped_gss
 
+                  # === ASSERTION 2: Compare pruned GSS ===
+                  rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
+                  ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
+                  py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
+                  assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
+                  # =======================================
+
+                  if not pruned_gss.is_empty():
+                       mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+
+                       # === ASSERTION 3: Compare mapped GSS ===
+                       rust_gss_after_prune = rust_gss_before_prune # it was modified in place
+                       ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
+                       py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+                       assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
+                       # =======================================
+
+                       temp_states[tokenizer_sid] = mapped_gss
+              
               current_state_for_processing = temp_states
               # --- End: Added pre-processing steps ---
 
@@ -28186,11 +28210,11 @@ local_system:
                               for nt_id, pids in nts.items():
                                   handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-                  for reduce_action, gss_list in reductions_to_do.items():
-                      merged_popped_gss = GSS.merge(gss_list)
-                      for from_state_id in merged_popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+              for reduce_action, gss_list in reductions_to_do.items():
+                  merged_popped_gss = GSS.merge(gss_list)
+                  for from_state_id in merged_popped_gss.peek():
+                      goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                      shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
               if not shifted_gsses:
                   # Return an empty GSS, preserving the structure and root from the input GSS.
@@ -28320,6 +28344,8 @@ local_system:
                           for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
                               if disallowed_bv.is_empty():
                                   continue
+
+                              end = min(end, self.tokenizer.max_state())
 
                               for tsid in range(start, end + 1):
                                   possible_matches_for_state = possible_matches.get(tsid)
@@ -36794,7 +36820,7 @@ messages:
               regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
           }
 
-          fn max_state(&self) -> usize {
+          pub fn max_state(&self) -> usize {
               self.dfa.states.len()
           }
 
@@ -37029,6 +37055,10 @@ messages:
 
           fn initial_state_id(&self) -> usize {
               self.inner.initial_state_id().0
+          }
+
+          fn max_state(&self) -> usize {
+              self.inner.max_state()
           }
       }
 
@@ -42609,6 +42639,8 @@ messages:
                               if disallowed_bv.is_empty():
                                   continue
 
+                              end = min(end, self.tokenizer.max_state())
+
                               for tsid in range(start, end + 1):
                                   possible_matches_for_state = possible_matches.get(tsid)
                                   if not possible_matches_for_state:
@@ -42690,12 +42722,17 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
   - user: |-
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-17_20-47-56
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 maturin develop -r && python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-17_20-47-56
+         Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
+          Finished `release` profile [optimized] target(s) in 21.49s
+      📦 Built wheel for CPython 3.12 to /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/.tmpVGN5v6/python-0.1.0-cp312-cp312-macosx_11_0_arm64.whl
+      ✏️  Setting installed package as editable
+      🛠 Installed python-0.1.0
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: aug25/models/precompute3_model_pure_python.py
-      Normalizing precompute3 BVs: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1462/1462 [00:00<00:00, 76673.91it/s]
-      Model loaded in 0.0685 seconds.
+      Normalizing precompute3 BVs: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1462/1462 [00:00<00:00, 86463.42it/s]
+      Model loaded in 0.0650 seconds.
       Loading and tokenizing code from: ../src/example_code.js
       Tokenized into 6 tokens.
 
@@ -42788,7 +42825,7 @@ messages:
       Rust state_map after commit:
         sid=0, gss=LeveledGSS([[[108, 31], PyAcc(HybridL2Bitset { inner: (0..=66, HybridBitset { inner: 0..=18446744073709551615 }), (67..=67, HybridBitset { inner: 0..=1, 3..=18446744073709551615 }), (68..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })], [[108, 92], PyAcc(HybridL2Bitset { inner: (0..=66, HybridBitset { inner: 0..=18446744073709551615 }), (67..=67, HybridBitset { inner: 0..=1, 3..=18446744073709551615 }), (68..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })]])
         sid=67, gss=LeveledGSS([[[108, 31], PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })], [[108, 92], PyAcc(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })]])
-      Benchmarking steps:  50%|█████████████████████████████████████████████████████████████████████████                                                                         | 3/6 [00:00<00:00, 364.61it/s, commit]
+      Benchmarking steps:  50%|█████████████████████████████████████████████████████████████████████████                                                                         | 3/6 [00:00<00:00, 398.16it/s, commit]
       Traceback (most recent call last):
         File "<frozen runpy>", line 198, in _run_module_as_main
         File "<frozen runpy>", line 88, in _run_code
@@ -42821,183 +42858,62 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the `AssertionError` you're encountering. The mismatch in tokenizer states after a `commit` operation stems from a few related issues in both your Python and Rust code, primarily concerning how empty GSS states are handled during pre-processing and how allowed terminals are mapped. Here are the step-by-step instructions to fix the problem, followed by the corresponding git diffs.
+      I've analyzed the traceback and the provided code. The `AssertionError` indicates a discrepancy between your Python and Rust implementations of the `commit` logic. Specifically, the Python version fails to produce a parser state for tokenizer state `0` after a certain commit, while the Rust version does.
 
-      ### Step-by-step Instructions
+      The root cause is a bug in your Python implementation of the GLR parser step within `_process_token` in `python/aug25/models/precompute3_model_pure_python.py`. The loop that processes reductions is incorrectly indented, causing it to execute prematurely inside the loop that iterates over the GSS heads. This leads to incorrect processing of reductions, as they are not collected from all active heads before being handled.
 
-      #### 1. Fix GSS State Handling in Python `commit`
+      Here are the step-by-step instructions to fix this, followed by the git diff.
 
-      The Python implementation of `commit` prematurely drops GSS states if they become empty after pruning, which is incorrect. An empty GSS might still be carried over to a new tokenizer state.
+      ### Instructions
 
-      -   **File**: `python/aug25/models/precompute3_model_pure_python.py`
-      -   **Method**: `commit`
-      -   **Action**: Locate the loop that builds `temp_states`. Remove the conditional check `if not pruned_gss.is_empty():` and the debugging assertions within it. This ensures all tokenizer states are processed, even if their GSS becomes empty.
+      1.  **Open the file:** `python/aug25/models/precompute3_model_pure_python.py`.
 
-      #### 2. Correct Terminal Mapping Logic in Python
+      2.  **Locate the function:** Find the `_process_token` method within the `Model` class.
 
-      The `_map_allowed_terminals_tokenizer_states` method incorrectly initializes the new set of allowed terminals to "all allowed" instead of "none allowed". This causes states that are not destinations of the mapping to have incorrect permissions.
+      3.  **Correct the indentation:** Inside `_process_token`, find the loop that begins with `for reduce_action, gss_list in reductions_to_do.items():`. This loop and its body are currently indented one level too deep. De-indent this entire block by one level (4 spaces) so that it is at the same indentation level as the `for state_id, state_gsss in heads_by_state.items():` loop above it.
 
-      -   **File**: `python/aug25/models/precompute3_model_pure_python.py`
-      -   **Method**: `_map_allowed_terminals_tokenizer_states`
-      -   **Action**: Change the line `new_l2 = ffi.HybridL2Bitset.all()` to `new_l2 = ffi.HybridL2Bitset()`.
-
-      #### 3. Expose `new` and Fix `get_l2_bitset` in Python FFI
-
-      To support the changes above and prevent panics, you need to expose a constructor for `HybridL2Bitset` and make `get_l2_bitset` safer.
-
-      -   **File**: `python/src/lib.rs`
-      -   **Struct**: `PyHybridL2Bitset`
-      -   **Actions**:
-          1.  Add a `#[new]` function to create an empty `HybridL2Bitset` from Python.
-          2.  Modify `get_l2_bitset` to return an empty bitset instead of panicking when a state ID is not found.
-
-      #### 4. Correct Terminal Mapping Logic in Rust
-
-      The corresponding Rust function `map_allowed_terminals_tokenizer_states` has the same two logic errors as the Python version: it can panic if a tokenizer state is missing, and it incorrectly initializes the new terminal set.
-
-      -   **File**: `src/datastructures/gss.rs`
-      -   **Function**: `map_allowed_terminals_tokenizer_states`
-      -   **Actions**:
-          1.  In the `map_one` closure, change `terminals.get_l2_bitset(...).unwrap()` to `terminals.get_l2_bitset(...).cloned().unwrap_or_else(HybridBitset::zeros)`.
-          2.  Change `let mut new_terminals_l2_bitset = HybridL2Bitset::all();` to `let mut new_terminals_l2_bitset = HybridL2Bitset::new();`.
-          3.  Update the `and_modify` call to pass a reference: `*bv |= &bv_source`.
+          This ensures that all shifts and reductions are collected from all GSS heads before any reductions are processed, which is the correct "level-by-level" GLR algorithm.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here is the patch to apply the fix.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -200,14 +200,12 @@
+      @@ -399,13 +399,13 @@
+                               for nt_id, pids in nts.items():
+                                   handle_reduce(Reduce(nt_id, length, pids), state_gss)
        
-           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-               def apply_map(acc: PyAcc) -> PyAcc:
-                   old_l2 = acc.terminals_union
-                   new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-      -            
-                   for old_sid, new_sid in state_map.items():
-                       bv_source = old_l2.get_l2_bitset(old_sid)
-                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-      -            
-      -            new_l2 = ffi.HybridL2Bitset.all()
-      +            new_l2 = ffi.HybridL2Bitset()
-                   for new_sid, bv in new_bvs.items():
-                       new_l2.insert_l2_bitset(new_sid, bv)
-      -            
-                   return PyAcc(terminals_union=new_l2)
-               return gss.apply(apply_map)
+      -            for reduce_action, gss_list in reductions_to_do.items():
+      -                merged_popped_gss = GSS.merge(gss_list)
+      -                for from_state_id in merged_popped_gss.peek():
+      -                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+      -                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+      +        for reduce_action, gss_list in reductions_to_do.items():
+      +            merged_popped_gss = GSS.merge(gss_list)
+      +            for from_state_id in merged_popped_gss.peek():
+      +                goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+      +                shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
        
-      @@ -268,22 +266,9 @@
-               temp_states: Dict[int, GSS] = {}
-               for tokenizer_sid, gss in self.state.items():
-                   pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-      -
-      -            # === ASSERTION 2: Compare pruned GSS ===
-      -            rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-      -            ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-      -            py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-      -            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
-      -            # =======================================
-      -
-      -            if not pruned_gss.is_empty():
-      -                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-      -
-      -                 # === ASSERTION 3: Compare mapped GSS ===
-      -                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-      -                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-      -                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-      -                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
-      -                 # =======================================
-      -
-      -                 temp_states[tokenizer_sid] = mapped_gss
-      -        
-      +            # if not pruned_gss.is_empty(): # This was a bug. An empty GSS might still be carried over.
-      +            mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-      +            temp_states[tokenizer_sid] = mapped_gss
-      +
-               current_state_for_processing = temp_states
-               # --- End: Added pre-processing steps ---
-       
-
-      ```
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -460,6 +460,11 @@
-       
-       #[pymethods]
-       impl PyHybridL2Bitset {
-      +    #[new]
-      +    fn new() -> Self {
-      +        Self { inner: RustHybridL2Bitset::new() }
-      +    }
-      +
-           fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
-               self.inner.range_values().map(|(range, bv)| {
-                   let py_range = (*range.start(), *range.end());
-      @@ -478,7 +483,7 @@
-           }
-       
-           fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-      -        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
-      +        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).cloned().unwrap_or_else(RustHybridBitset::zeros) }
-           }
-       
-           fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
-
-      ```
-
-      ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1218,16 +1218,15 @@
-           let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
-               let mut new_terminals_btreemap = BTreeMap::new();
-       
-      -        for (old_state_id, new_state_id) in map {
-      -            let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
-      +        for (old_state_id, new_state_id) in map { // This unwrap is probably wrong.
-      +            let bv_source = terminals.get_l2_bitset(old_state_id.0).cloned().unwrap_or_else(HybridBitset::zeros);
-                   new_terminals_btreemap.entry(*new_state_id)
-      -                .and_modify(|bv| *bv |= bv_source)
-      +                .and_modify(|bv| *bv |= &bv_source)
-                       .or_insert_with(|| bv_source.clone());
-               }
-       
-      -        let mut new_terminals_l2_bitset = HybridL2Bitset::all();
-      +        let mut new_terminals_l2_bitset = HybridL2Bitset::new();
-               for (state_id, bv) in new_terminals_btreemap {
-                   new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
-               }
-       
+               if not shifted_gsses:
+                   # Return an empty GSS, preserving the structure and root from the input GSS.
+                   return GSS(node_factory=gss._factory)
+               else:
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct GSS empty state handling
-      and terminal mapping logic"'
+  - user: 'Changes committed with message: "Fix: Correct indentation for reduction
+      processing in _process_token"'
     metadata:
 ...
