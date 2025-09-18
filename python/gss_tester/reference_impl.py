@@ -51,6 +51,10 @@ class ReferenceGSS(GSS[T, Acc]):
         new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
         return ReferenceGSS(new_stacks, self._acc_default_factory)
 
+    def split_heads(self) -> Iterable['ReferenceGSS[T, Acc]']:
+        for stack, acc in self.stacks:
+            yield ReferenceGSS([(stack, acc)], self._acc_default_factory)
+
     def peek(self) -> Set[T]:
         return {stack[-1] for stack, acc in self.stacks if stack}
 

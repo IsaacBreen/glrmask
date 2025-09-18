@@ -190,18 +190,16 @@ class FastGSS(GSS[T, Acc]):
 
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
+    def split_heads(self) -> Iterable['FastGSS[T, Acc]']:
+        for head in self._heads:
+            yield FastGSS(frozenset([head]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
         for head in self._heads:
             if head in self._child_to_parents:
                 for value, _ in self._child_to_parents[head]:
                     peek_values.add(value)
-        return peek_values
-
-    def peek_from_head(self, head: _Node[T, Acc]) -> Set[T]:
-        peek_values: Set[T] = set()
-        if head in self._child_to_parents:
-            peek_values.update(v for v, _ in self._child_to_parents[head])
         return peek_values
 
     def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
