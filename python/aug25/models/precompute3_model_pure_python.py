@@ -429,6 +429,14 @@ class Model(GraphProvider):
 
         self.constraint_state.commit(token_id)
 
+        print("state_map after commit:")
+        for sid, gss in self.state.items():
+            print(f"  sid={sid}, gss={gss}")
+
+        print("Rust state_map after commit:")
+        for sid, rust_gss in self.constraint_state.get_state_map().items():
+            print(f"  sid={sid}, gss={rust_gss}")
+
         assert self.state.keys() == rust_state_map.keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {rust_state_map.keys()}"
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
