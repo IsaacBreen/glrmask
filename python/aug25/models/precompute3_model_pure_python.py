@@ -259,57 +259,55 @@ class Model(GraphProvider):
             self.state = {}
             return
 
-        # --- PRE-PROCESSING (mirroring Rust) ---
-        terminals_map: Dict[int, ffi.Bitset] = {}
+        # ---- PRE-PROCESSING LOGIC ----
         state_map: Dict[int, int] = {}
+        terminals_map: Dict[int, ffi.Bitset] = {}
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
-
+            
             terminals = ffi.Bitset.zeros()
             for terminal_id, _ in matches:
                 terminals.insert(terminal_id)
             terminals_map[tokenizer_sid] = terminals
 
-        # Prune based on matched terminals
-        pruned_states: Dict[int, FastGSS] = {}
+        # Prune GSS based on disallowed terminals
+        state_after_prune = {}
         for tokenizer_sid, gss in self.state.items():
             def predicate(acc: PyAcc) -> bool:
                 for state_id, matched_bv in terminals_map.items():
-                    allowed_for_state = acc.terminals_union.get_l2_bitset(state_id)
-                    if not matched_bv.is_subset(allowed_for_state):
-                        return False  # Prune
-                return True  # Keep
-
+                    allowed_terminals_union = acc.terminals_union.get_l2_bitset(state_id)
+                    if not matched_bv.is_subset(allowed_terminals_union):
+                        return False
+                return True
+            
             pruned_gss = gss.prune(predicate)
             if any(h is not pruned_gss._root for h in pruned_gss._heads):
-                pruned_states[tokenizer_sid] = pruned_gss
-        self.state = pruned_states
-
-        # Map tokenizer states in accumulators
-        mapped_states: Dict[int, FastGSS] = {}
-        for tokenizer_sid, gss in self.state.items():
+                state_after_prune[tokenizer_sid] = pruned_gss
+        
+        # Map tokenizer states within GSS accumulators
+        state_after_map = {}
+        for tokenizer_sid, gss in state_after_prune.items():
             def map_acc(acc: PyAcc) -> PyAcc:
-                new_l2_map = collections.defaultdict(ffi.Bitset.zeros)
+                terminals = acc.terminals_union
+                new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
+                
                 for old_sid, new_sid in state_map.items():
-                    bv = acc.terminals_union.get_l2_bitset(old_sid)
-                    new_l2_map[new_sid] = new_l2_map[new_sid].union(bv)
-
-                new_l2 = ffi.HybridL2Bitset.all()
-                for sid, bv in new_l2_map.items():
-                    new_l2.insert_l2_bitset(sid, bv)
-
-                return PyAcc(terminals_union=new_l2)
+                    bv_source = terminals.get_l2_bitset(old_sid)
+                    new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                
+                final_l2 = ffi.HybridL2Bitset.all()
+                for new_sid, bv in new_bvs.items():
+                    final_l2.insert_l2_bitset(new_sid, bv)
+                
+                return PyAcc(terminals_union=final_l2)
 
             mapped_gss = gss.apply(map_acc)
-            # The tokenizer_sid for the gss itself doesn't change here.
-            # It's the internal L2 bitset that changes.
-            # The new keys for self.state will be determined by the main loop.
-            # Here we just update the GSSs.
-            mapped_states[tokenizer_sid] = mapped_gss
-        self.state = mapped_states
-        # --- END PRE-PROCESSING ---
+            state_after_map[tokenizer_sid] = mapped_gss
+
+        self.state = state_after_map
+        # ---- END PRE-PROCESSING ----
 
         new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
 
@@ -354,10 +352,14 @@ class Model(GraphProvider):
             if end_state is not None:
                 new_states[end_state].append(gss)
 
-        merged_states = {
+        merged_states_raw = {
             sid: FastGSS.merge(gss_list, merge_acc)
             for sid, gss_list in new_states.items()
             if gss_list
+        }
+        merged_states = {
+            sid: gss for sid, gss in merged_states_raw.items()
+            if any(h is not gss._root for h in gss._heads)
         }
 
         self.state = merged_states
