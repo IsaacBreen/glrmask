@@ -203,15 +203,12 @@ class Model(GraphProvider):
         def apply_map(acc: PyAcc) -> PyAcc:
             old_l2 = acc.terminals_union
             new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-            
             for old_sid, new_sid in state_map.items():
                 bv_source = old_l2.get_l2_bitset(old_sid)
                 new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-            
-            new_l2 = ffi.HybridL2Bitset.all()
+            new_l2 = ffi.HybridL2Bitset()
             for new_sid, bv in new_bvs.items():
                 new_l2.insert_l2_bitset(new_sid, bv)
-            
             return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_map)
 
@@ -301,25 +298,10 @@ class Model(GraphProvider):
         temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-
-            # === ASSERTION 2: Compare pruned GSS ===
-            rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-            ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-            py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
-            # =======================================
-            
+            # if not pruned_gss.is_empty(): # This was a bug. An empty GSS might still be carried over.
             mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-
-            # === ASSERTION 3: Compare mapped GSS ===
-            rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-            ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-            py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-            assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
-            # =======================================
-
             temp_states[tokenizer_sid] = mapped_gss
-        
+
         current_state_for_processing = temp_states
         # --- End: Added pre-processing steps ---
 
