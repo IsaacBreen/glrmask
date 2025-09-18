@@ -12,7 +12,6 @@ class ReferenceGSS(GSS[T, Acc]):
 
     @classmethod
     def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-        """Creates a GSS from a list of explicit stacks."""
         pass
 
     def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
@@ -34,10 +33,6 @@ class ReferenceGSS(GSS[T, Acc]):
         pass
 
     def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-        """
-        Merges the accumulators of all active stacks into a single optional value.
-        Returns None if there are no active stacks.
-        """
         pass
 
     @staticmethod
