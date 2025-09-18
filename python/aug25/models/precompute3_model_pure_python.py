@@ -434,7 +434,8 @@ class Model(GraphProvider):
             print(f"  sid={sid}, gss={gss}")
 
         print("Rust state_map after commit:")
-        for sid, rust_gss in self.constraint_state.get_state_map().items():
+        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+        for sid, rust_gss in expected_state_map.items():
             print(f"  sid={sid}, gss={rust_gss}")
 
         assert self.state.keys() == rust_state_map.keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {rust_state_map.keys()}"
