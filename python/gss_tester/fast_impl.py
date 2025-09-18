@@ -1,6 +1,6 @@
 import itertools
 from functools import reduce
-from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
+from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet, Optional
 
 from .interface import GSS, T, Acc
 
@@ -137,13 +137,49 @@ class FastGSS(GSS[T, Acc]):
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-        new_heads = {head for head in self._heads if predicate(head.acc)}
+        new_heads: Set[_Node[T, Acc]] = set()
+        new_child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+        memo: Dict[_Node[T, Acc], Optional[_Node[T, Acc]]] = {}
+
+        for head in self._heads:
+            new_head = self._prune_recursive_helper(head, predicate, new_child_to_parents, memo)
+            if new_head:
+                new_heads.add(new_head)
 
         if not new_heads:
             # If all stacks are pruned, the result is an empty GSS (represented by the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, {}, self._path_cache)
 
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+
+    def _prune_recursive_helper(self, node: _Node[T, Acc], predicate: Callable[[Acc], bool],
+                                new_child_to_parents: Dict, memo: Dict) -> Optional[_Node[T, Acc]]:
+        if node in memo:
+            return memo[node]
+
+        if not predicate(node.acc):
+            memo[node] = None
+            return None
+
+        if node == self._root:
+            memo[node] = node
+            return node
+
+        new_parents = set()
+        if node in self._child_to_parents:
+            for value, parent in self._child_to_parents[node]:
+                new_parent = self._prune_recursive_helper(parent, predicate, new_child_to_parents, memo)
+                if new_parent:
+                    new_parents.add((value, new_parent))
+
+        if not new_parents:
+            memo[node] = None
+            return None
+
+        new_node = _Node(acc=node.acc, depth=node.depth)
+        new_child_to_parents[new_node] = new_parents
+        memo[node] = new_node
+        return new_node
 
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
