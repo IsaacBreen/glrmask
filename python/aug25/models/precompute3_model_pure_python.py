@@ -426,6 +426,13 @@ class GSS:
         input_stacks_total = 0
 
         gss_list = list(gss_list)
+        # Fast paths to cut unnecessary overhead on trivial merges
+        if not gss_list:
+            if GSS._active_profiler is not None:
+                GSS._active_profiler.on_gss_merge(0, 0, 0)
+            return GSS({})
+        if len(gss_list) == 1:
+            return gss_list[0]
 
         for gss in gss_list:
             num_inputs += 1
@@ -611,8 +618,11 @@ class Model(GraphProvider):
         # Build tokenizer maps
         terminals_map: Dict[int, ffi.Bitset] = {}
         state_map: Dict[int, int] = {}
+        # Cache for tokenizer execute results within this commit: (tokenizer_sid, offset) -> (end_state, matches)
+        tokenizer_exec_cache: Dict[Tuple[int, int], Tuple[Optional[int], List[Tuple[int, int]]]] = {}
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+            tokenizer_exec_cache[(tokenizer_sid, 0)] = (end_state, matches)
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
             b = ffi.Bitset.zeros()
@@ -628,7 +638,8 @@ class Model(GraphProvider):
                 current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
 
         # Accumulate results incrementally per tokenizer state (avoid large lists)
-        new_states: Dict[int, GSS] = {}
+        # We first bucket all partial GSS fragments per tokenizer state, then merge once at the end.
+        new_states_bins: Dict[int, List[GSS]] = collections.defaultdict(list)
         q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
         visited_q_items: set = set()
         if profiler is not None:
@@ -646,7 +657,12 @@ class Model(GraphProvider):
                 continue
             visited_q_items.add(q_key)
 
-            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            cached = tokenizer_exec_cache.get((tokenizer_sid, offset))
+            if cached is None:
+                end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+                tokenizer_exec_cache[(tokenizer_sid, offset)] = (end_state, matches)
+            else:
+                end_state, matches = cached
             if profiler is not None:
                 profiler.on_matches(offset, matches)
 
@@ -667,12 +683,8 @@ class Model(GraphProvider):
                     new_offset = offset + width
                     next_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        # Merge incrementally
-                        existing = new_states.get(next_sid)
-                        if existing is None:
-                            new_states[next_sid] = processed_gss
-                        else:
-                            new_states[next_sid] = GSS.merge([existing, processed_gss])
+                        # Defer merging; just bucket results
+                        new_states_bins[next_sid].append(processed_gss)
                     else:
                         q.append((new_offset, next_sid, processed_gss))
                         if profiler is not None:
@@ -680,16 +692,19 @@ class Model(GraphProvider):
 
             if end_state is not None:
                 # carry-forward without consumption
-                existing = new_states.get(end_state)
-                if existing is None:
-                    new_states[end_state] = gss
-                else:
-                    new_states[end_state] = GSS.merge([existing, gss])
+                new_states_bins[end_state].append(gss)
                 if profiler is not None:
                     profiler.on_carry_forward()
 
-        # Prune empty GSS states
-        self.state = {sid: st for sid, st in new_states.items() if not st.is_empty()}
+        # Finalize: single merge per tokenizer state, then prune empties
+        new_states: Dict[int, GSS] = {}
+        for sid, pieces in new_states_bins.items():
+            if not pieces:
+                continue
+            merged = pieces[0] if len(pieces) == 1 else GSS.merge(pieces)
+            if not merged.is_empty():
+                new_states[sid] = merged
+        self.state = new_states
 
         t1 = time.perf_counter()
 
@@ -702,20 +717,72 @@ class Model(GraphProvider):
             print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     def _process_token(self, gss: GSS, terminal_id: int, profiler: Optional[_CommitProfiler] = None) -> GSS:
-        # Seed by partitioning once (avoid O(H^2) from repeated isolate)
-        heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-        for state_id, heads in gss._partition_by_top().items():
-            heads_by_state[state_id].append(GSS(heads))
+        # Optimized in-place dict aggregation to avoid repeated GSS.merge churn
+        # Partition once by top state
+        initial_groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = gss._partition_by_top()
+        if not initial_groups:
+            if profiler is not None:
+                profiler.on_process_token(terminal_id, shifts=0, reduces=0, splits=0, gotos=0)
+            return GSS({})
 
-        shifted_gsses: List[GSS] = []
+        # Worklist: state_id -> dict of heads for that state
+        work: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {sid: dict(heads) for sid, heads in initial_groups.items()}
+        # Aggregate all shifted results into a single dict
+        shifted_agg: Dict[Tuple[int, ...], PyAcc] = {}
+
         c_shifts = 0
         c_reduces = 0
         c_splits = 0
         c_gotos = 0
 
-        while heads_by_state:
-            state_id, state_gsss = heads_by_state.popitem()
-            state_gss = GSS.merge(state_gsss)
+        def merge_inplace(dst: Dict[Tuple[int, ...], PyAcc], src: Dict[Tuple[int, ...], PyAcc]) -> None:
+            for st, acc in src.items():
+                existing = dst.get(st)
+                if existing is None:
+                    dst[st] = acc
+                else:
+                    dst[st] = existing.merge(acc)
+
+        def push_into(heads: Dict[Tuple[int, ...], PyAcc], value: int, target: Dict[Tuple[int, ...], PyAcc]) -> None:
+            for stack, acc in heads.items():
+                new_stack = stack + (value,)
+                existing = target.get(new_stack)
+                if existing is None:
+                    target[new_stack] = acc
+                else:
+                    target[new_stack] = existing.merge(acc)
+
+        def popn_dict(heads: Dict[Tuple[int, ...], PyAcc], n: int) -> Dict[Tuple[int, ...], PyAcc]:
+            if n <= 0:
+                return dict(heads)
+            out: Dict[Tuple[int, ...], PyAcc] = {}
+            for stack, acc in heads.items():
+                if len(stack) <= n:
+                    new_stack: Tuple[int, ...] = ()
+                else:
+                    new_stack = stack[:-n]
+                existing = out.get(new_stack)
+                if existing is None:
+                    out[new_stack] = acc
+                else:
+                    out[new_stack] = existing.merge(acc)
+            return out
+
+        def partition_by_top_dict(heads: Dict[Tuple[int, ...], PyAcc]) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
+            groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
+            for stack, acc in heads.items():
+                if not stack:
+                    continue
+                top = stack[-1]
+                bucket = groups.get(top)
+                if bucket is None:
+                    bucket = {}
+                    groups[top] = bucket
+                bucket[stack] = acc
+            return groups
+
+        while work:
+            state_id, state_heads = work.popitem()
             row = self.parser_table.table.get(state_id)
             if not row:
                 continue
@@ -724,40 +791,48 @@ class Model(GraphProvider):
                 continue
 
             if isinstance(action, int):  # Shift
-                shifted_gsses.append(state_gss.push(action))
+                push_into(state_heads, action, shifted_agg)
                 c_shifts += 1
                 continue
 
             if isinstance(action, Reduce):
                 c_reduces += 1
-                popped = state_gss.popn(action.len)
-                # Partition once by from_state_id after reduction
-                groups = popped._partition_by_top()
-                for from_state_id, heads in groups.items():
+                popped = popn_dict(state_heads, action.len)
+                groups = partition_by_top_dict(popped)
+                for from_state_id, sub_heads in groups.items():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
-                    heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+                    bucket = work.get(goto_state_id)
+                    if bucket is None:
+                        bucket = {}
+                        work[goto_state_id] = bucket
+                    # Push goto into the worklist bucket directly
+                    push_into(sub_heads, goto_state_id, bucket)
                     c_gotos += 1
                 continue
 
             # Split
             c_splits += 1
             if action.shift is not None:
-                shifted_gsses.append(state_gss.push(action.shift))
+                push_into(state_heads, action.shift, shifted_agg)
                 c_shifts += 1
             for length, nts in action.reduces.items():
-                popped = state_gss.popn(length)
-                groups = popped._partition_by_top()
-                for from_state_id, heads in groups.items():
+                popped = popn_dict(state_heads, length)
+                groups = partition_by_top_dict(popped)
+                for from_state_id, sub_heads in groups.items():
                     table_row = self.parser_table.table[from_state_id]
                     for nt_id in nts.keys():
                         goto_state_id = table_row.gotos[nt_id]
-                        heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+                        bucket = work.get(goto_state_id)
+                        if bucket is None:
+                            bucket = {}
+                            work[goto_state_id] = bucket
+                        push_into(sub_heads, goto_state_id, bucket)
                         c_gotos += 1
 
         if profiler is not None:
             profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
 
-        return GSS() if not shifted_gsses else GSS.merge(shifted_gsses)
+        return GSS({}) if not shifted_agg else GSS(shifted_agg)
 
     def get_mask(self) -> RangeSet:
         """

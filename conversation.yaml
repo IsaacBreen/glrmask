@@ -1136,85 +1136,50 @@ local_system:
               self.on_finalize()
 
 
-      # GSS Node implementation for true graph-structured stacks
-      @dataclass(frozen=True)
-      class GSSNode:
-          state_id: int
-          prev: Optional["GSSNode"]
-          length: int
-
-          def to_tuple(self) -> Tuple[int, ...]:
-              items = []
-              curr: Optional[GSSNode] = self
-              while curr:
-                  items.append(curr.state_id)
-                  curr = curr.prev
-              return tuple(reversed(items))
-
-          def __repr__(self) -> str:
-              # Avoid infinitely recursing on `prev`
-              return f"GSSNode(state_id={self.state_id}, prev=..., length={self.length})"
-
-
       # GSS implementation (simplified)
 
       class GSS:
           """
           A compact Graph-Structured Stack representation.
-          Internally, it's a map from a GSSNode (representing a stack head) to a
-          PyAcc accumulator. This allows for sharing of stack prefixes (the "graph"
-          part of GSS).
-              Dict[Optional[GSSNode], PyAcc]
-          The empty stack is represented by the key `None`.
+
+          Conceptually, it's just a multiset of stacks (each a tuple of state IDs),
+          each annotated with a PyAcc accumulator. We canonicalize by merging
+          accumulators per identical stack, so internally it's:
+              Dict[Tuple[int, ...], PyAcc]
+
+          The empty stack is represented by the empty tuple ().
           """
           # Active profiler for merge instrumentation (set by _CommitProfiler)
           _active_profiler: Optional[_CommitProfiler] = None
-          # Node cache, managed by Model.commit, to ensure maximal sharing of stack structure.
-          _node_cache: Dict[Tuple[int, Optional[GSSNode]], GSSNode] = {}
 
-          def __init__(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> None:
-              self._heads: Dict[Optional[GSSNode], PyAcc] = heads if heads is not None else {}
+          def __init__(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> None:
+              self._heads: Dict[Tuple[int, ...], PyAcc] = heads if heads is not None else {}
 
           @classmethod
           def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
               """
               Build a GSS from explicit stacks.
-              node_factory is ignored; we use a class-level cache for node sharing.
+
+              node_factory is ignored in this simplified implementation; we keep it in the
+              signature for compatibility with existing call sites.
               """
-              m: Dict[Optional[GSSNode], PyAcc] = {}
+              m: Dict[Tuple[int, ...], PyAcc] = {}
               for vals, acc in stacks:
-                  curr_node: Optional[GSSNode] = None
-                  if not vals:
-                      if None in m:
-                          m[None] = m[None].merge(acc)
-                      else:
-                          m[None] = acc
-                      continue
-
-                  for val in vals:
-                      key = (val, curr_node)
-                      if key in GSS._node_cache:
-                          node = GSS._node_cache[key]
-                      else:
-                          length = (curr_node.length + 1) if curr_node else 1
-                          node = GSSNode(val, curr_node, length)
-                          GSS._node_cache[key] = node
-                      curr_node = node
-
-                  if curr_node in m:
-                      m[curr_node] = m[curr_node].merge(acc)
+                  key = tuple(vals)
+                  if key in m:
+                      m[key] = m[key].merge(acc)
                   else:
-                      m[curr_node] = acc
+                      m[key] = acc
               return cls(m)
 
-          def _clone_with(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> "GSS":
+          def _clone_with(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> "GSS":
               return GSS(dict(self._heads) if heads is None else heads)
 
           # --- Introspection helpers (used by profiler) ---
 
           def head_count(self) -> int:
               # Non-empty stacks only
-              return sum(1 for k in self._heads.keys() if k is not None)
+              return sum(1 for k in self._heads.keys() if len(k) > 0)
 
           def acc_count(self) -> int:
               # One accumulator per unique stack
@@ -1227,10 +1192,7 @@ local_system:
           def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
               n = 0
               for k in self._heads.keys():
-                  if k is None:
-                      yield ()
-                  else:
-                      yield k.to_tuple()
+                  yield k
                   n += 1
                   if limit is not None and n >= limit:
                       break
@@ -1238,12 +1200,12 @@ local_system:
           def compute_stats(self) -> GSSStats:
               if not self._heads:
                   return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
-              depths = [k.length if k is not None else 0 for k in self._heads.keys()]
+              depths = [len(k) for k in self._heads.keys()]
               dmin = min(depths) if depths else 0
               dmax = max(depths) if depths else 0
               dmean = (sum(depths) / len(depths)) if depths else 0.0
-              empty_present = 1 if None in self._heads else 0
-              heads_nonempty = sum(1 for k in self._heads.keys() if k is not None)
+              empty_present = 1 if () in self._heads else 0
+              heads_nonempty = sum(1 for k in self._heads.keys() if k)
               return GSSStats(
                   heads=heads_nonempty,
                   empty_stacks=empty_present,
@@ -1261,14 +1223,10 @@ local_system:
 
               prefixes = collections.defaultdict(int)
               total_stack_els = 0
-              for node in self._heads.keys():
-                  if node is None:
-                      continue
-                  total_stack_els += node.length
-                  curr: Optional[GSSNode] = node
-                  while curr:
-                      prefixes[curr] += 1
-                      curr = curr.prev
+              for stack in self._heads.keys():
+                  total_stack_els += len(stack)
+                  for i in range(1, len(stack) + 1):
+                      prefixes[stack[:i]] += 1
 
               num_unique_stacks = len(self._heads)
               num_unique_prefixes = len(prefixes)
@@ -1283,25 +1241,18 @@ local_system:
 
               if num_unique_stacks > 10:
                   print("  Top 10 most common prefixes:")
-                  for p_node, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
-                      print(f"    - Prefix {p_node.to_tuple()} occurred {count} times")
+                  for p, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
+                      print(f"    - Prefix {p} occurred {count} times")
           # --- Core operations ---
 
           def push(self, value: int) -> "GSS":
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for prev_node, acc in self._heads.items():
-                  key = (value, prev_node)
-                  if key in GSS._node_cache:
-                      new_node = GSS._node_cache[key]
+              new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+              for stack, acc in self._heads.items():
+                  new_stack = stack + (value,)
+                  if new_stack in new_heads:
+                      new_heads[new_stack] = new_heads[new_stack].merge(acc)
                   else:
-                      length = (prev_node.length + 1) if prev_node else 1
-                      new_node = GSSNode(value, prev_node, length)
-                      GSS._node_cache[key] = new_node
-
-                  if new_node in new_heads:
-                      new_heads[new_node] = new_heads[new_node].merge(acc)
-                  else:
-                      new_heads[new_node] = acc
+                      new_heads[new_stack] = acc
               return GSS(new_heads)
 
           def pop(self) -> "GSS":
@@ -1310,22 +1261,16 @@ local_system:
           def popn(self, n: int) -> "GSS":
               if n <= 0:
                   return self
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for node, acc in self._heads.items():
-                  if node is None or node.length <= n:
-                      new_node: Optional[GSSNode] = None
+              new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+              for stack, acc in self._heads.items():
+                  if len(stack) <= n:
+                      new_stack: Tuple[int, ...] = ()
                   else:
-                      popped_node = node
-                      for _ in range(n):
-                          if popped_node is None:
-                              break
-                          popped_node = popped_node.prev
-                      new_node = popped_node
-
-                  if new_node in new_heads:
-                      new_heads[new_node] = new_heads[new_node].merge(acc)
+                      new_stack = stack[:-n]
+                  if new_stack in new_heads:
+                      new_heads[new_stack] = new_heads[new_stack].merge(acc)
                   else:
-                      new_heads[new_node] = acc
+                      new_heads[new_stack] = acc
               return GSS(new_heads)
 
           def is_empty(self) -> bool:
@@ -1333,25 +1278,25 @@ local_system:
 
           def isolate(self, value: Optional[int]) -> "GSS":
               if value is None:
-                  acc = self._heads.get(None)
-                  return GSS({None: acc} if acc is not None else {})
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for node, acc in self._heads.items():
-                  if node is not None and node.state_id == value:
-                      new_heads[node] = acc
+                  acc = self._heads.get(())
+                  return GSS({(): acc} if acc is not None else {})
+              new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+              for stack, acc in self._heads.items():
+                  if stack and stack[-1] == value:
+                      new_heads[stack] = acc
               return GSS(new_heads)
 
-          def _partition_by_top(self) -> Dict[int, Dict[Optional[GSSNode], PyAcc]]:
-              groups: Dict[int, Dict[Optional[GSSNode], PyAcc]] = {}
-              for node, acc in self._heads.items():
-                  if node is None:
+          def _partition_by_top(self) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
+              groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
+              for stack, acc in self._heads.items():
+                  if not stack:
                       continue
-                  top = node.state_id
+                  top = stack[-1]
                   bucket = groups.get(top)
                   if bucket is None:
                       bucket = {}
                       groups[top] = bucket
-                  bucket[node] = acc
+                  bucket[stack] = acc
               return groups
 
           def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
@@ -1361,7 +1306,7 @@ local_system:
               return GSS({stack: acc for stack, acc in self._heads.items() if predicate(acc)})
 
           def peek(self) -> Set[int]:
-              return {node.state_id for node in self._heads.keys() if node is not None}
+              return {stack[-1] for stack in self._heads.keys() if stack}
 
           def reduce_acc(self) -> Optional[PyAcc]:
               combined: Optional[PyAcc] = None
@@ -1371,20 +1316,27 @@ local_system:
 
           @staticmethod
           def merge(gss_list: Iterable["GSS"]) -> "GSS":
-              merged: Dict[Optional[GSSNode], PyAcc] = {}
+              merged: Dict[Tuple[int, ...], PyAcc] = {}
               num_inputs = 0
               input_stacks_total = 0
 
               gss_list = list(gss_list)
+              # Fast paths to cut unnecessary overhead on trivial merges
+              if not gss_list:
+                  if GSS._active_profiler is not None:
+                      GSS._active_profiler.on_gss_merge(0, 0, 0)
+                  return GSS({})
+              if len(gss_list) == 1:
+                  return gss_list[0]
 
               for gss in gss_list:
                   num_inputs += 1
                   input_stacks_total += gss.stack_count()
-                  for node, acc in gss._heads.items():
-                      if node in merged:
-                          merged[node] = merged[node].merge(acc)
+                  for stack, acc in gss._heads.items():
+                      if stack in merged:
+                          merged[stack] = merged[stack].merge(acc)
                       else:
-                          merged[node] = acc
+                          merged[stack] = acc
 
               output_stacks = len(merged)
               if GSS._active_profiler is not None:
@@ -1547,7 +1499,6 @@ local_system:
               Core incremental update. This method is the main focus for performance analysis.
               Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
               """
-              GSS._node_cache.clear()
               self._commit_step += 1
               t0 = time.perf_counter()
               token_bytes = self.id_to_token[token_id]
@@ -1562,8 +1513,11 @@ local_system:
               # Build tokenizer maps
               terminals_map: Dict[int, ffi.Bitset] = {}
               state_map: Dict[int, int] = {}
+              # Cache for tokenizer execute results within this commit: (tokenizer_sid, offset) -> (end_state, matches)
+              tokenizer_exec_cache: Dict[Tuple[int, int], Tuple[Optional[int], List[Tuple[int, int]]]] = {}
               for tokenizer_sid in self.state.keys():
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+                  tokenizer_exec_cache[(tokenizer_sid, 0)] = (end_state, matches)
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   b = ffi.Bitset.zeros()
@@ -1579,7 +1533,8 @@ local_system:
                       current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
 
               # Accumulate results incrementally per tokenizer state (avoid large lists)
-              new_states: Dict[int, GSS] = {}
+              # We first bucket all partial GSS fragments per tokenizer state, then merge once at the end.
+              new_states_bins: Dict[int, List[GSS]] = collections.defaultdict(list)
               q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
               visited_q_items: set = set()
               if profiler is not None:
@@ -1597,7 +1552,12 @@ local_system:
                       continue
                   visited_q_items.add(q_key)
 
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+                  cached = tokenizer_exec_cache.get((tokenizer_sid, offset))
+                  if cached is None:
+                      end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+                      tokenizer_exec_cache[(tokenizer_sid, offset)] = (end_state, matches)
+                  else:
+                      end_state, matches = cached
                   if profiler is not None:
                       profiler.on_matches(offset, matches)
 
@@ -1618,12 +1578,8 @@ local_system:
                           new_offset = offset + width
                           next_sid = self.tokenizer_initial_state
                           if new_offset == len(token_bytes):
-                              # Merge incrementally
-                              existing = new_states.get(next_sid)
-                              if existing is None:
-                                  new_states[next_sid] = processed_gss
-                              else:
-                                  new_states[next_sid] = GSS.merge([existing, processed_gss])
+                              # Defer merging; just bucket results
+                              new_states_bins[next_sid].append(processed_gss)
                           else:
                               q.append((new_offset, next_sid, processed_gss))
                               if profiler is not None:
@@ -1631,16 +1587,19 @@ local_system:
 
                   if end_state is not None:
                       # carry-forward without consumption
-                      existing = new_states.get(end_state)
-                      if existing is None:
-                          new_states[end_state] = gss
-                      else:
-                          new_states[end_state] = GSS.merge([existing, gss])
+                      new_states_bins[end_state].append(gss)
                       if profiler is not None:
                           profiler.on_carry_forward()
 
-              # Prune empty GSS states
-              self.state = {sid: st for sid, st in new_states.items() if not st.is_empty()}
+              # Finalize: single merge per tokenizer state, then prune empties
+              new_states: Dict[int, GSS] = {}
+              for sid, pieces in new_states_bins.items():
+                  if not pieces:
+                      continue
+                  merged = pieces[0] if len(pieces) == 1 else GSS.merge(pieces)
+                  if not merged.is_empty():
+                      new_states[sid] = merged
+              self.state = new_states
 
               t1 = time.perf_counter()
 
@@ -1653,20 +1612,72 @@ local_system:
                   print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
           def _process_token(self, gss: GSS, terminal_id: int, profiler: Optional[_CommitProfiler] = None) -> GSS:
-              # Seed by partitioning once (avoid O(H^2) from repeated isolate)
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id, heads in gss._partition_by_top().items():
-                  heads_by_state[state_id].append(GSS(heads))
+              # Optimized in-place dict aggregation to avoid repeated GSS.merge churn
+              # Partition once by top state
+              initial_groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = gss._partition_by_top()
+              if not initial_groups:
+                  if profiler is not None:
+                      profiler.on_process_token(terminal_id, shifts=0, reduces=0, splits=0, gotos=0)
+                  return GSS({})
 
-              shifted_gsses: List[GSS] = []
+              # Worklist: state_id -> dict of heads for that state
+              work: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {sid: dict(heads) for sid, heads in initial_groups.items()}
+              # Aggregate all shifted results into a single dict
+              shifted_agg: Dict[Tuple[int, ...], PyAcc] = {}
+
               c_shifts = 0
               c_reduces = 0
               c_splits = 0
               c_gotos = 0
 
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge(state_gsss)
+              def merge_inplace(dst: Dict[Tuple[int, ...], PyAcc], src: Dict[Tuple[int, ...], PyAcc]) -> None:
+                  for st, acc in src.items():
+                      existing = dst.get(st)
+                      if existing is None:
+                          dst[st] = acc
+                      else:
+                          dst[st] = existing.merge(acc)
+
+              def push_into(heads: Dict[Tuple[int, ...], PyAcc], value: int, target: Dict[Tuple[int, ...], PyAcc]) -> None:
+                  for stack, acc in heads.items():
+                      new_stack = stack + (value,)
+                      existing = target.get(new_stack)
+                      if existing is None:
+                          target[new_stack] = acc
+                      else:
+                          target[new_stack] = existing.merge(acc)
+
+              def popn_dict(heads: Dict[Tuple[int, ...], PyAcc], n: int) -> Dict[Tuple[int, ...], PyAcc]:
+                  if n <= 0:
+                      return dict(heads)
+                  out: Dict[Tuple[int, ...], PyAcc] = {}
+                  for stack, acc in heads.items():
+                      if len(stack) <= n:
+                          new_stack: Tuple[int, ...] = ()
+                      else:
+                          new_stack = stack[:-n]
+                      existing = out.get(new_stack)
+                      if existing is None:
+                          out[new_stack] = acc
+                      else:
+                          out[new_stack] = existing.merge(acc)
+                  return out
+
+              def partition_by_top_dict(heads: Dict[Tuple[int, ...], PyAcc]) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
+                  groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
+                  for stack, acc in heads.items():
+                      if not stack:
+                          continue
+                      top = stack[-1]
+                      bucket = groups.get(top)
+                      if bucket is None:
+                          bucket = {}
+                          groups[top] = bucket
+                      bucket[stack] = acc
+                  return groups
+
+              while work:
+                  state_id, state_heads = work.popitem()
                   row = self.parser_table.table.get(state_id)
                   if not row:
                       continue
@@ -1675,40 +1686,48 @@ local_system:
                       continue
 
                   if isinstance(action, int):  # Shift
-                      shifted_gsses.append(state_gss.push(action))
+                      push_into(state_heads, action, shifted_agg)
                       c_shifts += 1
                       continue
 
                   if isinstance(action, Reduce):
                       c_reduces += 1
-                      popped = state_gss.popn(action.len)
-                      # Partition once by from_state_id after reduction
-                      groups = popped._partition_by_top()
-                      for from_state_id, heads in groups.items():
+                      popped = popn_dict(state_heads, action.len)
+                      groups = partition_by_top_dict(popped)
+                      for from_state_id, sub_heads in groups.items():
                           goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
-                          heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+                          bucket = work.get(goto_state_id)
+                          if bucket is None:
+                              bucket = {}
+                              work[goto_state_id] = bucket
+                          # Push goto into the worklist bucket directly
+                          push_into(sub_heads, goto_state_id, bucket)
                           c_gotos += 1
                       continue
 
                   # Split
                   c_splits += 1
                   if action.shift is not None:
-                      shifted_gsses.append(state_gss.push(action.shift))
+                      push_into(state_heads, action.shift, shifted_agg)
                       c_shifts += 1
                   for length, nts in action.reduces.items():
-                      popped = state_gss.popn(length)
-                      groups = popped._partition_by_top()
-                      for from_state_id, heads in groups.items():
+                      popped = popn_dict(state_heads, length)
+                      groups = partition_by_top_dict(popped)
+                      for from_state_id, sub_heads in groups.items():
                           table_row = self.parser_table.table[from_state_id]
                           for nt_id in nts.keys():
                               goto_state_id = table_row.gotos[nt_id]
-                              heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+                              bucket = work.get(goto_state_id)
+                              if bucket is None:
+                                  bucket = {}
+                                  work[goto_state_id] = bucket
+                              push_into(sub_heads, goto_state_id, bucket)
                               c_gotos += 1
 
               if profiler is not None:
                   profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
 
-              return GSS() if not shifted_gsses else GSS.merge(shifted_gsses)
+              return GSS({}) if not shifted_agg else GSS(shifted_agg)
 
           def get_mask(self) -> RangeSet:
               """
@@ -1845,7 +1864,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -2776,16 +2795,16 @@ messages:
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: aug25/models/precompute3_model_pure_python.py
-      Model loaded in 14.1377 seconds.
+      Model loaded in 11.8108 seconds.
       Loading and tokenizing code from: ../src/example_code5.js
-      Tokenized into 16 tokens.
+      Tokenized into 30 tokens.
 
-      --- Running benchmark (16 steps) ---
+      --- Running benchmark (30 steps) ---
       [process_token] term=4 shifts=1 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=20 shifts=1 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=1 token='if' time_ms=0.677
+      step=1 token='if' time_ms=0.751
       pre:  1 states, heads=1, stacks=1, max_depth=1
       post: 2 states, heads=3, stacks=3, max_depth=2
       queue: enq=1 pop=1 offsets=1 max_offset=0
@@ -2801,13 +2820,13 @@ messages:
         Unique prefixes (nodes in a true GSS): 3
         Compression potential (total_els / unique_prefixes): 1.33
       === COMMIT PROFILE END ===
-      commit (ms): 0.68
+      commit (ms): 0.75
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=21 shifts=3 reduces=22 splits=1 gotos=23
       === COMMIT PROFILE START ===
-      step=2 token=' (' time_ms=0.454
+      step=2 token=' (' time_ms=0.44
       pre:  2 states, heads=3, stacks=3, max_depth=2
       post: 3 states, heads=8, stacks=8, max_depth=3
       queue: enq=2 pop=3 offsets=2 max_offset=1
@@ -2823,14 +2842,14 @@ messages:
         Unique prefixes (nodes in a true GSS): 3
         Compression potential (total_els / unique_prefixes): 1.67
       === COMMIT PROFILE END ===
-      commit (ms): 0.45
+      commit (ms): 0.44
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
       [process_token] term=4 shifts=3 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=3 token='true' time_ms=0.31
+      step=3 token='true' time_ms=0.229
       pre:  3 states, heads=8, stacks=8, max_depth=3
       post: 3 states, heads=12, stacks=12, max_depth=4
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -2846,13 +2865,13 @@ messages:
         Unique prefixes (nodes in a true GSS): 13
         Compression potential (total_els / unique_prefixes): 1.85
       === COMMIT PROFILE END ===
-      commit (ms): 0.32
+      commit (ms): 0.23
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=22 shifts=7 reduces=68 splits=1 gotos=133
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=4 token=')' time_ms=0.681
+      step=4 token=')' time_ms=0.466
       pre:  3 states, heads=12, stacks=12, max_depth=4
       post: 3 states, heads=16, stacks=16, max_depth=5
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -2868,14 +2887,14 @@ messages:
         Unique prefixes (nodes in a true GSS): 8
         Compression potential (total_els / unique_prefixes): 1.75
       === COMMIT PROFILE END ===
-      commit (ms): 0.67
+      commit (ms): 0.46
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=12 shifts=3 reduces=46 splits=0 gotos=46
       === COMMIT PROFILE START ===
-      step=5 token=' {' time_ms=0.469
+      step=5 token=' {' time_ms=0.314
       pre:  3 states, heads=16, stacks=16, max_depth=5
       post: 3 states, heads=23, stacks=23, max_depth=6
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -2902,7 +2921,7 @@ messages:
           - Prefix (962, 507, 508, 509) occurred 1 times
           - Prefix (962, 507, 508, 509, 510) occurred 1 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.47
+      commit (ms): 0.31
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
@@ -2910,7 +2929,7 @@ messages:
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=20 shifts=1 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=6 token=' if' time_ms=0.355
+      step=6 token=' if' time_ms=0.224
       pre:  3 states, heads=23, stacks=23, max_depth=6
       post: 3 states, heads=28, stacks=28, max_depth=7
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -2937,14 +2956,14 @@ messages:
           - Prefix (962, 507, 508, 509, 510) occurred 2 times
           - Prefix (962, 161) occurred 1 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.36
+      commit (ms): 0.22
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=21 shifts=4 reduces=21 splits=2 gotos=24
       === COMMIT PROFILE START ===
-      step=7 token=' (' time_ms=0.5
+      step=7 token=' (' time_ms=0.343
       pre:  3 states, heads=28, stacks=28, max_depth=7
       post: 3 states, heads=43, stacks=43, max_depth=8
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -2971,14 +2990,14 @@ messages:
           - Prefix (962, 507, 508, 509, 510) occurred 4 times
           - Prefix (962, 982, 983) occurred 3 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.5
+      commit (ms): 0.33
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
       [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=8 token='true' time_ms=0.507
+      step=8 token='true' time_ms=0.352
       pre:  3 states, heads=43, stacks=43, max_depth=8
       post: 3 states, heads=58, stacks=58, max_depth=9
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -3005,13 +3024,13 @@ messages:
           - Prefix (962, 507, 508, 509, 510) occurred 4 times
           - Prefix (962, 982, 983) occurred 3 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.5
+      commit (ms): 0.34
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=9 token=')' time_ms=1.069
+      step=9 token=')' time_ms=0.811
       pre:  3 states, heads=58, stacks=58, max_depth=9
       post: 3 states, heads=73, stacks=73, max_depth=10
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -3038,14 +3057,14 @@ messages:
           - Prefix (962, 982, 220) occurred 7 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 7 times
       === COMMIT PROFILE END ===
-      commit (ms): 1.05
+      commit (ms): 0.8
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=46
       === COMMIT PROFILE START ===
-      step=10 token=' {' time_ms=0.724
+      step=10 token=' {' time_ms=0.596
       pre:  3 states, heads=73, stacks=73, max_depth=10
       post: 3 states, heads=100, stacks=100, max_depth=11
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -3072,7 +3091,7 @@ messages:
           - Prefix (962, 982, 220) occurred 19 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 19 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.71
+      commit (ms): 0.58
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
@@ -3080,7 +3099,7 @@ messages:
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=11 token=' if' time_ms=0.75
+      step=11 token=' if' time_ms=0.7
       pre:  3 states, heads=100, stacks=100, max_depth=11
       post: 3 states, heads=121, stacks=121, max_depth=12
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -3107,14 +3126,14 @@ messages:
           - Prefix (962, 982, 220) occurred 23 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 23 times
       === COMMIT PROFILE END ===
-      commit (ms): 0.74
+      commit (ms): 0.69
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
       === COMMIT PROFILE START ===
-      step=12 token=' (' time_ms=1.163
+      step=12 token=' (' time_ms=1.078
       pre:  3 states, heads=121, stacks=121, max_depth=12
       post: 3 states, heads=178, stacks=178, max_depth=13
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -3141,14 +3160,14 @@ messages:
           - Prefix (962, 982, 220) occurred 31 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 31 times
       === COMMIT PROFILE END ===
-      commit (ms): 1.14
+      commit (ms): 1.04
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
       [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=13 token='true' time_ms=1.315
+      step=13 token='true' time_ms=1.43
       pre:  3 states, heads=178, stacks=178, max_depth=13
       post: 3 states, heads=235, stacks=235, max_depth=14
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -3175,13 +3194,13 @@ messages:
           - Prefix (962, 982, 220) occurred 31 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 31 times
       === COMMIT PROFILE END ===
-      commit (ms): 1.29
+      commit (ms): 1.4
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=14 token=')' time_ms=2.694
+      step=14 token=')' time_ms=2.984
       pre:  3 states, heads=235, stacks=235, max_depth=14
       post: 3 states, heads=292, stacks=292, max_depth=15
       queue: enq=3 pop=3 offsets=1 max_offset=0
@@ -3208,14 +3227,14 @@ messages:
           - Prefix (962, 982, 220) occurred 46 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 46 times
       === COMMIT PROFILE END ===
-      commit (ms): 2.67
+      commit (ms): 2.94
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
       === COMMIT PROFILE START ===
-      step=15 token=' {' time_ms=2.107
+      step=15 token=' {' time_ms=1.99
       pre:  3 states, heads=292, stacks=292, max_depth=15
       post: 3 states, heads=394, stacks=394, max_depth=16
       queue: enq=3 pop=4 offsets=2 max_offset=1
@@ -3242,46 +3261,527 @@ messages:
           - Prefix (962, 982, 220) occurred 92 times
           - Prefix (962, 507, 508, 509, 510, 220) occurred 92 times
       === COMMIT PROFILE END ===
-      commit (ms): 2.08
+      commit (ms): 1.96
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=16 token=' if' time_ms=2.216
+      pre:  3 states, heads=394, stacks=394, max_depth=16
+      post: 3 states, heads=472, stacks=472, max_depth=17
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
+      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
+      merges: calls=37 inputs_gss=42 input_stacks=1440 output_stacks=1383 dedup_saved=57
+      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
+      largest pre-state sid=307 heads=292 unique_stacks=292 empty=0 depth[min/mean/max]=1/9.6/15 accs=292
+      same sid post-state heads=337 unique_stacks=337 empty=0 depth[min/mean/max]=1/9.87/16 accs=337
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 337
+        Total stack elements (sum of depths): 3327
+        Unique prefixes (nodes in a true GSS): 473
+        Compression potential (total_els / unique_prefixes): 7.03
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 337 times
+          - Prefix (962, 982) occurred 219 times
+          - Prefix (962, 507) occurred 112 times
+          - Prefix (962, 507, 508) occurred 111 times
+          - Prefix (962, 507, 508, 509) occurred 108 times
+          - Prefix (962, 507, 508, 509, 510) occurred 108 times
+          - Prefix (962, 982, 983) occurred 107 times
+          - Prefix (962, 982, 983, 220) occurred 107 times
+          - Prefix (962, 982, 220) occurred 107 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 107 times
+      === COMMIT PROFILE END ===
+      commit (ms): 2.17
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
+      === COMMIT PROFILE START ===
+      step=17 token=' (' time_ms=3.38
+      pre:  3 states, heads=472, stacks=472, max_depth=17
+      post: 3 states, heads=688, stacks=688, max_depth=18
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
+      merges: calls=80 inputs_gss=87 input_stacks=2793 output_stacks=2748 dedup_saved=45
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=337 unique_stacks=337 empty=0 depth[min/mean/max]=1/9.87/16 accs=337
+      same sid post-state heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 427
+        Total stack elements (sum of depths): 4467
+        Unique prefixes (nodes in a true GSS): 563
+        Compression potential (total_els / unique_prefixes): 7.93
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 427 times
+          - Prefix (962, 982) occurred 279 times
+          - Prefix (962, 507) occurred 142 times
+          - Prefix (962, 507, 508) occurred 141 times
+          - Prefix (962, 507, 508, 509) occurred 138 times
+          - Prefix (962, 507, 508, 509, 510) occurred 138 times
+          - Prefix (962, 982, 983) occurred 137 times
+          - Prefix (962, 982, 983, 220) occurred 137 times
+          - Prefix (962, 982, 220) occurred 137 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 137 times
+      === COMMIT PROFILE END ===
+      commit (ms): 3.32
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
       === COMMIT PROFILE START ===
-      step=16 token='
-      ' time_ms=2.281
-      pre:  3 states, heads=394, stacks=394, max_depth=16
-      post: 3 states, heads=382, stacks=382, max_depth=16
+      step=18 token='true' time_ms=4.251
+      pre:  3 states, heads=688, stacks=688, max_depth=18
+      post: 3 states, heads=904, stacks=904, max_depth=19
+      queue: enq=3 pop=3 offsets=1 max_offset=0
+      tokenizer: matches_total=5 width_hist={4: 5}
+      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
+      merges: calls=38 inputs_gss=45 input_stacks=2159 output_stacks=2069 dedup_saved=90
+      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
+      largest pre-state sid=307 heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
+      same sid post-state heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 427
+        Total stack elements (sum of depths): 4467
+        Unique prefixes (nodes in a true GSS): 563
+        Compression potential (total_els / unique_prefixes): 7.93
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 427 times
+          - Prefix (962, 982) occurred 279 times
+          - Prefix (962, 507) occurred 142 times
+          - Prefix (962, 507, 508) occurred 141 times
+          - Prefix (962, 507, 508, 509) occurred 138 times
+          - Prefix (962, 507, 508, 509, 510) occurred 138 times
+          - Prefix (962, 982, 983) occurred 137 times
+          - Prefix (962, 982, 983, 220) occurred 137 times
+          - Prefix (962, 982, 220) occurred 137 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 137 times
+      === COMMIT PROFILE END ===
+      commit (ms): 4.19
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=19 token=')' time_ms=9.6
+      pre:  3 states, heads=904, stacks=904, max_depth=19
+      post: 3 states, heads=1120, stacks=1120, max_depth=20
       queue: enq=3 pop=3 offsets=1 max_offset=0
       tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=3 shifts=0 reduces=0 splits=0 gotos=0
-      merges: calls=27 inputs_gss=28 input_stacks=743 output_stacks=686 dedup_saved=57
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=292 unique_stacks=292 empty=0 depth[min/mean/max]=1/9.6/15 accs=292
-      same sid post-state heads=292 unique_stacks=292 empty=0 depth[min/mean/max]=1/9.6/15 accs=292
+      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
+      merges: calls=110 inputs_gss=178 input_stacks=8288 output_stacks=8153 dedup_saved=135
+      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
+      largest pre-state sid=307 heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
+      same sid post-state heads=598 unique_stacks=598 empty=0 depth[min/mean/max]=1/11.36/18 accs=598
       [GSS PREFIX ANALYSIS]
-        Unique stacks: 292
-        Total stack elements (sum of depths): 2802
-        Unique prefixes (nodes in a true GSS): 416
-        Compression potential (total_els / unique_prefixes): 6.74
+        Unique stacks: 598
+        Total stack elements (sum of depths): 6795
+        Unique prefixes (nodes in a true GSS): 860
+        Compression potential (total_els / unique_prefixes): 7.90
         Top 10 most common prefixes:
-          - Prefix (962,) occurred 292 times
-          - Prefix (962, 982) occurred 189 times
-          - Prefix (962, 507) occurred 97 times
-          - Prefix (962, 507, 508) occurred 96 times
-          - Prefix (962, 507, 508, 509) occurred 93 times
-          - Prefix (962, 507, 508, 509, 510) occurred 93 times
-          - Prefix (962, 982, 983) occurred 92 times
-          - Prefix (962, 982, 983, 220) occurred 92 times
-          - Prefix (962, 982, 220) occurred 92 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 92 times
+          - Prefix (962,) occurred 598 times
+          - Prefix (962, 982) occurred 393 times
+          - Prefix (962, 507) occurred 199 times
+          - Prefix (962, 507, 508) occurred 198 times
+          - Prefix (962, 507, 508, 509) occurred 195 times
+          - Prefix (962, 507, 508, 509, 510) occurred 195 times
+          - Prefix (962, 982, 983) occurred 194 times
+          - Prefix (962, 982, 983, 220) occurred 194 times
+          - Prefix (962, 982, 220) occurred 194 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 194 times
       === COMMIT PROFILE END ===
-      commit (ms): 2.25
+      commit (ms): 9.52
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
+      === COMMIT PROFILE START ===
+      step=20 token=' {' time_ms=6.739
+      pre:  3 states, heads=1120, stacks=1120, max_depth=20
+      post: 3 states, heads=1507, stacks=1507, max_depth=21
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
+      merges: calls=87 inputs_gss=113 input_stacks=5727 output_stacks=5727 dedup_saved=0
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=598 unique_stacks=598 empty=0 depth[min/mean/max]=1/11.36/18 accs=598
+      same sid post-state heads=1120 unique_stacks=1120 empty=0 depth[min/mean/max]=1/13.08/20 accs=1120
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 1120
+        Total stack elements (sum of depths): 14649
+        Unique prefixes (nodes in a true GSS): 1598
+        Compression potential (total_els / unique_prefixes): 9.17
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 1120 times
+          - Prefix (962, 982) occurred 741 times
+          - Prefix (962, 507) occurred 373 times
+          - Prefix (962, 507, 508) occurred 372 times
+          - Prefix (962, 507, 508, 509) occurred 369 times
+          - Prefix (962, 507, 508, 509, 510) occurred 369 times
+          - Prefix (962, 982, 983) occurred 368 times
+          - Prefix (962, 982, 983, 220) occurred 368 times
+          - Prefix (962, 982, 220) occurred 368 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 368 times
+      === COMMIT PROFILE END ===
+      commit (ms): 6.64
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=21 token=' if' time_ms=8.172
+      pre:  3 states, heads=1507, stacks=1507, max_depth=21
+      post: 3 states, heads=1804, stacks=1804, max_depth=22
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
+      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
+      merges: calls=37 inputs_gss=42 input_stacks=5502 output_stacks=5286 dedup_saved=216
+      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
+      largest pre-state sid=307 heads=1120 unique_stacks=1120 empty=0 depth[min/mean/max]=1/13.08/20 accs=1120
+      same sid post-state heads=1291 unique_stacks=1291 empty=0 depth[min/mean/max]=1/13.37/21 accs=1291
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 1291
+        Total stack elements (sum of depths): 17265
+        Unique prefixes (nodes in a true GSS): 1814
+        Compression potential (total_els / unique_prefixes): 9.52
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 1291 times
+          - Prefix (962, 982) occurred 855 times
+          - Prefix (962, 507) occurred 430 times
+          - Prefix (962, 507, 508) occurred 429 times
+          - Prefix (962, 507, 508, 509) occurred 426 times
+          - Prefix (962, 507, 508, 509, 510) occurred 426 times
+          - Prefix (962, 982, 983) occurred 425 times
+          - Prefix (962, 982, 983, 220) occurred 425 times
+          - Prefix (962, 982, 220) occurred 425 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 425 times
+      === COMMIT PROFILE END ===
+      commit (ms): 8.02
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
+      === COMMIT PROFILE START ===
+      step=22 token=' (' time_ms=12.707
+      pre:  3 states, heads=1804, stacks=1804, max_depth=22
+      post: 3 states, heads=2623, stacks=2623, max_depth=23
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
+      merges: calls=80 inputs_gss=87 input_stacks=10641 output_stacks=10470 dedup_saved=171
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=1291 unique_stacks=1291 empty=0 depth[min/mean/max]=1/13.37/21 accs=1291
+      same sid post-state heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 1633
+        Total stack elements (sum of depths): 22839
+        Unique prefixes (nodes in a true GSS): 2156
+        Compression potential (total_els / unique_prefixes): 10.59
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 1633 times
+          - Prefix (962, 982) occurred 1083 times
+          - Prefix (962, 507) occurred 544 times
+          - Prefix (962, 507, 508) occurred 543 times
+          - Prefix (962, 507, 508, 509) occurred 540 times
+          - Prefix (962, 507, 508, 509, 510) occurred 540 times
+          - Prefix (962, 982, 983) occurred 539 times
+          - Prefix (962, 982, 983, 220) occurred 539 times
+          - Prefix (962, 982, 220) occurred 539 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 539 times
+      === COMMIT PROFILE END ===
+      commit (ms): 12.52
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=23 token='true' time_ms=15.936
+      pre:  3 states, heads=2623, stacks=2623, max_depth=23
+      post: 3 states, heads=3442, stacks=3442, max_depth=24
+      queue: enq=3 pop=3 offsets=1 max_offset=0
+      tokenizer: matches_total=5 width_hist={4: 5}
+      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
+      merges: calls=38 inputs_gss=45 input_stacks=8216 output_stacks=7874 dedup_saved=342
+      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
+      largest pre-state sid=307 heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
+      same sid post-state heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 1633
+        Total stack elements (sum of depths): 22839
+        Unique prefixes (nodes in a true GSS): 2156
+        Compression potential (total_els / unique_prefixes): 10.59
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 1633 times
+          - Prefix (962, 982) occurred 1083 times
+          - Prefix (962, 507) occurred 544 times
+          - Prefix (962, 507, 508) occurred 543 times
+          - Prefix (962, 507, 508, 509) occurred 540 times
+          - Prefix (962, 507, 508, 509, 510) occurred 540 times
+          - Prefix (962, 982, 983) occurred 539 times
+          - Prefix (962, 982, 983, 220) occurred 539 times
+          - Prefix (962, 982, 220) occurred 539 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 539 times
+      === COMMIT PROFILE END ===
+      commit (ms): 15.69
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=24 token=')' time_ms=38.779
+      pre:  3 states, heads=3442, stacks=3442, max_depth=24
+      post: 3 states, heads=4261, stacks=4261, max_depth=25
+      queue: enq=3 pop=3 offsets=1 max_offset=0
+      tokenizer: matches_total=4 width_hist={1: 4}
+      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
+      merges: calls=110 inputs_gss=178 input_stacks=31499 output_stacks=30986 dedup_saved=513
+      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
+      largest pre-state sid=307 heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
+      same sid post-state heads=2281 unique_stacks=2281 empty=0 depth[min/mean/max]=1/14.91/23 accs=2281
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 2281
+        Total stack elements (sum of depths): 34008
+        Unique prefixes (nodes in a true GSS): 3281
+        Compression potential (total_els / unique_prefixes): 10.37
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 2281 times
+          - Prefix (962, 982) occurred 1515 times
+          - Prefix (962, 507) occurred 760 times
+          - Prefix (962, 507, 508) occurred 759 times
+          - Prefix (962, 507, 508, 509) occurred 756 times
+          - Prefix (962, 507, 508, 509, 510) occurred 756 times
+          - Prefix (962, 982, 983) occurred 755 times
+          - Prefix (962, 982, 983, 220) occurred 755 times
+          - Prefix (962, 982, 220) occurred 755 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 755 times
+      === COMMIT PROFILE END ===
+      commit (ms): 38.47
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
+      === COMMIT PROFILE START ===
+      step=25 token=' {' time_ms=26.574
+      pre:  3 states, heads=4261, stacks=4261, max_depth=25
+      post: 3 states, heads=5728, stacks=5728, max_depth=26
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
+      merges: calls=87 inputs_gss=113 input_stacks=21774 output_stacks=21774 dedup_saved=0
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=2281 unique_stacks=2281 empty=0 depth[min/mean/max]=1/14.91/23 accs=2281
+      same sid post-state heads=4261 unique_stacks=4261 empty=0 depth[min/mean/max]=1/16.66/25 accs=4261
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 4261
+        Total stack elements (sum of depths): 70977
+        Unique prefixes (nodes in a true GSS): 6080
+        Compression potential (total_els / unique_prefixes): 11.67
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 4261 times
+          - Prefix (962, 982) occurred 2835 times
+          - Prefix (962, 507) occurred 1420 times
+          - Prefix (962, 507, 508) occurred 1419 times
+          - Prefix (962, 507, 508, 509) occurred 1416 times
+          - Prefix (962, 507, 508, 509, 510) occurred 1416 times
+          - Prefix (962, 982, 983) occurred 1415 times
+          - Prefix (962, 982, 983, 220) occurred 1415 times
+          - Prefix (962, 982, 220) occurred 1415 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 1415 times
+      === COMMIT PROFILE END ===
+      commit (ms): 26.2
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=26 token=' if' time_ms=29.583
+      pre:  3 states, heads=5728, stacks=5728, max_depth=26
+      post: 3 states, heads=6853, stacks=6853, max_depth=27
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
+      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
+      merges: calls=37 inputs_gss=42 input_stacks=20901 output_stacks=20082 dedup_saved=819
+      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
+      largest pre-state sid=307 heads=4261 unique_stacks=4261 empty=0 depth[min/mean/max]=1/16.66/25 accs=4261
+      same sid post-state heads=4909 unique_stacks=4909 empty=0 depth[min/mean/max]=1/16.96/26 accs=4909
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 4909
+        Total stack elements (sum of depths): 83235
+        Unique prefixes (nodes in a true GSS): 6899
+        Compression potential (total_els / unique_prefixes): 12.06
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 4909 times
+          - Prefix (962, 982) occurred 3267 times
+          - Prefix (962, 507) occurred 1636 times
+          - Prefix (962, 507, 508) occurred 1635 times
+          - Prefix (962, 507, 508, 509) occurred 1632 times
+          - Prefix (962, 507, 508, 509, 510) occurred 1632 times
+          - Prefix (962, 982, 983) occurred 1631 times
+          - Prefix (962, 982, 983, 220) occurred 1631 times
+          - Prefix (962, 982, 220) occurred 1631 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 1631 times
+      === COMMIT PROFILE END ===
+      commit (ms): 29.14
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
+      === COMMIT PROFILE START ===
+      step=27 token=' (' time_ms=46.591
+      pre:  3 states, heads=6853, stacks=6853, max_depth=27
+      post: 3 states, heads=9958, stacks=9958, max_depth=28
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
+      merges: calls=80 inputs_gss=87 input_stacks=40377 output_stacks=39729 dedup_saved=648
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=4909 unique_stacks=4909 empty=0 depth[min/mean/max]=1/16.96/26 accs=4909
+      same sid post-state heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 6205
+        Total stack elements (sum of depths): 109047
+        Unique prefixes (nodes in a true GSS): 8195
+        Compression potential (total_els / unique_prefixes): 13.31
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 6205 times
+          - Prefix (962, 982) occurred 4131 times
+          - Prefix (962, 507) occurred 2068 times
+          - Prefix (962, 507, 508) occurred 2067 times
+          - Prefix (962, 507, 508, 509) occurred 2064 times
+          - Prefix (962, 507, 508, 509, 510) occurred 2064 times
+          - Prefix (962, 982, 983) occurred 2063 times
+          - Prefix (962, 982, 983, 220) occurred 2063 times
+          - Prefix (962, 982, 220) occurred 2063 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 2063 times
+      === COMMIT PROFILE END ===
+      commit (ms): 45.92
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
+      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=28 token='true' time_ms=59.828
+      pre:  3 states, heads=9958, stacks=9958, max_depth=28
+      post: 3 states, heads=13063, stacks=13063, max_depth=29
+      queue: enq=3 pop=3 offsets=1 max_offset=0
+      tokenizer: matches_total=5 width_hist={4: 5}
+      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
+      merges: calls=38 inputs_gss=45 input_stacks=31175 output_stacks=29879 dedup_saved=1296
+      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
+      largest pre-state sid=307 heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
+      same sid post-state heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 6205
+        Total stack elements (sum of depths): 109047
+        Unique prefixes (nodes in a true GSS): 8195
+        Compression potential (total_els / unique_prefixes): 13.31
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 6205 times
+          - Prefix (962, 982) occurred 4131 times
+          - Prefix (962, 507) occurred 2068 times
+          - Prefix (962, 507, 508) occurred 2067 times
+          - Prefix (962, 507, 508, 509) occurred 2064 times
+          - Prefix (962, 507, 508, 509, 510) occurred 2064 times
+          - Prefix (962, 982, 983) occurred 2063 times
+          - Prefix (962, 982, 983, 220) occurred 2063 times
+          - Prefix (962, 982, 220) occurred 2063 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 2063 times
+      === COMMIT PROFILE END ===
+      commit (ms): 58.99
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      === COMMIT PROFILE START ===
+      step=29 token=')' time_ms=160.284
+      pre:  3 states, heads=13063, stacks=13063, max_depth=29
+      post: 3 states, heads=16168, stacks=16168, max_depth=30
+      queue: enq=3 pop=3 offsets=1 max_offset=0
+      tokenizer: matches_total=4 width_hist={1: 4}
+      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
+      merges: calls=110 inputs_gss=178 input_stacks=119411 output_stacks=117467 dedup_saved=1944
+      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
+      largest pre-state sid=307 heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
+      same sid post-state heads=8662 unique_stacks=8662 empty=0 depth[min/mean/max]=1/18.51/28 accs=8662
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 8662
+        Total stack elements (sum of depths): 160293
+        Unique prefixes (nodes in a true GSS): 12461
+        Compression potential (total_els / unique_prefixes): 12.86
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 8662 times
+          - Prefix (962, 982) occurred 5769 times
+          - Prefix (962, 507) occurred 2887 times
+          - Prefix (962, 507, 508) occurred 2886 times
+          - Prefix (962, 507, 508, 509) occurred 2883 times
+          - Prefix (962, 507, 508, 509, 510) occurred 2883 times
+          - Prefix (962, 982, 983) occurred 2882 times
+          - Prefix (962, 982, 983, 220) occurred 2882 times
+          - Prefix (962, 982, 220) occurred 2882 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 2882 times
+      === COMMIT PROFILE END ===
+      commit (ms): 159.24
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
+      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
+      === COMMIT PROFILE START ===
+      step=30 token=' {' time_ms=105.327
+      pre:  3 states, heads=16168, stacks=16168, max_depth=30
+      post: 3 states, heads=21730, stacks=21730, max_depth=31
+      queue: enq=3 pop=4 offsets=2 max_offset=1
+      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
+      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
+      merges: calls=87 inputs_gss=113 input_stacks=82578 output_stacks=82578 dedup_saved=0
+      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
+      largest pre-state sid=307 heads=8662 unique_stacks=8662 empty=0 depth[min/mean/max]=1/18.51/28 accs=8662
+      same sid post-state heads=16168 unique_stacks=16168 empty=0 depth[min/mean/max]=1/20.26/30 accs=16168
+      [GSS PREFIX ANALYSIS]
+        Unique stacks: 16168
+        Total stack elements (sum of depths): 327612
+        Unique prefixes (nodes in a true GSS): 23072
+        Compression potential (total_els / unique_prefixes): 14.20
+        Top 10 most common prefixes:
+          - Prefix (962,) occurred 16168 times
+          - Prefix (962, 982) occurred 10773 times
+          - Prefix (962, 507) occurred 5389 times
+          - Prefix (962, 507, 508) occurred 5388 times
+          - Prefix (962, 507, 508, 509) occurred 5385 times
+          - Prefix (962, 507, 508, 509, 510) occurred 5385 times
+          - Prefix (962, 982, 983) occurred 5384 times
+          - Prefix (962, 982, 983, 220) occurred 5384 times
+          - Prefix (962, 982, 220) occurred 5384 times
+          - Prefix (962, 507, 508, 509, 510, 220) occurred 5384 times
+      === COMMIT PROFILE END ===
+      commit (ms): 103.92
       --- Benchmark finished ---
 
       Benchmark results saved to: benchmark_results/2025-09-18_17-20-09/precompute3_model_pure_python_results.json
     metadata:
   - user: |-
       We're getting exponential increase in compute time with an input string that consists of nested if-statements `if (true) { if (true) { if (true) {`. Investigate this.
+      The full input is
+      ```js
+      if (true) { if (true) { if (true) { if (true) { if (true) { if (true) {
+      ```
       The ffi stuff should already be well-optimized.
       Note that this benchmark code must strictly adhere to the current interface or it will fail to run at all.
       We're focussing on commit. And on the size/complexity of the GSS.
@@ -3304,617 +3804,368 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with exponential complexity in parsing is a classic challenge. The growth in unique stacks you're seeing is a strong indicator that the current list-based stack representation isn't sharing prefixes, which is the entire point of a Graph-Structured Stack (GSS).
+      Below are step-by-step changes to remove the source of exponential slowdowns in commit(), focusing on reducing repeated GSS merges and switching the token-processing pipeline to in-place dict aggregation. This keeps the public interface intact but significantly reduces merge churn and needless recomputation, which is what dominates runtime in your benchmark.
 
-      Here are the step-by-step instructions to refactor your `GSS` implementation into a true graph-based structure, which should mitigate the exponential growth and improve performance significantly.
+      High-level plan
+      - Reduce merge churn in commit by aggregating intermediate GSS results per tokenizer state and merging once at the end.
+      - Add a simple tokenizer execution cache keyed by (tokenizer_state_id, offset) to avoid recomputation within a commit step.
+      - Rewrite _process_token to use in-place dict aggregation instead of repeatedly constructing/merging many GSS objects. This collapses thousands of small merges into a few fast dict updates.
+      - Small micro-optimization in GSS.merge to short-circuit trivial cases.
 
-      ### Step-by-step Instructions
+      Concrete, step-by-step edits
 
-      #### 1. Define a `GSSNode` Class
+      File: python/aug25/models/precompute3_model_pure_python.py
 
-      First, we need a class to represent a node in the GSS graph. Each node will contain a state ID, a link to its predecessor (`prev`), and its depth (`length`) for efficient popping.
+      1) Optimize GSS.merge with early returns
+      - Inside class GSS, in the static method merge, add early returns when the input is empty or a single GSS. This avoids unnecessary iteration and profiler callbacks on trivial merges.
 
-      In `python/aug25/models/precompute3_model_pure_python.py`, insert the following code right before the `class GSS:` definition (around line 280):
+      2) Optimize Model.commit
+      - Introduce a local tokenizer_exec_cache: Dict[(tokenizer_sid, offset)] -> (end_state, matches). Prepopulate entries for offset 0 during the initial terminals_map/state_map loop, then reuse in the BFS instead of re-running tokenizer for the same (sid, offset).
+      - Replace the previous new_states: Dict[int, GSS] immediate-merge logic with new_states_bins: Dict[int, List[GSS]] as an accumulator. Append partial results during BFS, and after BFS finishes, run a single merge per tokenizer state. This removes tens/hundreds of repeated merges per step.
+      - Keep all profiling hooks intact (queue/matches/prunes/carry-forward). on_matches is still invoked for each queue pop, even if results were cached, because it reflects processing activity, not tokenizer CPU time.
 
-      ```python
-      # GSS Node implementation for true graph-structured stacks
-      @dataclass(frozen=True)
-      class GSSNode:
-          state_id: int
-          prev: Optional["GSSNode"]
-          length: int
+      3) Rewrite Model._process_token to aggregate in-place
+      - Replace the prior list-of-GSS + repeated GSS.merge approach with an in-place dict-of-stacks pipeline:
+        - Partition the input GSS once by top-of-stack.
+        - Maintain a worklist mapping state_id -> dict[stack_tuple -> PyAcc].
+        - For Shift actions: push directly into a single aggregate dict for all shifts (shifted_agg), no intermediate GSS objects needed.
+        - For Reduce and Split: perform popn on dicts, partition by top, compute gotos, and push into the worklist for further reduction in the same token step. All merges are simple in-place dict unions with PyAcc.merge.
+      - Return a single GSS constructed from the shifted_agg dict (or empty if none). Profiling counters are maintained.
 
-          def to_tuple(self) -> Tuple[int, ...]:
-              items = []
-              curr: Optional[GSSNode] = self
-              while curr:
-                  items.append(curr.state_id)
-                  curr = curr.prev
-              return tuple(reversed(items))
+      Why this addresses the exponential blowup
+      - The exponential increase you observe is dominated by repeated GSS.merge calls across the same heads. By aggregating in dicts and merging only once at the end per tokenizer state, we convert thousands of small merges into O(1) dict updates and a few large merges, which is much more cache-friendly and CPU-efficient.
+      - The new _process_token avoids building many short-lived GSS objects and the repeated merges they require. This reduces both time and allocations. It also removes quadratic patterns caused by nested reductions/splits feeding back into the worklist with ever-more-merges.
+      - The tokenizer cache avoids re-running execute_from_state for the same (sid, offset) pairs within the same token commit.
 
-          def __repr__(self) -> str:
-              # Avoid infinitely recursing on `prev`
-              return f"GSSNode(state_id={self.state_id}, prev=..., length={self.length})"
-      ```
+      Expected impact
+      - Merge counts (as shown by the commit profiler) will drop by orders of magnitude.
+      - Total time per step should scale roughly with the number of unique heads (which the grammar dictates) rather than heads multiplied by merge churn, addressing the super-linear growth you see with nesting.
 
-      #### 2. Refactor the `GSS` Class
-
-      Next, we'll replace the existing `GSS` implementation. The new version will use `GSSNode` objects as keys for its internal dictionary of stack heads, enabling prefix sharing. It will also manage a class-level cache for `GSSNode` objects to ensure that identical stack prefixes are represented by the same node object across all `GSS` instances within a single `commit` operation.
-
-      In `python/aug25/models/precompute3_model_pure_python.py`, replace the entire `class GSS:` block (from approximately line 283 to 549) with the following implementation:
-
-      ```python
-      class GSS:
-          """
-          A compact Graph-Structured Stack representation.
-          Internally, it's a map from a GSSNode (representing a stack head) to a
-          PyAcc accumulator. This allows for sharing of stack prefixes (the "graph"
-          part of GSS).
-              Dict[Optional[GSSNode], PyAcc]
-          The empty stack is represented by the key `None`.
-          """
-          # Active profiler for merge instrumentation (set by _CommitProfiler)
-          _active_profiler: Optional[_CommitProfiler] = None
-          # Node cache, managed by Model.commit, to ensure maximal sharing of stack structure.
-          _node_cache: Dict[Tuple[int, Optional[GSSNode]], GSSNode] = {}
-
-          def __init__(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> None:
-              self._heads: Dict[Optional[GSSNode], PyAcc] = heads if heads is not None else {}
-
-          @classmethod
-          def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
-              """
-              Build a GSS from explicit stacks.
-              node_factory is ignored; we use a class-level cache for node sharing.
-              """
-              m: Dict[Optional[GSSNode], PyAcc] = {}
-              for vals, acc in stacks:
-                  curr_node: Optional[GSSNode] = None
-                  if not vals:
-                      if None in m:
-                          m[None] = m[None].merge(acc)
-                      else:
-                          m[None] = acc
-                      continue
-
-                  for val in vals:
-                      key = (val, curr_node)
-                      if key in GSS._node_cache:
-                          node = GSS._node_cache[key]
-                      else:
-                          length = (curr_node.length + 1) if curr_node else 1
-                          node = GSSNode(val, curr_node, length)
-                          GSS._node_cache[key] = node
-                      curr_node = node
-
-                  if curr_node in m:
-                      m[curr_node] = m[curr_node].merge(acc)
-                  else:
-                      m[curr_node] = acc
-              return cls(m)
-
-          def _clone_with(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> "GSS":
-              return GSS(dict(self._heads) if heads is None else heads)
-
-          # --- Introspection helpers (used by profiler) ---
-
-          def head_count(self) -> int:
-              # Non-empty stacks only
-              return sum(1 for k in self._heads.keys() if k is not None)
-
-          def acc_count(self) -> int:
-              # One accumulator per unique stack
-              return len(self._heads)
-
-          def stack_count(self) -> int:
-              # Unique stacks (including empty if present)
-              return len(self._heads)
-
-          def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
-              n = 0
-              for k in self._heads.keys():
-                  if k is None:
-                      yield ()
-                  else:
-                      yield k.to_tuple()
-                  n += 1
-                  if limit is not None and n >= limit:
-                      break
-
-          def compute_stats(self) -> GSSStats:
-              if not self._heads:
-                  return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
-              depths = [k.length if k is not None else 0 for k in self._heads.keys()]
-              dmin = min(depths) if depths else 0
-              dmax = max(depths) if depths else 0
-              dmean = (sum(depths) / len(depths)) if depths else 0.0
-              empty_present = 1 if None in self._heads else 0
-              heads_nonempty = sum(1 for k in self._heads.keys() if k is not None)
-              return GSSStats(
-                  heads=heads_nonempty,
-                  empty_stacks=empty_present,
-                  unique_stacks=len(self._heads),
-                  accs=len(self._heads),
-                  depth_min=dmin,
-                  depth_max=dmax,
-                  depth_mean=dmean,
-              )
-
-          def analyze_prefixes(self) -> None:
-              if not self._heads:
-                  print("[GSS PREFIX ANALYSIS] Empty GSS")
-                  return
-
-              prefixes = collections.defaultdict(int)
-              total_stack_els = 0
-              for node in self._heads.keys():
-                  if node is None:
-                      continue
-                  total_stack_els += node.length
-                  curr: Optional[GSSNode] = node
-                  while curr:
-                      prefixes[curr] += 1
-                      curr = curr.prev
-
-              num_unique_stacks = len(self._heads)
-              num_unique_prefixes = len(prefixes)
-
-              print("[GSS PREFIX ANALYSIS]")
-              print(f"  Unique stacks: {num_unique_stacks}")
-              print(f"  Total stack elements (sum of depths): {total_stack_els}")
-              print(f"  Unique prefixes (nodes in a true GSS): {num_unique_prefixes}")
-              if num_unique_prefixes > 0:
-                  compression = total_stack_els / num_unique_prefixes
-                  print(f"  Compression potential (total_els / unique_prefixes): {compression:.2f}")
-
-              if num_unique_stacks > 10:
-                  print("  Top 10 most common prefixes:")
-                  for p_node, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
-                      print(f"    - Prefix {p_node.to_tuple()} occurred {count} times")
-          # --- Core operations ---
-
-          def push(self, value: int) -> "GSS":
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for prev_node, acc in self._heads.items():
-                  key = (value, prev_node)
-                  if key in GSS._node_cache:
-                      new_node = GSS._node_cache[key]
-                  else:
-                      length = (prev_node.length + 1) if prev_node else 1
-                      new_node = GSSNode(value, prev_node, length)
-                      GSS._node_cache[key] = new_node
-
-                  if new_node in new_heads:
-                      new_heads[new_node] = new_heads[new_node].merge(acc)
-                  else:
-                      new_heads[new_node] = acc
-              return GSS(new_heads)
-
-          def pop(self) -> "GSS":
-              return self.popn(1)
-
-          def popn(self, n: int) -> "GSS":
-              if n <= 0:
-                  return self
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for node, acc in self._heads.items():
-                  if node is None or node.length <= n:
-                      new_node: Optional[GSSNode] = None
-                  else:
-                      popped_node = node
-                      for _ in range(n):
-                          if popped_node is None:
-                              break
-                          popped_node = popped_node.prev
-                      new_node = popped_node
-
-                  if new_node in new_heads:
-                      new_heads[new_node] = new_heads[new_node].merge(acc)
-                  else:
-                      new_heads[new_node] = acc
-              return GSS(new_heads)
-
-          def is_empty(self) -> bool:
-              return not self._heads
-
-          def isolate(self, value: Optional[int]) -> "GSS":
-              if value is None:
-                  acc = self._heads.get(None)
-                  return GSS({None: acc} if acc is not None else {})
-              new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-              for node, acc in self._heads.items():
-                  if node is not None and node.state_id == value:
-                      new_heads[node] = acc
-              return GSS(new_heads)
-
-          def _partition_by_top(self) -> Dict[int, Dict[Optional[GSSNode], PyAcc]]:
-              groups: Dict[int, Dict[Optional[GSSNode], PyAcc]] = {}
-              for node, acc in self._heads.items():
-                  if node is None:
-                      continue
-                  top = node.state_id
-                  bucket = groups.get(top)
-                  if bucket is None:
-                      bucket = {}
-                      groups[top] = bucket
-                  bucket[node] = acc
-              return groups
-
-          def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
-              return GSS({stack: func(acc) for stack, acc in self._heads.items()})
-
-          def prune(self, predicate: Callable[[PyAcc], bool]) -> "GSS":
-              return GSS({stack: acc for stack, acc in self._heads.items() if predicate(acc)})
-
-          def peek(self) -> Set[int]:
-              return {node.state_id for node in self._heads.keys() if node is not None}
-
-          def reduce_acc(self) -> Optional[PyAcc]:
-              combined: Optional[PyAcc] = None
-              for acc in self._heads.values():
-                  combined = acc if combined is None else combined.merge(acc)
-              return combined
-
-          @staticmethod
-          def merge(gss_list: Iterable["GSS"]) -> "GSS":
-              merged: Dict[Optional[GSSNode], PyAcc] = {}
-              num_inputs = 0
-              input_stacks_total = 0
-
-              gss_list = list(gss_list)
-
-              for gss in gss_list:
-                  num_inputs += 1
-                  input_stacks_total += gss.stack_count()
-                  for node, acc in gss._heads.items():
-                      if node in merged:
-                          merged[node] = merged[node].merge(acc)
-                      else:
-                          merged[node] = acc
-
-              output_stacks = len(merged)
-              if GSS._active_profiler is not None:
-                  GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, output_stacks)
-
-              return GSS(merged)
-      ```
-
-      #### 3. Manage the GSS Node Cache
-
-      Finally, to ensure the node cache doesn't grow indefinitely across multiple tokens, we need to clear it at the beginning of each `commit` call.
-
-      In `python/aug25/models/precompute3_model_pure_python.py`, add one line to the beginning of the `Model.commit` method (around line 680):
-
-      ```python
-          def commit(self, token_id: int):
-              """
-              Core incremental update. This method is the main focus for performance analysis.
-              Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
-              """
-              GSS._node_cache.clear()
-              self._commit_step += 1
-              t0 = time.perf_counter()
-              # ... rest of the method
-      ```
-
-      These changes will transform your stack representation into a true GSS, which should convert the exponential complexity you're observing into polynomial complexity, providing a significant performance boost on inputs with deep nesting.
-
-      ### Git Diff
-
-      Here is the git diff for the changes described above:
+      Patch
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 8111111..2222222 100644
+      index 5f0c7a7..3a2d2b0 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -277,118 +277,168 @@
-               self.on_finalize()
-       
-       
-      +# GSS Node implementation for true graph-structured stacks
-      +@dataclass(frozen=True)
-      +class GSSNode:
-      +    state_id: int
-      +    prev: Optional["GSSNode"]
-      +    length: int
-      +
-      +    def to_tuple(self) -> Tuple[int, ...]:
-      +        items = []
-      +        curr: Optional[GSSNode] = self
-      +        while curr:
-      +            items.append(curr.state_id)
-      +            curr = curr.prev
-      +        return tuple(reversed(items))
-      +
-      +    def __repr__(self) -> str:
-      +        # Avoid infinitely recursing on `prev`
-      +        return f"GSSNode(state_id={self.state_id}, prev=..., length={self.length})"
-      +
-      +
-       # GSS implementation (simplified)
-       
-       class GSS:
-           """
-           A compact Graph-Structured Stack representation.
-      -
-      -    Conceptually, it's just a multiset of stacks (each a tuple of state IDs),
-      -    each annotated with a PyAcc accumulator. We canonicalize by merging
-      -    accumulators per identical stack, so internally it's:
-      -        Dict[Tuple[int, ...], PyAcc]
-      -
-      -    The empty stack is represented by the empty tuple ().
-      +    Internally, it's a map from a GSSNode (representing a stack head) to a
-      +    PyAcc accumulator. This allows for sharing of stack prefixes (the "graph"
-      +    part of GSS).
-      +        Dict[Optional[GSSNode], PyAcc]
-      +    The empty stack is represented by the key `None`.
-           """
-           # Active profiler for merge instrumentation (set by _CommitProfiler)
-           _active_profiler: Optional[_CommitProfiler] = None
-      -
-      -    def __init__(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> None:
-      -        self._heads: Dict[Tuple[int, ...], PyAcc] = heads if heads is not None else {}
-      +    # Node cache, managed by Model.commit, to ensure maximal sharing of stack structure.
-      +    _node_cache: Dict[Tuple[int, Optional[GSSNode]], GSSNode] = {}
-      +
-      +    def __init__(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> None:
-      +        self._heads: Dict[Optional[GSSNode], PyAcc] = heads if heads is not None else {}
-       
-           @classmethod
-           def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
-               """
-               Build a GSS from explicit stacks.
-      -
-      -        node_factory is ignored in this simplified implementation; we keep it in the
-      -        signature for compatibility with existing call sites.
-      -        """
-      -        m: Dict[Tuple[int, ...], PyAcc] = {}
-      +        node_factory is ignored; we use a class-level cache for node sharing.
-      +        """
-      +        m: Dict[Optional[GSSNode], PyAcc] = {}
-               for vals, acc in stacks:
-      -            key = tuple(vals)
-      -            if key in m:
-      -                m[key] = m[key].merge(acc)
-      -            else:
-      -                m[key] = acc
-      +            curr_node: Optional[GSSNode] = None
-      +            if not vals:
-      +                if None in m:
-      +                    m[None] = m[None].merge(acc)
-      +                else:
-      +                    m[None] = acc
-      +                continue
-      +
-      +            for val in vals:
-      +                key = (val, curr_node)
-      +                if key in GSS._node_cache:
-      +                    node = GSS._node_cache[key]
-      +                else:
-      +                    length = (curr_node.length + 1) if curr_node else 1
-      +                    node = GSSNode(val, curr_node, length)
-      +                    GSS._node_cache[key] = node
-      +                curr_node = node
-      +
-      +            if curr_node in m:
-      +                m[curr_node] = m[curr_node].merge(acc)
-      +            else:
-      +                m[curr_node] = acc
-               return cls(m)
-       
-      -    def _clone_with(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> "GSS":
-      +    def _clone_with(self, heads: Optional[Dict[Optional[GSSNode], PyAcc]] = None) -> "GSS":
-               return GSS(dict(self._heads) if heads is None else heads)
-       
-           # --- Introspection helpers (used by profiler) ---
-       
-           def head_count(self) -> int:
-               # Non-empty stacks only
-      -        return sum(1 for k in self._heads.keys() if len(k) > 0)
-      +        return sum(1 for k in self._heads.keys() if k is not None)
-       
-           def acc_count(self) -> int:
-               # One accumulator per unique stack
-      @@ -400,7 +450,10 @@
-           def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
-               n = 0
-               for k in self._heads.keys():
-      -            yield k
-      +            if k is None:
-      +                yield ()
-      +            else:
-      +                yield k.to_tuple()
-                   n += 1
-                   if limit is not None and n >= limit:
-                       break
-      @@ -408,13 +461,13 @@
-           def compute_stats(self) -> GSSStats:
-               if not self._heads:
-                   return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
-      -        depths = [len(k) for k in self._heads.keys()]
-      +        depths = [k.length if k is not None else 0 for k in self._heads.keys()]
-               dmin = min(depths) if depths else 0
-               dmax = max(depths) if depths else 0
-               dmean = (sum(depths) / len(depths)) if depths else 0.0
-      -        empty_present = 1 if () in self._heads else 0
-      -        heads_nonempty = sum(1 for k in self._heads.keys() if k)
-      +        empty_present = 1 if None in self._heads else 0
-      +        heads_nonempty = sum(1 for k in self._heads.keys() if k is not None)
-               return GSSStats(
-                   heads=heads_nonempty,
-                   empty_stacks=empty_present,
-      @@ -430,11 +483,14 @@
-                   return
-       
-               prefixes = collections.defaultdict(int)
-               total_stack_els = 0
-      -        for stack in self._heads.keys():
-      -            total_stack_els += len(stack)
-      -            for i in range(1, len(stack) + 1):
-      -                prefixes[stack[:i]] += 1
-      +        for node in self._heads.keys():
-      +            if node is None:
-      +                continue
-      +            total_stack_els += node.length
-      +            curr: Optional[GSSNode] = node
-      +            while curr:
-      +                prefixes[curr] += 1
-      +                curr = curr.prev
-       
-               num_unique_stacks = len(self._heads)
-               num_unique_prefixes = len(prefixes)
-      @@ -448,60 +504,69 @@
-       
-               if num_unique_stacks > 10:
-                   print("  Top 10 most common prefixes:")
-      -            for p, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
-      -                print(f"    - Prefix {p} occurred {count} times")
-      +            for p_node, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
-      +                print(f"    - Prefix {p_node.to_tuple()} occurred {count} times")
-           # --- Core operations ---
-       
-           def push(self, value: int) -> "GSS":
-      -        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-      -        for stack, acc in self._heads.items():
-      -            new_stack = stack + (value,)
-      -            if new_stack in new_heads:
-      -                new_heads[new_stack] = new_heads[new_stack].merge(acc)
-      -            else:
-      -                new_heads[new_stack] = acc
-      +        new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-      +        for prev_node, acc in self._heads.items():
-      +            key = (value, prev_node)
-      +            if key in GSS._node_cache:
-      +                new_node = GSS._node_cache[key]
-      +            else:
-      +                length = (prev_node.length + 1) if prev_node else 1
-      +                new_node = GSSNode(value, prev_node, length)
-      +                GSS._node_cache[key] = new_node
-      +
-      +            if new_node in new_heads:
-      +                new_heads[new_node] = new_heads[new_node].merge(acc)
-      +            else:
-      +                new_heads[new_node] = acc
-               return GSS(new_heads)
-       
-           def pop(self) -> "GSS":
-               return self.popn(1)
-       
-           def popn(self, n: int) -> "GSS":
-               if n <= 0:
-                   return self
-      -        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-      -        for stack, acc in self._heads.items():
-      -            if len(stack) <= n:
-      -                new_stack: Tuple[int, ...] = ()
-      -            else:
-      -                new_stack = stack[:-n]
-      -            if new_stack in new_heads:
-      -                new_heads[new_stack] = new_heads[new_stack].merge(acc)
-      -            else:
-      -                new_heads[new_stack] = acc
-      +        new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-      +        for node, acc in self._heads.items():
-      +            if node is None or node.length <= n:
-      +                new_node: Optional[GSSNode] = None
-      +            else:
-      +                popped_node = node
-      +                for _ in range(n):
-      +                    if popped_node is None:
-      +                        break
-      +                    popped_node = popped_node.prev
-      +                new_node = popped_node
-      +
-      +            if new_node in new_heads:
-      +                new_heads[new_node] = new_heads[new_node].merge(acc)
-      +            else:
-      +                new_heads[new_node] = acc
-               return GSS(new_heads)
-       
-           def is_empty(self) -> bool:
-               return not self._heads
-       
-           def isolate(self, value: Optional[int]) -> "GSS":
-               if value is None:
-      -            acc = self._heads.get(())
-      -            return GSS({(): acc} if acc is not None else {})
-      -        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-      -        for stack, acc in self._heads.items():
-      -            if stack and stack[-1] == value:
-      -                new_heads[stack] = acc
-      +            acc = self._heads.get(None)
-      +            return GSS({None: acc} if acc is not None else {})
-      +        new_heads: Dict[Optional[GSSNode], PyAcc] = {}
-      +        for node, acc in self._heads.items():
-      +            if node is not None and node.state_id == value:
-      +                new_heads[node] = acc
-               return GSS(new_heads)
-       
-      -    def _partition_by_top(self) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
-      -        groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
-      -        for stack, acc in self._heads.items():
-      -            if not stack:
-      -                continue
-      -            top = stack[-1]
-      +    def _partition_by_top(self) -> Dict[int, Dict[Optional[GSSNode], PyAcc]]:
-      +        groups: Dict[int, Dict[Optional[GSSNode], PyAcc]] = {}
-      +        for node, acc in self._heads.items():
-      +            if node is None:
-      +                continue
-      +            top = node.state_id
-                   bucket = groups.get(top)
-                   if bucket is None:
-                       bucket = {}
-                       groups[top] = bucket
-      -            bucket[stack] = acc
-      +            bucket[node] = acc
-               return groups
-       
-           def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
-      @@ -511,7 +576,7 @@
-               return GSS({stack: acc for stack, acc in self._heads.items() if predicate(acc)})
-       
-           def peek(self) -> Set[int]:
-      -        return {stack[-1] for stack in self._heads.keys() if stack}
-      +        return {node.state_id for node in self._heads.keys() if node is not None}
-       
-           def reduce_acc(self) -> Optional[PyAcc]:
-               combined: Optional[PyAcc] = None
-      @@ -521,7 +586,7 @@
-       
-           @staticmethod
+      @@ -230,12 +230,18 @@ class GSS:
            def merge(gss_list: Iterable["GSS"]) -> "GSS":
-      -        merged: Dict[Tuple[int, ...], PyAcc] = {}
-      +        merged: Dict[Optional[GSSNode], PyAcc] = {}
+               merged: Dict[Tuple[int, ...], PyAcc] = {}
                num_inputs = 0
                input_stacks_total = 0
        
-      @@ -530,11 +595,11 @@
+      -        gss_list = list(gss_list)
+      +        gss_list = list(gss_list)
+      +        # Fast paths to cut unnecessary overhead on trivial merges
+      +        if not gss_list:
+      +            if GSS._active_profiler is not None:
+      +                GSS._active_profiler.on_gss_merge(0, 0, 0)
+      +            return GSS({})
+      +        if len(gss_list) == 1:
+      +            return gss_list[0]
+       
                for gss in gss_list:
                    num_inputs += 1
                    input_stacks_total += gss.stack_count()
-      -            for stack, acc in gss._heads.items():
-      -                if stack in merged:
-      -                    merged[stack] = merged[stack].merge(acc)
-      +            for node, acc in gss._heads.items():
-      +                if node in merged:
-      +                    merged[node] = merged[node].merge(acc)
-                       else:
-      -                    merged[stack] = acc
-      +                    merged[node] = acc
+                   for stack, acc in gss._heads.items():
+      @@ -498,17 +504,22 @@ class Model(GraphProvider):
+                   for sid, st in self._gss_stats_map(self.state).items():
+                       profiler.add_pre_stats(sid, st)
        
-               output_stacks = len(merged)
-               if GSS._active_profiler is not None:
-      @@ -679,6 +744,7 @@
-               Core incremental update. This method is the main focus for performance analysis.
-               Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
+               # Build tokenizer maps
+               terminals_map: Dict[int, ffi.Bitset] = {}
+               state_map: Dict[int, int] = {}
+      +        # Cache for tokenizer execute results within this commit: (tokenizer_sid, offset) -> (end_state, matches)
+      +        tokenizer_exec_cache: Dict[Tuple[int, int], Tuple[Optional[int], List[Tuple[int, int]]]] = {}
+               for tokenizer_sid in self.state.keys():
+                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+      +            tokenizer_exec_cache[(tokenizer_sid, 0)] = (end_state, matches)
+                   if end_state is not None:
+                       state_map[tokenizer_sid] = end_state
+                   b = ffi.Bitset.zeros()
+                   for terminal_id, _ in matches:
+                       b.insert(terminal_id)
+                   terminals_map[tokenizer_sid] = b
+       
+               # Prune and map per-state GSS
+               current_state_for_processing: Dict[int, GSS] = {}
+               for tokenizer_sid, gss in self.state.items():
+      @@ -518,62 +529,85 @@ class Model(GraphProvider):
+                       current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
+       
+               # Accumulate results incrementally per tokenizer state (avoid large lists)
+      -        new_states: Dict[int, GSS] = {}
+      +        # We first bucket all partial GSS fragments per tokenizer state, then merge once at the end.
+      +        new_states_bins: Dict[int, List[GSS]] = collections.defaultdict(list)
+               q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
+               visited_q_items: set = set()
+               if profiler is not None:
+                   profiler.on_queue_enqueued(len(q))
+       
+               # Small cache for tokens accessible from tokenizer end states
+               accessible_cache: Dict[int, Set[int]] = {}
+       
+               while q:
+                   offset, tokenizer_sid, gss = q.popleft()
+                   if profiler is not None:
+                       profiler.on_queue_pop(offset)
+                   q_key = (offset, tokenizer_sid, id(gss))
+                   if q_key in visited_q_items:
+                       continue
+                   visited_q_items.add(q_key)
+       
+      -            end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+      +            cached = tokenizer_exec_cache.get((tokenizer_sid, offset))
+      +            if cached is None:
+      +                end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+      +                tokenizer_exec_cache[(tokenizer_sid, offset)] = (end_state, matches)
+      +            else:
+      +                end_state, matches = cached
+                   if profiler is not None:
+                       profiler.on_matches(offset, matches)
+       
+                   for terminal_id, width in matches:
+                       # Process parser transitions for this terminal
+                       processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id, profiler=profiler)
+       
+                       # Prune the same terminal from the tokenizer end_state to avoid double-consume
+                       if end_state is not None:
+                           if end_state not in accessible_cache:
+                               accessible_cache[end_state] = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                           if terminal_id in accessible_cache[end_state]:
+                               processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+                               if profiler is not None:
+                                   profiler.on_end_state_prune()
+       
+                       if not processed_gss.is_empty():
+                           new_offset = offset + width
+                           next_sid = self.tokenizer_initial_state
+                           if new_offset == len(token_bytes):
+      -                        # Merge incrementally
+      -                        existing = new_states.get(next_sid)
+      -                        if existing is None:
+      -                            new_states[next_sid] = processed_gss
+      -                        else:
+      -                            new_states[next_sid] = GSS.merge([existing, processed_gss])
+      +                        # Defer merging; just bucket results
+      +                        new_states_bins[next_sid].append(processed_gss)
+                           else:
+                               q.append((new_offset, next_sid, processed_gss))
+                               if profiler is not None:
+                                   profiler.on_enqueue_after_match()
+       
+                   if end_state is not None:
+                       # carry-forward without consumption
+      -                existing = new_states.get(end_state)
+      -                if existing is None:
+      -                    new_states[end_state] = gss
+      -                else:
+      -                    new_states[end_state] = GSS.merge([existing, gss])
+      +                new_states_bins[end_state].append(gss)
+                       if profiler is not None:
+                           profiler.on_carry_forward()
+       
+      -        # Prune empty GSS states
+      -        self.state = {sid: st for sid, st in new_states.items() if not st.is_empty()}
+      +        # Finalize: single merge per tokenizer state, then prune empties
+      +        new_states: Dict[int, GSS] = {}
+      +        for sid, pieces in new_states_bins.items():
+      +            if not pieces:
+      +                continue
+      +            merged = pieces[0] if len(pieces) == 1 else GSS.merge(pieces)
+      +            if not merged.is_empty():
+      +                new_states[sid] = merged
+      +        self.state = new_states
+       
+               t1 = time.perf_counter()
+       
+               if profiler is not None:
+                   for sid, gss in self.state.items():
+                       profiler.add_post_stats(sid, gss)
+                   profiler.finalize()
+       
+               if os.environ.get("REPORT_COMMIT_TIME") == "1":
+                   print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
+       
+           def _process_token(self, gss: GSS, terminal_id: int, profiler: Optional[_CommitProfiler] = None) -> GSS:
+      -        # Seed by partitioning once (avoid O(H^2) from repeated isolate)
+      -        heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
+      -        for state_id, heads in gss._partition_by_top().items():
+      -            heads_by_state[state_id].append(GSS(heads))
+      -
+      -        shifted_gsses: List[GSS] = []
+      -        c_shifts = 0
+      -        c_reduces = 0
+      -        c_splits = 0
+      -        c_gotos = 0
+      -
+      -        while heads_by_state:
+      -            state_id, state_gsss = heads_by_state.popitem()
+      -            state_gss = GSS.merge(state_gsss)
+      -            row = self.parser_table.table.get(state_id)
+      -            if not row:
+      -                continue
+      -            action = row.actions.get(terminal_id)
+      -            if not action:
+      -                continue
+      -
+      -            if isinstance(action, int):  # Shift
+      -                shifted_gsses.append(state_gss.push(action))
+      -                c_shifts += 1
+      -                continue
+      -
+      -            if isinstance(action, Reduce):
+      -                c_reduces += 1
+      -                popped = state_gss.popn(action.len)
+      -                # Partition once by from_state_id after reduction
+      -                groups = popped._partition_by_top()
+      -                for from_state_id, heads in groups.items():
+      -                    goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
+      -                    heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+      -                    c_gotos += 1
+      -                continue
+      -
+      -            # Split
+      -            c_splits += 1
+      -            if action.shift is not None:
+      -                shifted_gsses.append(state_gss.push(action.shift))
+      -                c_shifts += 1
+      -            for length, nts in action.reduces.items():
+      -                popped = state_gss.popn(length)
+      -                groups = popped._partition_by_top()
+      -                for from_state_id, heads in groups.items():
+      -                    table_row = self.parser_table.table[from_state_id]
+      -                    for nt_id in nts.keys():
+      -                        goto_state_id = table_row.gotos[nt_id]
+      -                        heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
+      -                        c_gotos += 1
+      -
+      -        if profiler is not None:
+      -            profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
+      -
+      -        return GSS() if not shifted_gsses else GSS.merge(shifted_gsses)
+      +        # Optimized in-place dict aggregation to avoid repeated GSS.merge churn
+      +        # Partition once by top state
+      +        initial_groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = gss._partition_by_top()
+      +        if not initial_groups:
+      +            if profiler is not None:
+      +                profiler.on_process_token(terminal_id, shifts=0, reduces=0, splits=0, gotos=0)
+      +            return GSS({})
+      +
+      +        # Worklist: state_id -> dict of heads for that state
+      +        work: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {sid: dict(heads) for sid, heads in initial_groups.items()}
+      +        # Aggregate all shifted results into a single dict
+      +        shifted_agg: Dict[Tuple[int, ...], PyAcc] = {}
+      +
+      +        c_shifts = 0
+      +        c_reduces = 0
+      +        c_splits = 0
+      +        c_gotos = 0
+      +
+      +        def merge_inplace(dst: Dict[Tuple[int, ...], PyAcc], src: Dict[Tuple[int, ...], PyAcc]) -> None:
+      +            for st, acc in src.items():
+      +                existing = dst.get(st)
+      +                if existing is None:
+      +                    dst[st] = acc
+      +                else:
+      +                    dst[st] = existing.merge(acc)
+      +
+      +        def push_into(heads: Dict[Tuple[int, ...], PyAcc], value: int, target: Dict[Tuple[int, ...], PyAcc]) -> None:
+      +            for stack, acc in heads.items():
+      +                new_stack = stack + (value,)
+      +                existing = target.get(new_stack)
+      +                if existing is None:
+      +                    target[new_stack] = acc
+      +                else:
+      +                    target[new_stack] = existing.merge(acc)
+      +
+      +        def popn_dict(heads: Dict[Tuple[int, ...], PyAcc], n: int) -> Dict[Tuple[int, ...], PyAcc]:
+      +            if n <= 0:
+      +                return dict(heads)
+      +            out: Dict[Tuple[int, ...], PyAcc] = {}
+      +            for stack, acc in heads.items():
+      +                if len(stack) <= n:
+      +                    new_stack: Tuple[int, ...] = ()
+      +                else:
+      +                    new_stack = stack[:-n]
+      +                existing = out.get(new_stack)
+      +                if existing is None:
+      +                    out[new_stack] = acc
+      +                else:
+      +                    out[new_stack] = existing.merge(acc)
+      +            return out
+      +
+      +        def partition_by_top_dict(heads: Dict[Tuple[int, ...], PyAcc]) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
+      +            groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
+      +            for stack, acc in heads.items():
+      +                if not stack:
+      +                    continue
+      +                top = stack[-1]
+      +                bucket = groups.get(top)
+      +                if bucket is None:
+      +                    bucket = {}
+      +                    groups[top] = bucket
+      +                bucket[stack] = acc
+      +            return groups
+      +
+      +        while work:
+      +            state_id, state_heads = work.popitem()
+      +            row = self.parser_table.table.get(state_id)
+      +            if not row:
+      +                continue
+      +            action = row.actions.get(terminal_id)
+      +            if not action:
+      +                continue
+      +
+      +            if isinstance(action, int):  # Shift
+      +                push_into(state_heads, action, shifted_agg)
+      +                c_shifts += 1
+      +                continue
+      +
+      +            if isinstance(action, Reduce):
+      +                c_reduces += 1
+      +                popped = popn_dict(state_heads, action.len)
+      +                groups = partition_by_top_dict(popped)
+      +                for from_state_id, sub_heads in groups.items():
+      +                    goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
+      +                    bucket = work.get(goto_state_id)
+      +                    if bucket is None:
+      +                        bucket = {}
+      +                        work[goto_state_id] = bucket
+      +                    # Push goto into the worklist bucket directly
+      +                    push_into(sub_heads, goto_state_id, bucket)
+      +                    c_gotos += 1
+      +                continue
+      +
+      +            # Split
+      +            c_splits += 1
+      +            if action.shift is not None:
+      +                push_into(state_heads, action.shift, shifted_agg)
+      +                c_shifts += 1
+      +            for length, nts in action.reduces.items():
+      +                popped = popn_dict(state_heads, length)
+      +                groups = partition_by_top_dict(popped)
+      +                for from_state_id, sub_heads in groups.items():
+      +                    table_row = self.parser_table.table[from_state_id]
+      +                    for nt_id in nts.keys():
+      +                        goto_state_id = table_row.gotos[nt_id]
+      +                        bucket = work.get(goto_state_id)
+      +                        if bucket is None:
+      +                            bucket = {}
+      +                            work[goto_state_id] = bucket
+      +                        push_into(sub_heads, goto_state_id, bucket)
+      +                        c_gotos += 1
+      +
+      +        if profiler is not None:
+      +            profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
+      +
+      +        return GSS({}) if not shifted_agg else GSS(shifted_agg)
+       
+           def get_mask(self) -> RangeSet:
                """
-      +        GSS._node_cache.clear()
-               self._commit_step += 1
-               t0 = time.perf_counter()
-               token_bytes = self.id_to_token[token_id]
-
+               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+               """
+               active_states = self.state
       ```
     metadata:
   - user: |
@@ -3926,7 +4177,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS to use graph-structured nodes
-      and caching"'
+  - user: 'Changes committed with message: "Refactor GSS processing to use in-place
+      dict aggregation and caching"'
     metadata:
 ...
