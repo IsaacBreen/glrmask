@@ -453,48 +453,58 @@ class GSS:
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
         """
-        Merge several GSS structures:
-          - Deduplicate identical stacks while merging accumulators.
-          - Critically: reuse a persistent NodeFactory from the first non-empty input
-            so nodes are shared across merges within a commit, avoiding re-allocation.
+        Optimized GSS merge using direct _StackNode pointers, avoiding costly
+        stack-to-tuple conversion. Assumes all GSSs in the list share the same
+        _NodeFactory.
         """
-        merged: Dict[Tuple[int, ...], PyAcc] = {}
+        merged_heads: Dict[_StackNode, PyAcc] = {}
+        merged_empty: Optional[PyAcc] = None
         num_inputs = 0
         input_stacks_total = 0
         base_factory: Optional[_NodeFactory] = None
+        
+        gss_list = list(gss_list)
 
         for gss in gss_list:
             num_inputs += 1
-            input_stacks_total += len(gss._heads) + (1 if gss._empty_accs else 0)
-            if base_factory is None and (gss._heads or gss._empty_accs):
+            input_stacks_total += gss.stack_count()
+            if gss.is_empty():
+                continue
+
+            if base_factory is None:
                 base_factory = gss._factory
+            else:
+                # This optimization relies on all merged GSSs sharing a node factory.
+                assert gss._factory is base_factory, "Cannot merge GSS with different node factories"
+
+            # Fast path: factories are the same, use _StackNode directly as keys.
             for head, accs in gss._heads.items():
-                vals: List[int] = []
-                cur: Optional[_StackNode] = head
-                while cur is not None:
-                    vals.append(cur.value)
-                    cur = cur.prev
-                key = tuple(reversed(vals))
-                for a in accs:
-                    merged[key] = merged[key].merge(a) if key in merged else a
-            for a in gss._empty_accs:
-                key = ()
-                merged[key] = merged[key].merge(a) if key in merged else a
+                for acc in accs:
+                    if head in merged_heads:
+                        merged_heads[head] = merged_heads[head].merge(acc)
+                    else:
+                        merged_heads[head] = acc
+            
+            for acc in gss._empty_accs:
+                merged_empty = merged_empty.merge(acc) if merged_empty is not None else acc
 
-        # Ensure we have a factory even if all inputs were empty
         if base_factory is None:
-            base_factory = _NodeFactory()
+            # All GSSs were empty. Use factory from the first one if available, or create a new one.
+            base_factory = gss_list[0]._factory if gss_list else _NodeFactory()
 
-        if not merged:
-            if GSS._active_profiler is not None:
-                GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, 0)
+        output_stacks = len(merged_heads) + (1 if merged_empty is not None else 0)
+        if GSS._active_profiler is not None:
+            GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, output_stacks)
+
+        if not merged_heads and merged_empty is None:
             return GSS(node_factory=base_factory)
 
-        if GSS._active_profiler is not None:
-            GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, len(merged))
-
-        # Build using the chosen base factory to preserve node sharing across merges
-        return GSS.from_stacks([(list(k), v) for k, v in merged.items()], node_factory=base_factory)
+        final_heads: Dict[_StackNode, List[PyAcc]] = {
+            head: [acc] for head, acc in merged_heads.items()
+        }
+        final_empty: List[PyAcc] = [merged_empty] if merged_empty is not None else []
+        
+        return GSS(node_factory=base_factory, heads=final_heads, empty_accs=final_empty)
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
