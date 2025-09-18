@@ -1,7 +1,7 @@
 import json
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
@@ -250,7 +250,8 @@ class Model(GraphProvider):
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
-            q_item_key = (offset, tokenizer_sid, id(gss))
+            # Deduplicate by semantic GSS equality instead of object identity to avoid exponential blow-up.
+            q_item_key = (offset, tokenizer_sid, gss)
             if q_item_key in visited_q_items:
                 continue
             visited_q_items.add(q_item_key)
@@ -306,25 +307,42 @@ class Model(GraphProvider):
             def handle_shift(shift_to_state_id, gss_to_shift):
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
-            def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                popped_gss = gss_to_reduce
-                for _ in range(reduce_action.len):
-                    popped_gss = popped_gss.pop()
-                for from_state_id in popped_gss.peek():
-                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                    goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
+            def handle_reduce_grouped(length: int, nt_id: int, gss_to_reduce: GSS):
+                # Cache popn by reduction length
+                popped_gss = gss_to_reduce.popn(length)
+                from_states: Set[int] = set(popped_gss.peek())
+                if not from_states:
+                    return
+                # Group by goto state to reduce isolate() calls
+                by_goto: Dict[int, Set[int]] = collections.defaultdict(set)
+                for from_state_id in from_states:
+                    goto_row = self.parser_table.table.get(from_state_id)
+                    if not goto_row:
+                        continue
+                    goto_state_id = goto_row.gotos.get(nt_id)
+                    if goto_state_id is None:
+                        continue
+                    by_goto[goto_state_id].add(from_state_id)
+                for goto_state_id, from_group in by_goto.items():
+                    iso_group = popped_gss.isolate_values(from_group)
+                    if iso_group.is_empty():
+                        continue
+                    goto_gss = iso_group.push(goto_state_id)
                     heads_by_state[goto_state_id].append(goto_gss)
 
             if isinstance(action, int):
                 handle_shift(action, state_gss)
             elif isinstance(action, Reduce):
-                handle_reduce(action, state_gss)
+                handle_reduce_grouped(action.len, action.nonterminal_id, state_gss)
             elif isinstance(action, Split):
                 if action.shift is not None:
                     handle_shift(action.shift, state_gss)
+                # For Split, reuse the same popped and from-states per length across all nonterminals
                 for length, nts in action.reduces.items():
-                    for nt_id, pids in nts.items():
-                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
+                    if not nts:
+                        continue
+                    for nt_id in nts.keys():
+                        handle_reduce_grouped(length, nt_id, state_gss)
 
         return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
 
@@ -433,20 +451,23 @@ class Model(GraphProvider):
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
+                # Cache popn per 'pop' value for this node to avoid recomputation
+                _popped_cache: Dict[int, GSS] = {}
                 for (pop, llm_bv), dests in children:
-                    popped = gss_node.popn(pop)
+                    popped = _popped_cache.get(pop)
+                    if popped is None:
+                        popped = gss_node.popn(pop)
+                        _popped_cache[pop] = popped
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
-                        matched: List[GSS] = []
-                        if not state_bv.is_empty():
-                            for sid_val in popped.peek():
-                                if state_bv.contains(sid_val):
-                                    matched.append(popped.isolate(sid_val))
-                        if not matched:
+                        if state_bv.is_empty():
                             continue
-
-                        child_gss_node = GSS.merge(matched)
+                        # Filter in a single pass using allowed states
+                        allowed_states: Set[int] = set(state_bv.to_indices())
+                        child_gss_node = popped.isolate_values(allowed_states)
+                        if child_gss_node.is_empty():
+                            continue
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
                         d = int(dest_idx)
                         existing = values.get(d)
