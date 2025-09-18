@@ -265,7 +265,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self._group(self._heads, func(self._acc))
 
         assert self._children is not None
-        new_children = {h: func(a) for h, a in self._children.items()}
+        # Memoize calls to func for each unique accumulator to preserve sharing.
+        unique_accs = set(self._children.values())
+        memo = {acc: func(acc) for acc in unique_accs}
+        new_children = {head: memo[acc] for head, acc in self._children.items()}
+
         # Re-canonicalize in case func makes some accumulators equal
         return self._from_heads_map(new_children)
 
