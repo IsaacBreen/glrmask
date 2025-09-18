@@ -2532,13 +2532,13 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn get_mask3(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
-        crate::debug!(1, "\n--- get_mask3 START ---");
-        crate::debug!(1, "GSS at start of get_mask3:");
+        crate::debug!(10, "\n--- get_mask3 START ---");
+        crate::debug!(10, "GSS at start of get_mask3:");
         crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(1, "Initial GSS stats: {:#?}", stats);
+        crate::debug!(10, "Initial GSS stats: {:#?}", stats);
         crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
         if GSS_LOGGING_ENABLED {
@@ -2577,7 +2577,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
-        crate::debug!(1, "\n--- Seeding work queue ---");
+        crate::debug!(10, "\n--- Seeding work queue ---");
 
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.active_state.stack.is_empty() {
@@ -2585,7 +2585,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
                 let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
-                crate::debug!(1, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, format_bv(&allowed_bv));
+                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, format_bv(&allowed_bv));
                 
                 initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
                     .and_modify(|(existing_glr, existing_bv)| {
@@ -2616,11 +2616,11 @@ impl<'a> GrammarConstraintState<'a> {
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
             |state, (pop, llm_token_bv_from_edge), dest_map| {
                 let (glr_s, allowed_bv) = state;
-                crate::debug!(1, "  - STEP: gss_ptr={:p}, allowed_bv={}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, format_bv(allowed_bv), pop, format_bv(llm_token_bv_from_edge));
+                crate::debug!(10, "  - STEP: gss_ptr={:p}, allowed_bv={}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, format_bv(allowed_bv), pop, format_bv(llm_token_bv_from_edge));
                 let popped = glr_s.active_state.stack.popn(*pop);
                 let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
                 if num_peeks > 0 {
-                    crate::debug!(1, "      - Popped GSS has {} peeks", num_peeks);
+                    crate::debug!(10, "      - Popped GSS has {} peeks", num_peeks);
                 }
                 let mut results = Vec::new();
 
@@ -2645,7 +2645,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;
 
                     if new_glr_s.is_ok() && !new_allowed_bv.is_empty() {
-                        crate::debug!(1, "      - Dest: idx={}, state_bv={}, matched={}, child_mask={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), format_bv(&new_allowed_bv), new_glr_s.active_state.stack);
+                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, child_mask={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), format_bv(&new_allowed_bv), new_glr_s.active_state.stack);
                         results.push((dest_idx.clone(), (new_glr_s, new_allowed_bv)));
                     }
                 }
@@ -2655,14 +2655,14 @@ impl<'a> GrammarConstraintState<'a> {
             |state1, state2| {
                 let (glr_s1, allowed_bv1) = state1;
                 let (glr_s2, allowed_bv2) = state2;
-                crate::debug!(1, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(&allowed_bv2));
+                crate::debug!(10, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(&allowed_bv2));
                 glr_s1.merge_with(glr_s2);
                 *allowed_bv1 |= allowed_bv2;
             },
             // process_fn: (precomputed_node_data, final_state_for_this_path)
             |precomputed_node_data, state| {
                 let (glr_s, allowed_bv) = state;
-                crate::debug!(1, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={}", precomputed_node_data as *const _, glr_s.active_state.stack, format_bv(allowed_bv));
+                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={}", precomputed_node_data as *const _, glr_s.active_state.stack, format_bv(allowed_bv));
 
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
@@ -2692,7 +2692,7 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= &final_allowed_tokens;
                         let after = final_mask_internal.borrow().len();
                         if after > before {
-                            crate::debug!(1, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&final_allowed_tokens));
+                            crate::debug!(10, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&final_allowed_tokens));
                         }
                     }
                 }
@@ -2707,11 +2707,11 @@ impl<'a> GrammarConstraintState<'a> {
         crate::profiler::print_summary();
         crate::profiler::reset();
 
-        crate::debug!(1, "\n--- get_mask3 END ---");
-        crate::debug!(1, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
+        crate::debug!(10, "\n--- get_mask3 END ---");
+        crate::debug!(10, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         crate::debug!(4, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-        crate::debug!(1, "Final mask mapped: {}", format_bv(&final_mask_mapped));
+        crate::debug!(10, "Final mask mapped: {}", format_bv(&final_mask_mapped));
         crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
 
         let t_end = std::time::Instant::now();

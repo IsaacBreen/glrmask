@@ -392,7 +392,7 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        print("\n--- Seeding work queue ---")
+        # print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
             new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
@@ -400,7 +400,7 @@ class Model(GraphProvider):
                 continue
             root_idx = int(root_idx)
 
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
+            # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
 
             existing = values.get(root_idx)
             if existing is not None:
@@ -433,7 +433,7 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
-        print("\n--- Main loop ---")
+        # print("\n--- Main loop ---")
         iter_count = 0
         while True:
             iter_count += 1
@@ -446,23 +446,23 @@ class Model(GraphProvider):
                 if node_indices:
                     break
             if not node_indices:
-                print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                # print(f"[{iter_count}] Loop finished: no more nodes to process.")
                 break  # nothing left to process
 
-            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+            # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
-                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                    # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 item = values.pop(node_idx, None)
                 if item is None:
-                    print(f"  - Node {node_idx}: SKIPPING (no value)")
+                    # print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
-                print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
+                # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -492,21 +492,21 @@ class Model(GraphProvider):
                         before_len = final_mask.len()
                         final_mask = final_mask.union(final_allowed_tokens)
                         after_len = final_mask.len()
-                        if after_len > before_len:
-                            print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
+                        # if after_len > before_len:
+                        #     print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
 
                 if llm_mask.is_empty():
                     stopped.add(node_idx)
-                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                    # print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
                 # if not children:
-                #     print(f"    - No children for node {node_idx}")
+                #     # print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
-                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                    # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
                     # Collect all pops from GSS parents
                     popped = popn_fast_py(gss_node, pop)
 
@@ -535,12 +535,12 @@ class Model(GraphProvider):
                             merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
-                            print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                            print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
+                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
-                            print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
-                            print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
+                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
 
                         enqueue(max_depth[d], d)
 
