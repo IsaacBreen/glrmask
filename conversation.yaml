@@ -560,19 +560,28 @@ local_system:
               root: _A[T] = _A_ROOT
 
               for gss in gss_list:
-                  # To merge different GSS types, we convert them to a common
-                  # representation of (stack_values, acc) pairs via ReferenceGSS.
-                  ref_gss = gss.to_reference_impl()
-                  for vals, acc in ref_gss._stacks:
-                      # Reconstruct the _A node structure for this stack
-                      cur = root
-                      for v in vals:
-                          cur = _ACell(cur, v)
+                  if isinstance(gss, LeveledGSS):
+                      # Fast path for LeveledGSS instances
+                      for head, acc in gss._iter_heads():
+                          if head in all_heads:
+                              all_heads[head] = all_heads[head].merge(acc)
+                          else:
+                              all_heads[head] = acc
+                  else:
+                      # Slow path for other GSS types
+                      # To merge different GSS types, we convert them to a common
+                      # representation of (stack_values, acc) pairs via ReferenceGSS.
+                      ref_gss = gss.to_reference_impl()
+                      for vals, acc in ref_gss._stacks:
+                          # Reconstruct the _A node structure for this stack
+                          cur = root
+                          for v in vals:
+                              cur = _ACell(cur, v)
 
-                      if cur in all_heads:
-                          all_heads[cur] = all_heads[cur].merge(acc)
-                      else:
-                          all_heads[cur] = acc
+                          if cur in all_heads:
+                              all_heads[cur] = all_heads[cur].merge(acc)
+                          else:
+                              all_heads[cur] = acc
 
               return LeveledGSS._from_heads_map(all_heads)
 
@@ -581,6 +590,18 @@ local_system:
           # -------------------------
 
           def __eq__(self, other: object) -> bool:
+              if isinstance(other, LeveledGSS):
+                  # Fast path for LeveledGSS vs LeveledGSS
+                  if self._kind != other._kind:
+                      return False
+                  if self._kind == _BKind.EMPTY:
+                      return True
+                  if self._kind == _BKind.GROUP:
+                      return self._heads == other._heads and self._acc == other._acc
+                  if self._kind == _BKind.BRANCH:
+                      return self._children == other._children
+                  return False  # Should be unreachable
+
               if not isinstance(other, GSS):
                   return NotImplemented
               # Compare via ReferenceGSS for robust, canonical semantics
@@ -1557,12 +1578,41 @@ local_system:
 
           @staticmethod
           def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-              all_heads: Dict[_A[T], Acc] = {}
-              root: _A[T] = _A_ROOT
+              # Stage 1: Partition GSSs by type and structure for optimization.
+              # We can efficiently merge GROUPs that share the same set of heads.
+              groups_by_heads: Dict[frozenset[_A[T]], List[Acc]] = defaultdict(list)
+              others: List[GSS[T, Acc]] = []
 
               for gss in gss_list:
                   if isinstance(gss, LeveledGSS):
-                      # Fast path for LeveledGSS instances
+                      if gss._kind == _BKind.GROUP:
+                          assert gss._heads is not None and gss._acc is not None
+                          groups_by_heads[gss._heads].append(gss._acc)
+                      elif gss._kind != _BKind.EMPTY:
+                          # This will be BRANCH GSSs. EMPTY GSSs are ignored.
+                          others.append(gss)
+                  else:
+                      others.append(gss)
+
+              # Stage 2: Build the initial `all_heads` from the partitioned GROUPs.
+              all_heads: Dict[_A[T], Acc] = {}
+              for heads, acc_list in groups_by_heads.items():
+                  if not acc_list:
+                      continue
+                  # Merge all accumulators for this single head structure.
+                  merged_acc = reduce(lambda a, b: a.merge(b), acc_list)
+                  # Apply this merged accumulator to all heads in the set.
+                  for head in heads:
+                      if head in all_heads:
+                          all_heads[head] = all_heads[head].merge(merged_acc)
+                      else:
+                          all_heads[head] = merged_acc
+
+              # Stage 3: Merge the remaining GSSs (BRANCH, other types) head by head.
+              root: _A[T] = _A_ROOT
+              for gss in others:
+                  if isinstance(gss, LeveledGSS):
+                      # Fast path for remaining LeveledGSS (i.e., BRANCH)
                       for head, acc in gss._iter_heads():
                           if head in all_heads:
                               all_heads[head] = all_heads[head].merge(acc)
@@ -1570,8 +1620,6 @@ local_system:
                               all_heads[head] = acc
                   else:
                       # Slow path for other GSS types
-                      # To merge different GSS types, we convert them to a common
-                      # representation of (stack_values, acc) pairs via ReferenceGSS.
                       ref_gss = gss.to_reference_impl()
                       for vals, acc in ref_gss._stacks:
                           # Reconstruct the _A node structure for this stack
@@ -1583,7 +1631,6 @@ local_system:
                               all_heads[cur] = all_heads[cur].merge(acc)
                           else:
                               all_heads[cur] = acc
-
               return LeveledGSS._from_heads_map(all_heads)
 
           # -------------------------
@@ -2642,19 +2689,28 @@ messages:
               root: _A[T] = _A_ROOT
 
               for gss in gss_list:
-                  # To merge different GSS types, we convert them to a common
-                  # representation of (stack_values, acc) pairs via ReferenceGSS.
-                  ref_gss = gss.to_reference_impl()
-                  for vals, acc in ref_gss._stacks:
-                      # Reconstruct the _A node structure for this stack
-                      cur = root
-                      for v in vals:
-                          cur = _ACell(cur, v)
+                  if isinstance(gss, LeveledGSS):
+                      # Fast path for LeveledGSS instances
+                      for head, acc in gss._iter_heads():
+                          if head in all_heads:
+                              all_heads[head] = all_heads[head].merge(acc)
+                          else:
+                              all_heads[head] = acc
+                  else:
+                      # Slow path for other GSS types
+                      # To merge different GSS types, we convert them to a common
+                      # representation of (stack_values, acc) pairs via ReferenceGSS.
+                      ref_gss = gss.to_reference_impl()
+                      for vals, acc in ref_gss._stacks:
+                          # Reconstruct the _A node structure for this stack
+                          cur = root
+                          for v in vals:
+                              cur = _ACell(cur, v)
 
-                      if cur in all_heads:
-                          all_heads[cur] = all_heads[cur].merge(acc)
-                      else:
-                          all_heads[cur] = acc
+                          if cur in all_heads:
+                              all_heads[cur] = all_heads[cur].merge(acc)
+                          else:
+                              all_heads[cur] = acc
 
               return LeveledGSS._from_heads_map(all_heads)
 
@@ -2663,6 +2719,18 @@ messages:
           # -------------------------
 
           def __eq__(self, other: object) -> bool:
+              if isinstance(other, LeveledGSS):
+                  # Fast path for LeveledGSS vs LeveledGSS
+                  if self._kind != other._kind:
+                      return False
+                  if self._kind == _BKind.EMPTY:
+                      return True
+                  if self._kind == _BKind.GROUP:
+                      return self._heads == other._heads and self._acc == other._acc
+                  if self._kind == _BKind.BRANCH:
+                      return self._children == other._children
+                  return False  # Should be unreachable
+
               if not isinstance(other, GSS):
                   return NotImplemented
               # Compare via ReferenceGSS for robust, canonical semantics
@@ -3111,8 +3179,10 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/test_spec.py
-  - user: Modify `leveled_impl.py` to *not* use `to_reference_impl` for `__eq__` and
-      `merge`. To do so is abhorrently slow.
+  - user: Kind of the point of GSS is sharing nodes. The fast path in `merge` can
+      be made much faster by taking advantage of this fact. We don't need to merge
+      two nodes and iterate all the way down if we know those nodes are the same.
+      If two nodes are the same, don't merge them.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3131,25 +3201,52 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to optimize the `LeveledGSS` implementation, followed by the corresponding git diff.
+      Based on your request to optimize the `merge` method by better leveraging structural sharing, I've updated the implementation in `LeveledGSS`. The new approach partitions the GSS instances being merged. It specifically identifies `GROUP` variants that share the exact same set of head nodes and merges their accumulators in a batch, reducing redundant iterations. Other GSS variants are then merged into the result.
+
+      Here are the step-by-step instructions to apply this change.
 
       ### Step-by-step Instructions
 
-      I will modify `python/gss_tester/leveled_impl.py` to implement faster versions of the `merge` and `__eq__` methods. These changes introduce a "fast path" for operations between `LeveledGSS` instances, avoiding the slow `to_reference_impl()` conversion, while retaining it as a fallback for compatibility with other `GSS` types.
-
-      1.  **Open the file `python/gss_tester/leveled_impl.py`.**
-
-      2.  **Navigate to the `merge` static method (around line 308).** Replace the entire method with the following code. This adds a fast path to efficiently merge other `LeveledGSS` instances by directly accessing their internal head-to-accumulator mappings. For other GSS types, it retains the previous, slower logic of converting to a `ReferenceGSS` to ensure compatibility.
+      1.  **Open the file `python/gss_tester/leveled_impl.py`**.
+      2.  **Navigate to the `merge` static method** inside the `LeveledGSS` class (around line 300).
+      3.  **Replace the entire body of the `merge` method** with the following optimized implementation:
 
           ```python
-          @staticmethod
-          def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-              all_heads: Dict[_A[T], Acc] = {}
-              root: _A[T] = _A_ROOT
+              # Stage 1: Partition GSSs by type and structure for optimization.
+              # We can efficiently merge GROUPs that share the same set of heads.
+              groups_by_heads: Dict[frozenset[_A[T]], List[Acc]] = defaultdict(list)
+              others: List[GSS[T, Acc]] = []
 
               for gss in gss_list:
                   if isinstance(gss, LeveledGSS):
-                      # Fast path for LeveledGSS instances
+                      if gss._kind == _BKind.GROUP:
+                          assert gss._heads is not None and gss._acc is not None
+                          groups_by_heads[gss._heads].append(gss._acc)
+                      elif gss._kind != _BKind.EMPTY:
+                          # This will be BRANCH GSSs. EMPTY GSSs are ignored.
+                          others.append(gss)
+                  else:
+                      others.append(gss)
+
+              # Stage 2: Build the initial `all_heads` from the partitioned GROUPs.
+              all_heads: Dict[_A[T], Acc] = {}
+              for heads, acc_list in groups_by_heads.items():
+                  if not acc_list:
+                      continue
+                  # Merge all accumulators for this single head structure.
+                  merged_acc = reduce(lambda a, b: a.merge(b), acc_list)
+                  # Apply this merged accumulator to all heads in the set.
+                  for head in heads:
+                      if head in all_heads:
+                          all_heads[head] = all_heads[head].merge(merged_acc)
+                      else:
+                          all_heads[head] = merged_acc
+
+              # Stage 3: Merge the remaining GSSs (BRANCH, other types) head by head.
+              root: _A[T] = _A_ROOT
+              for gss in others:
+                  if isinstance(gss, LeveledGSS):
+                      # Fast path for remaining LeveledGSS (i.e., BRANCH)
                       for head, acc in gss._iter_heads():
                           if head in all_heads:
                               all_heads[head] = all_heads[head].merge(acc)
@@ -3157,8 +3254,6 @@ messages:
                               all_heads[head] = acc
                   else:
                       # Slow path for other GSS types
-                      # To merge different GSS types, we convert them to a common
-                      # representation of (stack_values, acc) pairs via ReferenceGSS.
                       ref_gss = gss.to_reference_impl()
                       for vals, acc in ref_gss._stacks:
                           # Reconstruct the _A node structure for this stack
@@ -3174,59 +3269,78 @@ messages:
               return LeveledGSS._from_heads_map(all_heads)
           ```
 
-      3.  **Navigate to the `__eq__` method (around line 333).** Replace the entire method with the following code. This adds a fast path for comparing two `LeveledGSS` instances by checking their internal state directly. This avoids the costly conversion to `ReferenceGSS` for this common case. The fallback comparison via `ReferenceGSS` is kept for comparing with other GSS implementation types.
+      ### Git Diff
 
-          ```python
-          def __eq__(self, other: object) -> bool:
-              if isinstance(other, LeveledGSS):
-                  # Fast path for LeveledGSS vs LeveledGSS
-                  if self._kind != other._kind:
-                      return False
-                  if self._kind == _BKind.EMPTY:
-                      return True
-                  if self._kind == _BKind.GROUP:
-                      return self._heads == other._heads and self._acc == other._acc
-                  if self._kind == _BKind.BRANCH:
-                      return self._children == other._children
-                  return False  # Should be unreachable
-
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              # Compare via ReferenceGSS for robust, canonical semantics
-              return self.to_reference_impl() == other.to_reference_impl()
-          ```
-
-      ### Git Diffs
-
-      Here is the git diff to apply these changes directly.
+      Here is the change in `git diff` format for you to apply.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 911111c..1111111 100644
+      index 1111111..2222222 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -307,28 +307,34 @@
+      @@ -300,33 +300,58 @@
+       
            @staticmethod
            def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-               all_heads: Dict[_A[T], Acc] = {}
-               root: _A[T] = _A_ROOT
-       
-               for gss in gss_list:
-      -            # To merge different GSS types, we convert them to a common
-      -            # representation of (stack_values, acc) pairs via ReferenceGSS.
-      -            ref_gss = gss.to_reference_impl()
-      -            for vals, acc in ref_gss._stacks:
-      -                # Reconstruct the _A node structure for this stack
-      -                cur = root
-      -                for v in vals:
-      -                    cur = _ACell(cur, v)
+      -        all_heads: Dict[_A[T], Acc] = {}
+      -        root: _A[T] = _A_ROOT
       -
-      -                if cur in all_heads:
-      -                    all_heads[cur] = all_heads[cur].merge(acc)
-      -                else:
-      -                    all_heads[cur] = acc
+      +        # Stage 1: Partition GSSs by type and structure for optimization.
+      +        # We can efficiently merge GROUPs that share the same set of heads.
+      +        groups_by_heads: Dict[frozenset[_A[T]], List[Acc]] = defaultdict(list)
+      +        others: List[GSS[T, Acc]] = []
+      +
+               for gss in gss_list:
+                   if isinstance(gss, LeveledGSS):
+      -                # Fast path for LeveledGSS instances
+      -                for head, acc in gss._iter_heads():
+      -                    if head in all_heads:
+      -                        all_heads[head] = all_heads[head].merge(acc)
+      -                    else:
+      -                        all_heads[head] = acc
+      +                if gss._kind == _BKind.GROUP:
+      +                    assert gss._heads is not None and gss._acc is not None
+      +                    groups_by_heads[gss._heads].append(gss._acc)
+      +                elif gss._kind != _BKind.EMPTY:
+      +                    # This will be BRANCH GSSs. EMPTY GSSs are ignored.
+      +                    others.append(gss)
+                   else:
+      -                # Slow path for other GSS types
+      -                # To merge different GSS types, we convert them to a common
+      -                # representation of (stack_values, acc) pairs via ReferenceGSS.
+      -                ref_gss = gss.to_reference_impl()
+      -                for vals, acc in ref_gss._stacks:
+      -                    # Reconstruct the _A node structure for this stack
+      -                    cur = root
+      -                    for v in vals:
+      -                        cur = _ACell(cur, v)
+      -
+      -                    if cur in all_heads:
+      -                        all_heads[cur] = all_heads[cur].merge(acc)
+      -                    else:
+      -                        all_heads[cur] = acc
+      -
+      +                others.append(gss)
+      +
+      +        # Stage 2: Build the initial `all_heads` from the partitioned GROUPs.
+      +        all_heads: Dict[_A[T], Acc] = {}
+      +        for heads, acc_list in groups_by_heads.items():
+      +            if not acc_list:
+      +                continue
+      +            # Merge all accumulators for this single head structure.
+      +            merged_acc = reduce(lambda a, b: a.merge(b), acc_list)
+      +            # Apply this merged accumulator to all heads in the set.
+      +            for head in heads:
+      +                if head in all_heads:
+      +                    all_heads[head] = all_heads[head].merge(merged_acc)
+      +                else:
+      +                    all_heads[head] = merged_acc
+      +
+      +        # Stage 3: Merge the remaining GSSs (BRANCH, other types) head by head.
+      +        root: _A[T] = _A_ROOT
+      +        for gss in others:
       +            if isinstance(gss, LeveledGSS):
-      +                # Fast path for LeveledGSS instances
+      +                # Fast path for remaining LeveledGSS (i.e., BRANCH)
       +                for head, acc in gss._iter_heads():
       +                    if head in all_heads:
       +                        all_heads[head] = all_heads[head].merge(acc)
@@ -3234,8 +3348,6 @@ messages:
       +                        all_heads[head] = acc
       +            else:
       +                # Slow path for other GSS types
-      +                # To merge different GSS types, we convert them to a common
-      +                # representation of (stack_values, acc) pairs via ReferenceGSS.
       +                ref_gss = gss.to_reference_impl()
       +                for vals, acc in ref_gss._stacks:
       +                    # Reconstruct the _A node structure for this stack
@@ -3247,37 +3359,9 @@ messages:
       +                        all_heads[cur] = all_heads[cur].merge(acc)
       +                    else:
       +                        all_heads[cur] = acc
-       
                return LeveledGSS._from_heads_map(all_heads)
        
            # -------------------------
-           # Dunder methods
-           # -------------------------
-       
-           def __eq__(self, other: object) -> bool:
-      -        if not isinstance(other, GSS):
-      -            return NotImplemented
-      -        # Compare via ReferenceGSS for robust, canonical semantics
-      -        return self.to_reference_impl() == other.to_reference_impl()
-      +        if isinstance(other, LeveledGSS):
-      +            # Fast path for LeveledGSS vs LeveledGSS
-      +            if self._kind != other._kind:
-      +                return False
-      +            if self._kind == _BKind.EMPTY:
-      +                return True
-      +            if self._kind == _BKind.GROUP:
-      +                return self._heads == other._heads and self._acc == other._acc
-      +            if self._kind == _BKind.BRANCH:
-      +                return self._children == other._children
-      +            return False  # Should be unreachable
-      +
-      +        if not isinstance(other, GSS):
-      +            return NotImplemented
-      +        # Compare via ReferenceGSS for robust, canonical semantics
-      +        return self.to_reference_impl() == other.to_reference_impl()
-       
-           def __repr__(self) -> str:
-               if self._kind == _BKind.EMPTY:
 
       ```
     metadata:
@@ -3290,7 +3374,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Optimize LeveledGSS merge and eq
-      with fast paths"'
+  - user: 'Changes committed with message: "LeveledGSS: Optimize merge by partitioning
+      and grouping common GROUP variants"'
     metadata:
 ...
