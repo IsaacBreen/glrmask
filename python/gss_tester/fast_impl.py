@@ -77,6 +77,7 @@ class FastGSS(GSS[T, Acc]):
             heads.add(root)
 
         for stack_list, acc in stacks:
+            stack_list.reverse()
             current_node = root
             stack_tuple = tuple(stack_list)
 

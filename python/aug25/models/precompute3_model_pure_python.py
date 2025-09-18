@@ -20,10 +20,6 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     def acc_factory():
         return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
 
-    if not stacks_for_from_stacks:
-        # Handle empty GSS case
-        return FastGSS.initial(acc_factory)
-
     return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
 
 
