@@ -373,6 +373,11 @@ class Model(GraphProvider):
             for sid, gss_list in new_states.items()
             if gss_list
         }
+        print("merged_states before filtering empties:")
+        for sid, gss in merged_states.items():
+            print(f"  sid={sid}, gss={gss}")
+
+        merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
         self.state = merged_states
 
