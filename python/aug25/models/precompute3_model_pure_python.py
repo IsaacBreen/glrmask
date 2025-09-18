@@ -7,10 +7,9 @@ from dataclasses import dataclass, field
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
-from gss_tester.interface import GSS
-from gss_tester.leveled_impl import FastGSS
+from gss_tester.leveled_impl import LeveledGSS as GSS
 
-def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> GSS:
     flattened_stacks = rust_gss_node.flatten()
     
     stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
@@ -23,7 +22,7 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
         root_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
         stacks_for_from_stacks.append(([], root_acc))
 
-    return FastGSS.from_stacks(stacks_for_from_stacks)
+    return GSS.from_stacks(stacks_for_from_stacks)
 
 
 @dataclass(frozen=True)
@@ -87,7 +86,7 @@ class Model(GraphProvider):
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
         self.tokenizer: Optional[ffi.Regex] = None
         self.parser_table: Optional[ParserTable] = None
-        self.state: Dict[int, FastGSS] = {}
+        self.state: Dict[int, GSS] = {}
         self.internal_to_original_map: Dict[int, int] = {}
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
@@ -176,7 +175,7 @@ class Model(GraphProvider):
         model.parser_table = ParserTable(start_state_id, py_table)
 
         initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-        initial_gss = FastGSS.from_stacks([([], initial_acc)])
+        initial_gss = GSS.from_stacks([([], initial_acc)])
         initial_gss = initial_gss.push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -189,7 +188,7 @@ class Model(GraphProvider):
 
         return model
 
-    def _prune_disallowed_terminals(self, gss: FastGSS, terminals_map: Dict[int, ffi.Bitset]) -> FastGSS:
+    def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             allowed_terminals_l2 = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
@@ -199,7 +198,7 @@ class Model(GraphProvider):
             return True
         return gss.prune(predicate)
 
-    def _map_allowed_terminals_tokenizer_states(self, gss: FastGSS, state_map: Dict[int, int]) -> FastGSS:
+    def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
             old_l2 = acc.terminals_union
             new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
@@ -215,7 +214,7 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_map)
 
-    def _disallow_terminal_in_state(self, gss: FastGSS, state_id: int, terminal_id: int) -> FastGSS:
+    def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         """
         Mirror Rust: disallow_terminals_and_prune_arc over a single tokenizer state
         by clearing 'terminal_id' for that specific 'state_id' in the L2 bitset of the GSS acc.
@@ -298,7 +297,7 @@ class Model(GraphProvider):
 
         # =================================
 
-        temp_states: Dict[int, FastGSS] = {}
+        temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
 
@@ -324,7 +323,7 @@ class Model(GraphProvider):
         current_state_for_processing = temp_states
         # --- End: Added pre-processing steps ---
 
-        new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+        new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
 
         q = collections.deque()
         for tokenizer_sid, gss in current_state_for_processing.items():
@@ -369,7 +368,7 @@ class Model(GraphProvider):
                 new_states[end_state].append(gss)
 
         merged_states = {
-            sid: FastGSS.merge(gss_list, merge_acc)
+            sid: GSS.merge(gss_list, merge_acc)
             for sid, gss_list in new_states.items()
             if gss_list
         }
@@ -390,13 +389,13 @@ class Model(GraphProvider):
         assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
         assert self.state == expected_state_map, f"GSS state mismatch after commit."
 
-    def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-        heads_by_state: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+    def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+        heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
 
         shifted_gsses = []
-        reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
+        reductions_to_do: Dict[Reduce, List[GSS]] = collections.defaultdict(list)
 
         for state_id, state_gsss in heads_by_state.items():
             for state_gss in state_gsss:
@@ -424,16 +423,16 @@ class Model(GraphProvider):
                             handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
             for reduce_action, gss_list in reductions_to_do.items():
-                merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+                merged_popped_gss = GSS.merge(gss_list, merge_acc)
                 for from_state_id in merged_popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
         if not shifted_gsses:
             # Return an empty GSS, preserving the structure and root from the input GSS.
-            return FastGSS(frozenset([gss._root]), gss._root, gss._child_to_parents, gss._path_cache)
+            return GSS(frozenset([gss._root]), gss._root, gss._child_to_parents, gss._path_cache)
         else:
-            return FastGSS.merge(shifted_gsses, merge_acc)
+            return GSS.merge(shifted_gsses, merge_acc)
 
     def get_mask(self) -> RangeSet:
         """
@@ -461,8 +460,8 @@ class Model(GraphProvider):
 
         final_mask = ffi.Bitset.zeros()
 
-        # node_idx -> (FastGSS, Bitset)
-        values: Dict[int, Tuple[FastGSS, ffi.Bitset]] = {}
+        # node_idx -> (GSS, Bitset)
+        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -486,7 +485,7 @@ class Model(GraphProvider):
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = FastGSS.merge([existing_gss, gss], merge_acc)
+                merged_gss = GSS.merge([existing_gss, gss], merge_acc)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -604,7 +603,7 @@ class Model(GraphProvider):
                             continue
 
                         # Merge matched parent GSS nodes
-                        child_gss_node = FastGSS.merge(matched, merge_acc)
+                        child_gss_node = GSS.merge(matched, merge_acc)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -613,7 +612,7 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = FastGSS.merge([existing_gss, child_gss_node], merge_acc)
+                            merged_gss = GSS.merge([existing_gss, child_gss_node], merge_acc)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                             # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
