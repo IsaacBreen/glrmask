@@ -134,16 +134,90 @@ class FastGSS(GSS[T, Acc]):
             new_heads.add(new_node)
             memo[head] = new_node
             
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache)
+
+    def deep_apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
+        new_child_to_parents = {}
+        memo = {}  # old_node -> new_node
+
+        def _rebuild_recursive(node: _Node[T, Acc]) -> _Node[T, Acc]:
+            if node in memo:
+                return memo[node]
+
+            new_acc = func(node.acc)
+            
+            if node == self._root:
+                new_root = _Node(acc=new_acc, depth=0)
+                memo[node] = new_root
+                return new_root
+
+            new_parents = set()
+            if node in self._child_to_parents:
+                for value, parent in self._child_to_parents[node]:
+                    new_parent = _rebuild_recursive(parent)
+                    new_parents.add((value, new_parent))
+            
+            new_node = _Node(acc=new_acc, depth=node.depth)
+            if new_parents:
+                new_child_to_parents[new_node] = new_parents
+            memo[node] = new_node
+            return new_node
+
+        new_heads = {_rebuild_recursive(head) for head in self._heads}
+        new_root = memo.get(self._root)
+        if not new_root: # Should not happen if we start from a valid GSS
+            new_root = _rebuild_recursive(self._root)
+
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, new_root, new_child_to_parents, {})
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-        new_heads = {head for head in self._heads if predicate(head.acc)}
+        new_child_to_parents = {}
+        memo = {}  # old_node -> new_node or None
+
+        def _rebuild_recursive(node: _Node[T, Acc]) -> Optional[_Node[T, Acc]]:
+            if node in memo:
+                return memo[node]
+
+            if not predicate(node.acc):
+                memo[node] = None
+                return None
+
+            if node == self._root:
+                new_root = _Node(acc=node.acc, depth=0)
+                memo[node] = new_root
+                return new_root
+
+            new_parents = set()
+            if node in self._child_to_parents:
+                for value, parent in self._child_to_parents[node]:
+                    new_parent = _rebuild_recursive(parent)
+                    if new_parent:
+                        new_parents.add((value, new_parent))
+            
+            if not new_parents:
+                memo[node] = None
+                return None
+
+            new_node = _Node(acc=node.acc, depth=node.depth)
+            new_child_to_parents[new_node] = new_parents
+            memo[node] = new_node
+            return new_node
+
+        new_heads = set()
+        for head in self._heads:
+            new_head = _rebuild_recursive(head)
+            if new_head:
+                new_heads.add(new_head)
 
         if not new_heads:
             # If all stacks are pruned, the result is an empty GSS (represented by the root).
-            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+            return FastGSS.initial(self._acc_default_factory)
 
-        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+        new_root = memo.get(self._root)
+        if not new_root:
+            return FastGSS.initial(self._acc_default_factory)
+
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, new_root, new_child_to_parents, {})
 
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
