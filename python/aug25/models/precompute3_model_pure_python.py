@@ -36,26 +36,19 @@ class ParserTable:
 @dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
-    llm_tokens_union: ffi.Bitset
 
     def __hash__(self):
-        return hash((self.terminals_union, self.llm_tokens_union))
+        return hash(self.terminals_union)
 
     def to_json_serializable(self):
-        return {
-            "terminals_union": self.terminals_union.to_json_serializable(),
-            "llm_tokens_union": self.llm_tokens_union.to_json_serializable()
-        }
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
 
     def __repr__(self):
-        return f"PyAcc({self.terminals_union}, {self.llm_tokens_union})"
+        return f"PyAcc({self.terminals_union})"
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(
-        terminals_union=acc1.terminals_union.union(acc2.terminals_union),
-        llm_tokens_union=acc1.llm_tokens_union.union(acc2.llm_tokens_union)
-    )
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
@@ -67,17 +60,14 @@ def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
         result = result.pop()
     return result
 
-def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode, model: 'Model') -> FastGSS:
+def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     memo_nodes: Dict[int, PyGSSNodeInternal] = {}
     child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
     q = collections.deque([rust_gss_node])
     visited_rust_ptrs = {rust_gss_node.ptr()}
     while q:
         rust_node = q.popleft()
-        py_acc = PyAcc(
-            terminals_union=rust_node.local_acc_terminals_union(),
-            llm_tokens_union=rust_node.local_acc_llm_tokens_union()
-        )
+        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
         py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
         memo_nodes[rust_node.ptr()] = py_node
         for _, pred_rust_node in rust_node.predecessors():
@@ -97,10 +87,7 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode, model: 'Model') -
                 q.append(pred_rust_node)
     py_head_node = memo_nodes[rust_gss_node.ptr()]
     def acc_factory():
-        return PyAcc(
-            terminals_union=ffi.HybridL2Bitset.all(),
-            llm_tokens_union=model.all_internal_llm_tokens_bitset
-        )
+        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
     py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
     return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
 
@@ -210,10 +197,7 @@ class Model(GraphProvider):
         model.parser_table = ParserTable(start_state_id, py_table)
 
         def acc_factory():
-            return PyAcc(
-                terminals_union=ffi.HybridL2Bitset.all(),
-                llm_tokens_union=model.all_internal_llm_tokens_bitset
-            )
+            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
         initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -274,65 +258,6 @@ class Model(GraphProvider):
         if not token_bytes:
             self.state = {}
             return
-
-        # --- Start of new logic ---
-        # 1. reset_llm_tokens
-        def reset_llm(acc: PyAcc) -> PyAcc:
-            return PyAcc(
-                terminals_union=acc.terminals_union,
-                llm_tokens_union=self.all_internal_llm_tokens_bitset
-            )
-
-        temp_state = {}
-        for sid, gss in self.state.items():
-            temp_state[sid] = gss.deep_apply(reset_llm)
-        self.state = temp_state
-
-        # 2. Build state_map and terminals_map
-        state_map: Dict[int, int] = {}
-        terminals_map: Dict[int, ffi.Bitset] = {}
-        for tokenizer_state_id in self.state.keys():
-            end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_state_id)
-            if end_state is not None:
-                state_map[tokenizer_state_id] = end_state
-
-            terminals = ffi.Bitset.zeros()
-            for terminal_id, _ in matches:
-                terminals.insert(terminal_id)
-            terminals_map[tokenizer_state_id] = terminals
-
-        # 3. prune_disallowed_terminals
-        def check_and_prune(acc: PyAcc) -> bool:
-            for state_id, matched_bv in terminals_map.items():
-                allowed_terminals_union = acc.terminals_union.get_l2_bitset(state_id)
-                if not matched_bv.is_subset(allowed_terminals_union):
-                    return False # prune
-            return True # keep
-
-        temp_state = {}
-        for sid, gss in self.state.items():
-            temp_state[sid] = gss.prune(check_and_prune)
-        self.state = temp_state
-
-        # 4. map_allowed_terminals_tokenizer_states
-        def map_terminals(acc: PyAcc) -> PyAcc:
-            new_terminals_l2_bitset = ffi.HybridL2Bitset.all()
-            new_terminals_btreemap = collections.defaultdict(ffi.Bitset.zeros)
-
-            for old_state_id, new_state_id in state_map.items():
-                bv_source = acc.terminals_union.get_l2_bitset(old_state_id)
-                new_terminals_btreemap[new_state_id] = new_terminals_btreemap[new_state_id].union(bv_source)
-
-            for state_id, bv in new_terminals_btreemap.items():
-                new_terminals_l2_bitset.insert_l2_bitset(state_id, bv)
-
-            return PyAcc(terminals_union=new_terminals_l2_bitset, llm_tokens_union=acc.llm_tokens_union)
-
-        temp_state = {}
-        for sid, gss in self.state.items():
-            temp_state[sid] = gss.deep_apply(map_terminals)
-        self.state = temp_state
-        # --- End of new logic ---
 
         new_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
 
@@ -439,7 +364,7 @@ class Model(GraphProvider):
         print("GSS at start of get_mask:")
         state_map = self.state
 
-        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss, self) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
 
         print(f"state_map:")
         for sid, gss in state_map.items():
