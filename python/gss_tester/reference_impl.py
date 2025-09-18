@@ -18,6 +18,11 @@ class ReferenceGSS(GSS[T, Acc]):
         """Creates a GSS with a single empty stack and a default accumulator."""
         return cls([], acc_default_factory)
 
+    @classmethod
+    def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'ReferenceGSS[T, Acc]':
+        """Creates a GSS from a list of explicit stacks."""
+        return cls(stacks, acc_default_factory)
+
     def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
         new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
         return ReferenceGSS(new_stacks, self._acc_default_factory)

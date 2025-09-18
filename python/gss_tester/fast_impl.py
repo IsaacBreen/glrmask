@@ -61,6 +61,50 @@ class FastGSS(GSS[T, Acc]):
             path_cache={root.id: frozenset([tuple()])}
         )
 
+    @classmethod
+    def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'FastGSS[T, Acc]':
+        """Creates a GSS from a list of explicit stacks by building the node graph."""
+        root = _Node(acc=acc_default_factory(), depth=0)
+        child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
+        path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
+        heads: Set[_Node[T, Acc]] = set()
+
+        # Memoize nodes created for stack prefixes to ensure structure is shared.
+        # key: tuple(stack_prefix), value: _Node
+        memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
+
+        if not stacks:
+            heads.add(root)
+
+        for stack_list, acc in stacks:
+            current_node = root
+            stack_tuple = tuple(stack_list)
+
+            # Traverse/create nodes for the path
+            for i, value in enumerate(stack_tuple):
+                prefix = stack_tuple[:i + 1]
+                if prefix in memoized_nodes:
+                    current_node = memoized_nodes[prefix]
+                else:
+                    # Create a new node. Its accumulator is temporary; only head accumulators matter.
+                    new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
+                    child_to_parents[new_node] = {(value, current_node)}
+                    memoized_nodes[prefix] = new_node
+                    current_node = new_node
+            
+            # Now `current_node` is the shared node for this stack path.
+            # We need a head with the specific accumulator.
+            if current_node.acc == acc:
+                heads.add(current_node)
+            else:
+                # Create a new head node with the correct accumulator but same structure.
+                new_head = _Node(acc=acc, depth=current_node.depth)
+                if current_node in child_to_parents:
+                    child_to_parents[new_head] = child_to_parents[current_node]
+                heads.add(new_head)
+
+        return cls(frozenset(heads), acc_default_factory, root, child_to_parents, path_cache)
+
     def push(self, value: T) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
         new_child_to_parents = self._child_to_parents.copy()

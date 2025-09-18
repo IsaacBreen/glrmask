@@ -14,6 +14,12 @@ class GSS(ABC, Generic[T, Acc]):
         """Creates an initial GSS, typically with one empty stack."""
         pass
 
+    @classmethod
+    @abstractmethod
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]], acc_default_factory: Callable[[], Acc]) -> 'GSS[T, Acc]':
+        """Creates a GSS from a list of explicit stacks."""
+        pass
+
     @abstractmethod
     def push(self, value: T) -> 'GSS[T, Acc]':
         """Pushes a value onto all active stack heads, returning a new GSS state."""
