@@ -432,11 +432,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     curr = nxt
                 else:
                     curr = nxt
-                    # Best-effort cache fill if missing
-                    if nxt.id not in path_cache:
-                        # Reconstruct from parent_of
-                        ppath = _reconstruct_path(nxt, parent_of, path_cache)
-                        path_cache[nxt.id] = ppath
+                    # When traversing an existing node, we must update curr_path
+                    # to ensure the next segment is built on the correct prefix.
+                    if curr.id not in path_cache:
+                        # This is a best-effort cache fill.
+                        path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+                    curr_path = path_cache[curr.id]
                 node = curr
             return node
 

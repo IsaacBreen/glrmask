@@ -2,11 +2,12 @@ local_system:
   attached_files:
     - python/gss_tester/__init__.py
     - python/gss_tester/analyzer.py
-    - python/gss_tester/fast_impl.py
     - python/gss_tester/interface.py
+    - python/gss_tester/leveled_impl.py
     - python/gss_tester/reference_impl.py
     - python/gss_tester/runner.py
     - python/gss_tester/test_spec.py
+    - python/gss_tester/run_tests.sh
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -142,314 +143,6 @@ local_system:
 
       if __name__ == "__main__":
           main()
-    python/gss_tester/fast_impl.py: |
-      import itertools
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
-
-      from .interface import GSS, T, Acc
-
-      class _Node(Generic[T, Acc]):
-          """Represents a node in the GSS graph. Each node is a unique state."""
-          _id_counter = itertools.count()
-
-          def __init__(self, acc: Acc, depth: int):
-              self.id = next(self._id_counter)
-              self.acc = acc
-              self.depth = depth
-          
-          def __hash__(self):
-              return self.id
-
-          def __eq__(self, other):
-              if not isinstance(other, _Node):
-                  return NotImplemented
-              return self.id == other.id
-          
-          def __repr__(self):
-              return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
-
-          def __str__(self):
-              return self.__repr__()
-
-      class FastGSS(GSS[T, Acc]):
-          """
-          A performant GSS implementation using a graph of shared nodes.
-          
-          - The GSS is represented as a DAG where nodes are states and edges are stack operations.
-          - Nodes store accumulators and their depth from the root.
-          - The structure is represented by a child-to-parents mapping, allowing efficient `pop` operations.
-          - GSS instances are immutable. Operations return new instances with updated heads or structure maps.
-          - Path reconstruction for `merge` and `to_json_serializable` is memoized for performance.
-          """
-
-          def __init__(self, 
-                       heads: FrozenSet[_Node[T, Acc]], 
-                       root: _Node[T, Acc],
-                       child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
-                       path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
-              self._heads = heads
-              self._root = root
-              self._child_to_parents = child_to_parents
-              self._path_cache = path_cache
-
-          @classmethod
-          def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks by building the node graph."""
-              root_acc: Acc = None
-              has_empty_stack = False
-              for s, acc in stacks:
-                  if not s:
-                      has_empty_stack = True
-                      root_acc = acc
-                      break
-              
-              if not has_empty_stack:
-                  raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
-
-              root = _Node(acc=root_acc, depth=0)
-              child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-              path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
-              heads: Set[_Node[T, Acc]] = set()
-
-              # Memoize nodes created for stack prefixes to ensure structure is shared.
-              # key: tuple(stack_prefix), value: _Node
-              memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
-
-              if not stacks:
-                  heads.add(root)
-
-              for stack_list, acc in stacks:
-                  stack_list.reverse()
-                  current_node = root
-                  stack_tuple = tuple(stack_list)
-
-                  # Traverse/create nodes for the path
-                  for i, value in enumerate(stack_tuple):
-                      prefix = stack_tuple[:i + 1]
-                      if prefix in memoized_nodes:
-                          current_node = memoized_nodes[prefix]
-                      else:
-                          # Create a new node. Its accumulator is temporary; only head accumulators matter.
-                          new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
-                          child_to_parents[new_node] = {(value, current_node)}
-                          memoized_nodes[prefix] = new_node
-                          current_node = new_node
-                  
-                  # Now `current_node` is the shared node for this stack path.
-                  # We need a head with the specific accumulator.
-                  if current_node.acc == acc:
-                      heads.add(current_node)
-                  else:
-                      # Create a new head node with the correct accumulator but same structure.
-                      new_head = _Node(acc=acc, depth=current_node.depth)
-                      if current_node in child_to_parents:
-                          child_to_parents[new_head] = child_to_parents[current_node]
-                      heads.add(new_head)
-
-              return cls(frozenset(heads), root, child_to_parents, path_cache)
-
-          def push(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              
-              # Memoize node creation within a single push operation
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_node = _Node(acc=head.acc, depth=head.depth + 1)
-                  
-                  if new_node not in new_child_to_parents:
-                      new_child_to_parents[new_node] = set()
-                  new_child_to_parents[new_node].add((value, head))
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
-
-          def pop(self) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for _, parent in self._child_to_parents[head]:
-                          new_heads.add(parent)
-
-              if not new_heads:
-                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains only the initial empty stack."""
-              return self._heads == frozenset([self._root])
-
-          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      if any(v == value for v, _ in self._child_to_parents[head]):
-                          new_heads.add(head)
-
-              if not new_heads:
-                  # If no stacks match, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-              new_heads = {head for head in self._heads if predicate(head.acc)}
-
-              if not new_heads:
-                  # If all stacks are pruned, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for value, _ in self._child_to_parents[head]:
-                          peek_values.add(value)
-              return peek_values
-
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [head.acc for head in self._heads]
-              return reduce(merge_func, accumulators)
-
-          @staticmethod
-          def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
-              gss_list = list(gss_list)
-              if not gss_list:
-                  raise ValueError("Cannot merge an empty list of GSS instances.")
-              
-              first_gss = gss_list[0]
-              
-              if len(gss_list) == 1:
-                  return first_gss
-
-              # Filter out GSSs that only contain an empty stack if there are others with content.
-              gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
-
-              if gss_with_content:
-                  gss_list_to_merge = gss_with_content
-              else:
-                  # All GSSs only contain empty stacks, so merge them all.
-                  gss_list_to_merge = gss_list
-
-              # Combine all structural information and heads
-              all_child_to_parents = {}
-              all_path_caches = {}
-              all_heads = set()
-              for gss in gss_list_to_merge:
-                  all_child_to_parents.update(gss._child_to_parents)
-                  all_path_caches.update(gss._path_cache)
-                  all_heads.update(gss._heads)
-
-              # Group heads by their structural path
-              heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
-              for head in all_heads:
-                  paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
-                  if paths not in heads_by_path:
-                      heads_by_path[paths] = []
-                  heads_by_path[paths].append(head)
-
-              final_heads: Set[_Node[T, Acc]] = set()
-              for paths, nodes in heads_by_path.items():
-                  if len(nodes) == 1:
-                      final_heads.add(nodes[0])
-                      continue
-                  
-                  # Merge accumulators for nodes on the same path
-                  merged_acc = reduce(merge_func, (n.acc for n in nodes))
-                  
-                  # Try to find an existing node with the merged accumulator to reuse
-                  reused_node = next((n for n in nodes if n.acc == merged_acc), None)
-                  
-                  if reused_node:
-                      final_heads.add(reused_node)
-                  else:
-                      # Create a new node representing the merged state
-                      canonical_node = nodes[0]
-                      new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
-                      if canonical_node in all_child_to_parents:
-                          all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
-                      final_heads.add(new_node)
-
-              return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
-
-          def to_json_serializable(self) -> Any:
-              all_stacks = []
-              for head in self._heads:
-                  paths = self._reconstruct_paths(head, self._child_to_parents, self._path_cache)
-                  for path in paths:
-                      all_stacks.append({"stack": list(path), "acc": head.acc})
-              
-              # Sort for a canonical representation
-              return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
-
-          def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
-              if node.id in cache:
-                  return cache[node.id]
-
-              if node == self._root:
-                  return frozenset([tuple()])
-
-              if node not in child_to_parents:
-                  # This can happen if a GSS is empty (has no heads pointing to this node's parents)
-                  return frozenset()
-
-              paths: Set[Tuple[T, ...]] = set()
-              for value, parent in child_to_parents[node]:
-                  parent_paths = self._reconstruct_paths(parent, child_to_parents, cache)
-                  for p_path in parent_paths:
-                      paths.add(p_path + (value,))
-              
-              result = frozenset(paths)
-              cache[node.id] = result
-              return result
-
-          def __hash__(self):
-              serial = self.to_json_serializable()
-              hashable_serial = tuple(
-                  (tuple(item['stack']), item['acc']) for item in serial
-              )
-              return hash(hashable_serial)
-
-          def __eq__(self, other):
-              if not isinstance(other, FastGSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __repr__(self):
-              return f"FastGSS({self.to_json_serializable()})"
     python/gss_tester/interface.py: |-
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
@@ -554,819 +247,558 @@ local_system:
           def __hash__(self):
               """Defines hash based on the canonical JSON representation."""
               pass
-    python/gss_tester/reference_impl.py: |+
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+    python/gss_tester/leveled_impl.py: |
+      from __future__ import annotations
+
+      import itertools
+      from dataclasses import dataclass
       from functools import reduce
+      from typing import (
+          TypeVar,
+          Generic,
+          List,
+          Tuple,
+          Callable,
+          Set,
+          Iterable,
+          Dict,
+          Any,
+          Optional,
+          Type,
+      )
+
       from .interface import GSS, T, Acc
 
-      class ReferenceGSS(GSS[T, Acc]):
+
+      class _ANode(Generic[T, Acc]):
           """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Its behavior is the gold standard for the consistency tests.
+          Structural node for the GSS DAG.
+          - No accumulator is stored here.
+          - Each node has exactly one parent (except root), and is identified by a unique id.
+          - Edges are maintained externally via the owning GSS instance.
           """
-          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Acc):
-              self.stacks = stacks
+          _id_counter = itertools.count()
+
+          __slots__ = ("id", "depth")
+
+          def __init__(self, depth: int):
+              self.id = next(self._id_counter)
+              self.depth = depth
+
+          def __hash__(self) -> int:
+              return self.id
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, _ANode):
+                  return NotImplemented
+              return self.id == other.id
+
+          def __repr__(self) -> str:
+              return f"_ANode(id={self.id}, depth={self.depth})"
+
+
+      @dataclass(frozen=True, slots=True)
+      class _BHead(Generic[T, Acc]):
+          """
+          "Head" wrapper that carries an accumulator at a specific structural node.
+          This models the invariant:
+            - Accumulators live only at heads (one 'level'): B wraps an A node + Acc.
+            - If a parent node has a head (acc), its children will not (as operations replace heads).
+            - If all children's accs would be equal on pop, they collapse into the parent (dedup of heads).
+          """
+          node: _ANode[T, Acc]
+          acc: Acc
+
+          def __hash__(self) -> int:
+              # Hash by node id and accumulator
+              return hash((self.node.id, self.acc))
+
+          def __repr__(self) -> str:
+              return f"_BHead(node={self.node!r}, acc={self.acc!r})"
+
+
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          """
+          A fast, immutable Graph-Structured Stack (GSS) focusing on "accumulators-at-one-level" invariants.
+
+          Design:
+            - Structural nodes (_ANode) form a DAG from root via labeled edges (values of type T).
+            - Active stacks ("heads") are represented by _BHead objects (node+acc), i.e., type B wrapping type A + Acc.
+            - Only heads carry accumulators; internal nodes do not.
+            - Push replaces each head with a new child head; Pop replaces head(s) by parent head(s).
+            - If multiple children pop to the same parent with equal accumulators, they deduplicate into a single parent head.
+            - Multiple different accumulators at the same parent path are allowed (they represent distinct heads on that stack).
+
+          Data structures:
+            - _root: the root _ANode (represents the empty stack).
+            - _root_acc: accumulator of the empty stack (Reference semantics).
+            - _heads: frozenset of _BHead (the active stacks with accumulators).
+            - _parent_of: dict mapping child _ANode -> (parent _ANode, value T). Root has no parent.
+            - _child_of: dict mapping (parent _ANode, value T) -> child _ANode (unique).
+            - _path_cache: dict mapping node.id -> tuple of T representing the path from root to this node (cached).
+          """
+
+          __slots__ = (
+              "_root",
+              "_root_acc",
+              "_heads",
+              "_parent_of",
+              "_child_of",
+              "_path_cache",
+          )
+
+          def __init__(
+              self,
+              root: _ANode[T, Acc],
+              root_acc: Acc,
+              heads: frozenset[_BHead[T, Acc]],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]],
+              path_cache: Dict[int, Tuple[T, ...]],
+          ):
+              self._root = root
               self._root_acc = root_acc
-              if not self.stacks:
-                  self.stacks.append(([], self._root_acc))
-
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              root_acc: Acc = None
-              has_empty_stack = False
-              for s, acc in stacks:
-                  if not s:
-                      has_empty_stack = True
-                      root_acc = acc
-                      break
-              if not has_empty_stack:
-                  raise ValueError("ReferenceGSS.from_stacks requires an empty stack to determine the root accumulator.")
-              return cls(stacks, root_acc)
-
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
-              return ReferenceGSS(new_stacks, self._root_acc)
-
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = []
-              for stack, acc in self.stacks:
-                  if stack:
-                      new_stacks.append((stack[:-1], acc))
-              return ReferenceGSS(new_stacks, self._root_acc)
-
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = []
-              for stack, acc in self.stacks:
-                  if stack and stack[-1] == value:
-                      new_stacks.append((stack, acc))
-              return ReferenceGSS(new_stacks, self._root_acc)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
-              return ReferenceGSS(new_stacks, self._root_acc)
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
-              return ReferenceGSS(new_stacks, self._root_acc)
-
-          def peek(self) -> Set[T]:
-              return {stack[-1] for stack, acc in self.stacks if stack}
-
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [acc for _, acc in self.stacks]
-              return reduce(merge_func, accumulators)
-
-          @staticmethod
-          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              root_acc = None
-              
-              gss_list = list(gss_list)
-              if not gss_list:
-                  raise ValueError("Cannot merge empty list of GSS")
-
-              root_acc = gss_list[0]._root_acc
-
-              for gss in gss_list:
-                  if isinstance(gss, ReferenceGSS):
-                      # Don't add the default empty stack if there are other stacks
-                      if len(gss.stacks) > 1 or gss.stacks[0][0]:
-                          all_stacks.extend(gss.stacks)
-              
-              if root_acc is None:
-                   # This can happen if all GSSs were empty.
-                   root_acc = gss_list[0]._root_acc
-
-              merged_map: Dict[Tuple[T, ...], Acc] = {}
-              for stack, acc in all_stacks:
-                  key = tuple(stack)
-                  if key in merged_map:
-                      merged_map[key] = merge_func(merged_map[key], acc)
-                  else:
-                      merged_map[key] = acc
-              
-              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
-              return ReferenceGSS(final_stacks, root_acc)
-
-          def to_json_serializable(self) -> Any:
-              # Sort stacks for a canonical representation, making comparisons reliable.
-              # Stacks (lists) are converted to tuples to be sortable keys.
-              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
-              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
-
-          def __hash__(self):
-              return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
-
-          def is_empty(self) -> bool:
-              return len(self.stacks) == 1 and not self.stacks[0][0]
-
-    python/gss_tester/runner.py: |
-      import argparse
-      import importlib
-      import json
-      from pathlib import Path
-      import sys
-
-      from .test_spec import run_test_spec
-
-      def main():
-          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
-          parser.add_argument(
-              "implementation_module",
-              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
-          )
-          parser.add_argument(
-              "implementation_class",
-              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
-          )
-          parser.add_argument(
-              "-o", "--output",
-              type=Path,
-              required=True,
-              help="Path to the output JSON file for the results."
-          )
-          args = parser.parse_args()
-
-          try:
-              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
-              module = importlib.import_module(args.implementation_module)
-              gss_class = getattr(module, args.implementation_class)
-          except (ImportError, AttributeError) as e:
-              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
-              sys.exit(1)
-
-          print("Running test specification...")
-          results = []
-          for state, line_no in run_test_spec(gss_class):
-              results.append({
-                  "line": line_no,
-                  "state": state
-              })
-
-          output_data = {
-              "implementation": f"{args.implementation_module}.{args.implementation_class}",
-              "results": results
-          }
-
-          args.output.parent.mkdir(parents=True, exist_ok=True)
-          with open(args.output, 'w') as f:
-              json.dump(output_data, f, indent=2)
-
-          print(f"Successfully ran {len(results)} checks.")
-          print(f"Results saved to {args.output}")
-
-      if __name__ == "__main__":
-          main()
-    python/gss_tester/test_spec.py: |
-      import inspect
-      from typing import Generator, Tuple, Any, Type
-      from .interface import GSS
-
-      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-          """
-          A generator that defines a sequence of GSS operations and yields states at
-          various points for consistency checking.
-
-          Yields:
-              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-          """
-          
-          # For this test, the accumulator is an integer and stack items are integers.
-          acc_factory = lambda: 0
-          merge_func = lambda a, b: a + b
-
-          def _yield_state(gss_state: GSS):
-              """Helper to yield the state and the caller's line number."""
-              caller_frame = inspect.currentframe().f_back
-              line_no = caller_frame.f_lineno
-              yield (gss_state.to_json_serializable(), line_no)
-
-          # --- Test 1: Basic push/pop ---
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
-
-          gss1 = gss1.push(10)
-          yield from _yield_state(gss1)
-
-          gss1 = gss1.push(20)
-          yield from _yield_state(gss1)
-
-          gss_popped_20 = gss1.isolate(20).pop()
-          yield from _yield_state(gss_popped_20)
-
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-          yield from _yield_state(gss_popped_10)
-
-          # --- Test 2: Forking and Merging ---
-          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
-          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
-          
-          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
-          yield from _yield_state(merged1)
-          
-          # Merge a stack that already exists to test accumulator merging
-          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-          merged2 = gss_class.merge([merged1, gss_c], merge_func)
-          yield from _yield_state(merged2)
-
-          # --- Test 3: Apply accumulator function ---
-          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
-          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
-          yield from _yield_state(gss_to_apply)
-
-          # --- Test 4: Pop with no match ---
-          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-          yield from _yield_state(gss_after_failed_pop)
-
-          # --- Test 5: Complex sequence (diamond pattern) ---
-          s0 = gss_class.from_stacks([([], acc_factory())])
-          s1 = s0.push(1)
-          s2 = s1.push(2)
-          s3 = s1.push(3)
-          s4 = gss_class.merge([s2, s3], merge_func)
-          yield from _yield_state(s4)
-          
-          s5 = s4.push(4)
-          yield from _yield_state(s5)
-          
-          s6 = s5.isolate(4).pop()
-          yield from _yield_state(s6) # should be same as s4
-          
-          s7 = s6.isolate(2).pop()
-          s8 = s6.isolate(3).pop()
-          yield from _yield_state(s7)
-          yield from _yield_state(s8)
-          
-          s9 = gss_class.merge([s7, s8], merge_func)
-          yield from _yield_state(s9) # should be same as s1
-          
-          # --- Test 6: Merging empty GSS ---
-          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
-          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-          yield from _yield_state(gss_empty)
-          
-          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
-          yield from _yield_state(merged_with_empty) # should be same as gss_d
-
-          # --- Test 7: Pruning ---
-          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
-          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
-          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
-          yield from _yield_state(gss_to_prune)
-
-          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
-          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
-
-          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
-  prev_file_contents:
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/analyzer.py: |
-      import argparse
-      import json
-      from pathlib import Path
-      from typing import List, Dict, Any, Tuple
-      import itertools
-
-      def analyze_results(result_files: List[Path], reference_file: Path = None):
-          all_results: Dict[str, List[Dict[str, Any]]] = {}
-          implementations: List[str] = []
-
-          for file_path in result_files:
-              try:
-                  data = json.loads(file_path.read_text())
-                  impl_name = data["implementation"]
-                  all_results[impl_name] = data["results"]
-                  implementations.append(impl_name)
-              except (json.JSONDecodeError, KeyError) as e:
-                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
-
-
-          if not implementations:
-              print("No valid result files found to analyze.")
-              return
-
-          # --- Equivalence Partitioning ---
-          # A signature is a tuple of all yielded states and their line numbers.
-          Signature = Tuple[Tuple[int, str], ...]
-
-          def get_signature(results: List[Dict[str, Any]]) -> Signature:
-              # Serialize state to a string to make it hashable and canonical.
-              return tuple(
-                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
-              )
-
-          partitions: Dict[Signature, List[str]] = {}
-          for impl_name, results in all_results.items():
-              sig = get_signature(results)
-              if sig not in partitions:
-                  partitions[sig] = []
-              partitions[sig].append(impl_name)
-
-          print("--- Consistency Analysis ---")
-          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
-
-          # --- Reference Comparison ---
-          ref_sig: Signature = None
-          ref_impl_name: str = None
-          if reference_file:
-              try:
-                  ref_data = json.loads(reference_file.read_text())
-                  ref_impl_name = ref_data["implementation"]
-                  ref_sig = get_signature(ref_data["results"])
-                  print(f"Reference implementation: {ref_impl_name}\n")
-              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
-                  print(f"Warning: Could not load reference file {reference_file}: {e}")
-
-
-          # --- Display Partitions ---
-          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
-          for i, (sig, impls) in enumerate(sorted_partitions):
-              header = f"Class {i+1} ({len(impls)} implementation(s))"
-              if ref_sig:
-                  match_icon = "✅" if sig == ref_sig else "❌"
-                  header += f" [Ref Match: {match_icon}]"
-              
-              print(header)
-              print("-" * len(header))
-              for impl in sorted(impls):
-                  print(f"  - {impl}")
-              print()
-
-          # --- Detailed Divergence Report ---
-          if len(partitions) > 1:
-              print("\n--- Divergence Report ---")
-              # Compare every pair of partitions
-              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
-                  impl_name1 = sorted(impls1)[0]
-                  impl_name2 = sorted(impls2)[0]
-                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
-                  
-                  results1 = all_results[impl_name1]
-                  results2 = all_results[impl_name2]
-                  
-                  max_len = max(len(results1), len(results2))
-                  for i in range(max_len):
-                      res1 = results1[i] if i < len(results1) else None
-                      res2 = results2[i] if i < len(results2) else None
-
-                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
-                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
-
-                      if sig_item1 != sig_item2:
-                          print(f"  - First divergence at yield index {i}:")
-                          if res1:
-                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
-                          else:
-                              print(f"    - {impl_name1}: No yield at this index.")
-                          
-                          if res2:
-                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
-                          else:
-                              print(f"    - {impl_name2}: No yield at this index.")
-                          break # Show only the first divergence for this pair
-
-      def main():
-          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
-          parser.add_argument(
-              "result_files",
-              nargs='+',
-              type=Path,
-              help="Paths to result JSON files."
-          )
-          parser.add_argument(
-              "-r", "--reference",
-              type=Path,
-              default=None,
-              help="Path to a reference result file for comparison."
-          )
-          args = parser.parse_args()
-
-          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
-          if not valid_files:
-              print("Error: No valid result files found.")
-              return
-
-          analyze_results(valid_files, args.reference)
-
-      if __name__ == "__main__":
-          main()
-    python/gss_tester/fast_impl.py: |
-      import itertools
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
-
-      from .interface import GSS, T, Acc
-
-      class _Node(Generic[T, Acc]):
-          """Represents a node in the GSS graph. Each node is a unique state."""
-          _id_counter = itertools.count()
-
-          def __init__(self, acc: Acc, depth: int):
-              self.id = next(self._id_counter)
-              self.acc = acc
-              self.depth = depth
-          
-          def __hash__(self):
-              return self.id
-
-          def __eq__(self, other):
-              if not isinstance(other, _Node):
-                  return NotImplemented
-              return self.id == other.id
-          
-          def __repr__(self):
-              return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
-
-          def __str__(self):
-              return self.__repr__()
-
-      class FastGSS(GSS[T, Acc]):
-          """
-          A performant GSS implementation using a graph of shared nodes.
-          
-          - The GSS is represented as a DAG where nodes are states and edges are stack operations.
-          - Nodes store accumulators and their depth from the root.
-          - The structure is represented by a child-to-parents mapping, allowing efficient `pop` operations.
-          - GSS instances are immutable. Operations return new instances with updated heads or structure maps.
-          - Path reconstruction for `merge` and `to_json_serializable` is memoized for performance.
-          """
-
-          def __init__(self, 
-                       heads: FrozenSet[_Node[T, Acc]], 
-                       root: _Node[T, Acc],
-                       child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
-                       path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
               self._heads = heads
-              self._root = root
-              self._child_to_parents = child_to_parents
+              self._parent_of = parent_of
+              self._child_of = child_of
               self._path_cache = path_cache
 
+          # ---- Construction ----
+
           @classmethod
-          def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks by building the node graph."""
-              root_acc: Acc = None
-              has_empty_stack = False
+          def from_stacks(cls: Type["LeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "LeveledGSS[T, Acc]":
+              """
+              Build a GSS from explicit stacks. Matches ReferenceGSS semantics:
+                - There must be an empty stack [] providing the root accumulator.
+                - Multiple stacks can be present; structure is shared where possible.
+              """
+              # Find root acc from empty stack, as in reference implementation
+              root_acc: Optional[Acc] = None
+              has_empty = False
               for s, acc in stacks:
                   if not s:
-                      has_empty_stack = True
                       root_acc = acc
+                      has_empty = True
                       break
-              
-              if not has_empty_stack:
-                  raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
+              if not has_empty:
+                  raise ValueError("LeveledGSS.from_stacks requires an empty stack to determine the root accumulator.")
 
-              root = _Node(acc=root_acc, depth=0)
-              child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-              path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
-              heads: Set[_Node[T, Acc]] = set()
+              root = _ANode[T, Acc](depth=0)
 
-              # Memoize nodes created for stack prefixes to ensure structure is shared.
-              # key: tuple(stack_prefix), value: _Node
-              memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
+              # We'll build using a memo from path tuples to nodes for structural sharing
+              path_to_node: Dict[Tuple[T, ...], _ANode[T, Acc]] = {tuple(): root}
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
 
-              if not stacks:
-                  heads.add(root)
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  if path in path_to_node:
+                      return path_to_node[path]
+                  # Create by extending parent path
+                  parent_path, val = path[:-1], path[-1]
+                  parent_node = get_or_create_node(parent_path)
+                  key = (parent_node, val)
+                  if key in child_of:
+                      node = child_of[key]
+                      path_to_node[path] = node
+                      return node
+                  node = _ANode[T, Acc](depth=parent_node.depth + 1)
+                  parent_of[node] = (parent_node, val)
+                  child_of[key] = node
+                  path_to_node[path] = node
+                  path_cache[node.id] = path
+                  return node
 
-              for stack_list, acc in stacks:
-                  stack_list.reverse()
-                  current_node = root
-                  stack_tuple = tuple(stack_list)
+              heads: Set[_BHead[T, Acc]] = set()
 
-                  # Traverse/create nodes for the path
-                  for i, value in enumerate(stack_tuple):
-                      prefix = stack_tuple[:i + 1]
-                      if prefix in memoized_nodes:
-                          current_node = memoized_nodes[prefix]
-                      else:
-                          # Create a new node. Its accumulator is temporary; only head accumulators matter.
-                          new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
-                          child_to_parents[new_node] = {(value, current_node)}
-                          memoized_nodes[prefix] = new_node
-                          current_node = new_node
-                  
-                  # Now `current_node` is the shared node for this stack path.
-                  # We need a head with the specific accumulator.
-                  if current_node.acc == acc:
-                      heads.add(current_node)
-                  else:
-                      # Create a new head node with the correct accumulator but same structure.
-                      new_head = _Node(acc=acc, depth=current_node.depth)
-                      if current_node in child_to_parents:
-                          child_to_parents[new_head] = child_to_parents[current_node]
-                      heads.add(new_head)
+              for stack, acc in stacks:
+                  path = tuple(stack)
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
 
-              return cls(frozenset(heads), root, child_to_parents, path_cache)
+              # Reference semantics: If no stacks specified (shouldn't happen due to empty root), ensure there's root:
+              if not heads:
+                  heads.add(_BHead(node=root, acc=root_acc))
 
-          def push(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              
-              # Memoize node creation within a single push operation
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
+              return cls(
+                  root=root,
+                  root_acc=root_acc,  # store the root accumulator
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- Core operations ----
+
+          def push(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Push 'value' onto all active stacks.
+              Implementation:
+                - For each head (node, acc), generate the child node for (node, value), reusing structure if it exists.
+                - Result heads are the set of (child, acc).
+                - This respects invariants: parent heads are replaced by children heads; parents no longer carry accs.
+              """
+              new_child_of = dict(self._child_of)
+              new_parent_of = dict(self._parent_of)
+              new_path_cache = dict(self._path_cache)
+
+              new_heads: Set[_BHead[T, Acc]] = set()
 
               for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
+                  parent = head.node
+                  key = (parent, value)
+                  child = new_child_of.get(key)
+                  if child is None:
+                      child = _ANode[T, Acc](depth=parent.depth + 1)
+                      new_child_of[key] = child
+                      new_parent_of[child] = (parent, value)
 
-                  new_node = _Node(acc=head.acc, depth=head.depth + 1)
-                  
-                  if new_node not in new_child_to_parents:
-                      new_child_to_parents[new_node] = set()
-                  new_child_to_parents[new_node].add((value, head))
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
+                      # Update path cache
+                      parent_path = self._reconstruct_path_cached(parent, new_parent_of, new_path_cache)
+                      new_path_cache[child.id] = parent_path + (value,)
 
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
+                  new_heads.add(_BHead(node=child, acc=head.acc))
 
-          def pop(self) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=new_parent_of,
+                  child_of=new_child_of,
+                  path_cache=new_path_cache,
+              )
+
+          def pop(self) -> "LeveledGSS[T, Acc]":
+              """
+              Pop the top value from all active stacks.
+              Result:
+                - For each head (node, acc), replace it with head(s) at its parent node(s).
+                - Due to our structure, each node has at most one parent. If none (root), it disappears.
+                - If multiple children map to the same parent and have equal accs, dedup occurs naturally.
+                - If all heads disappear, return a GSS representing the single empty stack (root with _root_acc).
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
+
               for head in self._heads:
-                  if head in self._child_to_parents:
-                      for _, parent in self._child_to_parents[head]:
-                          new_heads.add(parent)
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      parent_node, _ = parent_edge
+                      new_heads.add(_BHead(node=parent_node, acc=head.acc))
+                  # else: head at root, pop has no effect for that head (it's removed)
 
               if not new_heads:
-                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+                  # Return GSS with a single empty stack (root with root_acc), as per ReferenceGSS semantics.
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
 
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
 
           def is_empty(self) -> bool:
-              """Checks if the GSS contains only the initial empty stack."""
-              return self._heads == frozenset([self._root])
+              """
+              Checks if the GSS contains only the initial empty stack (root).
+              """
+              return len(self._heads) == 1 and next(iter(self._heads)).node == self._root
 
-          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
+          def isolate(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Keep only stacks with 'value' at the top.
+              Implementation detail:
+                - Top is the labeled edge into the head's node. We check the incoming edge label.
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
               for head in self._heads:
-                  if head in self._child_to_parents:
-                      if any(v == value for v, _ in self._child_to_parents[head]):
-                          new_heads.add(head)
-
-              if not new_heads:
-                  # If no stacks match, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is None:
+                      # root has no top; it doesn't match any value
                       continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-              new_heads = {head for head in self._heads if predicate(head.acc)}
+                  _, v = parent_edge
+                  if v == value:
+                      new_heads.add(head)
 
               if not new_heads:
-                  # If all stacks are pruned, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
+                  # Result is the empty GSS (root only)
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
 
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def apply(self, func: Callable[[Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Apply 'func' to each head accumulator.
+              This preserves structure and ensures dedup if multiple heads map to same (node, acc') after transform.
+              """
+              new_heads = {_BHead(node=h.node, acc=func(h.acc)) for h in self._heads}
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> "LeveledGSS[T, Acc]":
+              """
+              Remove stacks whose accumulator does not satisfy the predicate.
+              If all are removed, return the empty GSS (root with root_acc).
+              """
+              new_heads = {h for h in self._heads if predicate(h.acc)}
+              if not new_heads:
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
 
           def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
+              """
+              Return the set of top-of-stack values across all heads.
+              """
+              vals: Set[T] = set()
               for head in self._heads:
-                  if head in self._child_to_parents:
-                      for value, _ in self._child_to_parents[head]:
-                          peek_values.add(value)
-              return peek_values
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      _, v = parent_edge
+                      vals.add(v)
+              return vals
 
           def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [head.acc for head in self._heads]
-              return reduce(merge_func, accumulators)
+              """
+              Merge the accumulators of all active stacks using merge_func (left fold).
+              """
+              it = iter(self._heads)
+              try:
+                  first = next(it)
+              except StopIteration:
+                  # Shouldn't happen; empty GSS has root with an acc
+                  return self._root_acc
+              acc_val = first.acc
+              for h in it:
+                  acc_val = merge_func(acc_val, h.acc)
+              return acc_val
 
           @staticmethod
-          def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
-              gss_list = list(gss_list)
-              if not gss_list:
+          def merge(gss_list: Iterable["LeveledGSS[T, Acc]"], merge_func: Callable[[Acc, Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Merge multiple GSS instances into one, combining accumulators for identical stacks.
+              Semantics:
+                - If there is at least one GSS with non-empty stacks (i.e., some head not at root),
+                  ignore GSS instances that contain only the empty stack.
+                - For identical stack paths across different GSS inputs, combine accumulators via merge_func.
+                - Within a single GSS, distinct accumulators on the same path remain distinct (this method merges across inputs).
+              """
+              gsss = list(gss_list)
+              if not gsss:
                   raise ValueError("Cannot merge an empty list of GSS instances.")
-              
-              first_gss = gss_list[0]
-              
-              if len(gss_list) == 1:
-                  return first_gss
 
-              # Filter out GSSs that only contain an empty stack if there are others with content.
-              gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
+              # If any GSS has content beyond the empty stack, we ignore purely-empty ones.
+              def has_content(g: LeveledGSS[T, Acc]) -> bool:
+                  return any(h.node is not g._root for h in g._heads)
 
-              if gss_with_content:
-                  gss_list_to_merge = gss_with_content
-              else:
-                  # All GSSs only contain empty stacks, so merge them all.
-                  gss_list_to_merge = gss_list
+              with_content = [g for g in gsss if has_content(g)]
+              first = gsss[0]
 
-              # Combine all structural information and heads
-              all_child_to_parents = {}
-              all_path_caches = {}
-              all_heads = set()
-              for gss in gss_list_to_merge:
-                  all_child_to_parents.update(gss._child_to_parents)
-                  all_path_caches.update(gss._path_cache)
-                  all_heads.update(gss._heads)
+              if not with_content:
+                  # All are empty -> return an empty GSS bearing the first's root_acc
+                  return LeveledGSS.from_stacks([([], first._root_acc)])
 
-              # Group heads by their structural path
-              heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
-              for head in all_heads:
-                  paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
-                  if paths not in heads_by_path:
-                      heads_by_path[paths] = []
-                  heads_by_path[paths].append(head)
+              # Aggregate across all non-empty heads, merging accumulator values for identical paths across inputs.
+              path_to_acc: Dict[Tuple[T, ...], Acc] = {}
 
-              final_heads: Set[_Node[T, Acc]] = set()
-              for paths, nodes in heads_by_path.items():
-                  if len(nodes) == 1:
-                      final_heads.add(nodes[0])
-                      continue
-                  
-                  # Merge accumulators for nodes on the same path
-                  merged_acc = reduce(merge_func, (n.acc for n in nodes))
-                  
-                  # Try to find an existing node with the merged accumulator to reuse
-                  reused_node = next((n for n in nodes if n.acc == merged_acc), None)
-                  
-                  if reused_node:
-                      final_heads.add(reused_node)
-                  else:
-                      # Create a new node representing the merged state
-                      canonical_node = nodes[0]
-                      new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
-                      if canonical_node in all_child_to_parents:
-                          all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
-                      final_heads.add(new_node)
+              for g in with_content:
+                  for h in g._heads:
+                      if h.node is g._root:
+                          continue  # ignore root-only when others exist
+                      path = g._reconstruct_path_cached(h.node, g._parent_of, g._path_cache)
+                      if path in path_to_acc:
+                          path_to_acc[path] = merge_func(path_to_acc[path], h.acc)
+                      else:
+                          path_to_acc[path] = h.acc
 
-              return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
+              # Rebuild a new structure from aggregated paths
+              root = _ANode[T, Acc](depth=0)
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
+              heads: Set[_BHead[T, Acc]] = set()
+
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  # Build deterministically using child_of
+                  node = root
+                  if not path:
+                      return node
+                  # We don't keep a full memo by tuple to stay lightweight; follow child_of and create as needed.
+                  # Still O(len(path)) per path.
+                  curr = root
+                  curr_path = ()
+                  for v in path:
+                      key = (curr, v)
+                      nxt = child_of.get(key)
+                      if nxt is None:
+                          nxt = _ANode[T, Acc](depth=curr.depth + 1)
+                          child_of[key] = nxt
+                          parent_of[nxt] = (curr, v)
+                          curr_path = curr_path + (v,)
+                          path_cache[nxt.id] = curr_path
+                          curr = nxt
+                      else:
+                          curr = nxt
+                          # Best-effort cache fill if missing
+                          if nxt.id not in path_cache:
+                              # Reconstruct from parent_of
+                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
+                              path_cache[nxt.id] = ppath
+                      node = curr
+                  return node
+
+              # Create heads for each aggregated path
+              for path, acc in path_to_acc.items():
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
+
+              return LeveledGSS(
+                  root=root,
+                  root_acc=first._root_acc,
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- JSON and equality/hash ----
 
           def to_json_serializable(self) -> Any:
-              all_stacks = []
-              for head in self._heads:
-                  paths = self._reconstruct_paths(head, self._child_to_parents, self._path_cache)
-                  for path in paths:
-                      all_stacks.append({"stack": list(path), "acc": head.acc})
-              
-              # Sort for a canonical representation
-              return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
+              """
+              Canonical JSON-serializable snapshot of current heads as a list of {"stack": [...], "acc": ...}.
+              Sorted for deterministic comparison.
+              """
+              items = []
+              for h in self._heads:
+                  path = self._reconstruct_path_cached(h.node, self._parent_of, self._path_cache)
+                  items.append({"stack": list(path), "acc": h.acc})
+              # Sort canonically: by path then repr(acc) for stability across arbitrary objects
+              items.sort(key=lambda x: (tuple(x["stack"]), repr(x["acc"])))
+              return items
 
-          def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
+          def __hash__(self) -> int:
+              serial = self.to_json_serializable()
+              return hash(tuple((tuple(item["stack"]), repr(item["acc"])) for item in serial))
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __repr__(self) -> str:
+              return f"LeveledGSS({self.to_json_serializable()})"
+
+          # ---- Internals ----
+
+          @staticmethod
+          def _reconstruct_path_cached(
+              node: _ANode[T, Acc],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              cache: Dict[int, Tuple[T, ...]],
+          ) -> Tuple[T, ...]:
               if node.id in cache:
                   return cache[node.id]
+              return _reconstruct_path(node, parent_of, cache)
 
-              if node == self._root:
-                  return frozenset([tuple()])
 
-              if node not in child_to_parents:
-                  # This can happen if a GSS is empty (has no heads pointing to this node's parents)
-                  return frozenset()
+      def _reconstruct_path(
+          node: _ANode[T, Acc],
+          parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+          cache: Dict[int, Tuple[T, ...]],
+      ) -> Tuple[T, ...]:
+          """
+          Reconstruct the path from root to 'node' using parent_of map.
+          Assumes a unique parent chain (DAG without multiple parents for the same node in practice).
+          """
+          # Iterative to avoid recursion overhead
+          stack_nodes: List[_ANode[T, Acc]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  prefix = cache[curr.id]
+                  break
+              stack_nodes.append(curr)
+              p = parent_of.get(curr)
+              if p is None:
+                  # curr is root
+                  prefix = ()
+                  cache[curr.id] = prefix
+                  stack_nodes.pop()  # remove root from list to avoid duplicate write below
+                  break
+              curr = p[0]
 
-              paths: Set[Tuple[T, ...]] = set()
-              for value, parent in child_to_parents[node]:
-                  parent_paths = self._reconstruct_paths(parent, child_to_parents, cache)
-                  for p_path in parent_paths:
-                      paths.add(p_path + (value,))
-              
-              result = frozenset(paths)
-              cache[node.id] = result
-              return result
-
-          def __hash__(self):
-              serial = self.to_json_serializable()
-              hashable_serial = tuple(
-                  (tuple(item['stack']), item['acc']) for item in serial
-              )
-              return hash(hashable_serial)
-
-          def __eq__(self, other):
-              if not isinstance(other, FastGSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __repr__(self):
-              return f"FastGSS({self.to_json_serializable()})"
-    python/gss_tester/interface.py: |-
-      from abc import ABC, abstractmethod
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
-      import json
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc') # Accumulator type
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def push(self, value: T) -> 'GSS[T, Acc]':
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self, n: int) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains only the initial empty stack."""
-              pass
-
-          @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              pass
-
-          @staticmethod
-          @abstractmethod
-          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
-              pass
-
-          @abstractmethod
-          def to_json_serializable(self) -> Any:
-              """Returns a JSON-serializable representation of the GSS state for comparison."""
-              pass
-
-          def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
-              except Exception:
-                  return super().__str__()
-
-          def __eq__(self, other):
-              """Defines equality based on the canonical JSON representation."""
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __hash__(self):
-              """Defines hash based on the canonical JSON representation."""
-              pass
+          # Now unwind
+          path = list(prefix)
+          # We need to also collect the edge labels along the way
+          # We replay from the cached node to the original 'node'
+          last = None
+          # Recompute the chain with values
+          # We'll walk the same nodes from where we had cache to original 'node'.
+          # First, figure out the chain including values:
+          # Build a reverse chain from the original node to the nearest cached ancestor
+          chain: List[Tuple[_ANode[T, Acc], T]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  break
+              parent_tuple = parent_of.get(curr)
+              if parent_tuple is None:
+                  # reached root with no cache
+                  break
+              parent_node, val = parent_tuple
+              chain.append((parent_node, val))
+              curr = parent_node
+          # chain is from child->... to cached ancestor; reverse to go forward
+          for parent_node, val in reversed(chain):
+              path.append(val)
+              # fill cache for child
+              # The child is the next in chain; we can retrieve it indirectly but we don't need to cache each intermediate child explicitly here
+          # Cache final node path
+          cache[node.id] = tuple(path)
+          return tuple(path)
     python/gss_tester/reference_impl.py: |+
       from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
       from functools import reduce
@@ -1678,6 +1110,1375 @@ local_system:
           # Case 9b: popn more than stack depth
           gss_pn_pop4 = gss_pn_merged.popn(4)
           yield from _yield_state(gss_pn_pop4) # has []
+    python/gss_tester/run_tests.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_tests.sh
+      #
+      # A script to automate running the GSS test specification against multiple
+      # implementations, generating JSON results, and analyzing them for consistency.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./gss_tester/run_tests.sh <reference_impl> <impl1> [impl2 ...]
+      #
+      # Example:
+      #   ./gss_tester/run_tests.sh gss_tester.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      #
+      # Each implementation is specified as 'path.to.module.ClassName'.
+      # ==============================================================================
+
+      # --- Setup PYTHONPATH to find gss_tester ---
+      # The script is in 'python/gss_tester', so the python source root is one level up.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <reference_impl> <impl1> [impl2 ...]"
+          echo "Error: At least one implementation is required. The first is treated as the reference."
+          exit 1
+      fi
+
+      REFERENCE_IMPL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_IMPLS=("$REFERENCE_IMPL" "${COMPETITORS[@]}")
+
+      # --- Setup ---
+      # Create a unique directory for this test run's results.
+      RESULTS_DIR="gss_test_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Test results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Implementation: $REFERENCE_IMPL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Implementations: ${COMPETITORS[*]}"
+      else
+        echo "Other Implementations: (none)"
+      fi
+      echo "---"
+
+      # --- Run Tests ---
+      echo "Starting test runs..."
+      REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
+      for full_impl_path in "${ALL_IMPLS[@]}"; do
+          echo
+          echo ">>> Running test spec for: $full_impl_path"
+
+          # --- Convert file path to module and class names ---
+          # This logic handles both module paths (e.g., gss_tester.ref.RefGSS) and
+          # file paths (e.g., python/gss_tester/reference_impl.py).
+          if [[ "$full_impl_path" == *.py ]]; then
+              # Handle file path: derive module and class name by convention.
+              # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
+              module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+              # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
+              # Use sed to robustly strip one or more '.py' suffixes.
+              base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
+              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+              full_impl_name="${module_name}.${class_name}"
+          else
+              # Handle module.ClassName format
+              full_impl_name="$full_impl_path"
+              module_name="${full_impl_name%.*}"
+              class_name="${full_impl_name##*.}"
+          fi
+
+          # The first implementation is the reference; capture its canonical name.
+          if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
+              REFERENCE_IMPL_CANONICAL="$full_impl_name"
+          fi
+
+          output_file="${RESULTS_DIR}/${full_impl_name}.json"
+
+          cmd=(python -m gss_tester.runner
+              "$module_name"
+              "$class_name"
+              --output "$output_file")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished test spec for: $full_impl_path"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Test for $full_impl_path interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Test for $full_impl_path failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All test runs completed."
+      echo "---"
+
+      # --- Analyze Results ---
+      echo "Analyzing results for consistency..."
+      REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
+
+      # Check if the reference file was actually created
+      if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
+          echo "Error: Reference result file was not generated: $REFERENCE_RESULT_FILE"
+          echo "Skipping analysis."
+          exit 1
+      fi
+
+      cmd=(python -m gss_tester.analyzer
+          "${RESULTS_DIR}"/*.json
+          --reference "$REFERENCE_RESULT_FILE")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Consistency analysis complete."
+      echo "Reference: $REFERENCE_IMPL"
+      echo "Summary printed above."
+      echo "Full JSON results are in: $RESULTS_DIR"
+  prev_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/interface.py: |-
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+      import json
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc') # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self, n: int) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              pass
+
+          @abstractmethod
+          def isolate(self, value: T) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          @abstractmethod
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              pass
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              try:
+                  data = self.to_json_serializable()
+                  return json.dumps(data, indent=2, sort_keys=True)
+              except Exception:
+                  return super().__str__()
+
+          def __eq__(self, other):
+              """Defines equality based on the canonical JSON representation."""
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __hash__(self):
+              """Defines hash based on the canonical JSON representation."""
+              pass
+    python/gss_tester/leveled_impl.py: |
+      from __future__ import annotations
+
+      import itertools
+      from dataclasses import dataclass
+      from functools import reduce
+      from typing import (
+          TypeVar,
+          Generic,
+          List,
+          Tuple,
+          Callable,
+          Set,
+          Iterable,
+          Dict,
+          Any,
+          Optional,
+          Type,
+      )
+
+      from .interface import GSS, T, Acc
+
+
+      class _ANode(Generic[T, Acc]):
+          """
+          Structural node for the GSS DAG.
+          - No accumulator is stored here.
+          - Each node has exactly one parent (except root), and is identified by a unique id.
+          - Edges are maintained externally via the owning GSS instance.
+          """
+          _id_counter = itertools.count()
+
+          __slots__ = ("id", "depth")
+
+          def __init__(self, depth: int):
+              self.id = next(self._id_counter)
+              self.depth = depth
+
+          def __hash__(self) -> int:
+              return self.id
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, _ANode):
+                  return NotImplemented
+              return self.id == other.id
+
+          def __repr__(self) -> str:
+              return f"_ANode(id={self.id}, depth={self.depth})"
+
+
+      @dataclass(frozen=True, slots=True)
+      class _BHead(Generic[T, Acc]):
+          """
+          "Head" wrapper that carries an accumulator at a specific structural node.
+          This models the invariant:
+            - Accumulators live only at heads (one 'level'): B wraps an A node + Acc.
+            - If a parent node has a head (acc), its children will not (as operations replace heads).
+            - If all children's accs would be equal on pop, they collapse into the parent (dedup of heads).
+          """
+          node: _ANode[T, Acc]
+          acc: Acc
+
+          def __hash__(self) -> int:
+              # Hash by node id and accumulator
+              return hash((self.node.id, self.acc))
+
+          def __repr__(self) -> str:
+              return f"_BHead(node={self.node!r}, acc={self.acc!r})"
+
+
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          """
+          A fast, immutable Graph-Structured Stack (GSS) focusing on "accumulators-at-one-level" invariants.
+
+          Design:
+            - Structural nodes (_ANode) form a DAG from root via labeled edges (values of type T).
+            - Active stacks ("heads") are represented by _BHead objects (node+acc), i.e., type B wrapping type A + Acc.
+            - Only heads carry accumulators; internal nodes do not.
+            - Push replaces each head with a new child head; Pop replaces head(s) by parent head(s).
+            - If multiple children pop to the same parent with equal accumulators, they deduplicate into a single parent head.
+            - Multiple different accumulators at the same parent path are allowed (they represent distinct heads on that stack).
+
+          Data structures:
+            - _root: the root _ANode (represents the empty stack).
+            - _root_acc: accumulator of the empty stack (Reference semantics).
+            - _heads: frozenset of _BHead (the active stacks with accumulators).
+            - _parent_of: dict mapping child _ANode -> (parent _ANode, value T). Root has no parent.
+            - _child_of: dict mapping (parent _ANode, value T) -> child _ANode (unique).
+            - _path_cache: dict mapping node.id -> tuple of T representing the path from root to this node (cached).
+          """
+
+          __slots__ = (
+              "_root",
+              "_root_acc",
+              "_heads",
+              "_parent_of",
+              "_child_of",
+              "_path_cache",
+          )
+
+          def __init__(
+              self,
+              root: _ANode[T, Acc],
+              root_acc: Acc,
+              heads: frozenset[_BHead[T, Acc]],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]],
+              path_cache: Dict[int, Tuple[T, ...]],
+          ):
+              self._root = root
+              self._root_acc = root_acc
+              self._heads = heads
+              self._parent_of = parent_of
+              self._child_of = child_of
+              self._path_cache = path_cache
+
+          # ---- Construction ----
+
+          @classmethod
+          def from_stacks(cls: Type["LeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "LeveledGSS[T, Acc]":
+              """
+              Build a GSS from explicit stacks. Matches ReferenceGSS semantics:
+                - There must be an empty stack [] providing the root accumulator.
+                - Multiple stacks can be present; structure is shared where possible.
+              """
+              # Find root acc from empty stack, as in reference implementation
+              root_acc: Optional[Acc] = None
+              has_empty = False
+              for s, acc in stacks:
+                  if not s:
+                      root_acc = acc
+                      has_empty = True
+                      break
+              if not has_empty:
+                  raise ValueError("LeveledGSS.from_stacks requires an empty stack to determine the root accumulator.")
+
+              root = _ANode[T, Acc](depth=0)
+
+              # We'll build using a memo from path tuples to nodes for structural sharing
+              path_to_node: Dict[Tuple[T, ...], _ANode[T, Acc]] = {tuple(): root}
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
+
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  if path in path_to_node:
+                      return path_to_node[path]
+                  # Create by extending parent path
+                  parent_path, val = path[:-1], path[-1]
+                  parent_node = get_or_create_node(parent_path)
+                  key = (parent_node, val)
+                  if key in child_of:
+                      node = child_of[key]
+                      path_to_node[path] = node
+                      return node
+                  node = _ANode[T, Acc](depth=parent_node.depth + 1)
+                  parent_of[node] = (parent_node, val)
+                  child_of[key] = node
+                  path_to_node[path] = node
+                  path_cache[node.id] = path
+                  return node
+
+              heads: Set[_BHead[T, Acc]] = set()
+
+              for stack, acc in stacks:
+                  path = tuple(stack)
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
+
+              # Reference semantics: If no stacks specified (shouldn't happen due to empty root), ensure there's root:
+              if not heads:
+                  heads.add(_BHead(node=root, acc=root_acc))
+
+              return cls(
+                  root=root,
+                  root_acc=root_acc,  # store the root accumulator
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- Core operations ----
+
+          def push(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Push 'value' onto all active stacks.
+              Implementation:
+                - For each head (node, acc), generate the child node for (node, value), reusing structure if it exists.
+                - Result heads are the set of (child, acc).
+                - This respects invariants: parent heads are replaced by children heads; parents no longer carry accs.
+              """
+              new_child_of = dict(self._child_of)
+              new_parent_of = dict(self._parent_of)
+              new_path_cache = dict(self._path_cache)
+
+              new_heads: Set[_BHead[T, Acc]] = set()
+
+              for head in self._heads:
+                  parent = head.node
+                  key = (parent, value)
+                  child = new_child_of.get(key)
+                  if child is None:
+                      child = _ANode[T, Acc](depth=parent.depth + 1)
+                      new_child_of[key] = child
+                      new_parent_of[child] = (parent, value)
+
+                      # Update path cache
+                      parent_path = self._reconstruct_path_cached(parent, new_parent_of, new_path_cache)
+                      new_path_cache[child.id] = parent_path + (value,)
+
+                  new_heads.add(_BHead(node=child, acc=head.acc))
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=new_parent_of,
+                  child_of=new_child_of,
+                  path_cache=new_path_cache,
+              )
+
+          def pop(self) -> "LeveledGSS[T, Acc]":
+              """
+              Pop the top value from all active stacks.
+              Result:
+                - For each head (node, acc), replace it with head(s) at its parent node(s).
+                - Due to our structure, each node has at most one parent. If none (root), it disappears.
+                - If multiple children map to the same parent and have equal accs, dedup occurs naturally.
+                - If all heads disappear, return a GSS representing the single empty stack (root with _root_acc).
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
+
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      parent_node, _ = parent_edge
+                      new_heads.add(_BHead(node=parent_node, acc=head.acc))
+                  # else: head at root, pop has no effect for that head (it's removed)
+
+              if not new_heads:
+                  # Return GSS with a single empty stack (root with root_acc), as per ReferenceGSS semantics.
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def is_empty(self) -> bool:
+              """
+              Checks if the GSS contains only the initial empty stack (root).
+              """
+              return len(self._heads) == 1 and next(iter(self._heads)).node == self._root
+
+          def isolate(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Keep only stacks with 'value' at the top.
+              Implementation detail:
+                - Top is the labeled edge into the head's node. We check the incoming edge label.
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is None:
+                      # root has no top; it doesn't match any value
+                      continue
+                  _, v = parent_edge
+                  if v == value:
+                      new_heads.add(head)
+
+              if not new_heads:
+                  # Result is the empty GSS (root only)
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def apply(self, func: Callable[[Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Apply 'func' to each head accumulator.
+              This preserves structure and ensures dedup if multiple heads map to same (node, acc') after transform.
+              """
+              new_heads = {_BHead(node=h.node, acc=func(h.acc)) for h in self._heads}
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> "LeveledGSS[T, Acc]":
+              """
+              Remove stacks whose accumulator does not satisfy the predicate.
+              If all are removed, return the empty GSS (root with root_acc).
+              """
+              new_heads = {h for h in self._heads if predicate(h.acc)}
+              if not new_heads:
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def peek(self) -> Set[T]:
+              """
+              Return the set of top-of-stack values across all heads.
+              """
+              vals: Set[T] = set()
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      _, v = parent_edge
+                      vals.add(v)
+              return vals
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """
+              Merge the accumulators of all active stacks using merge_func (left fold).
+              """
+              it = iter(self._heads)
+              try:
+                  first = next(it)
+              except StopIteration:
+                  # Shouldn't happen; empty GSS has root with an acc
+                  return self._root_acc
+              acc_val = first.acc
+              for h in it:
+                  acc_val = merge_func(acc_val, h.acc)
+              return acc_val
+
+          @staticmethod
+          def merge(gss_list: Iterable["LeveledGSS[T, Acc]"], merge_func: Callable[[Acc, Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Merge multiple GSS instances into one, combining accumulators for identical stacks.
+              Semantics:
+                - If there is at least one GSS with non-empty stacks (i.e., some head not at root),
+                  ignore GSS instances that contain only the empty stack.
+                - For identical stack paths across different GSS inputs, combine accumulators via merge_func.
+                - Within a single GSS, distinct accumulators on the same path remain distinct (this method merges across inputs).
+              """
+              gsss = list(gss_list)
+              if not gsss:
+                  raise ValueError("Cannot merge an empty list of GSS instances.")
+
+              # If any GSS has content beyond the empty stack, we ignore purely-empty ones.
+              def has_content(g: LeveledGSS[T, Acc]) -> bool:
+                  return any(h.node is not g._root for h in g._heads)
+
+              with_content = [g for g in gsss if has_content(g)]
+              first = gsss[0]
+
+              if not with_content:
+                  # All are empty -> return an empty GSS bearing the first's root_acc
+                  return LeveledGSS.from_stacks([([], first._root_acc)])
+
+              # Aggregate across all non-empty heads, merging accumulator values for identical paths across inputs.
+              path_to_acc: Dict[Tuple[T, ...], Acc] = {}
+
+              for g in with_content:
+                  for h in g._heads:
+                      if h.node is g._root:
+                          continue  # ignore root-only when others exist
+                      path = g._reconstruct_path_cached(h.node, g._parent_of, g._path_cache)
+                      if path in path_to_acc:
+                          path_to_acc[path] = merge_func(path_to_acc[path], h.acc)
+                      else:
+                          path_to_acc[path] = h.acc
+
+              # Rebuild a new structure from aggregated paths
+              root = _ANode[T, Acc](depth=0)
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
+              heads: Set[_BHead[T, Acc]] = set()
+
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  # Build deterministically using child_of
+                  node = root
+                  if not path:
+                      return node
+                  # We don't keep a full memo by tuple to stay lightweight; follow child_of and create as needed.
+                  # Still O(len(path)) per path.
+                  curr = root
+                  curr_path = ()
+                  for v in path:
+                      key = (curr, v)
+                      nxt = child_of.get(key)
+                      if nxt is None:
+                          nxt = _ANode[T, Acc](depth=curr.depth + 1)
+                          child_of[key] = nxt
+                          parent_of[nxt] = (curr, v)
+                          curr_path = curr_path + (v,)
+                          path_cache[nxt.id] = curr_path
+                          curr = nxt
+                      else:
+                          curr = nxt
+                          # When traversing an existing node, we must update curr_path
+                          # to ensure the next segment is built on the correct prefix.
+                          if curr.id not in path_cache:
+                              # This is a best-effort cache fill.
+                              path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+                          curr_path = path_cache[curr.id]
+                      node = curr
+                  return node
+
+              # Create heads for each aggregated path
+              for path, acc in path_to_acc.items():
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
+
+              return LeveledGSS(
+                  root=root,
+                  root_acc=first._root_acc,
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- JSON and equality/hash ----
+
+          def to_json_serializable(self) -> Any:
+              """
+              Canonical JSON-serializable snapshot of current heads as a list of {"stack": [...], "acc": ...}.
+              Sorted for deterministic comparison.
+              """
+              items = []
+              for h in self._heads:
+                  path = self._reconstruct_path_cached(h.node, self._parent_of, self._path_cache)
+                  items.append({"stack": list(path), "acc": h.acc})
+              # Sort canonically: by path then repr(acc) for stability across arbitrary objects
+              items.sort(key=lambda x: (tuple(x["stack"]), repr(x["acc"])))
+              return items
+
+          def __hash__(self) -> int:
+              serial = self.to_json_serializable()
+              return hash(tuple((tuple(item["stack"]), repr(item["acc"])) for item in serial))
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __repr__(self) -> str:
+              return f"LeveledGSS({self.to_json_serializable()})"
+
+          # ---- Internals ----
+
+          @staticmethod
+          def _reconstruct_path_cached(
+              node: _ANode[T, Acc],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              cache: Dict[int, Tuple[T, ...]],
+          ) -> Tuple[T, ...]:
+              if node.id in cache:
+                  return cache[node.id]
+              return _reconstruct_path(node, parent_of, cache)
+
+
+      def _reconstruct_path(
+          node: _ANode[T, Acc],
+          parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+          cache: Dict[int, Tuple[T, ...]],
+      ) -> Tuple[T, ...]:
+          """
+          Reconstruct the path from root to 'node' using parent_of map.
+          Assumes a unique parent chain (DAG without multiple parents for the same node in practice).
+          """
+          # Iterative to avoid recursion overhead
+          stack_nodes: List[_ANode[T, Acc]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  prefix = cache[curr.id]
+                  break
+              stack_nodes.append(curr)
+              p = parent_of.get(curr)
+              if p is None:
+                  # curr is root
+                  prefix = ()
+                  cache[curr.id] = prefix
+                  stack_nodes.pop()  # remove root from list to avoid duplicate write below
+                  break
+              curr = p[0]
+
+          # Now unwind
+          path = list(prefix)
+          # We need to also collect the edge labels along the way
+          # We replay from the cached node to the original 'node'
+          last = None
+          # Recompute the chain with values
+          # We'll walk the same nodes from where we had cache to original 'node'.
+          # First, figure out the chain including values:
+          # Build a reverse chain from the original node to the nearest cached ancestor
+          chain: List[Tuple[_ANode[T, Acc], T]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  break
+              parent_tuple = parent_of.get(curr)
+              if parent_tuple is None:
+                  # reached root with no cache
+                  break
+              parent_node, val = parent_tuple
+              chain.append((parent_node, val))
+              curr = parent_node
+          # chain is from child->... to cached ancestor; reverse to go forward
+          for parent_node, val in reversed(chain):
+              path.append(val)
+              # fill cache for child
+              # The child is the next in chain; we can retrieve it indirectly but we don't need to cache each intermediate child explicitly here
+          # Cache final node path
+          cache[node.id] = tuple(path)
+          return tuple(path)
+    python/gss_tester/reference_impl.py: |+
+      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+      from functools import reduce
+      from .interface import GSS, T, Acc
+
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Its behavior is the gold standard for the consistency tests.
+          """
+          def __init__(self, stacks: List[Tuple[List[T], Acc]], root_acc: Acc):
+              self.stacks = stacks
+              self._root_acc = root_acc
+              if not self.stacks:
+                  self.stacks.append(([], self._root_acc))
+
+          @classmethod
+          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              root_acc: Acc = None
+              has_empty_stack = False
+              for s, acc in stacks:
+                  if not s:
+                      has_empty_stack = True
+                      root_acc = acc
+                      break
+              if not has_empty_stack:
+                  raise ValueError("ReferenceGSS.from_stacks requires an empty stack to determine the root accumulator.")
+              return cls(stacks, root_acc)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack + [value], acc) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack:
+                      new_stacks.append((stack[:-1], acc))
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack and stack[-1] == value:
+                      new_stacks.append((stack, acc))
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, func(acc)) for stack, acc in self.stacks]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = [(stack, acc) for stack, acc in self.stacks if predicate(acc)]
+              return ReferenceGSS(new_stacks, self._root_acc)
+
+          def peek(self) -> Set[T]:
+              return {stack[-1] for stack, acc in self.stacks if stack}
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """Merges the accumulators of all active stacks into a single value."""
+              accumulators = [acc for _, acc in self.stacks]
+              return reduce(merge_func, accumulators)
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              root_acc = None
+              
+              gss_list = list(gss_list)
+              if not gss_list:
+                  raise ValueError("Cannot merge empty list of GSS")
+
+              root_acc = gss_list[0]._root_acc
+
+              for gss in gss_list:
+                  if isinstance(gss, ReferenceGSS):
+                      # Don't add the default empty stack if there are other stacks
+                      if len(gss.stacks) > 1 or gss.stacks[0][0]:
+                          all_stacks.extend(gss.stacks)
+              
+              if root_acc is None:
+                   # This can happen if all GSSs were empty.
+                   root_acc = gss_list[0]._root_acc
+
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for stack, acc in all_stacks:
+                  key = tuple(stack)
+                  if key in merged_map:
+                      merged_map[key] = merge_func(merged_map[key], acc)
+                  else:
+                      merged_map[key] = acc
+              
+              final_stacks = [(list(key), acc) for key, acc in merged_map.items()]
+              return ReferenceGSS(final_stacks, root_acc)
+
+          def to_json_serializable(self) -> Any:
+              # Sort stacks for a canonical representation, making comparisons reliable.
+              # Stacks (lists) are converted to tuples to be sortable keys.
+              sorted_stacks = sorted(self.stacks, key=lambda x: (tuple(x[0]), x[1]))
+              return [{"stack": stack, "acc": acc} for stack, acc in sorted_stacks]
+
+          def __hash__(self):
+              return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
+
+          def is_empty(self) -> bool:
+              return len(self.stacks) == 1 and not self.stacks[0][0]
+
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+    python/gss_tester/run_tests.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_tests.sh
+      #
+      # A script to automate running the GSS test specification against multiple
+      # implementations, generating JSON results, and analyzing them for consistency.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./gss_tester/run_tests.sh <reference_impl> <impl1> [impl2 ...]
+      #
+      # Example:
+      #   ./gss_tester/run_tests.sh gss_tester.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      #
+      # Each implementation is specified as 'path.to.module.ClassName'.
+      # ==============================================================================
+
+      # --- Setup PYTHONPATH to find gss_tester ---
+      # The script is in 'python/gss_tester', so the python source root is one level up.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <reference_impl> <impl1> [impl2 ...]"
+          echo "Error: At least one implementation is required. The first is treated as the reference."
+          exit 1
+      fi
+
+      REFERENCE_IMPL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_IMPLS=("$REFERENCE_IMPL" "${COMPETITORS[@]}")
+
+      # --- Setup ---
+      # Create a unique directory for this test run's results.
+      RESULTS_DIR="gss_test_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Test results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Implementation: $REFERENCE_IMPL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Implementations: ${COMPETITORS[*]}"
+      else
+        echo "Other Implementations: (none)"
+      fi
+      echo "---"
+
+      # --- Run Tests ---
+      echo "Starting test runs..."
+      REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
+      for full_impl_path in "${ALL_IMPLS[@]}"; do
+          echo
+          echo ">>> Running test spec for: $full_impl_path"
+
+          # --- Convert file path to module and class names ---
+          # This logic handles both module paths (e.g., gss_tester.ref.RefGSS) and
+          # file paths (e.g., python/gss_tester/reference_impl.py).
+          if [[ "$full_impl_path" == *.py ]]; then
+              # Handle file path: derive module and class name by convention.
+              # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
+              module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+              # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
+              # Use sed to robustly strip one or more '.py' suffixes.
+              base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
+              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+              full_impl_name="${module_name}.${class_name}"
+          else
+              # Handle module.ClassName format
+              full_impl_name="$full_impl_path"
+              module_name="${full_impl_name%.*}"
+              class_name="${full_impl_name##*.}"
+          fi
+
+          # The first implementation is the reference; capture its canonical name.
+          if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
+              REFERENCE_IMPL_CANONICAL="$full_impl_name"
+          fi
+
+          output_file="${RESULTS_DIR}/${full_impl_name}.json"
+
+          cmd=(python -m gss_tester.runner
+              "$module_name"
+              "$class_name"
+              --output "$output_file")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished test spec for: $full_impl_path"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Test for $full_impl_path interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Test for $full_impl_path failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All test runs completed."
+      echo "---"
+
+      # --- Analyze Results ---
+      echo "Analyzing results for consistency..."
+      REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
+
+      # Check if the reference file was actually created
+      if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
+          echo "Error: Reference result file was not generated: $REFERENCE_RESULT_FILE"
+          echo "Skipping analysis."
+          exit 1
+      fi
+
+      cmd=(python -m gss_tester.analyzer
+          "${RESULTS_DIR}"/*.json
+          --reference "$REFERENCE_RESULT_FILE")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Consistency analysis complete."
+      echo "Reference: $REFERENCE_IMPL"
+      echo "Summary printed above."
+      echo "Full JSON results are in: $RESULTS_DIR"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1865,319 +2666,6 @@ messages:
     metadata:
       filename: python/gss_tester/analyzer.py
   - user: |-
-      ```python 'python/gss_tester/fast_impl.py'
-      import itertools
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Generic, FrozenSet
-
-      from .interface import GSS, T, Acc
-
-      class _Node(Generic[T, Acc]):
-          """Represents a node in the GSS graph. Each node is a unique state."""
-          _id_counter = itertools.count()
-
-          def __init__(self, acc: Acc, depth: int):
-              self.id = next(self._id_counter)
-              self.acc = acc
-              self.depth = depth
-          
-          def __hash__(self):
-              return self.id
-
-          def __eq__(self, other):
-              if not isinstance(other, _Node):
-                  return NotImplemented
-              return self.id == other.id
-          
-          def __repr__(self):
-              return f"_Node(id={self.id}, depth={self.depth}, acc={self.acc})"
-
-          def __str__(self):
-              return self.__repr__()
-
-      class FastGSS(GSS[T, Acc]):
-          """
-          A performant GSS implementation using a graph of shared nodes.
-          
-          - The GSS is represented as a DAG where nodes are states and edges are stack operations.
-          - Nodes store accumulators and their depth from the root.
-          - The structure is represented by a child-to-parents mapping, allowing efficient `pop` operations.
-          - GSS instances are immutable. Operations return new instances with updated heads or structure maps.
-          - Path reconstruction for `merge` and `to_json_serializable` is memoized for performance.
-          """
-
-          def __init__(self, 
-                       heads: FrozenSet[_Node[T, Acc]], 
-                       root: _Node[T, Acc],
-                       child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]],
-                       path_cache: Dict[int, FrozenSet[Tuple[T, ...]]]):
-              self._heads = heads
-              self._root = root
-              self._child_to_parents = child_to_parents
-              self._path_cache = path_cache
-
-          @classmethod
-          def from_stacks(cls: Type['FastGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'FastGSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks by building the node graph."""
-              root_acc: Acc = None
-              has_empty_stack = False
-              for s, acc in stacks:
-                  if not s:
-                      has_empty_stack = True
-                      root_acc = acc
-                      break
-              
-              if not has_empty_stack:
-                  raise ValueError("FastGSS.from_stacks requires an empty stack to determine the root accumulator.")
-
-              root = _Node(acc=root_acc, depth=0)
-              child_to_parents: Dict[_Node[T, Acc], Set[Tuple[T, _Node[T, Acc]]]] = {}
-              path_cache: Dict[int, FrozenSet[Tuple[T, ...]]] = {root.id: frozenset([tuple()])}
-              heads: Set[_Node[T, Acc]] = set()
-
-              # Memoize nodes created for stack prefixes to ensure structure is shared.
-              # key: tuple(stack_prefix), value: _Node
-              memoized_nodes: Dict[Tuple[T, ...], _Node[T, Acc]] = {tuple(): root}
-
-              if not stacks:
-                  heads.add(root)
-
-              for stack_list, acc in stacks:
-                  stack_list.reverse()
-                  current_node = root
-                  stack_tuple = tuple(stack_list)
-
-                  # Traverse/create nodes for the path
-                  for i, value in enumerate(stack_tuple):
-                      prefix = stack_tuple[:i + 1]
-                      if prefix in memoized_nodes:
-                          current_node = memoized_nodes[prefix]
-                      else:
-                          # Create a new node. Its accumulator is temporary; only head accumulators matter.
-                          new_node = _Node(acc=current_node.acc, depth=current_node.depth + 1)
-                          child_to_parents[new_node] = {(value, current_node)}
-                          memoized_nodes[prefix] = new_node
-                          current_node = new_node
-                  
-                  # Now `current_node` is the shared node for this stack path.
-                  # We need a head with the specific accumulator.
-                  if current_node.acc == acc:
-                      heads.add(current_node)
-                  else:
-                      # Create a new head node with the correct accumulator but same structure.
-                      new_head = _Node(acc=acc, depth=current_node.depth)
-                      if current_node in child_to_parents:
-                          child_to_parents[new_head] = child_to_parents[current_node]
-                      heads.add(new_head)
-
-              return cls(frozenset(heads), root, child_to_parents, path_cache)
-
-          def push(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              
-              # Memoize node creation within a single push operation
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_node = _Node(acc=head.acc, depth=head.depth + 1)
-                  
-                  if new_node not in new_child_to_parents:
-                      new_child_to_parents[new_node] = set()
-                  new_child_to_parents[new_node].add((value, head))
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
-
-          def pop(self) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for _, parent in self._child_to_parents[head]:
-                          new_heads.add(parent)
-
-              if not new_heads:
-                  # A pop resulting in no stacks should yield a GSS with a single empty stack (the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains only the initial empty stack."""
-              return self._heads == frozenset([self._root])
-
-          def isolate(self, value: T) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      if any(v == value for v, _ in self._child_to_parents[head]):
-                          new_heads.add(head)
-
-              if not new_heads:
-                  # If no stacks match, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
-              new_heads: Set[_Node[T, Acc]] = set()
-              new_child_to_parents = self._child_to_parents.copy()
-              memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
-
-              for head in self._heads:
-                  if head in memo:
-                      new_heads.add(memo[head])
-                      continue
-
-                  new_acc = func(head.acc)
-                  new_node = _Node(acc=new_acc, depth=head.depth)
-                  
-                  if head in self._child_to_parents:
-                      new_child_to_parents[new_node] = self._child_to_parents[head]
-                  
-                  new_heads.add(new_node)
-                  memo[head] = new_node
-                  
-              return FastGSS(frozenset(new_heads), self._root, new_child_to_parents, self._path_cache.copy())
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
-              new_heads = {head for head in self._heads if predicate(head.acc)}
-
-              if not new_heads:
-                  # If all stacks are pruned, the result is an empty GSS (represented by the root).
-                  return FastGSS(frozenset([self._root]), self._root, self._child_to_parents, self._path_cache)
-
-              return FastGSS(frozenset(new_heads), self._root, self._child_to_parents, self._path_cache)
-
-          def peek(self) -> Set[T]:
-              peek_values: Set[T] = set()
-              for head in self._heads:
-                  if head in self._child_to_parents:
-                      for value, _ in self._child_to_parents[head]:
-                          peek_values.add(value)
-              return peek_values
-
-          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-              """Merges the accumulators of all active stacks into a single value."""
-              accumulators = [head.acc for head in self._heads]
-              return reduce(merge_func, accumulators)
-
-          @staticmethod
-          def merge(gss_list: Iterable['FastGSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'FastGSS[T, Acc]':
-              gss_list = list(gss_list)
-              if not gss_list:
-                  raise ValueError("Cannot merge an empty list of GSS instances.")
-              
-              first_gss = gss_list[0]
-              
-              if len(gss_list) == 1:
-                  return first_gss
-
-              # Filter out GSSs that only contain an empty stack if there are others with content.
-              gss_with_content = [gss for gss in gss_list if any(h is not gss._root for h in gss._heads)]
-
-              if gss_with_content:
-                  gss_list_to_merge = gss_with_content
-              else:
-                  # All GSSs only contain empty stacks, so merge them all.
-                  gss_list_to_merge = gss_list
-
-              # Combine all structural information and heads
-              all_child_to_parents = {}
-              all_path_caches = {}
-              all_heads = set()
-              for gss in gss_list_to_merge:
-                  all_child_to_parents.update(gss._child_to_parents)
-                  all_path_caches.update(gss._path_cache)
-                  all_heads.update(gss._heads)
-
-              # Group heads by their structural path
-              heads_by_path: Dict[FrozenSet[Tuple[T, ...]], List[_Node[T, Acc]]] = {}
-              for head in all_heads:
-                  paths = first_gss._reconstruct_paths(head, all_child_to_parents, all_path_caches)
-                  if paths not in heads_by_path:
-                      heads_by_path[paths] = []
-                  heads_by_path[paths].append(head)
-
-              final_heads: Set[_Node[T, Acc]] = set()
-              for paths, nodes in heads_by_path.items():
-                  if len(nodes) == 1:
-                      final_heads.add(nodes[0])
-                      continue
-                  
-                  # Merge accumulators for nodes on the same path
-                  merged_acc = reduce(merge_func, (n.acc for n in nodes))
-                  
-                  # Try to find an existing node with the merged accumulator to reuse
-                  reused_node = next((n for n in nodes if n.acc == merged_acc), None)
-                  
-                  if reused_node:
-                      final_heads.add(reused_node)
-                  else:
-                      # Create a new node representing the merged state
-                      canonical_node = nodes[0]
-                      new_node = _Node(acc=merged_acc, depth=canonical_node.depth)
-                      if canonical_node in all_child_to_parents:
-                          all_child_to_parents[new_node] = all_child_to_parents[canonical_node]
-                      final_heads.add(new_node)
-
-              return FastGSS(frozenset(final_heads), first_gss._root, all_child_to_parents, all_path_caches)
-
-          def to_json_serializable(self) -> Any:
-              all_stacks = []
-              for head in self._heads:
-                  paths = self._reconstruct_paths(head, self._child_to_parents, self._path_cache)
-                  for path in paths:
-                      all_stacks.append({"stack": list(path), "acc": head.acc})
-              
-              # Sort for a canonical representation
-              return sorted(all_stacks, key=lambda x: (x["stack"], repr(x["acc"])))
-
-          def _reconstruct_paths(self, node: _Node, child_to_parents: Dict, cache: Dict) -> FrozenSet[Tuple[T, ...]]:
-              if node.id in cache:
-                  return cache[node.id]
-
-              if node == self._root:
-                  return frozenset([tuple()])
-
-              if node not in child_to_parents:
-                  # This can happen if a GSS is empty (has no heads pointing to this node's parents)
-                  return frozenset()
-
-              paths: Set[Tuple[T, ...]] = set()
-              for value, parent in child_to_parents[node]:
-                  parent_paths = self._reconstruct_paths(parent, child_to_parents, cache)
-                  for p_path in parent_paths:
-                      paths.add(p_path + (value,))
-              
-              result = frozenset(paths)
-              cache[node.id] = result
-              return result
-
-          def __hash__(self):
-              serial = self.to_json_serializable()
-              hashable_serial = tuple(
-                  (tuple(item['stack']), item['acc']) for item in serial
-              )
-              return hash(hashable_serial)
-
-          def __eq__(self, other):
-              if not isinstance(other, FastGSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __repr__(self):
-              return f"FastGSS({self.to_json_serializable()})"
-
-      ```
-    metadata:
-      filename: python/gss_tester/fast_impl.py
-  - user: |-
       ```python 'python/gss_tester/interface.py'
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
@@ -2285,6 +2773,563 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/interface.py
+  - user: |-
+      ```python 'python/gss_tester/leveled_impl.py'
+      from __future__ import annotations
+
+      import itertools
+      from dataclasses import dataclass
+      from functools import reduce
+      from typing import (
+          TypeVar,
+          Generic,
+          List,
+          Tuple,
+          Callable,
+          Set,
+          Iterable,
+          Dict,
+          Any,
+          Optional,
+          Type,
+      )
+
+      from .interface import GSS, T, Acc
+
+
+      class _ANode(Generic[T, Acc]):
+          """
+          Structural node for the GSS DAG.
+          - No accumulator is stored here.
+          - Each node has exactly one parent (except root), and is identified by a unique id.
+          - Edges are maintained externally via the owning GSS instance.
+          """
+          _id_counter = itertools.count()
+
+          __slots__ = ("id", "depth")
+
+          def __init__(self, depth: int):
+              self.id = next(self._id_counter)
+              self.depth = depth
+
+          def __hash__(self) -> int:
+              return self.id
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, _ANode):
+                  return NotImplemented
+              return self.id == other.id
+
+          def __repr__(self) -> str:
+              return f"_ANode(id={self.id}, depth={self.depth})"
+
+
+      @dataclass(frozen=True, slots=True)
+      class _BHead(Generic[T, Acc]):
+          """
+          "Head" wrapper that carries an accumulator at a specific structural node.
+          This models the invariant:
+            - Accumulators live only at heads (one 'level'): B wraps an A node + Acc.
+            - If a parent node has a head (acc), its children will not (as operations replace heads).
+            - If all children's accs would be equal on pop, they collapse into the parent (dedup of heads).
+          """
+          node: _ANode[T, Acc]
+          acc: Acc
+
+          def __hash__(self) -> int:
+              # Hash by node id and accumulator
+              return hash((self.node.id, self.acc))
+
+          def __repr__(self) -> str:
+              return f"_BHead(node={self.node!r}, acc={self.acc!r})"
+
+
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          """
+          A fast, immutable Graph-Structured Stack (GSS) focusing on "accumulators-at-one-level" invariants.
+
+          Design:
+            - Structural nodes (_ANode) form a DAG from root via labeled edges (values of type T).
+            - Active stacks ("heads") are represented by _BHead objects (node+acc), i.e., type B wrapping type A + Acc.
+            - Only heads carry accumulators; internal nodes do not.
+            - Push replaces each head with a new child head; Pop replaces head(s) by parent head(s).
+            - If multiple children pop to the same parent with equal accumulators, they deduplicate into a single parent head.
+            - Multiple different accumulators at the same parent path are allowed (they represent distinct heads on that stack).
+
+          Data structures:
+            - _root: the root _ANode (represents the empty stack).
+            - _root_acc: accumulator of the empty stack (Reference semantics).
+            - _heads: frozenset of _BHead (the active stacks with accumulators).
+            - _parent_of: dict mapping child _ANode -> (parent _ANode, value T). Root has no parent.
+            - _child_of: dict mapping (parent _ANode, value T) -> child _ANode (unique).
+            - _path_cache: dict mapping node.id -> tuple of T representing the path from root to this node (cached).
+          """
+
+          __slots__ = (
+              "_root",
+              "_root_acc",
+              "_heads",
+              "_parent_of",
+              "_child_of",
+              "_path_cache",
+          )
+
+          def __init__(
+              self,
+              root: _ANode[T, Acc],
+              root_acc: Acc,
+              heads: frozenset[_BHead[T, Acc]],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]],
+              path_cache: Dict[int, Tuple[T, ...]],
+          ):
+              self._root = root
+              self._root_acc = root_acc
+              self._heads = heads
+              self._parent_of = parent_of
+              self._child_of = child_of
+              self._path_cache = path_cache
+
+          # ---- Construction ----
+
+          @classmethod
+          def from_stacks(cls: Type["LeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "LeveledGSS[T, Acc]":
+              """
+              Build a GSS from explicit stacks. Matches ReferenceGSS semantics:
+                - There must be an empty stack [] providing the root accumulator.
+                - Multiple stacks can be present; structure is shared where possible.
+              """
+              # Find root acc from empty stack, as in reference implementation
+              root_acc: Optional[Acc] = None
+              has_empty = False
+              for s, acc in stacks:
+                  if not s:
+                      root_acc = acc
+                      has_empty = True
+                      break
+              if not has_empty:
+                  raise ValueError("LeveledGSS.from_stacks requires an empty stack to determine the root accumulator.")
+
+              root = _ANode[T, Acc](depth=0)
+
+              # We'll build using a memo from path tuples to nodes for structural sharing
+              path_to_node: Dict[Tuple[T, ...], _ANode[T, Acc]] = {tuple(): root}
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
+
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  if path in path_to_node:
+                      return path_to_node[path]
+                  # Create by extending parent path
+                  parent_path, val = path[:-1], path[-1]
+                  parent_node = get_or_create_node(parent_path)
+                  key = (parent_node, val)
+                  if key in child_of:
+                      node = child_of[key]
+                      path_to_node[path] = node
+                      return node
+                  node = _ANode[T, Acc](depth=parent_node.depth + 1)
+                  parent_of[node] = (parent_node, val)
+                  child_of[key] = node
+                  path_to_node[path] = node
+                  path_cache[node.id] = path
+                  return node
+
+              heads: Set[_BHead[T, Acc]] = set()
+
+              for stack, acc in stacks:
+                  path = tuple(stack)
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
+
+              # Reference semantics: If no stacks specified (shouldn't happen due to empty root), ensure there's root:
+              if not heads:
+                  heads.add(_BHead(node=root, acc=root_acc))
+
+              return cls(
+                  root=root,
+                  root_acc=root_acc,  # store the root accumulator
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- Core operations ----
+
+          def push(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Push 'value' onto all active stacks.
+              Implementation:
+                - For each head (node, acc), generate the child node for (node, value), reusing structure if it exists.
+                - Result heads are the set of (child, acc).
+                - This respects invariants: parent heads are replaced by children heads; parents no longer carry accs.
+              """
+              new_child_of = dict(self._child_of)
+              new_parent_of = dict(self._parent_of)
+              new_path_cache = dict(self._path_cache)
+
+              new_heads: Set[_BHead[T, Acc]] = set()
+
+              for head in self._heads:
+                  parent = head.node
+                  key = (parent, value)
+                  child = new_child_of.get(key)
+                  if child is None:
+                      child = _ANode[T, Acc](depth=parent.depth + 1)
+                      new_child_of[key] = child
+                      new_parent_of[child] = (parent, value)
+
+                      # Update path cache
+                      parent_path = self._reconstruct_path_cached(parent, new_parent_of, new_path_cache)
+                      new_path_cache[child.id] = parent_path + (value,)
+
+                  new_heads.add(_BHead(node=child, acc=head.acc))
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=new_parent_of,
+                  child_of=new_child_of,
+                  path_cache=new_path_cache,
+              )
+
+          def pop(self) -> "LeveledGSS[T, Acc]":
+              """
+              Pop the top value from all active stacks.
+              Result:
+                - For each head (node, acc), replace it with head(s) at its parent node(s).
+                - Due to our structure, each node has at most one parent. If none (root), it disappears.
+                - If multiple children map to the same parent and have equal accs, dedup occurs naturally.
+                - If all heads disappear, return a GSS representing the single empty stack (root with _root_acc).
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
+
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      parent_node, _ = parent_edge
+                      new_heads.add(_BHead(node=parent_node, acc=head.acc))
+                  # else: head at root, pop has no effect for that head (it's removed)
+
+              if not new_heads:
+                  # Return GSS with a single empty stack (root with root_acc), as per ReferenceGSS semantics.
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def is_empty(self) -> bool:
+              """
+              Checks if the GSS contains only the initial empty stack (root).
+              """
+              return len(self._heads) == 1 and next(iter(self._heads)).node == self._root
+
+          def isolate(self, value: T) -> "LeveledGSS[T, Acc]":
+              """
+              Keep only stacks with 'value' at the top.
+              Implementation detail:
+                - Top is the labeled edge into the head's node. We check the incoming edge label.
+              """
+              new_heads: Set[_BHead[T, Acc]] = set()
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is None:
+                      # root has no top; it doesn't match any value
+                      continue
+                  _, v = parent_edge
+                  if v == value:
+                      new_heads.add(head)
+
+              if not new_heads:
+                  # Result is the empty GSS (root only)
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def apply(self, func: Callable[[Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Apply 'func' to each head accumulator.
+              This preserves structure and ensures dedup if multiple heads map to same (node, acc') after transform.
+              """
+              new_heads = {_BHead(node=h.node, acc=func(h.acc)) for h in self._heads}
+
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> "LeveledGSS[T, Acc]":
+              """
+              Remove stacks whose accumulator does not satisfy the predicate.
+              If all are removed, return the empty GSS (root with root_acc).
+              """
+              new_heads = {h for h in self._heads if predicate(h.acc)}
+              if not new_heads:
+                  return LeveledGSS(
+                      root=self._root,
+                      root_acc=self._root_acc,
+                      heads=frozenset({_BHead(node=self._root, acc=self._root_acc)}),
+                      parent_of=self._parent_of,
+                      child_of=self._child_of,
+                      path_cache=self._path_cache,
+                  )
+              return LeveledGSS(
+                  root=self._root,
+                  root_acc=self._root_acc,
+                  heads=frozenset(new_heads),
+                  parent_of=self._parent_of,
+                  child_of=self._child_of,
+                  path_cache=self._path_cache,
+              )
+
+          def peek(self) -> Set[T]:
+              """
+              Return the set of top-of-stack values across all heads.
+              """
+              vals: Set[T] = set()
+              for head in self._heads:
+                  parent_edge = self._parent_of.get(head.node)
+                  if parent_edge is not None:
+                      _, v = parent_edge
+                      vals.add(v)
+              return vals
+
+          def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+              """
+              Merge the accumulators of all active stacks using merge_func (left fold).
+              """
+              it = iter(self._heads)
+              try:
+                  first = next(it)
+              except StopIteration:
+                  # Shouldn't happen; empty GSS has root with an acc
+                  return self._root_acc
+              acc_val = first.acc
+              for h in it:
+                  acc_val = merge_func(acc_val, h.acc)
+              return acc_val
+
+          @staticmethod
+          def merge(gss_list: Iterable["LeveledGSS[T, Acc]"], merge_func: Callable[[Acc, Acc], Acc]) -> "LeveledGSS[T, Acc]":
+              """
+              Merge multiple GSS instances into one, combining accumulators for identical stacks.
+              Semantics:
+                - If there is at least one GSS with non-empty stacks (i.e., some head not at root),
+                  ignore GSS instances that contain only the empty stack.
+                - For identical stack paths across different GSS inputs, combine accumulators via merge_func.
+                - Within a single GSS, distinct accumulators on the same path remain distinct (this method merges across inputs).
+              """
+              gsss = list(gss_list)
+              if not gsss:
+                  raise ValueError("Cannot merge an empty list of GSS instances.")
+
+              # If any GSS has content beyond the empty stack, we ignore purely-empty ones.
+              def has_content(g: LeveledGSS[T, Acc]) -> bool:
+                  return any(h.node is not g._root for h in g._heads)
+
+              with_content = [g for g in gsss if has_content(g)]
+              first = gsss[0]
+
+              if not with_content:
+                  # All are empty -> return an empty GSS bearing the first's root_acc
+                  return LeveledGSS.from_stacks([([], first._root_acc)])
+
+              # Aggregate across all non-empty heads, merging accumulator values for identical paths across inputs.
+              path_to_acc: Dict[Tuple[T, ...], Acc] = {}
+
+              for g in with_content:
+                  for h in g._heads:
+                      if h.node is g._root:
+                          continue  # ignore root-only when others exist
+                      path = g._reconstruct_path_cached(h.node, g._parent_of, g._path_cache)
+                      if path in path_to_acc:
+                          path_to_acc[path] = merge_func(path_to_acc[path], h.acc)
+                      else:
+                          path_to_acc[path] = h.acc
+
+              # Rebuild a new structure from aggregated paths
+              root = _ANode[T, Acc](depth=0)
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]] = {}
+              child_of: Dict[Tuple[_ANode[T, Acc], T], _ANode[T, Acc]] = {}
+              path_cache: Dict[int, Tuple[T, ...]] = {root.id: tuple()}
+              heads: Set[_BHead[T, Acc]] = set()
+
+              def get_or_create_node(path: Tuple[T, ...]) -> _ANode[T, Acc]:
+                  # Build deterministically using child_of
+                  node = root
+                  if not path:
+                      return node
+                  # We don't keep a full memo by tuple to stay lightweight; follow child_of and create as needed.
+                  # Still O(len(path)) per path.
+                  curr = root
+                  curr_path = ()
+                  for v in path:
+                      key = (curr, v)
+                      nxt = child_of.get(key)
+                      if nxt is None:
+                          nxt = _ANode[T, Acc](depth=curr.depth + 1)
+                          child_of[key] = nxt
+                          parent_of[nxt] = (curr, v)
+                          curr_path = curr_path + (v,)
+                          path_cache[nxt.id] = curr_path
+                          curr = nxt
+                      else:
+                          curr = nxt
+                          # Best-effort cache fill if missing
+                          if nxt.id not in path_cache:
+                              # Reconstruct from parent_of
+                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
+                              path_cache[nxt.id] = ppath
+                      node = curr
+                  return node
+
+              # Create heads for each aggregated path
+              for path, acc in path_to_acc.items():
+                  node = get_or_create_node(path)
+                  heads.add(_BHead(node=node, acc=acc))
+
+              return LeveledGSS(
+                  root=root,
+                  root_acc=first._root_acc,
+                  heads=frozenset(heads),
+                  parent_of=parent_of,
+                  child_of=child_of,
+                  path_cache=path_cache,
+              )
+
+          # ---- JSON and equality/hash ----
+
+          def to_json_serializable(self) -> Any:
+              """
+              Canonical JSON-serializable snapshot of current heads as a list of {"stack": [...], "acc": ...}.
+              Sorted for deterministic comparison.
+              """
+              items = []
+              for h in self._heads:
+                  path = self._reconstruct_path_cached(h.node, self._parent_of, self._path_cache)
+                  items.append({"stack": list(path), "acc": h.acc})
+              # Sort canonically: by path then repr(acc) for stability across arbitrary objects
+              items.sort(key=lambda x: (tuple(x["stack"]), repr(x["acc"])))
+              return items
+
+          def __hash__(self) -> int:
+              serial = self.to_json_serializable()
+              return hash(tuple((tuple(item["stack"]), repr(item["acc"])) for item in serial))
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_json_serializable() == other.to_json_serializable()
+
+          def __repr__(self) -> str:
+              return f"LeveledGSS({self.to_json_serializable()})"
+
+          # ---- Internals ----
+
+          @staticmethod
+          def _reconstruct_path_cached(
+              node: _ANode[T, Acc],
+              parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+              cache: Dict[int, Tuple[T, ...]],
+          ) -> Tuple[T, ...]:
+              if node.id in cache:
+                  return cache[node.id]
+              return _reconstruct_path(node, parent_of, cache)
+
+
+      def _reconstruct_path(
+          node: _ANode[T, Acc],
+          parent_of: Dict[_ANode[T, Acc], Tuple[_ANode[T, Acc], T]],
+          cache: Dict[int, Tuple[T, ...]],
+      ) -> Tuple[T, ...]:
+          """
+          Reconstruct the path from root to 'node' using parent_of map.
+          Assumes a unique parent chain (DAG without multiple parents for the same node in practice).
+          """
+          # Iterative to avoid recursion overhead
+          stack_nodes: List[_ANode[T, Acc]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  prefix = cache[curr.id]
+                  break
+              stack_nodes.append(curr)
+              p = parent_of.get(curr)
+              if p is None:
+                  # curr is root
+                  prefix = ()
+                  cache[curr.id] = prefix
+                  stack_nodes.pop()  # remove root from list to avoid duplicate write below
+                  break
+              curr = p[0]
+
+          # Now unwind
+          path = list(prefix)
+          # We need to also collect the edge labels along the way
+          # We replay from the cached node to the original 'node'
+          last = None
+          # Recompute the chain with values
+          # We'll walk the same nodes from where we had cache to original 'node'.
+          # First, figure out the chain including values:
+          # Build a reverse chain from the original node to the nearest cached ancestor
+          chain: List[Tuple[_ANode[T, Acc], T]] = []
+          curr = node
+          while True:
+              if curr.id in cache:
+                  break
+              parent_tuple = parent_of.get(curr)
+              if parent_tuple is None:
+                  # reached root with no cache
+                  break
+              parent_node, val = parent_tuple
+              chain.append((parent_node, val))
+              curr = parent_node
+          # chain is from child->... to cached ancestor; reverse to go forward
+          for parent_node, val in reversed(chain):
+              path.append(val)
+              # fill cache for child
+              # The child is the next in chain; we can retrieve it indirectly but we don't need to cache each intermediate child explicitly here
+          # Cache final node path
+          cache[node.id] = tuple(path)
+          return tuple(path)
+
+      ```
+    metadata:
+      filename: python/gss_tester/leveled_impl.py
   - user: |-
       ```python 'python/gss_tester/reference_impl.py'
       from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
@@ -2565,47 +3610,6 @@ messages:
           pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
           yield from _yield_state(pruned_all_gss) # Should be an empty GSS
 
-      ```
-    metadata:
-      filename: python/gss_tester/test_spec.py
-  - user: Our validation of the GSS impls isn't anywhere near comprehensive enough.
-      In fact, there *are* differences between the impls, but they aren't revealed
-      by the tests. Fix this.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. The existing test suite is not comprehensive enough to catch subtle differences in how the implementations handle stack merging after `pop` operations, especially concerning shared history and accumulator propagation. I'll add a few test cases to `test_spec.py` to expose these divergences.
-
-      Here are the step-by-step instructions to improve the test suite:
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `python/gss_tester/test_spec.py`**.
-      2.  **Navigate to the end of the `run_test_spec` function**.
-      3.  **Append the new test cases** to the end of the function. These new tests will cover:
-          *   Popping from merged branches that share a common parent stack, which should result in a single, merged stack. This will reveal an issue in `ReferenceGSS`.
-          *   Performing subsequent operations after such a pop to confirm the state is correct.
-          *   Popping from merged branches that have different accumulators. This will reveal an issue in `FastGSS` where accumulator values are lost.
-          *   Using the `popn` method with varying depths to ensure it handles stacks of different lengths correctly.
-
-      Here is the code to add:
-
-      ```python
           # --- Test 8: Pop operations on merged stacks ---
           # Case 8a: Pop to a common parent, should result in one stack.
           # This exposes a bug in ReferenceGSS which creates duplicate stacks.
@@ -2648,63 +3652,291 @@ messages:
           # Case 9b: popn more than stack depth
           gss_pn_pop4 = gss_pn_merged.popn(4)
           yield from _yield_state(gss_pn_pop4) # has []
+
       ```
+    metadata:
+      filename: python/gss_tester/test_spec.py
+  - user: |-
+      ```shell 'python/gss_tester/run_tests.sh'
+      #!/bin/bash
+      set -euo pipefail
 
-      ### Git Diffs
+      # ==============================================================================
+      # run_tests.sh
+      #
+      # A script to automate running the GSS test specification against multiple
+      # implementations, generating JSON results, and analyzing them for consistency.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./gss_tester/run_tests.sh <reference_impl> <impl1> [impl2 ...]
+      #
+      # Example:
+      #   ./gss_tester/run_tests.sh gss_tester.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      #
+      # Each implementation is specified as 'path.to.module.ClassName'.
+      # ==============================================================================
 
-      Here is the git diff for the change.
+      # --- Setup PYTHONPATH to find gss_tester ---
+      # The script is in 'python/gss_tester', so the python source root is one level up.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <reference_impl> <impl1> [impl2 ...]"
+          echo "Error: At least one implementation is required. The first is treated as the reference."
+          exit 1
+      fi
+
+      REFERENCE_IMPL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_IMPLS=("$REFERENCE_IMPL" "${COMPETITORS[@]}")
+
+      # --- Setup ---
+      # Create a unique directory for this test run's results.
+      RESULTS_DIR="gss_test_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Test results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Implementation: $REFERENCE_IMPL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Implementations: ${COMPETITORS[*]}"
+      else
+        echo "Other Implementations: (none)"
+      fi
+      echo "---"
+
+      # --- Run Tests ---
+      echo "Starting test runs..."
+      REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
+      for full_impl_path in "${ALL_IMPLS[@]}"; do
+          echo
+          echo ">>> Running test spec for: $full_impl_path"
+
+          # --- Convert file path to module and class names ---
+          # This logic handles both module paths (e.g., gss_tester.ref.RefGSS) and
+          # file paths (e.g., python/gss_tester/reference_impl.py).
+          if [[ "$full_impl_path" == *.py ]]; then
+              # Handle file path: derive module and class name by convention.
+              # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
+              module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+              # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
+              # Use sed to robustly strip one or more '.py' suffixes.
+              base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
+              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+              full_impl_name="${module_name}.${class_name}"
+          else
+              # Handle module.ClassName format
+              full_impl_name="$full_impl_path"
+              module_name="${full_impl_name%.*}"
+              class_name="${full_impl_name##*.}"
+          fi
+
+          # The first implementation is the reference; capture its canonical name.
+          if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
+              REFERENCE_IMPL_CANONICAL="$full_impl_name"
+          fi
+
+          output_file="${RESULTS_DIR}/${full_impl_name}.json"
+
+          cmd=(python -m gss_tester.runner
+              "$module_name"
+              "$class_name"
+              --output "$output_file")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished test spec for: $full_impl_path"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Test for $full_impl_path interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Test for $full_impl_path failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All test runs completed."
+      echo "---"
+
+      # --- Analyze Results ---
+      echo "Analyzing results for consistency..."
+      REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
+
+      # Check if the reference file was actually created
+      if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
+          echo "Error: Reference result file was not generated: $REFERENCE_RESULT_FILE"
+          echo "Skipping analysis."
+          exit 1
+      fi
+
+      cmd=(python -m gss_tester.analyzer
+          "${RESULTS_DIR}"/*.json
+          --reference "$REFERENCE_RESULT_FILE")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Consistency analysis complete."
+      echo "Reference: $REFERENCE_IMPL"
+      echo "Summary printed above."
+      echo "Full JSON results are in: $RESULTS_DIR"
+
+      ```
+    metadata:
+      filename: python/gss_tester/run_tests.sh
+  - user: |-
+      bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
+      Test results will be saved in: gss_test_results/2025-09-18_13-14-18
+      ---
+      Reference Implementation: gss_tester/reference_impl.py
+      Other Implementations: gss_tester/leveled_impl.py
+      ---
+      Starting test runs...
+
+      >>> Running test spec for: gss_tester/reference_impl.py
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      Importing ReferenceGSS from gss_tester.reference_impl...
+      Running test specification...
+      Successfully ran 28 checks.
+      Results saved to gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      >>> Finished test spec for: gss_tester/reference_impl.py
+
+      >>> Running test spec for: gss_tester/leveled_impl.py
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json
+      Importing LeveledGSS from gss_tester.leveled_impl...
+      Running test specification...
+      Successfully ran 28 checks.
+      Results saved to gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json
+      >>> Finished test spec for: gss_tester/leveled_impl.py
+
+      All test runs completed.
+      ---
+      Analyzing results for consistency...
+      python -m gss_tester.analyzer gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      --- Consistency Analysis ---
+      Found 2 equivalence class(es) among 2 implementations.
+
+      Reference implementation: gss_tester.reference_impl.ReferenceGSS
+
+      Class 1 (1 implementation(s)) [Ref Match: ❌]
+      --------------------------------------------
+        - gss_tester.leveled_impl.LeveledGSS
+
+      Class 2 (1 implementation(s)) [Ref Match: ✅]
+      --------------------------------------------
+        - gss_tester.reference_impl.ReferenceGSS
+
+
+      --- Divergence Report ---
+
+      Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
+        - First divergence at yield index 5:
+          - gss_tester.leveled_impl.LeveledGSS (L45): [{"stack": [1, 2], "acc": 0}, {"stack": [3], "acc": 0}]
+          - gss_tester.reference_impl.ReferenceGSS (L45): [{"stack": [1, 2], "acc": 0}, {"stack": [1, 3], "acc": 0}]
+
+      ---
+      Consistency analysis complete.
+      Reference: gss_tester/reference_impl.py
+      Summary printed above.
+      Full JSON results are in: gss_test_results/2025-09-18_13-14-18
+    metadata:
+  - user: Fix this.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Based on the divergence report, there's a bug in the `LeveledGSS.merge` method. When rebuilding a GSS from multiple paths that share a prefix (like `[1, 2]` and `[1, 3]`), the implementation fails to correctly track the path prefix when traversing the shared part of the structure. This results in an incorrect path being cached for the non-shared part, causing the divergence you observed.
+
+      Here are the step-by-step instructions to fix the bug, followed by the corresponding git diff.
+
+      ### Step-by-Step Instructions
+
+      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
+
+      2.  **Navigate to the `merge` static method** within the `LeveledGSS` class. Inside this method, locate the nested helper function `get_or_create_node`.
+
+      3.  **Find the `for` loop** inside `get_or_create_node`. The bug is in the `else` block of the main conditional statement within this loop. This block is executed when traversing a part of the path that already exists in the new GSS structure being built.
+
+      4.  **Modify the `else` block.** The original code correctly moves to the next node but fails to update the `curr_path` variable, which tracks the path to the current node. You need to replace the existing `else` block with logic that updates `curr_path` from the `path_cache` after traversing to an existing node.
+
+          Specifically, replace this block:
+
+          ```python
+                          curr = nxt
+                          # Best-effort cache fill if missing
+                          if nxt.id not in path_cache:
+                              # Reconstruct from parent_of
+                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
+                              path_cache[nxt.id] = ppath
+          ```
+
+          With this corrected block:
+
+          ```python
+                          curr = nxt
+                          # When traversing an existing node, we must update curr_path
+                          # to ensure the next segment is built on the correct prefix.
+                          if curr.id not in path_cache:
+                              # This is a best-effort cache fill.
+                              path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+                          curr_path = path_cache[curr.id]
+          ```
+
+      This change ensures that `curr_path` always holds the correct prefix, so when the path diverges and new nodes are created, their paths are cached correctly.
+
+      ### Git Diff
+
+      Here is the git patch to apply the fix.
 
       ```diff
-      diff --git a/python/gss_tester/test_spec.py b/python/gss_tester/test_spec.py
-      --- a/python/gss_tester/test_spec.py
-      +++ b/python/gss_tester/test_spec.py
-      @@ -118,3 +118,44 @@
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 99d9183..c9725f0 100644
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -485,12 +485,12 @@
+                           path_cache[nxt.id] = curr_path
+                           curr = nxt
+                       else:
+                           curr = nxt
+      -                    # Best-effort cache fill if missing
+      -                    if nxt.id not in path_cache:
+      -                        # Reconstruct from parent_of
+      -                        ppath = _reconstruct_path(nxt, parent_of, path_cache)
+      -                        path_cache[nxt.id] = ppath
+      +                    # When traversing an existing node, we must update curr_path
+      +                    # to ensure the next segment is built on the correct prefix.
+      +                    if curr.id not in path_cache:
+      +                        # This is a best-effort cache fill.
+      +                        path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+      +                    curr_path = path_cache[curr.id]
+                       node = curr
+                   return node
        
-           pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-           yield from _yield_state(pruned_all_gss) # Should be an empty GSS
-      +
-      +    # --- Test 8: Pop operations on merged stacks ---
-      +    # Case 8a: Pop to a common parent, should result in one stack.
-      +    # This exposes a bug in ReferenceGSS which creates duplicate stacks.
-      +    s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
-      +    s_branch1 = s_base.push(101)
-      +    s_branch2 = s_base.push(102)
-      +    s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
-      +    yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
-      +
-      +    s_popped = s_merged.pop()
-      +    yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
-      +
-      +    # Case 8b: Push after a pop that should have merged.
-      +    # This further highlights the divergence from the duplicate stacks.
-      +    s_pushed_after_pop = s_popped.push(103)
-      +    yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
-      +
-      +    # Case 8c: Pop to a common parent with different accumulators.
-      +    # This exposes a bug in FastGSS which loses accumulator information on pop.
-      +    s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
-      +    s_branch3 = s_base2.push(201).apply(lambda _: 7)
-      +    s_branch4 = s_base2.push(202).apply(lambda _: 8)
-      +    s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
-      +    yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
-      +
-      +    s_popped2 = s_merged2.pop()
-      +    # Should have two stacks: [200] acc 7, and [200] acc 8
-      +    yield from _yield_state(s_popped2)
-      +
-      +    # --- Test 9: popn ---
-      +    # Case 9a: popn less than stack depth
-      +    gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
-      +    gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
-      +    gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
-      +    yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
-      +
-      +    gss_pn_pop2 = gss_pn_merged.popn(2)
-      +    yield from _yield_state(gss_pn_pop2) # has [1] and []
-      +
-      +    # Case 9b: popn more than stack depth
-      +    gss_pn_pop4 = gss_pn_merged.popn(4)
-      +    yield from _yield_state(gss_pn_pop4) # has []
 
       ```
     metadata:
@@ -2713,11 +3945,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/test_spec.py
-      Applying patch to 'python/gss_tester/test_spec.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/test_spec.py.
+      Identified target file: python/gss_tester/leveled_impl.py
+      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "test: Add tests for pop on merged stacks
-      and popn"'
+  - user: 'Changes committed with message: "Fix: Correctly update curr_path in LeveledGSS.merge
+      to resolve divergence"'
     metadata:
 ...
