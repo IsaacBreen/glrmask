@@ -146,8 +146,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
           2) WITH_ACC: a leaf that contains one structural head (_A) and its accumulator (Acc)
           3) BRANCH: maps to other Bs (children), each of which must be a WITH_ACC leaf.
              This ensures accumulators occur only at one 'level' (i.e., at the leaves).
-             If all children leaves have the same Acc, we "suck up" into a single WITH_ACC leaf
-             at the root (empty head), per the invariant.
 
     Notes:
       - We do not store edges with max-depth directly in the structure; instead we can compute
@@ -186,8 +184,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def _branch(cls, arena: _Arena[T], children: Dict[_A, Acc]) -> "LeveledGSS[T, Acc]":
-        # Canonicalize: merge identical heads (already merged via dict),
-        # and possibly 'suck up' if all accs equal
+        # Canonicalize: merge identical heads (already merged via dict)
         if not children:
             return cls._empty(arena)
 
@@ -196,18 +193,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             (head, acc) = next(iter(children.items()))
             return cls(_BKind.WITH_ACC, arena, head, acc, None)
 
-        # Check 'suck up' condition: all accs equal
-        it = iter(children.values())
-        first_acc = next(it)
-        all_same = all(a == first_acc for a in it)
-
-        if all_same:
-            # Suck up: Replace the entire branch with a single leaf at the root
-            # per the invariant described in the prompt. The parent holds the acc,
-            # children carry none.
-            return cls(_BKind.WITH_ACC, arena, arena.root, first_acc, None)
-
-        # Otherwise, keep it as a branch
         return cls(_BKind.BRANCH, arena, None, None, dict(children))
 
     def _ensure_branch(self) -> Dict[_A, Acc]:
