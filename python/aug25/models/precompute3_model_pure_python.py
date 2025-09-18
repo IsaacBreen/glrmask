@@ -1,7 +1,7 @@
 import json
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Set, Union, Callable
+from typing import Dict, List, Tuple, Optional, Set, Union
 from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
@@ -19,14 +19,8 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
 
     def acc_factory():
         return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-    return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
 
-def reset_llm_tokens_py(gss: FastGSS) -> FastGSS:
-    # This is a placeholder. The current PyAcc doesn't track LLM tokens.
-    # The important part is that gss.apply is now recursive.
-    def reset_func(acc: PyAcc) -> PyAcc:
-        return acc
-    return gss.apply(reset_func)
+    return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
 
 
 @dataclass(frozen=True)
@@ -275,13 +269,6 @@ class Model(GraphProvider):
         token_bytes = self.id_to_token[token_id]
 
         # --- Python implementation starts here ---
-        
-        # ADD THIS BLOCK: Reset LLM tokens to match Rust's commit logic
-        new_py_state = {}
-        for sid, gss in self.state.items():
-            new_py_state[sid] = reset_llm_tokens_py(gss)
-        self.state = new_py_state
-        # END OF ADDED BLOCK
         py_states = list(self.state.keys())
         rust_states = list(self.constraint_state.get_state_map().keys())
         assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
@@ -408,45 +395,56 @@ class Model(GraphProvider):
         assert self.state == expected_state_map, f"GSS state mismatch after commit."
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
-        heads_by_state: Dict[int, List[FastGSS]] = collections.defaultdict(list)
-        for state_id in gss.peek():
-            heads_by_state[state_id].append(gss.isolate(state_id))
+        heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
+        for head in gss._heads:
+            for state_id in gss.peek_from_head(head):
+                heads_by_state[state_id].append(head)
 
         shifted_gsses = []
+        no_action_gsses = []
         reductions_to_do: Dict[Reduce, List[FastGSS]] = collections.defaultdict(list)
 
-        for state_id, state_gsss in heads_by_state.items():
-            for state_gss in state_gsss:
-                row = self.parser_table.table.get(state_id)
-                if not row: continue
-                action = row.actions.get(terminal_id)
-                if not action: continue
+        for state_id, heads in heads_by_state.items():
+            state_gss = FastGSS(frozenset(heads), gss._acc_default_factory, gss._root, gss._child_to_parents, gss._path_cache)
+            row = self.parser_table.table.get(state_id)
+            if not row:
+                # If a state is not in the table, it's a dead end for any token.
+                # The original implementation implicitly dropped it. Let's be explicit.
+                continue
 
-                def handle_shift(shift_to_state_id, gss_to_shift):
-                    shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+            action = row.actions.get(terminal_id)
+            if not action: continue
 
-                def handle_reduce(reduce_action, gss_to_reduce):
-                    popped_gss = gss_to_reduce.popn(reduce_action.len)
+            def handle_shift(shift_to_state_id, gss_to_shift):
+                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+            def handle_reduce(reduce_action, gss_to_reduce):
+                popped_gss = gss_to_reduce.popn(reduce_action.len)
+                if any(h is not popped_gss._root for h in popped_gss._heads):
                     reductions_to_do[reduce_action].append(popped_gss)
 
-                if isinstance(action, int):
-                    handle_shift(action, state_gss)
-                elif isinstance(action, Reduce):
-                    handle_reduce(action, state_gss)
-                elif isinstance(action, Split):
-                    if action.shift is not None:
-                        handle_shift(action.shift, state_gss)
-                    for length, nts in action.reduces.items():
-                        for nt_id, pids in nts.items():
-                            handle_reduce(Reduce(nt_id, length, pids), state_gss)
+            if isinstance(action, int):
+                handle_shift(action, state_gss)
+            elif isinstance(action, Reduce):
+                handle_reduce(action, state_gss)
+            elif isinstance(action, Split):
+                if action.shift is not None:
+                    handle_shift(action.shift, state_gss)
+                for length, nts in action.reduces.items():
+                    for nt_id, pids in nts.items():
+                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-            for reduce_action, gss_list in reductions_to_do.items():
-                merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
-                for from_state_id in merged_popped_gss.peek():
-                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+        for reduce_action, gss_list in reductions_to_do.items():
+            merged_popped_gss = FastGSS.merge(gss_list, merge_acc)
+            for from_state_id in merged_popped_gss.peek():
+                goto_state_id = self.parser_table.table[from_state_id].gotos.get(reduce_action.nonterminal_id)
+                if goto_state_id is not None:
                     shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
+        all_resulting_gsses = shifted_gsses + no_action_gsses
+        if not all_resulting_gsses:
+            return FastGSS.initial(gss._acc_default_factory)
+        return FastGSS.merge(all_resulting_gsses, merge_acc)
 
     def get_mask(self) -> RangeSet:
         """
