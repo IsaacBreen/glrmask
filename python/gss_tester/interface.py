@@ -43,9 +43,10 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def isolate(self, value: T) -> 'GSS[T, Acc]':
+    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
         """
         Keeps only the stacks that have `value` at the top.
+        If `value` is None, it keeps only the empty stacks.
         Returns a new GSS state containing only these stacks.
         """
         pass

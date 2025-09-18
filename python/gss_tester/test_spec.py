@@ -141,5 +141,18 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(gss_pn_pop2) # has [1] and []
 
     # Case 9b: popn more than stack depth
+
     gss_pn_pop4 = gss_pn_merged.popn(4)
     yield from _yield_state(gss_pn_pop4) # has []
+
+    # --- Test 10: Isolate empty stacks ---
+    gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+    gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+    gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+    yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+    gss_isolated_empty = gss_i_merged.isolate(None)
+    yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+    gss_isolated_10 = gss_i_merged.isolate(10)
+    yield from _yield_state(gss_isolated_10) # should have only [10] acc 2

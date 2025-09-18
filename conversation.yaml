@@ -777,9 +777,10 @@ local_system:
               pass
 
           @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
               """
               Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
               Returns a new GSS state containing only these stacks.
               """
               pass
@@ -895,12 +896,16 @@ local_system:
                       popped.append((new_vals, acc))
               return ReferenceGSS(popped)
 
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`
+          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
               filtered: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if vals and vals[-1] == value:
-                      filtered.append((list(vals), acc))
+                  if value is None:
+                      if not vals:
+                          filtered.append((list(vals), acc))
+                  else:
+                      if vals and vals[-1] == value:
+                          filtered.append((list(vals), acc))
               return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
@@ -1185,11 +1190,24 @@ local_system:
           yield from _yield_state(gss_pn_pop2) # has [1] and []
 
           # Case 9b: popn more than stack depth
+
           gss_pn_pop4 = gss_pn_merged.popn(4)
           yield from _yield_state(gss_pn_pop4) # has []
-  diffs_applied_this_send: false
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+          gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -1197,7 +1215,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - gf
   commit_message_model:
@@ -1855,5 +1873,150 @@ messages:
       filename: python/gss_tester/test_spec.py
   - user: Make it so isolate takes Self and Optional[T] and keeps only those stacks
       that have T on top, or empty stacks if T is None.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to modify the `isolate` method, followed by the corresponding git diffs.
+
+      ### Step-by-Step Instructions
+
+      1.  **Update the GSS interface:**
+          *   In `python/gss_tester/interface.py`, modify the `isolate` method within the `GSS` abstract base class.
+          *   Change its signature to accept an `Optional[T]` value by changing `value: T` to `value: Optional[T]`.
+          *   Update the docstring to describe the new behavior when the value is `None`.
+
+      2.  **Update the reference implementation:**
+          *   In `python/gss_tester/reference_impl.py`, update the `isolate` method in the `ReferenceGSS` class to match the new interface.
+          *   Change the method signature to `def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':`.
+          *   Modify the implementation to handle the case where `value` is `None`, in which case it should filter for and keep only the empty stacks.
+
+      3.  **Add a new test case:**
+          *   In `python/gss_tester/test_spec.py`, add a new test to the `run_test_spec` function to verify the new functionality of `isolate(None)`.
+          *   Append the following code block to the end of the `run_test_spec` function:
+
+          ```python
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+          gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+          ```
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
+      index 911111c..111811c 100644
+      --- a/python/gss_tester/interface.py
+      +++ b/python/gss_tester/interface.py
+      @@ -35,10 +35,11 @@
+               pass
+       
+           @abstractmethod
+      -    def isolate(self, value: T) -> 'GSS[T, Acc]':
+      +    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+               """
+               Keeps only the stacks that have `value` at the top.
+      +        If `value` is None, it keeps only the empty stacks.
+               Returns a new GSS state containing only these stacks.
+               """
+               pass
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
+      index 211111c..111111c 100644
+      --- a/python/gss_tester/reference_impl.py
+      +++ b/python/gss_tester/reference_impl.py
+      @@ -53,13 +53,18 @@
+                       popped.append((new_vals, acc))
+               return ReferenceGSS(popped)
+       
+      -    def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
+      -        # Keep only stacks whose top equals `value`
+      +    def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+      +        # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
+               filtered: List[Tuple[List[T], Acc]] = []
+               for vals, acc in self._stacks:
+      -            if vals and vals[-1] == value:
+      -                filtered.append((list(vals), acc))
+      +            if value is None:
+      +                if not vals:
+      +                    filtered.append((list(vals), acc))
+      +            else:
+      +                if vals and vals[-1] == value:
+      +                    filtered.append((list(vals), acc))
+               return ReferenceGSS(filtered)
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+               # Apply func to each accumulator independently
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/test_spec.py b/python/gss_tester/test_spec.py
+      index 111111c..111111d 100644
+      --- a/python/gss_tester/test_spec.py
+      +++ b/python/gss_tester/test_spec.py
+      @@ -128,3 +128,16 @@
+       
+           gss_pn_pop4 = gss_pn_merged.popn(4)
+           yield from _yield_state(gss_pn_pop4) # has []
+      +
+      +    # --- Test 10: Isolate empty stacks ---
+      +    gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+      +    gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+      +    gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+      +    yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+      +
+      +    gss_isolated_empty = gss_i_merged.isolate(None)
+      +    yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+      +
+      +    gss_isolated_10 = gss_i_merged.isolate(10)
+      +    yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/interface.py
+      Applying patch to 'python/gss_tester/interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/interface.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/reference_impl.py
+      Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/gss_tester/test_spec.py
+      Applying patch to 'python/gss_tester/test_spec.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/test_spec.py.
+    metadata:
+  - user: 'Changes committed with message: "feat: Enhance isolate method to handle
+      None for empty stacks and add tests"'
     metadata:
 ...

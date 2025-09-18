@@ -53,12 +53,16 @@ class ReferenceGSS(GSS[T, Acc]):
                 popped.append((new_vals, acc))
         return ReferenceGSS(popped)
 
-    def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-        # Keep only stacks whose top equals `value`
+    def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+        # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
         filtered: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
-            if vals and vals[-1] == value:
-                filtered.append((list(vals), acc))
+            if value is None:
+                if not vals:
+                    filtered.append((list(vals), acc))
+            else:
+                if vals and vals[-1] == value:
+                    filtered.append((list(vals), acc))
         return ReferenceGSS(filtered)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
