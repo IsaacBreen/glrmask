@@ -2822,18 +2822,18 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                        let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
                         if let Some(end_state_id) = exec_result.end_state {
                             let terminals_accessible_from_end_state = self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                             if terminals_accessible_from_end_state.contains(&TerminalID(match_info.id)) {
+                                let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
                                 let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                                 // Disallow this token from being matched again immediately.
                                 disallowed_terminals_for_end_state.insert(match_info.id);
                                 disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
+                                    disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
                             }
                         }
                         // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
-                        disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
                         // cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
 
                         if new_offset == llm_token_bytes.len() {
