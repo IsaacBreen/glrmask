@@ -1421,9 +1421,6 @@ local_system:
                       m[node] = existing.merge(acc)
               return cls(m)
 
-          def _clone_with(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> "GSS":
-              return GSS(dict(self._heads) if heads is None else cast(Dict[StackNode, PyAcc], heads))
-
           # --- Introspection helpers (used by profiler) ---
 
           def head_count(self) -> int:
@@ -1594,32 +1591,29 @@ local_system:
 
           @staticmethod
           def merge(gss_list: Iterable["GSS"]) -> "GSS":
-              merged: Dict[StackNode, PyAcc] = {}
-
               gss_list = list(gss_list)
               # Fast paths to cut unnecessary overhead on trivial merges
               if not gss_list:
                   if GSS._active_profiler is not None:
                       GSS._active_profiler.on_gss_merge(0, 0, 0)
-                  return GSS({})
-              if len(gss_list) == 1:
-                  return gss_list[0]
+                  return GSS({}) # returns _EMPTY_GSS
 
               # Profiling stats from original list
               num_inputs_orig = len(gss_list)
               input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
 
-              # Deduplicate GSS objects by their memory address (id)
-              unique_gss_map: Dict[int, "GSS"] = {id(g): g for g in gss_list}
+              # With interning, we can deduplicate GSS objects by their memory address (id).
+              # This handles both single-item lists and lists of identical objects, avoiding the merge.
+              unique_gsses = list({id(g): g for g in gss_list}.values())
 
-              if len(unique_gss_map) == 1:
-                  result_gss = next(iter(unique_gss_map.values()))
+              if len(unique_gsses) == 1:
+                  result_gss = unique_gsses[0]
                   if GSS._active_profiler is not None:
                       GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, result_gss.stack_count())
                   return result_gss
 
-              # The rest of the merge logic operates on the unique_gss list.
-              for gss in unique_gss_map.values():
+              merged: Dict[StackNode, PyAcc] = {}
+              for gss in unique_gsses:
                   for node, acc in gss._heads.items():
                       existing = merged.get(node)
                       if existing is None:
@@ -3565,5 +3559,149 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Intern GSS objects to ensure structural
       identity"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      ... and use this to avoid merging...
+    metadata:
+  - assistant: |-
+      Of course. You're right, the introduction of `GSS` interning allows us to simplify the merge logic significantly. Since any structurally identical `GSS` is now the *same* object in memory, we can streamline the `GSS.merge` function to more directly leverage this property.
+
+      The core idea is to deduplicate the list of GSSs to be merged based on their object ID. If the list collapses to a single unique GSS, we can return it immediately and avoid the costly process of iterating through and merging all the stack heads. This handles the trivial cases (empty list, single-item list) and the newly optimized case (a list of identical GSS objects) in one clean operation.
+
+      I'll also take this opportunity to remove an now-unused helper method, `_clone_with`, from the `GSS` class.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python.py`.
+
+      2.  **Locate the `GSS._clone_with` method**: Find this method around line 375 inside the `GSS` class.
+
+      3.  **Delete the `_clone_with` method**: Remove the entire method definition as it is no longer used.
+
+      4.  **Locate the `GSS.merge` static method**: Find this method around line 615.
+
+      5.  **Replace the `GSS.merge` method body**: Replace the entire body of the `merge` method with the following streamlined implementation. This new version removes the redundant fast path for single-item lists and uses a more direct deduplication strategy.
+
+          ```python
+              gss_list = list(gss_list)
+              if not gss_list:
+                  if GSS._active_profiler is not None:
+                      GSS._active_profiler.on_gss_merge(0, 0, 0)
+                  return GSS({}) # returns _EMPTY_GSS
+
+              # Profiling stats from original list
+              num_inputs_orig = len(gss_list)
+              input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
+
+              # With interning, we can deduplicate GSS objects by their memory address (id).
+              # This handles both single-item lists and lists of identical objects, avoiding the merge.
+              unique_gsses = list({id(g): g for g in gss_list}.values())
+
+              if len(unique_gsses) == 1:
+                  result_gss = unique_gsses[0]
+                  if GSS._active_profiler is not None:
+                      GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, result_gss.stack_count())
+                  return result_gss
+
+              merged: Dict[StackNode, PyAcc] = {}
+              for gss in unique_gsses:
+                  for node, acc in gss._heads.items():
+                      existing = merged.get(node)
+                      if existing is None:
+                          merged[node] = acc
+                      else:
+                          merged[node] = existing.merge(acc)
+
+              output_stacks = len(merged)
+              if GSS._active_profiler is not None:
+                  GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, output_stacks)
+
+              return GSS(merged)
+          ```
+
+      This refactoring makes the `merge` function cleaner and more directly expresses the optimization gained from interning `GSS` objects.
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -372,9 +372,6 @@
+                       m[node] = existing.merge(acc)
+               return cls(m)
+       
+      -    def _clone_with(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> "GSS":
+      -        return GSS(dict(self._heads) if heads is None else cast(Dict[StackNode, PyAcc], heads))
+      -
+           # --- Introspection helpers (used by profiler) ---
+       
+           def head_count(self) -> int:
+      @@ -615,36 +612,33 @@
+       
+           @staticmethod
+           def merge(gss_list: Iterable["GSS"]) -> "GSS":
+      -        merged: Dict[StackNode, PyAcc] = {}
+      -
+               gss_list = list(gss_list)
+               # Fast paths to cut unnecessary overhead on trivial merges
+               if not gss_list:
+                   if GSS._active_profiler is not None:
+                       GSS._active_profiler.on_gss_merge(0, 0, 0)
+      -            return GSS({})
+      -        if len(gss_list) == 1:
+      -            return gss_list[0]
+      +            return GSS({}) # returns _EMPTY_GSS
+       
+               # Profiling stats from original list
+               num_inputs_orig = len(gss_list)
+               input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
+       
+      -        # Deduplicate GSS objects by their memory address (id)
+      -        unique_gss_map: Dict[int, "GSS"] = {id(g): g for g in gss_list}
+      +        # With interning, we can deduplicate GSS objects by their memory address (id).
+      +        # This handles both single-item lists and lists of identical objects, avoiding the merge.
+      +        unique_gsses = list({id(g): g for g in gss_list}.values())
+       
+      -        if len(unique_gss_map) == 1:
+      -            result_gss = next(iter(unique_gss_map.values()))
+      +        if len(unique_gsses) == 1:
+      +            result_gss = unique_gsses[0]
+                   if GSS._active_profiler is not None:
+                       GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, result_gss.stack_count())
+                   return result_gss
+       
+      -        # The rest of the merge logic operates on the unique_gss list.
+      -        for gss in unique_gss_map.values():
+      +        merged: Dict[StackNode, PyAcc] = {}
+      +        for gss in unique_gsses:
+                   for node, acc in gss._heads.items():
+                       existing = merged.get(node)
+                       if existing is None:
+                           merged[node] = acc
+                       else:
+                           merged[node] = existing.merge(acc)
+       
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Streamline GSS merge using interning
+      and remove unused _clone_with"'
     metadata:
 ...

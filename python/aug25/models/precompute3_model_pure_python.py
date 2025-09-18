@@ -342,9 +342,6 @@ class GSS:
                 m[node] = existing.merge(acc)
         return cls(m)
 
-    def _clone_with(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> "GSS":
-        return GSS(dict(self._heads) if heads is None else cast(Dict[StackNode, PyAcc], heads))
-
     # --- Introspection helpers (used by profiler) ---
 
     def head_count(self) -> int:
@@ -515,32 +512,29 @@ class GSS:
 
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
-        merged: Dict[StackNode, PyAcc] = {}
-
         gss_list = list(gss_list)
         # Fast paths to cut unnecessary overhead on trivial merges
         if not gss_list:
             if GSS._active_profiler is not None:
                 GSS._active_profiler.on_gss_merge(0, 0, 0)
-            return GSS({})
-        if len(gss_list) == 1:
-            return gss_list[0]
+            return GSS({}) # returns _EMPTY_GSS
 
         # Profiling stats from original list
         num_inputs_orig = len(gss_list)
         input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
 
-        # Deduplicate GSS objects by their memory address (id)
-        unique_gss_map: Dict[int, "GSS"] = {id(g): g for g in gss_list}
+        # With interning, we can deduplicate GSS objects by their memory address (id).
+        # This handles both single-item lists and lists of identical objects, avoiding the merge.
+        unique_gsses = list({id(g): g for g in gss_list}.values())
 
-        if len(unique_gss_map) == 1:
-            result_gss = next(iter(unique_gss_map.values()))
+        if len(unique_gsses) == 1:
+            result_gss = unique_gsses[0]
             if GSS._active_profiler is not None:
                 GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, result_gss.stack_count())
             return result_gss
 
-        # The rest of the merge logic operates on the unique_gss list.
-        for gss in unique_gss_map.values():
+        merged: Dict[StackNode, PyAcc] = {}
+        for gss in unique_gsses:
             for node, acc in gss._heads.items():
                 existing = merged.get(node)
                 if existing is None:
