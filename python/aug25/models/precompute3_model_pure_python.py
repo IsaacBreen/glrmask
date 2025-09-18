@@ -371,11 +371,13 @@ class Model(GraphProvider):
                 # If after consuming the remainder from this offset we end in a tokenizer state
                 # that can produce this same terminal immediately, forbid it for that state.
                 if end_state is not None:
-                    # possible_matches_cache maps tokenizer_state_id -> { terminal_id -> Bitset }
-                    possible_for_end = pm_cache.get(end_state)
-                    # Keys are ints in the dict returned by ffi; a straight `in` check is fine.
-                    if possible_for_end is not None and terminal_id in possible_for_end:
-                        processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+                    # Use the tokenizer's accessible terminals (exactly as Rust does),
+                    # not possible_matches_cache (which depends on vocab coverage).
+                    accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                    if terminal_id in accessible_terms:
+                        processed_gss = self._disallow_terminal_in_state(
+                            processed_gss, end_state, terminal_id
+                        )
 
                 if any(h is not processed_gss._root for h in processed_gss._heads):
                     new_offset = offset + width

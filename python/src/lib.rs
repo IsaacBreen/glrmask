@@ -208,6 +208,14 @@ impl PyRegex {
         Ok((end_state, matches))
     }
 
+    fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<Vec<usize>> {
+        let accessible = self
+            .inner
+            .tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
+        let out: Vec<usize> = accessible.into_iter().map(|tid| tid.0).collect();
+        Ok(out)
+    }
+
     fn initial_state_id(&self) -> usize {
         self.inner.initial_state_id().0
     }
@@ -315,7 +323,7 @@ impl PyGLRParser {
         let table_dict = PyDict::new_bound(py);
         for (&state_id, row) in &self.inner.table {
             let row_dict = PyDict::new_bound(py);
-            
+
             let actions_dict = PyDict::new_bound(py);
             for (&terminal_id, action) in &row.shifts_and_reduces_full {
                 let py_action = match action {
@@ -363,7 +371,7 @@ impl PyGLRParser {
         let result_dict = PyDict::new_bound(py);
         result_dict.set_item("start_state_id", self.inner.start_state_id.0)?;
         result_dict.set_item("table", table_dict)?;
-        
+
         Ok(result_dict)
     }
 }
@@ -820,7 +828,7 @@ fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_
         let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
         rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
     }
-    
+
     let mut arc = node.inner.clone();
     sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
     node.inner = arc;
