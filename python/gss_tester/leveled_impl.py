@@ -314,7 +314,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return reduce(lambda a, b: a.merge(b), accs)
 
     def to_reference_impl(self) -> ReferenceGSS[T, Acc]:
-        return ReferenceGSS.from_stacks(list(self._iter_stacks()))
+        # LeveledGSS internal representation is top-at-head for stack lists.
+        # ReferenceGSS representation is top-at-tail.
+        # We must reverse the lists to convert between them.
+        stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
+        return ReferenceGSS.from_stacks(stacks_for_ref)
 
     @staticmethod
     def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
@@ -325,7 +329,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledGSS._empty()
         if len(live_gss_list) == 1:
             gss = live_gss_list[0]
-            return gss if isinstance(gss, LeveledGSS) else LeveledGSS.from_stacks(list(gss.to_reference_impl()._iter_stacks()))
+            if isinstance(gss, LeveledGSS):
+                return gss
+            # It's a foreign GSS. Convert it.
+            ref_gss = gss.to_reference_impl()
+            # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+            stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+            return LeveledGSS.from_stacks(stacks_for_leveled)
 
 
         dist_gss_list = []
@@ -335,7 +345,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 # Convert non-LeveledGSS types via from_stacks
                 ref_gss = gss.to_reference_impl()
-                dist_gss_list.append(LeveledGSS.from_stacks(ref_gss._stacks)._distribute())
+                # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+                stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+                dist_gss_list.append(LeveledGSS.from_stacks(stacks_for_leveled)._distribute())
 
         merged_empty_acc: Optional[Acc] = None
         all_children_by_key: Dict[T, List[LeveledGSS[T, Acc]]] = defaultdict(list)
