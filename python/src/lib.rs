@@ -525,6 +525,11 @@ impl PyHybridBitset {
     }
 
     #[staticmethod]
+    fn max_ones() -> Self {
+        Self { inner: RustHybridBitset::max_ones() }
+    }
+
+    #[staticmethod]
     fn ones(len: usize) -> Self {
         Self { inner: RustHybridBitset::ones(len) }
     }
