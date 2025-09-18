@@ -835,6 +835,24 @@ local_system:
               c_splits = 0
               c_gotos = 0
 
+              pop_cache: Dict[Tuple[StackNode, int], StackNode] = {}
+
+              def pop_node_cached(node: StackNode, n: int) -> StackNode:
+                  if n <= 0:
+                      return node
+                  key = (node, n)
+                  cached = pop_cache.get(key)
+                  if cached is not None:
+                      return cached
+                  
+                  p = node
+                  steps = n
+                  while steps > 0 and p.state is not None:
+                      p = p.prev
+                      steps -= 1
+                  pop_cache[key] = p
+                  return p
+
               def merge_inplace(dst: Dict[StackNode, PyAcc], src: Dict[StackNode, PyAcc]) -> None:
                   for node, acc in src.items():
                       existing = dst.get(node)
@@ -857,11 +875,7 @@ local_system:
                       return dict(heads)
                   out: Dict[StackNode, PyAcc] = {}
                   for node, acc in heads.items():
-                      p = node
-                      steps = n
-                      while steps > 0 and p.state is not None:
-                          p = p.prev
-                          steps -= 1
+                      p = pop_node_cached(node, n)
                       existing = out.get(p)
                       if existing is None:
                           out[p] = acc
@@ -1747,7 +1761,6 @@ local_system:
               Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
               """
               self._commit_step += 1
-              t0 = time.perf_counter()
               token_bytes = self.id_to_token[token_id]
 
               profiler: Optional[_CommitProfiler] = None
@@ -1756,6 +1769,8 @@ local_system:
                   # Pre-state summary
                   for sid, st in self._gss_stats_map(self.state).items():
                       profiler.add_pre_stats(sid, st)
+
+              t0 = time.perf_counter()
 
               # Build tokenizer maps
               terminals_map: Dict[int, ffi.Bitset] = {}
@@ -3007,6 +3022,24 @@ messages:
               c_splits = 0
               c_gotos = 0
 
+              pop_cache: Dict[Tuple[StackNode, int], StackNode] = {}
+
+              def pop_node_cached(node: StackNode, n: int) -> StackNode:
+                  if n <= 0:
+                      return node
+                  key = (node, n)
+                  cached = pop_cache.get(key)
+                  if cached is not None:
+                      return cached
+                  
+                  p = node
+                  steps = n
+                  while steps > 0 and p.state is not None:
+                      p = p.prev
+                      steps -= 1
+                  pop_cache[key] = p
+                  return p
+
               def merge_inplace(dst: Dict[StackNode, PyAcc], src: Dict[StackNode, PyAcc]) -> None:
                   for node, acc in src.items():
                       existing = dst.get(node)
@@ -3029,11 +3062,7 @@ messages:
                       return dict(heads)
                   out: Dict[StackNode, PyAcc] = {}
                   for node, acc in heads.items():
-                      p = node
-                      steps = n
-                      while steps > 0 and p.state is not None:
-                          p = p.prev
-                          steps -= 1
+                      p = pop_node_cached(node, n)
                       existing = out.get(p)
                       if existing is None:
                           out[p] = acc
@@ -3236,1077 +3265,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: |-
-      DISABLE_TQDM=1 bash run_benchmarks.sh aug25/models/rust_model.py aug25/models/precompute3_model_pure_python.py;
-      DEBUG_COMMIT_VERBOSE=1 DEBUG_PROCESS_TOKEN_TRACE=1 DISABLE_TQDM=1 PROFILE_COMMIT=1 REPORT_COMMIT_TIME=1 NO_GET_MASK=1 python -m aug25.benchmark_runner --code ../src/example_code5.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-18_17-20-09
-      Benchmark results will be saved in: benchmark_results/2025-09-18_18-21-16
-      ---
-      Baseline Model: aug25/models/rust_model.py
-      Other Models: aug25/models/precompute3_model_pure_python.py
-      Constraint File: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ../src/example_code.js
-      ---
-      Starting benchmark runs...
-
-      >>> Running benchmark for: rust_model.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/rust_model.py --output benchmark_results/2025-09-18_18-21-16
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/rust_model.py
-      Model loaded in 2.7941 seconds.
-      Loading and tokenizing code from: ../src/example_code.js
-      Tokenized into 271 tokens.
-
-      --- Running benchmark (271 steps) ---
-      Traversing edges:  20%|█████████████████████████████                                                                                                                  |  75053/371690 [00:00<00:01, 249341.94it/s]--- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-18_18-21-16/rust_model_results.json
-      >>> Finished benchmark for: rust_model.py
-
-      >>> Running benchmark for: precompute3_model_pure_python.py
-      python -m aug25.benchmark_runner --code ../src/example_code.js --constraint-file ../.cache/test_vocabs/js_grammar_constraint.json.gz --model aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-18_18-21-16
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/precompute3_model_pure_python.py
-      Model loaded in 12.4946 seconds.
-      Loading and tokenizing code from: ../src/example_code.js
-      Tokenized into 271 tokens.
-
-      --- Running benchmark (271 steps) ---
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-18_18-21-16/precompute3_model_pure_python_results.json
-      >>> Finished benchmark for: precompute3_model_pure_python.py
-
-      All benchmark runs completed.
-      ---
-      Analyzing results and generating plots...
-      python -m aug25.benchmark_analyzer benchmark_results/2025-09-18_18-21-16/precompute3_model_pure_python_results.json benchmark_results/2025-09-18_18-21-16/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-18_18-21-16/analysis
-      Selected baseline: rust_model
-      --- Benchmark Summary ---
-                                    equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                                      
-      precompute3_model_pure_python          ✅                    0    271    28.5863   20.1025    8.0961   21.7877   53.6474  106.8453  141.9891
-      rust_model                             ✅                    0    271    32.2635   27.2360    7.3626   26.4646   46.2747   97.3972  394.4655
-
-      Baseline: rust_model
-      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
-
-      Saving plots to benchmark_results/2025-09-18_18-21-16/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-18_18-21-16/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-18_18-21-16/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-18_18-21-16/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-18_18-21-16/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-18_18-21-16/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-18_18-21-16/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-18_18-21-16/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-18_18-21-16/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-18_18-21-16/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-18_18-21-16/analysis/total_timings_per_token_log.png
-
-      ---
-      Benchmark analysis complete.
-      Baseline: rust_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-18_18-21-16/analysis
-      Full JSON results are in: benchmark_results/2025-09-18_18-21-16
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: ../.cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: aug25/models/precompute3_model_pure_python.py
-      Model loaded in 13.2091 seconds.
-      Loading and tokenizing code from: ../src/example_code5.js
-      Tokenized into 30 tokens.
-
-      --- Running benchmark (30 steps) ---
-      [process_token] term=4 shifts=1 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=1 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=1 token='if' time_ms=0.517
-      pre:  1 states, heads=1, stacks=1, max_depth=1
-      post: 2 states, heads=3, stacks=3, max_depth=2
-      queue: enq=1 pop=1 offsets=1 max_offset=0
-      tokenizer: matches_total=3 width_hist={2: 3}
-      process_token: calls=3 shifts=2 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=1 prunes=2 enqueue_after_match=0
-      largest pre-state sid=0 heads=1 unique_stacks=1 empty=0 depth[min/mean/max]=1/1.0/1 accs=1
-      same sid post-state heads=2 unique_stacks=2 empty=0 depth[min/mean/max]=2/2.0/2 accs=2
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 2
-        Total stack elements (sum of depths): 4
-        Unique prefixes (nodes in a true GSS): 3
-        Compression potential (total_els / unique_prefixes): 1.33
-      === COMMIT PROFILE END ===
-      commit (ms): 0.53
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=3 reduces=22 splits=1 gotos=23
-      === COMMIT PROFILE START ===
-      step=2 token=' (' time_ms=0.42
-      pre:  2 states, heads=3, stacks=3, max_depth=2
-      post: 3 states, heads=8, stacks=8, max_depth=3
-      queue: enq=2 pop=3 offsets=2 max_offset=1
-      tokenizer: matches_total=5 width_hist={1: 3, 2: 2}
-      process_token: calls=4 shifts=3 reduces=22 splits=1 gotos=23
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=1
-      largest post-state sid=307 (no pre-state)
-      same sid post-state heads=3 unique_stacks=3 empty=0 depth[min/mean/max]=1/1.67/2 accs=3
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 3
-        Total stack elements (sum of depths): 5
-        Unique prefixes (nodes in a true GSS): 3
-        Compression potential (total_els / unique_prefixes): 1.67
-      === COMMIT PROFILE END ===
-      commit (ms): 0.41
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=3 token='true' time_ms=0.221
-      pre:  3 states, heads=8, stacks=8, max_depth=3
-      post: 3 states, heads=12, stacks=12, max_depth=4
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=6 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=0 heads=3 unique_stacks=3 empty=0 depth[min/mean/max]=3/3.0/3 accs=3
-      same sid post-state heads=6 unique_stacks=6 empty=0 depth[min/mean/max]=4/4.0/4 accs=6
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 6
-        Total stack elements (sum of depths): 24
-        Unique prefixes (nodes in a true GSS): 13
-        Compression potential (total_els / unique_prefixes): 1.85
-      === COMMIT PROFILE END ===
-      commit (ms): 0.23
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=7 reduces=68 splits=1 gotos=133
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=4 token=')' time_ms=0.438
-      pre:  3 states, heads=12, stacks=12, max_depth=4
-      post: 3 states, heads=16, stacks=16, max_depth=5
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=7 reduces=68 splits=1 gotos=133
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=3 unique_stacks=3 empty=0 depth[min/mean/max]=1/1.67/2 accs=3
-      same sid post-state heads=6 unique_stacks=6 empty=0 depth[min/mean/max]=1/2.33/3 accs=6
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 6
-        Total stack elements (sum of depths): 14
-        Unique prefixes (nodes in a true GSS): 8
-        Compression potential (total_els / unique_prefixes): 1.75
-      === COMMIT PROFILE END ===
-      commit (ms): 0.43
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=3 reduces=46 splits=0 gotos=46
-      === COMMIT PROFILE START ===
-      step=5 token=' {' time_ms=0.381
-      pre:  3 states, heads=16, stacks=16, max_depth=5
-      post: 3 states, heads=23, stacks=23, max_depth=6
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=3 reduces=46 splits=0 gotos=46
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=6 unique_stacks=6 empty=0 depth[min/mean/max]=1/2.33/3 accs=6
-      same sid post-state heads=16 unique_stacks=16 empty=0 depth[min/mean/max]=1/3.62/5 accs=16
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 16
-        Total stack elements (sum of depths): 58
-        Unique prefixes (nodes in a true GSS): 22
-        Compression potential (total_els / unique_prefixes): 2.64
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 16 times
-          - Prefix (962, 507) occurred 5 times
-          - Prefix (962, 982, 165) occurred 5 times
-          - Prefix (962, 982) occurred 5 times
-          - Prefix (962, 507, 508) occurred 4 times
-          - Prefix (962, 250, 8) occurred 4 times
-          - Prefix (962, 250) occurred 4 times
-          - Prefix (962, 161) occurred 1 times
-          - Prefix (962, 507, 508, 509, 510) occurred 1 times
-          - Prefix (962, 507, 508, 509) occurred 1 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.38
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=1 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=1 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=6 token=' if' time_ms=0.223
-      pre:  3 states, heads=23, stacks=23, max_depth=6
-      post: 3 states, heads=28, stacks=28, max_depth=7
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
-      process_token: calls=6 shifts=2 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
-      largest pre-state sid=307 heads=16 unique_stacks=16 empty=0 depth[min/mean/max]=1/3.62/5 accs=16
-      same sid post-state heads=19 unique_stacks=19 empty=0 depth[min/mean/max]=1/3.74/6 accs=19
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 19
-        Total stack elements (sum of depths): 71
-        Unique prefixes (nodes in a true GSS): 26
-        Compression potential (total_els / unique_prefixes): 2.73
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 19 times
-          - Prefix (962, 982) occurred 7 times
-          - Prefix (962, 507) occurred 6 times
-          - Prefix (962, 507, 508) occurred 5 times
-          - Prefix (962, 982, 165) occurred 5 times
-          - Prefix (962, 250, 8) occurred 4 times
-          - Prefix (962, 250) occurred 4 times
-          - Prefix (962, 507, 508, 509, 510) occurred 2 times
-          - Prefix (962, 507, 508, 509) occurred 2 times
-          - Prefix (962, 161) occurred 1 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.22
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=4 reduces=21 splits=2 gotos=24
-      === COMMIT PROFILE START ===
-      step=7 token=' (' time_ms=0.756
-      pre:  3 states, heads=28, stacks=28, max_depth=7
-      post: 3 states, heads=43, stacks=43, max_depth=8
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=21 splits=2 gotos=24
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=19 unique_stacks=19 empty=0 depth[min/mean/max]=1/3.74/6 accs=19
-      same sid post-state heads=25 unique_stacks=25 empty=0 depth[min/mean/max]=1/4.12/7 accs=25
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 25
-        Total stack elements (sum of depths): 103
-        Unique prefixes (nodes in a true GSS): 32
-        Compression potential (total_els / unique_prefixes): 3.22
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 25 times
-          - Prefix (962, 982) occurred 11 times
-          - Prefix (962, 507) occurred 8 times
-          - Prefix (962, 507, 508) occurred 7 times
-          - Prefix (962, 982, 165) occurred 5 times
-          - Prefix (962, 250, 8) occurred 4 times
-          - Prefix (962, 250) occurred 4 times
-          - Prefix (962, 507, 508, 509, 510) occurred 4 times
-          - Prefix (962, 507, 508, 509) occurred 4 times
-          - Prefix (962, 982, 983, 220) occurred 3 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.75
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=8 token='true' time_ms=0.34
-      pre:  3 states, heads=43, stacks=43, max_depth=8
-      post: 3 states, heads=58, stacks=58, max_depth=9
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=25 unique_stacks=25 empty=0 depth[min/mean/max]=1/4.12/7 accs=25
-      same sid post-state heads=25 unique_stacks=25 empty=0 depth[min/mean/max]=1/4.12/7 accs=25
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 25
-        Total stack elements (sum of depths): 103
-        Unique prefixes (nodes in a true GSS): 32
-        Compression potential (total_els / unique_prefixes): 3.22
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 25 times
-          - Prefix (962, 982) occurred 11 times
-          - Prefix (962, 507) occurred 8 times
-          - Prefix (962, 507, 508) occurred 7 times
-          - Prefix (962, 982, 165) occurred 5 times
-          - Prefix (962, 250, 8) occurred 4 times
-          - Prefix (962, 250) occurred 4 times
-          - Prefix (962, 507, 508, 509, 510) occurred 4 times
-          - Prefix (962, 507, 508, 509) occurred 4 times
-          - Prefix (962, 982, 983, 220) occurred 3 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.33
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=9 token=')' time_ms=0.714
-      pre:  3 states, heads=58, stacks=58, max_depth=9
-      post: 3 states, heads=73, stacks=73, max_depth=10
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=25 unique_stacks=25 empty=0 depth[min/mean/max]=1/4.12/7 accs=25
-      same sid post-state heads=37 unique_stacks=37 empty=0 depth[min/mean/max]=1/4.84/8 accs=37
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 37
-        Total stack elements (sum of depths): 179
-        Unique prefixes (nodes in a true GSS): 53
-        Compression potential (total_els / unique_prefixes): 3.38
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 37 times
-          - Prefix (962, 982) occurred 19 times
-          - Prefix (962, 507) occurred 12 times
-          - Prefix (962, 507, 508) occurred 11 times
-          - Prefix (962, 507, 508, 509, 510) occurred 8 times
-          - Prefix (962, 507, 508, 509) occurred 8 times
-          - Prefix (962, 982, 983, 220) occurred 7 times
-          - Prefix (962, 982, 983) occurred 7 times
-          - Prefix (962, 982, 220) occurred 7 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 7 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.7
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=46
-      === COMMIT PROFILE START ===
-      step=10 token=' {' time_ms=0.553
-      pre:  3 states, heads=73, stacks=73, max_depth=10
-      post: 3 states, heads=100, stacks=100, max_depth=11
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=46
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=37 unique_stacks=37 empty=0 depth[min/mean/max]=1/4.84/8 accs=37
-      same sid post-state heads=73 unique_stacks=73 empty=0 depth[min/mean/max]=1/6.27/10 accs=73
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 73
-        Total stack elements (sum of depths): 458
-        Unique prefixes (nodes in a true GSS): 104
-        Compression potential (total_els / unique_prefixes): 4.40
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 73 times
-          - Prefix (962, 982) occurred 43 times
-          - Prefix (962, 507) occurred 24 times
-          - Prefix (962, 507, 508) occurred 23 times
-          - Prefix (962, 507, 508, 509, 510) occurred 20 times
-          - Prefix (962, 507, 508, 509) occurred 20 times
-          - Prefix (962, 982, 983, 220) occurred 19 times
-          - Prefix (962, 982, 983) occurred 19 times
-          - Prefix (962, 982, 220) occurred 19 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 19 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.54
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=11 token=' if' time_ms=0.559
-      pre:  3 states, heads=100, stacks=100, max_depth=11
-      post: 3 states, heads=121, stacks=121, max_depth=12
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
-      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
-      largest pre-state sid=307 heads=73 unique_stacks=73 empty=0 depth[min/mean/max]=1/6.27/10 accs=73
-      same sid post-state heads=85 unique_stacks=85 empty=0 depth[min/mean/max]=1/6.53/11 accs=85
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 85
-        Total stack elements (sum of depths): 555
-        Unique prefixes (nodes in a true GSS): 119
-        Compression potential (total_els / unique_prefixes): 4.66
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 85 times
-          - Prefix (962, 982) occurred 51 times
-          - Prefix (962, 507) occurred 28 times
-          - Prefix (962, 507, 508) occurred 27 times
-          - Prefix (962, 507, 508, 509, 510) occurred 24 times
-          - Prefix (962, 507, 508, 509) occurred 24 times
-          - Prefix (962, 982, 983, 220) occurred 23 times
-          - Prefix (962, 982, 983) occurred 23 times
-          - Prefix (962, 982, 220) occurred 23 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 23 times
-      === COMMIT PROFILE END ===
-      commit (ms): 0.54
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
-      === COMMIT PROFILE START ===
-      step=12 token=' (' time_ms=1.087
-      pre:  3 states, heads=121, stacks=121, max_depth=12
-      post: 3 states, heads=178, stacks=178, max_depth=13
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=85 unique_stacks=85 empty=0 depth[min/mean/max]=1/6.53/11 accs=85
-      same sid post-state heads=109 unique_stacks=109 empty=0 depth[min/mean/max]=1/7.09/12 accs=109
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 109
-        Total stack elements (sum of depths): 773
-        Unique prefixes (nodes in a true GSS): 143
-        Compression potential (total_els / unique_prefixes): 5.41
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 109 times
-          - Prefix (962, 982) occurred 67 times
-          - Prefix (962, 507) occurred 36 times
-          - Prefix (962, 507, 508) occurred 35 times
-          - Prefix (962, 507, 508, 509, 510) occurred 32 times
-          - Prefix (962, 507, 508, 509) occurred 32 times
-          - Prefix (962, 982, 983, 220) occurred 31 times
-          - Prefix (962, 982, 983) occurred 31 times
-          - Prefix (962, 982, 220) occurred 31 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 31 times
-      === COMMIT PROFILE END ===
-      commit (ms): 1.06
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=13 token='true' time_ms=1.147
-      pre:  3 states, heads=178, stacks=178, max_depth=13
-      post: 3 states, heads=235, stacks=235, max_depth=14
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=109 unique_stacks=109 empty=0 depth[min/mean/max]=1/7.09/12 accs=109
-      same sid post-state heads=109 unique_stacks=109 empty=0 depth[min/mean/max]=1/7.09/12 accs=109
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 109
-        Total stack elements (sum of depths): 773
-        Unique prefixes (nodes in a true GSS): 143
-        Compression potential (total_els / unique_prefixes): 5.41
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 109 times
-          - Prefix (962, 982) occurred 67 times
-          - Prefix (962, 507) occurred 36 times
-          - Prefix (962, 507, 508) occurred 35 times
-          - Prefix (962, 507, 508, 509, 510) occurred 32 times
-          - Prefix (962, 507, 508, 509) occurred 32 times
-          - Prefix (962, 982, 983, 220) occurred 31 times
-          - Prefix (962, 982, 983) occurred 31 times
-          - Prefix (962, 982, 220) occurred 31 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 31 times
-      === COMMIT PROFILE END ===
-      commit (ms): 1.13
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=14 token=')' time_ms=2.686
-      pre:  3 states, heads=235, stacks=235, max_depth=14
-      post: 3 states, heads=292, stacks=292, max_depth=15
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=109 unique_stacks=109 empty=0 depth[min/mean/max]=1/7.09/12 accs=109
-      same sid post-state heads=154 unique_stacks=154 empty=0 depth[min/mean/max]=1/7.94/13 accs=154
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 154
-        Total stack elements (sum of depths): 1223
-        Unique prefixes (nodes in a true GSS): 221
-        Compression potential (total_els / unique_prefixes): 5.53
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 154 times
-          - Prefix (962, 982) occurred 97 times
-          - Prefix (962, 507) occurred 51 times
-          - Prefix (962, 507, 508) occurred 50 times
-          - Prefix (962, 507, 508, 509, 510) occurred 47 times
-          - Prefix (962, 507, 508, 509) occurred 47 times
-          - Prefix (962, 982, 983, 220) occurred 46 times
-          - Prefix (962, 982, 983) occurred 46 times
-          - Prefix (962, 982, 220) occurred 46 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 46 times
-      === COMMIT PROFILE END ===
-      commit (ms): 2.65
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
-      === COMMIT PROFILE START ===
-      step=15 token=' {' time_ms=1.773
-      pre:  3 states, heads=292, stacks=292, max_depth=15
-      post: 3 states, heads=394, stacks=394, max_depth=16
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=154 unique_stacks=154 empty=0 depth[min/mean/max]=1/7.94/13 accs=154
-      same sid post-state heads=292 unique_stacks=292 empty=0 depth[min/mean/max]=1/9.6/15 accs=292
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 292
-        Total stack elements (sum of depths): 2802
-        Unique prefixes (nodes in a true GSS): 416
-        Compression potential (total_els / unique_prefixes): 6.74
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 292 times
-          - Prefix (962, 982) occurred 189 times
-          - Prefix (962, 507) occurred 97 times
-          - Prefix (962, 507, 508) occurred 96 times
-          - Prefix (962, 507, 508, 509, 510) occurred 93 times
-          - Prefix (962, 507, 508, 509) occurred 93 times
-          - Prefix (962, 982, 983, 220) occurred 92 times
-          - Prefix (962, 982, 983) occurred 92 times
-          - Prefix (962, 982, 220) occurred 92 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 92 times
-      === COMMIT PROFILE END ===
-      commit (ms): 1.74
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=16 token=' if' time_ms=1.839
-      pre:  3 states, heads=394, stacks=394, max_depth=16
-      post: 3 states, heads=472, stacks=472, max_depth=17
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
-      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
-      largest pre-state sid=307 heads=292 unique_stacks=292 empty=0 depth[min/mean/max]=1/9.6/15 accs=292
-      same sid post-state heads=337 unique_stacks=337 empty=0 depth[min/mean/max]=1/9.87/16 accs=337
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 337
-        Total stack elements (sum of depths): 3327
-        Unique prefixes (nodes in a true GSS): 473
-        Compression potential (total_els / unique_prefixes): 7.03
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 337 times
-          - Prefix (962, 982) occurred 219 times
-          - Prefix (962, 507) occurred 112 times
-          - Prefix (962, 507, 508) occurred 111 times
-          - Prefix (962, 507, 508, 509, 510) occurred 108 times
-          - Prefix (962, 507, 508, 509) occurred 108 times
-          - Prefix (962, 982, 983, 220) occurred 107 times
-          - Prefix (962, 982, 983) occurred 107 times
-          - Prefix (962, 982, 220) occurred 107 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 107 times
-      === COMMIT PROFILE END ===
-      commit (ms): 1.8
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
-      === COMMIT PROFILE START ===
-      step=17 token=' (' time_ms=3.194
-      pre:  3 states, heads=472, stacks=472, max_depth=17
-      post: 3 states, heads=688, stacks=688, max_depth=18
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=337 unique_stacks=337 empty=0 depth[min/mean/max]=1/9.87/16 accs=337
-      same sid post-state heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 427
-        Total stack elements (sum of depths): 4467
-        Unique prefixes (nodes in a true GSS): 563
-        Compression potential (total_els / unique_prefixes): 7.93
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 427 times
-          - Prefix (962, 982) occurred 279 times
-          - Prefix (962, 507) occurred 142 times
-          - Prefix (962, 507, 508) occurred 141 times
-          - Prefix (962, 507, 508, 509, 510) occurred 138 times
-          - Prefix (962, 507, 508, 509) occurred 138 times
-          - Prefix (962, 982, 983, 220) occurred 137 times
-          - Prefix (962, 982, 983) occurred 137 times
-          - Prefix (962, 982, 220) occurred 137 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 137 times
-      === COMMIT PROFILE END ===
-      commit (ms): 3.13
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=18 token='true' time_ms=4.457
-      pre:  3 states, heads=688, stacks=688, max_depth=18
-      post: 3 states, heads=904, stacks=904, max_depth=19
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
-      same sid post-state heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 427
-        Total stack elements (sum of depths): 4467
-        Unique prefixes (nodes in a true GSS): 563
-        Compression potential (total_els / unique_prefixes): 7.93
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 427 times
-          - Prefix (962, 982) occurred 279 times
-          - Prefix (962, 507) occurred 142 times
-          - Prefix (962, 507, 508) occurred 141 times
-          - Prefix (962, 507, 508, 509, 510) occurred 138 times
-          - Prefix (962, 507, 508, 509) occurred 138 times
-          - Prefix (962, 982, 983, 220) occurred 137 times
-          - Prefix (962, 982, 983) occurred 137 times
-          - Prefix (962, 982, 220) occurred 137 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 137 times
-      === COMMIT PROFILE END ===
-      commit (ms): 4.39
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=19 token=')' time_ms=11.55
-      pre:  3 states, heads=904, stacks=904, max_depth=19
-      post: 3 states, heads=1120, stacks=1120, max_depth=20
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=427 unique_stacks=427 empty=0 depth[min/mean/max]=1/10.46/17 accs=427
-      same sid post-state heads=598 unique_stacks=598 empty=0 depth[min/mean/max]=1/11.36/18 accs=598
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 598
-        Total stack elements (sum of depths): 6795
-        Unique prefixes (nodes in a true GSS): 860
-        Compression potential (total_els / unique_prefixes): 7.90
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 598 times
-          - Prefix (962, 982) occurred 393 times
-          - Prefix (962, 507) occurred 199 times
-          - Prefix (962, 507, 508) occurred 198 times
-          - Prefix (962, 507, 508, 509, 510) occurred 195 times
-          - Prefix (962, 507, 508, 509) occurred 195 times
-          - Prefix (962, 982, 983, 220) occurred 194 times
-          - Prefix (962, 982, 983) occurred 194 times
-          - Prefix (962, 982, 220) occurred 194 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 194 times
-      === COMMIT PROFILE END ===
-      commit (ms): 11.46
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
-      === COMMIT PROFILE START ===
-      step=20 token=' {' time_ms=7.593
-      pre:  3 states, heads=1120, stacks=1120, max_depth=20
-      post: 3 states, heads=1507, stacks=1507, max_depth=21
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=598 unique_stacks=598 empty=0 depth[min/mean/max]=1/11.36/18 accs=598
-      same sid post-state heads=1120 unique_stacks=1120 empty=0 depth[min/mean/max]=1/13.08/20 accs=1120
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 1120
-        Total stack elements (sum of depths): 14649
-        Unique prefixes (nodes in a true GSS): 1598
-        Compression potential (total_els / unique_prefixes): 9.17
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 1120 times
-          - Prefix (962, 982) occurred 741 times
-          - Prefix (962, 507) occurred 373 times
-          - Prefix (962, 507, 508) occurred 372 times
-          - Prefix (962, 507, 508, 509, 510) occurred 369 times
-          - Prefix (962, 507, 508, 509) occurred 369 times
-          - Prefix (962, 982, 983, 220) occurred 368 times
-          - Prefix (962, 982, 983) occurred 368 times
-          - Prefix (962, 982, 220) occurred 368 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 368 times
-      === COMMIT PROFILE END ===
-      commit (ms): 7.49
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=21 token=' if' time_ms=7.571
-      pre:  3 states, heads=1507, stacks=1507, max_depth=21
-      post: 3 states, heads=1804, stacks=1804, max_depth=22
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
-      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
-      largest pre-state sid=307 heads=1120 unique_stacks=1120 empty=0 depth[min/mean/max]=1/13.08/20 accs=1120
-      same sid post-state heads=1291 unique_stacks=1291 empty=0 depth[min/mean/max]=1/13.37/21 accs=1291
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 1291
-        Total stack elements (sum of depths): 17265
-        Unique prefixes (nodes in a true GSS): 1814
-        Compression potential (total_els / unique_prefixes): 9.52
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 1291 times
-          - Prefix (962, 982) occurred 855 times
-          - Prefix (962, 507) occurred 430 times
-          - Prefix (962, 507, 508) occurred 429 times
-          - Prefix (962, 507, 508, 509, 510) occurred 426 times
-          - Prefix (962, 507, 508, 509) occurred 426 times
-          - Prefix (962, 982, 983, 220) occurred 425 times
-          - Prefix (962, 982, 983) occurred 425 times
-          - Prefix (962, 982, 220) occurred 425 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 425 times
-      === COMMIT PROFILE END ===
-      commit (ms): 7.42
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
-      === COMMIT PROFILE START ===
-      step=22 token=' (' time_ms=14.041
-      pre:  3 states, heads=1804, stacks=1804, max_depth=22
-      post: 3 states, heads=2623, stacks=2623, max_depth=23
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=1291 unique_stacks=1291 empty=0 depth[min/mean/max]=1/13.37/21 accs=1291
-      same sid post-state heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 1633
-        Total stack elements (sum of depths): 22839
-        Unique prefixes (nodes in a true GSS): 2156
-        Compression potential (total_els / unique_prefixes): 10.59
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 1633 times
-          - Prefix (962, 982) occurred 1083 times
-          - Prefix (962, 507) occurred 544 times
-          - Prefix (962, 507, 508) occurred 543 times
-          - Prefix (962, 507, 508, 509, 510) occurred 540 times
-          - Prefix (962, 507, 508, 509) occurred 540 times
-          - Prefix (962, 982, 983, 220) occurred 539 times
-          - Prefix (962, 982, 983) occurred 539 times
-          - Prefix (962, 982, 220) occurred 539 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 539 times
-      === COMMIT PROFILE END ===
-      commit (ms): 13.72
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=23 token='true' time_ms=16.994
-      pre:  3 states, heads=2623, stacks=2623, max_depth=23
-      post: 3 states, heads=3442, stacks=3442, max_depth=24
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
-      same sid post-state heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 1633
-        Total stack elements (sum of depths): 22839
-        Unique prefixes (nodes in a true GSS): 2156
-        Compression potential (total_els / unique_prefixes): 10.59
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 1633 times
-          - Prefix (962, 982) occurred 1083 times
-          - Prefix (962, 507) occurred 544 times
-          - Prefix (962, 507, 508) occurred 543 times
-          - Prefix (962, 507, 508, 509, 510) occurred 540 times
-          - Prefix (962, 507, 508, 509) occurred 540 times
-          - Prefix (962, 982, 983, 220) occurred 539 times
-          - Prefix (962, 982, 983) occurred 539 times
-          - Prefix (962, 982, 220) occurred 539 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 539 times
-      === COMMIT PROFILE END ===
-      commit (ms): 16.79
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=24 token=')' time_ms=35.212
-      pre:  3 states, heads=3442, stacks=3442, max_depth=24
-      post: 3 states, heads=4261, stacks=4261, max_depth=25
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=1633 unique_stacks=1633 empty=0 depth[min/mean/max]=1/13.99/22 accs=1633
-      same sid post-state heads=2281 unique_stacks=2281 empty=0 depth[min/mean/max]=1/14.91/23 accs=2281
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 2281
-        Total stack elements (sum of depths): 34008
-        Unique prefixes (nodes in a true GSS): 3281
-        Compression potential (total_els / unique_prefixes): 10.37
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 2281 times
-          - Prefix (962, 982) occurred 1515 times
-          - Prefix (962, 507) occurred 760 times
-          - Prefix (962, 507, 508) occurred 759 times
-          - Prefix (962, 507, 508, 509, 510) occurred 756 times
-          - Prefix (962, 507, 508, 509) occurred 756 times
-          - Prefix (962, 982, 983, 220) occurred 755 times
-          - Prefix (962, 982, 983) occurred 755 times
-          - Prefix (962, 982, 220) occurred 755 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 755 times
-      === COMMIT PROFILE END ===
-      commit (ms): 34.93
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
-      === COMMIT PROFILE START ===
-      step=25 token=' {' time_ms=25.044
-      pre:  3 states, heads=4261, stacks=4261, max_depth=25
-      post: 3 states, heads=5728, stacks=5728, max_depth=26
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=2281 unique_stacks=2281 empty=0 depth[min/mean/max]=1/14.91/23 accs=2281
-      same sid post-state heads=4261 unique_stacks=4261 empty=0 depth[min/mean/max]=1/16.66/25 accs=4261
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 4261
-        Total stack elements (sum of depths): 70977
-        Unique prefixes (nodes in a true GSS): 6080
-        Compression potential (total_els / unique_prefixes): 11.67
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 4261 times
-          - Prefix (962, 982) occurred 2835 times
-          - Prefix (962, 507) occurred 1420 times
-          - Prefix (962, 507, 508) occurred 1419 times
-          - Prefix (962, 507, 508, 509, 510) occurred 1416 times
-          - Prefix (962, 507, 508, 509) occurred 1416 times
-          - Prefix (962, 982, 983, 220) occurred 1415 times
-          - Prefix (962, 982, 983) occurred 1415 times
-          - Prefix (962, 982, 220) occurred 1415 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 1415 times
-      === COMMIT PROFILE END ===
-      commit (ms): 24.68
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=2 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=20 shifts=2 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=26 token=' if' time_ms=27.966
-      pre:  3 states, heads=5728, stacks=5728, max_depth=26
-      post: 3 states, heads=6853, stacks=6853, max_depth=27
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=7 width_hist={3: 3, 1: 1, 2: 3}
-      process_token: calls=6 shifts=4 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=5 enqueue_after_match=1
-      largest pre-state sid=307 heads=4261 unique_stacks=4261 empty=0 depth[min/mean/max]=1/16.66/25 accs=4261
-      same sid post-state heads=4909 unique_stacks=4909 empty=0 depth[min/mean/max]=1/16.96/26 accs=4909
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 4909
-        Total stack elements (sum of depths): 83235
-        Unique prefixes (nodes in a true GSS): 6899
-        Compression potential (total_els / unique_prefixes): 12.06
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 4909 times
-          - Prefix (962, 982) occurred 3267 times
-          - Prefix (962, 507) occurred 1636 times
-          - Prefix (962, 507, 508) occurred 1635 times
-          - Prefix (962, 507, 508, 509, 510) occurred 1632 times
-          - Prefix (962, 507, 508, 509) occurred 1632 times
-          - Prefix (962, 982, 983, 220) occurred 1631 times
-          - Prefix (962, 982, 983) occurred 1631 times
-          - Prefix (962, 982, 220) occurred 1631 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 1631 times
-      === COMMIT PROFILE END ===
-      commit (ms): 27.53
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=21 shifts=6 reduces=43 splits=3 gotos=47
-      === COMMIT PROFILE START ===
-      step=27 token=' (' time_ms=50.999
-      pre:  3 states, heads=6853, stacks=6853, max_depth=27
-      post: 3 states, heads=9958, stacks=9958, max_depth=28
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=6 reduces=43 splits=3 gotos=47
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=4909 unique_stacks=4909 empty=0 depth[min/mean/max]=1/16.96/26 accs=4909
-      same sid post-state heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 6205
-        Total stack elements (sum of depths): 109047
-        Unique prefixes (nodes in a true GSS): 8195
-        Compression potential (total_els / unique_prefixes): 13.31
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 6205 times
-          - Prefix (962, 982) occurred 4131 times
-          - Prefix (962, 507) occurred 2068 times
-          - Prefix (962, 507, 508) occurred 2067 times
-          - Prefix (962, 507, 508, 509, 510) occurred 2064 times
-          - Prefix (962, 507, 508, 509) occurred 2064 times
-          - Prefix (962, 982, 983, 220) occurred 2063 times
-          - Prefix (962, 982, 983) occurred 2063 times
-          - Prefix (962, 982, 220) occurred 2063 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 2063 times
-      === COMMIT PROFILE END ===
-      commit (ms): 50.27
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=1 shifts=3 reduces=0 splits=0 gotos=0
-      [process_token] term=4 shifts=4 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=28 token='true' time_ms=72.195
-      pre:  3 states, heads=9958, stacks=9958, max_depth=28
-      post: 3 states, heads=13063, stacks=13063, max_depth=29
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=5 width_hist={4: 5}
-      process_token: calls=5 shifts=7 reduces=0 splits=0 gotos=0
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=4 enqueue_after_match=0
-      largest pre-state sid=307 heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
-      same sid post-state heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 6205
-        Total stack elements (sum of depths): 109047
-        Unique prefixes (nodes in a true GSS): 8195
-        Compression potential (total_els / unique_prefixes): 13.31
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 6205 times
-          - Prefix (962, 982) occurred 4131 times
-          - Prefix (962, 507) occurred 2068 times
-          - Prefix (962, 507, 508) occurred 2067 times
-          - Prefix (962, 507, 508, 509, 510) occurred 2064 times
-          - Prefix (962, 507, 508, 509) occurred 2064 times
-          - Prefix (962, 982, 983, 220) occurred 2063 times
-          - Prefix (962, 982, 983) occurred 2063 times
-          - Prefix (962, 982, 220) occurred 2063 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 2063 times
-      === COMMIT PROFILE END ===
-      commit (ms): 70.76
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=22 shifts=8 reduces=72 splits=1 gotos=137
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      === COMMIT PROFILE START ===
-      step=29 token=')' time_ms=223.638
-      pre:  3 states, heads=13063, stacks=13063, max_depth=29
-      post: 3 states, heads=16168, stacks=16168, max_depth=30
-      queue: enq=3 pop=3 offsets=1 max_offset=0
-      tokenizer: matches_total=4 width_hist={1: 4}
-      process_token: calls=4 shifts=8 reduces=72 splits=1 gotos=137
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=3 prunes=3 enqueue_after_match=0
-      largest pre-state sid=307 heads=6205 unique_stacks=6205 empty=0 depth[min/mean/max]=1/17.57/27 accs=6205
-      same sid post-state heads=8662 unique_stacks=8662 empty=0 depth[min/mean/max]=1/18.51/28 accs=8662
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 8662
-        Total stack elements (sum of depths): 160293
-        Unique prefixes (nodes in a true GSS): 12461
-        Compression potential (total_els / unique_prefixes): 12.86
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 8662 times
-          - Prefix (962, 982) occurred 5769 times
-          - Prefix (962, 507) occurred 2887 times
-          - Prefix (962, 507, 508) occurred 2886 times
-          - Prefix (962, 507, 508, 509, 510) occurred 2883 times
-          - Prefix (962, 507, 508, 509) occurred 2883 times
-          - Prefix (962, 982, 983, 220) occurred 2882 times
-          - Prefix (962, 982, 983) occurred 2882 times
-          - Prefix (962, 982, 220) occurred 2882 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 2882 times
-      === COMMIT PROFILE END ===
-      commit (ms): 222.56
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=10 shifts=0 reduces=0 splits=0 gotos=0
-      [process_token] term=12 shifts=4 reduces=46 splits=0 gotos=67
-      === COMMIT PROFILE START ===
-      step=30 token=' {' time_ms=120.264
-      pre:  3 states, heads=16168, stacks=16168, max_depth=30
-      post: 3 states, heads=21730, stacks=21730, max_depth=31
-      queue: enq=3 pop=4 offsets=2 max_offset=1
-      tokenizer: matches_total=6 width_hist={2: 3, 1: 3}
-      process_token: calls=5 shifts=4 reduces=46 splits=0 gotos=67
-      merges: calls=0 inputs_gss=0 input_stacks=0 output_stacks=0 dedup_saved=0
-      end_state: carry_forward=4 prunes=4 enqueue_after_match=1
-      largest pre-state sid=307 heads=8662 unique_stacks=8662 empty=0 depth[min/mean/max]=1/18.51/28 accs=8662
-      same sid post-state heads=16168 unique_stacks=16168 empty=0 depth[min/mean/max]=1/20.26/30 accs=16168
-      [GSS PREFIX ANALYSIS]
-        Unique stacks: 16168
-        Total stack elements (sum of depths): 327612
-        Unique prefixes (nodes in a true GSS): 23072
-        Compression potential (total_els / unique_prefixes): 14.20
-        Top 10 most common prefixes:
-          - Prefix (962,) occurred 16168 times
-          - Prefix (962, 982) occurred 10773 times
-          - Prefix (962, 507) occurred 5389 times
-          - Prefix (962, 507, 508) occurred 5388 times
-          - Prefix (962, 507, 508, 509, 510) occurred 5385 times
-          - Prefix (962, 507, 508, 509) occurred 5385 times
-          - Prefix (962, 982, 983, 220) occurred 5384 times
-          - Prefix (962, 982, 983) occurred 5384 times
-          - Prefix (962, 982, 220) occurred 5384 times
-          - Prefix (962, 507, 508, 509, 510, 220) occurred 5384 times
-      === COMMIT PROFILE END ===
-      commit (ms): 118.08
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-18_17-20-09/precompute3_model_pure_python_results.json
-    metadata:
-  - user: |-
-      We're getting exponential increase in compute time with an input string that consists of nested if-statements `if (true) { if (true) { if (true) {`. Investigate this.
-      The full input is
-      ```js
-      if (true) { if (true) { if (true) { if (true) { if (true) { if (true) {
-      ```
-      The ffi stuff should already be well-optimized.
-      Note that this benchmark code must strictly adhere to the current interface or it will fail to run at all.
-      We're focussing on commit. And on the size/complexity of the GSS.
-      Focus on time complexity, exponential speedups, not just 'linear' speedups.
-
-      You can modify the code in any way you like, print whatever you want. I'll give you the output to analyse.
-      Don't try to solve it immediately. Think deeply about the cause. Run experiments.
-      Think about it: What could cause exponential blowup? Given our input?
+  - user: Ensure that the time profiler-related code takes to run isn't being included
+      in the execution time for the essential code of commit. I suspect some profile-related
+      code is itself ending up getting timed.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4325,108 +3286,81 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'm here to help you with your code. Based on my analysis of the performance issue, I've identified a key area for optimization. Here are the step-by-step instructions to address the exponential slowdown, followed by the corresponding git diff.
-
-      ### Analysis
-
-      The benchmark results clearly show an exponential increase in processing time and the number of unique stacks in the Graph-Structured Stack (GSS) when parsing nested `if` statements. The root cause is the ambiguity inherent in such structures (like the "dangling else" problem), which forces the GLR parser to maintain an exponentially growing number of parallel parse states.
-
-      While the `StackNode` implementation already helps by sharing common stack prefixes, the `_process_token` function still performs redundant work. Specifically, during a `Reduce` operation, the code pops `n` states from the top of *every single stack* being considered. The profiling data shows that many stacks share long prefixes, meaning we are repeatedly calculating the result of popping from the same prefix nodes.
-
-      The solution is to memoize the results of these pop operations within a single `_process_token` call. By caching the result of `pop(node, n)`, we can avoid re-traversing the stack for every head that shares the same prefix, converting a costly operation into a quick dictionary lookup. This should effectively combat the exponential complexity introduced by the grammar's ambiguity.
+      Of course. To ensure the time profiler's setup and pre-run analysis are not included in the execution time reported for the `commit` method's essential logic, we can adjust the placement of the timer start. Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python.py`.
+      In the file `python/aug25/models/precompute3_model_pure_python.py`, you will make a small change to the `commit` method within the `Model` class.
 
-      2.  **Navigate to the `_process_token` method**: Find the `_process_token` method inside the `Model` class.
+      1.  **Locate the `commit` method:** Find the `commit` method definition, which starts around line 730.
 
-      3.  **Introduce a cache for pop operations**: Immediately after the line `c_gotos = 0`, insert the following code block. This adds a dictionary `pop_cache` to store the results of pop operations and a helper function `pop_node_cached` that uses this cache.
-
+      2.  **Remove the initial timer start:** Inside the `commit` method, find and delete the following line, which currently starts the timer before the profiler is initialized:
           ```python
-                  pop_cache: Dict[Tuple[StackNode, int], StackNode] = {}
-          
-                  def pop_node_cached(node: StackNode, n: int) -> StackNode:
-                      if n <= 0:
-                          return node
-                      key = (node, n)
-                      cached = pop_cache.get(key)
-                      if cached is not None:
-                          return cached
-                      
-                      p = node
-                      steps = n
-                      while steps > 0 and p.state is not None:
-                          p = p.prev
-                          steps -= 1
-                      pop_cache[key] = p
-                      return p
+          t0 = time.perf_counter()
           ```
 
-      4.  **Update `popn_dict` to use the cache**: In the nested function `popn_dict` within `_process_token`, replace the manual stack traversal logic with a call to our new `pop_node_cached` function.
+      3.  **Move the timer start:** Find the `if` block that initializes the `_CommitProfiler`. Immediately after this block, insert the line you just removed. This will start the timer *after* all profiling setup is complete and just before the core logic of the method begins.
 
-          *   **Delete** these lines from `popn_dict`:
-              ```python
-                          p = node
-                          steps = n
-                          while steps > 0 and p.state is not None:
-                              p = p.prev
-                              steps -= 1
-              ```
-          *   **Insert** this line in their place:
-              ```python
-                          p = pop_node_cached(node, n)
-              ```
+      The code will change from this:
 
-      These changes will significantly optimize the reduction steps, which are the primary source of the performance degradation.
+      ```python
+              self._commit_step += 1
+              t0 = time.perf_counter()
+              token_bytes = self.id_to_token[token_id]
+
+              profiler: Optional[_CommitProfiler] = None
+              if _env_flag("PROFILE_COMMIT", False) or _env_flag("DEBUG_COMMIT_VERBOSE", False):
+                  profiler = _CommitProfiler(self._commit_step, token_bytes)
+                  # Pre-state summary
+                  for sid, st in self._gss_stats_map(self.state).items():
+                      profiler.add_pre_stats(sid, st)
+
+              # Build tokenizer maps
+      ```
+
+      To this:
+
+      ```python
+              self._commit_step += 1
+              token_bytes = self.id_to_token[token_id]
+
+              profiler: Optional[_CommitProfiler] = None
+              if _env_flag("PROFILE_COMMIT", False) or _env_flag("DEBUG_COMMIT_VERBOSE", False):
+                  profiler = _CommitProfiler(self._commit_step, token_bytes)
+                  # Pre-state summary
+                  for sid, st in self._gss_stats_map(self.state).items():
+                      profiler.add_pre_stats(sid, st)
+
+              t0 = time.perf_counter()
+
+              # Build tokenizer maps
+      ```
 
       ### Git Diff
 
-      Here is the git diff to apply the changes automatically:
+      Here is the git patch to apply these changes directly:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 4554605..59b486a 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1004,6 +1004,22 @@
-               c_splits = 0
-               c_gotos = 0
+      @@ -735,8 +735,7 @@
+               Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
+               """
+               self._commit_step += 1
+      -        t0 = time.perf_counter()
+               token_bytes = self.id_to_token[token_id]
        
-      +        pop_cache: Dict[Tuple[StackNode, int], StackNode] = {}
+               profiler: Optional[_CommitProfiler] = None
+      @@ -746,6 +745,8 @@
+                   for sid, st in self._gss_stats_map(self.state).items():
+                       profiler.add_pre_stats(sid, st)
+       
+      +        t0 = time.perf_counter()
       +
-      +        def pop_node_cached(node: StackNode, n: int) -> StackNode:
-      +            if n <= 0:
-      +                return node
-      +            key = (node, n)
-      +            cached = pop_cache.get(key)
-      +            if cached is not None:
-      +                return cached
-      +            
-      +            p = node
-      +            steps = n
-      +            while steps > 0 and p.state is not None:
-      +                p = p.prev
-      +                steps -= 1
-      +            pop_cache[key] = p
-      +            return p
-      +
-               def merge_inplace(dst: Dict[StackNode, PyAcc], src: Dict[StackNode, PyAcc]) -> None:
-                   for node, acc in src.items():
-                       existing = dst.get(node)
-      @@ -1024,12 +1040,7 @@
-                       return dict(heads)
-                   out: Dict[StackNode, PyAcc] = {}
-                   for node, acc in heads.items():
-      -                p = node
-      -                steps = n
-      -                while steps > 0 and p.state is not None:
-      -                    p = p.prev
-      -                    steps -= 1
-      +                p = pop_node_cached(node, n)
-                       existing = out.get(p)
-                       if existing is None:
-                           out[p] = acc
+               # Build tokenizer maps
+               terminals_map: Dict[int, ffi.Bitset] = {}
+               state_map: Dict[int, int] = {}
 
       ```
     metadata:
@@ -4439,7 +3373,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Optimize reduce operations by memoizing
-      stack pops"'
+  - user: 'Changes committed with message: "Move timer start in commit to exclude
+      profiler setup"'
     metadata:
 ...

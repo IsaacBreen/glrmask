@@ -683,7 +683,6 @@ class Model(GraphProvider):
         Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
         """
         self._commit_step += 1
-        t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
 
         profiler: Optional[_CommitProfiler] = None
@@ -692,6 +691,8 @@ class Model(GraphProvider):
             # Pre-state summary
             for sid, st in self._gss_stats_map(self.state).items():
                 profiler.add_pre_stats(sid, st)
+
+        t0 = time.perf_counter()
 
         # Build tokenizer maps
         terminals_map: Dict[int, ffi.Bitset] = {}
