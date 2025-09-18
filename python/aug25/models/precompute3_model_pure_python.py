@@ -407,38 +407,33 @@ class Model(GraphProvider):
 
         while heads_by_state:
             state_id, state_gsss = heads_by_state.popitem()
-            for state_gss in state_gsss:
-                row = self.parser_table.table.get(state_id)
-                if not row: continue
-                action = row.actions.get(terminal_id)
-                if not action: continue
+            state_gss = GSS.merge(state_gsss)
+            row = self.parser_table.table.get(state_id)
+            if not row: continue
+            action = row.actions.get(terminal_id)
+            if not action: continue
 
-                def handle_shift(shift_to_state_id, gss_to_shift):
-                    shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+            def handle_shift(shift_to_state_id, gss_to_shift):
+                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
-                def handle_reduce(reduce_action, gss_to_reduce):
-                    popped_gss = gss_to_reduce
-                    for _ in range(reduce_action.len):
-                        popped_gss = popped_gss.pop()
-                    reductions_to_do[reduce_action].append(popped_gss)
+            def handle_reduce(reduce_action, gss_to_reduce):
+                popped_gss = gss_to_reduce
+                popped_gss = popped_gss.popn(reduce_action.len)
+                for from_state_id in popped_gss.peek():
+                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                    goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
+                    heads_by_state[goto_state_id].append(goto_gss)
 
-                if isinstance(action, int):
-                    handle_shift(action, state_gss)
-                elif isinstance(action, Reduce):
-                    handle_reduce(action, state_gss)
-                elif isinstance(action, Split):
-                    if action.shift is not None:
-                        handle_shift(action.shift, state_gss)
-                    for length, nts in action.reduces.items():
-                        for nt_id, pids in nts.items():
-                            handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-        for reduce_action, gss_list in reductions_to_do.items():
-            merged_popped_gss = GSS.merge(gss_list)
-            for from_state_id in merged_popped_gss.peek():
-                goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                goto_gss = merged_popped_gss.isolate(from_state_id).push(goto_state_id)
-                heads_by_state[goto_state_id].append(goto_gss)
+            if isinstance(action, int):
+                handle_shift(action, state_gss)
+            elif isinstance(action, Reduce):
+                handle_reduce(action, state_gss)
+            elif isinstance(action, Split):
+                if action.shift is not None:
+                    handle_shift(action.shift, state_gss)
+                for length, nts in action.reduces.items():
+                    for nt_id, pids in nts.items():
+                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
         if not shifted_gsses:
             # Return an empty GSS, preserving the structure and root from the input GSS.
