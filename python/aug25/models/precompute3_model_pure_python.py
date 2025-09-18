@@ -306,6 +306,7 @@ class GSS:
 
     _intern: Dict[frozenset, "GSS"] = {}
     _EMPTY_GSS: "GSS"  # To be initialized after class definition
+    _uid_counter = 0
 
     def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
         heads = heads or {}
@@ -323,6 +324,8 @@ class GSS:
         if hasattr(self, '_heads'):
             return
         self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+        self.uid: int = GSS._uid_counter
+        GSS._uid_counter += 1
 
     @classmethod
     def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
@@ -525,7 +528,7 @@ class GSS:
 
         # With interning, we can deduplicate GSS objects by their memory address (id).
         # This handles both single-item lists and lists of identical objects, avoiding the merge.
-        unique_gsses = list({id(g): g for g in gss_list}.values())
+        unique_gsses = list({g.uid: g for g in gss_list}.values())
 
         if len(unique_gsses) == 1:
             result_gss = unique_gsses[0]
@@ -765,7 +768,7 @@ class Model(GraphProvider):
             offset, tokenizer_sid, gss = q.popleft()
             if profiler is not None:
                 profiler.on_queue_pop(offset)
-            q_key = (offset, tokenizer_sid, id(gss))
+            q_key = (offset, tokenizer_sid, gss.uid)
             if q_key in visited_q_items:
                 continue
             visited_q_items.add(q_key)

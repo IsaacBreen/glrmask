@@ -1385,6 +1385,7 @@ local_system:
 
           _intern: Dict[frozenset, "GSS"] = {}
           _EMPTY_GSS: "GSS"  # To be initialized after class definition
+          _uid_counter = 0
 
           def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
               heads = heads or {}
@@ -1402,6 +1403,8 @@ local_system:
               if hasattr(self, '_heads'):
                   return
               self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+              self.uid: int = GSS._uid_counter
+              GSS._uid_counter += 1
 
           @classmethod
           def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
@@ -1604,7 +1607,7 @@ local_system:
 
               # With interning, we can deduplicate GSS objects by their memory address (id).
               # This handles both single-item lists and lists of identical objects, avoiding the merge.
-              unique_gsses = list({id(g): g for g in gss_list}.values())
+              unique_gsses = list({g.uid: g for g in gss_list}.values())
 
               if len(unique_gsses) == 1:
                   result_gss = unique_gsses[0]
@@ -1844,7 +1847,7 @@ local_system:
                   offset, tokenizer_sid, gss = q.popleft()
                   if profiler is not None:
                       profiler.on_queue_pop(offset)
-                  q_key = (offset, tokenizer_sid, id(gss))
+                  q_key = (offset, tokenizer_sid, gss.uid)
                   if q_key in visited_q_items:
                       continue
                   visited_q_items.add(q_key)
@@ -3703,5 +3706,112 @@ messages:
     metadata:
   - user: 'Changes committed with message: "refactor: Streamline GSS merge using interning
       and remove unused _clone_with"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: No, don't use id(x). Use the uid we assign.
+    metadata:
+  - assistant: |-
+      You are absolutely right. Using a deterministic, assigned unique ID (`uid`) is a more robust approach than relying on Python's memory-address-based `id()`. This ensures that our canonicalization is explicit and predictable.
+
+      By assigning a `uid` to each unique `GSS` object upon its creation, we can use this ID throughout the system to quickly check for equality of state, which is key to avoiding redundant work in both the merge logic and the main processing queue in `commit`.
+
+      Here are the step-by-step instructions to implement this.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python.py`.
+
+      2.  **Add a UID counter to the `GSS` class**: Navigate to the `GSS` class definition (around line 346) and add a class attribute to serve as a counter for generating unique IDs.
+
+          ```python
+          class GSS:
+              # ... (existing attributes)
+              _uid_counter = 0
+          ```
+
+      3.  **Assign the UID in `GSS.__init__`**: Modify the `__init__` method (around line 364) to assign a unique ID to the `GSS` instance the first time it is initialized.
+
+          -   Add `self.uid: int = GSS._uid_counter` to assign the current counter value.
+          -   Add `GSS._uid_counter += 1` to increment the counter for the next unique object.
+
+      4.  **Update `GSS.merge` to use `uid`**: In the `GSS.merge` static method (around line 624), change the deduplication logic to use `g.uid` instead of `id(g)`.
+
+          -   The line `unique_gsses = list({id(g): g for g in gss_list}.values())` should be changed to:
+              ```python
+              unique_gsses = list({g.uid: g for g in gss_list}.values())
+              ```
+
+      5.  **Update `Model.commit` to use `uid`**: In the `commit` method's main processing loop (around line 768), update the construction of the `q_key` to use `gss.uid` for the visited check.
+
+          -   The line `q_key = (offset, tokenizer_sid, id(gss))` should be changed to:
+              ```python
+              q_key = (offset, tokenizer_sid, gss.uid)
+              ```
+
+      These changes ensure that our GSS deduplication is based on a stable, assigned ID, making the optimization more explicit and robust.
+
+      ### Git Diff
+
+      Here is the git diff to apply all the changes to `python/aug25/models/precompute3_model_pure_python.py`.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -346,6 +346,7 @@
+       
+           _intern: Dict[frozenset, "GSS"] = {}
+           _EMPTY_GSS: "GSS"  # To be initialized after class definition
+      +    _uid_counter = 0
+       
+           def __new__(cls, heads: Optional[Dict[StackNode, PyAcc]] = None):
+               heads = heads or {}
+      @@ -364,6 +365,8 @@
+               if hasattr(self, '_heads'):
+                   return
+               self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
+      +        self.uid: int = GSS._uid_counter
+      +        GSS._uid_counter += 1
+       
+           @classmethod
+           def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
+      @@ -624,8 +627,8 @@
+               input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
+       
+               # With interning, we can deduplicate GSS objects by their memory address (id).
+               # This handles both single-item lists and lists of identical objects, avoiding the merge.
+      -        unique_gsses = list({id(g): g for g in gss_list}.values())
+      +        unique_gsses = list({g.uid: g for g in gss_list}.values())
+       
+               if len(unique_gsses) == 1:
+                   result_gss = unique_gsses[0]
+      @@ -768,7 +771,7 @@
+                   offset, tokenizer_sid, gss = q.popleft()
+                   if profiler is not None:
+                       profiler.on_queue_pop(offset)
+      -            q_key = (offset, tokenizer_sid, id(gss))
+      +            q_key = (offset, tokenizer_sid, gss.uid)
+                   if q_key in visited_q_items:
+                       continue
+                   visited_q_items.add(q_key)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Use GSS uid for deduplication
+      and state tracking"'
     metadata:
 ...
