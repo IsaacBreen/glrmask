@@ -255,24 +255,16 @@ class Model(GraphProvider):
     def _map_allowed_terminals_tokenizer_states(self, gss: FastGSS, state_map: Dict[int, int]) -> FastGSS:
         def apply_map(acc: PyAcc) -> PyAcc:
             old_l2 = acc.terminals_union
-            new_l2 = old_l2.union(old_l2) # clone
-
-            to_merge: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-
+            new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
+            
             for old_sid, new_sid in state_map.items():
-                if old_sid == new_sid:
-                    continue
-                
-                bv_source = new_l2.get_l2_bitset(old_sid)
-                to_merge[new_sid] = to_merge[new_sid].union(bv_source)
-                
-                # Reset old state to default (all allowed)
-                new_l2.insert_l2_bitset(old_sid, ffi.Bitset.max_ones())
-
-            for new_sid, bv_to_merge in to_merge.items():
-                current_bv = new_l2.get_l2_bitset(new_sid)
-                new_l2.insert_l2_bitset(new_sid, current_bv.union(bv_to_merge))
-
+                bv_source = old_l2.get_l2_bitset(old_sid)
+                new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+            
+            new_l2 = ffi.HybridL2Bitset.all()
+            for new_sid, bv in new_bvs.items():
+                new_l2.insert_l2_bitset(new_sid, bv)
+            
             return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_map)
 
@@ -322,17 +314,11 @@ class Model(GraphProvider):
         # Get Rust state before commit for comparison
         rust_state_map_before_commit = self.constraint_state.get_state_map()
 
+        self.constraint_state.commit(token_id)
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
-            self.constraint_state.commit(token_id)
             self.state = {}
             return
-
-        # COMPUTE RUST MAPS BEFORE COMMIT
-        rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-
-        # Now commit the rust state
-        self.constraint_state.commit(token_id)
 
         # --- Python implementation starts here ---
 
@@ -351,11 +337,18 @@ class Model(GraphProvider):
             terminals_map[tokenizer_sid] = terminals
 
         # === ASSERTION 1: Compare maps ===
-        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+        rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
+        if state_map != rust_state_map:
+            print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
         
         py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
         rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-        assert py_terminals_map_serializable == rust_terminals_map_serializable, f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}"
+        if py_terminals_map_serializable != rust_terminals_map_serializable:
+            print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
+
+        if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
+            raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
+
         # =================================
 
         temp_states: Dict[int, FastGSS] = {}

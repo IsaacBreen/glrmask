@@ -62,7 +62,6 @@ impl PrecomputedNodeContents {
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use std::ops::BitOrAssign;
 use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
@@ -1462,21 +1461,21 @@ pub fn map_allowed_terminals_tokenizer_states(
     memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
-        let mut new_l2 = terminals.clone();
-        let mut to_merge: BTreeMap<TokenizerStateID, HybridBitset> = BTreeMap::new();
+        let mut new_terminals_btreemap = BTreeMap::new();
 
-        for (old_sid, new_sid) in map {
-            if old_sid == new_sid { continue; }
-            let bv = new_l2.get_l2_bitset(old_sid.0).unwrap().clone();
-            to_merge.entry(*new_sid).or_default().bitor_assign(&bv);
-            // After moving, the old state should revert to default (all allowed)
-            new_l2.insert_l2_bitset(old_sid.0, HybridBitset::max_ones());
+        for (old_state_id, new_state_id) in map {
+            let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
+            new_terminals_btreemap.entry(*new_state_id)
+                .and_modify(|bv| *bv |= bv_source)
+                .or_insert_with(|| bv_source.clone());
         }
 
-        for (sid, bv) in to_merge {
-            new_l2.get_l2_bitset_mut(sid.0).bitor_assign(&bv);
+        let mut new_terminals_l2_bitset = HybridL2Bitset::all();
+        for (state_id, bv) in new_terminals_btreemap {
+            new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
         }
-        new_l2
+
+        new_terminals_l2_bitset
     };
 
     let transform_acc = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
