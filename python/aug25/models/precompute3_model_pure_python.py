@@ -1,13 +1,13 @@
-from __future__ import annotations
 import json
 import heapq
 import collections
-import os
 import time
-from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, Type
+from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass, field
+
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
+from gss_tester.leveled_impl import LeveledGSS as GSS
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,8 @@ class Split:
     reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
 
 
-Action = Union[int, Reduce, Split]  # Shift (int), Reduce, or Split
+# Action can be a Shift (int), Reduce, or Split
+Action = Union[int, Reduce, Split]
 
 
 @dataclass
@@ -42,159 +43,18 @@ class ParserTable:
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
 
-    def __hash__(self) -> int:
+    def __hash__(self):
         return hash(self.terminals_union)
 
     def merge(self, other: "PyAcc") -> "PyAcc":
-        return PyAcc(self.terminals_union.union(other.terminals_union))
-
-
-# GSS implementation
-
-@dataclass(frozen=True, eq=False)
-class _StackNode:
-    prev: Optional["_StackNode"]
-    value: int
-
-    def __repr__(self) -> str:
-        return f"_StackNode(value={self.value!r}, prev_id={id(self.prev) if self.prev else None})"
-
-
-class _NodeFactory:
-    def __init__(self) -> None:
-        self._table: Dict[Tuple[Optional[_StackNode], int], _StackNode] = {}
-
-    def get(self, prev: Optional[_StackNode], value: int) -> _StackNode:
-        key = (prev, value)
-        node = self._table.get(key)
-        if node is None:
-            node = _StackNode(prev, value)
-            self._table[key] = node
-        return node
-
-
-class GSS:
-    def __init__(
-        self,
-        node_factory: Optional[_NodeFactory] = None,
-        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
-        empty_accs: Optional[List[PyAcc]] = None,
-    ) -> None:
-        self._factory: _NodeFactory = node_factory if node_factory is not None else _NodeFactory()
-        self._heads: Dict[_StackNode, List[PyAcc]] = heads if heads is not None else {}
-        self._empty_accs: List[PyAcc] = empty_accs if empty_accs is not None else []
-
-    @classmethod
-    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]]) -> "GSS":
-        factory = _NodeFactory()
-        heads: Dict[_StackNode, List[PyAcc]] = {}
-        empty_accs: List[PyAcc] = []
-        for vals, acc in stacks:
-            if not vals:
-                empty_accs.append(acc)
-                continue
-            prev: Optional[_StackNode] = None
-            for v in vals:
-                prev = factory.get(prev, v)
-            heads.setdefault(prev, []).append(acc)
-        return cls(factory, heads, empty_accs)
-
-    def _clone_with(
-        self,
-        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
-        empty_accs: Optional[List[PyAcc]] = None,
-    ) -> "GSS":
-        return GSS(
-            self._factory,
-            heads if heads is not None else dict(self._heads),
-            empty_accs if empty_accs is not None else list(self._empty_accs),
-        )
-
-    def push(self, value: int) -> "GSS":
-        new_heads: Dict[_StackNode, List[PyAcc]] = {}
-        for head, accs in self._heads.items():
-            new_heads.setdefault(self._factory.get(head, value), []).extend(accs)
-        if self._empty_accs:
-            new_heads.setdefault(self._factory.get(None, value), []).extend(self._empty_accs)
-        return self._clone_with(heads=new_heads, empty_accs=[])
-
-    def pop(self) -> "GSS":
-        new_heads: Dict[_StackNode, List[PyAcc]] = {}
-        new_empty: List[PyAcc] = []
-        for head, accs in self._heads.items():
-            if head.prev is None:
-                new_empty.extend(accs)
-            else:
-                new_heads.setdefault(head.prev, []).extend(accs)
-        return self._clone_with(heads=new_heads, empty_accs=new_empty)
-
-    def popn(self, n: int) -> "GSS":
-        gss = self
-        for _ in range(n):
-            gss = gss.pop()
-        return gss
-
-    def is_empty(self) -> bool:
-        return not (self._empty_accs or self._heads)
-
-    def isolate(self, value: Optional[int]) -> "GSS":
-        if value is None:
-            return self._clone_with(heads={}, empty_accs=list(self._empty_accs))
-        return self._clone_with(
-            heads={h: list(a) for h, a in self._heads.items() if h.value == value},
-            empty_accs=[],
-        )
-
-    def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
-        return self._clone_with(
-            heads={h: [func(a) for a in accs] for h, accs in self._heads.items()},
-            empty_accs=[func(a) for a in self._empty_accs],
-        )
-
-    def prune(self, predicate: Callable[[PyAcc], bool]) -> "GSS":
-        new_heads = {}
-        for head, accs in self._heads.items():
-            kept = [a for a in accs if predicate(a)]
-            if kept:
-                new_heads[head] = kept
-        return self._clone_with(heads=new_heads, empty_accs=[a for a in self._empty_accs if predicate(a)])
-
-    def peek(self) -> Set[int]:
-        return {h.value for h, accs in self._heads.items() if accs}
-
-    def reduce_acc(self) -> Optional[PyAcc]:
-        combined: Optional[PyAcc] = None
-        for accs in self._heads.values():
-            for a in accs:
-                combined = a if combined is None else combined.merge(a)
-        for a in self._empty_accs:
-            combined = a if combined is None else combined.merge(a)
-        return combined
-
-    @staticmethod
-    def merge(gss_list: Iterable["GSS"]) -> "GSS":
-        merged: Dict[Tuple[int, ...], PyAcc] = {}
-        for gss in gss_list:
-            for head, accs in gss._heads.items():
-                vals: List[int] = []
-                cur: Optional[_StackNode] = head
-                while cur is not None:
-                    vals.append(cur.value)
-                    cur = cur.prev
-                key = tuple(reversed(vals))
-                for a in accs:
-                    merged[key] = merged[key].merge(a) if key in merged else a
-            for a in gss._empty_accs:
-                key = ()
-                merged[key] = merged[key].merge(a) if key in merged else a
-        if not merged:
-            return GSS()
-        return GSS.from_stacks([(list(k), v) for k, v in merged.items()])
+        return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-    acc = gss.reduce_acc()
-    return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
+    merged_acc = gss.reduce_acc()
+    if merged_acc is None:
+        return ffi.HybridL2Bitset.all()
+    return merged_acc.terminals_union.complement()
 
 
 class Model(GraphProvider):
@@ -220,18 +80,24 @@ class Model(GraphProvider):
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
 
+        # Normalize arena children bitsets and cache max_depth
         for uid, node in self.arena.items():
-            self.max_depth[int(uid)] = int(node.get("max_depth", 0) or 0)
+            uid_int = int(uid)
+            self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+
             children = node.get("children") or []
             if not children:
                 node["children"] = []
                 continue
+
             new_children = []
-            for (pop, llm_bv_json), dest_map in children:
+            for edge_key, dest_map in children:
+                pop, llm_bv_json = edge_key
                 llm_bv = bs_from_json(dumps(llm_bv_json))
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
-                    new_dest_map.append((int(dest_idx), bs_from_json(dumps(state_bv_json))))
+                    state_bv = bs_from_json(dumps(state_bv_json))
+                    new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
 
@@ -240,9 +106,11 @@ class Model(GraphProvider):
         data = json.loads(s)
         roots_map = data["precomputed3"]
         arena_json = data["trie3_god"]
-        arena = {int(k): v for k, v in arena_json.get("values", [])}
+        arena_values = arena_json.get("values", [])
+        arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
 
+        # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         model.tokenizer = constraint.tokenizer()
         model.glr_parser = constraint.glr_parser()
@@ -252,27 +120,34 @@ class Model(GraphProvider):
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
         start_state_id = parser_data['start_state_id']
-
-        def _parse_action(ad):
-            v = ad['variant']
-            if v == 'Shift':
-                return ad['state_id']
-            if v == 'Reduce':
-                return Reduce(ad['nonterminal_id'], ad['len'], tuple(sorted(ad['production_ids'])))
-            if v == 'Split':
-                reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {
-                    int(length): {int(nt): tuple(sorted(pids)) for nt, pids in nts}
-                    for length, nts in ad['reduces']
-                }
-                return Split(ad['shift'], reduces)
-            return None
-
         py_table: Dict[int, Row] = {}
-        for state_id_str, row in table_data:
+        for state_id_str, row_data in table_data:
             state_id = int(state_id_str)
-            actions = {int(tid): act for tid, ad in row['shifts_and_reduces_full'] if (act := _parse_action(ad)) is not None}
-            gotos = {int(nt): gd['state_id'] for nt, gd in row['gotos'] if gd['state_id'] is not None}
-            py_table[state_id] = Row(actions, gotos)
+            py_row = Row()
+            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                term_id = int(term_id_str)
+                variant = action_data['variant']
+                if variant == 'Shift':
+                    py_row.actions[term_id] = action_data['state_id']
+                elif variant == 'Reduce':
+                    pids = tuple(sorted(action_data['production_ids']))
+                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                elif variant == 'Split':
+                    shift = action_data['shift']
+                    reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
+                    for len_str, nts_data in action_data['reduces']:
+                        len_int = int(len_str)
+                        nts: Dict[int, Tuple[int, ...]] = {}
+                        for nt_id_str, pids in nts_data:
+                            nt_id_int = int(nt_id_str)
+                            nts[nt_id_int] = tuple(sorted(pids))
+                        reduces[len_int] = nts
+                    py_row.actions[term_id] = Split(shift, reduces)
+            for nt_id_str, goto_data in row_data['gotos']:
+                nt_id = int(nt_id_str)
+                if goto_data['state_id'] is not None:
+                    py_row.gotos[nt_id] = goto_data['state_id']
+            py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
         initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
@@ -280,17 +155,17 @@ class Model(GraphProvider):
         model.state = {model.tokenizer_initial_state: initial_gss}
 
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-        raw_pm = constraint.possible_matches()
-        model.possible_matches_cache = {int(tsid): {int(tid): bv for tid, bv in inner.items()} for tsid, inner in raw_pm.items()}
+        model.possible_matches_cache = constraint.possible_matches()
         model.internal_to_original_map = constraint.internal_to_original_map()
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
         return model
 
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
-            allowed_l2 = acc.terminals_union
+            allowed_terminals_l2 = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
-                if not matched_bv.is_subset(allowed_l2.get_l2_bitset(state_id)):
+                allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
+                if not matched_bv.is_subset(allowed_for_state):
                     return False
             return True
         return gss.prune(predicate)
@@ -300,11 +175,13 @@ class Model(GraphProvider):
             old_l2 = acc.terminals_union
             new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
             for old_sid, new_sid in state_map.items():
-                new_bvs[new_sid] = new_bvs[new_sid].union(old_l2.get_l2_bitset(old_sid))
+                bv_source = old_l2.get_l2_bitset(old_sid)
+                new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+
             new_l2 = ffi.HybridL2Bitset.all()
             for new_sid, bv in new_bvs.items():
                 new_l2.insert_l2_bitset(new_sid, bv)
-            return PyAcc(new_l2)
+            return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_map)
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
@@ -313,8 +190,10 @@ class Model(GraphProvider):
             new_l2 = current_l2.union(current_l2)  # clone
             curr_bv = current_l2.get_l2_bitset(state_id)
             if curr_bv.contains(terminal_id):
-                new_l2.insert_l2_bitset(state_id, curr_bv.difference(ffi.Bitset.from_indices([terminal_id])))
-            return PyAcc(new_l2)
+                to_remove = ffi.Bitset.from_indices([terminal_id])
+                new_bv = curr_bv.difference(to_remove)
+                new_l2.insert_l2_bitset(state_id, new_bv)
+            return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_disallow)
 
     def get_root(self, state_id: int) -> int:
@@ -324,6 +203,9 @@ class Model(GraphProvider):
         return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
     def iter_edges(self, node: int, token: int):
+        """
+        Explode packed transitions into (pop, state_id or None, dest_idx).
+        """
         children = self.arena.get(node, {}).get("children") or []
         for (pop, llm_bv), dests in children:
             if llm_bv.contains(token):
@@ -346,34 +228,41 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
-            b = ffi.Bitset.zeros()
+            terminals = ffi.Bitset.zeros()
             for terminal_id, _ in matches:
-                b.insert(terminal_id)
-            terminals_map[tokenizer_sid] = b
+                terminals.insert(terminal_id)
+            terminals_map[tokenizer_sid] = terminals
 
         # Prune and map per-state GSS
-        current_state_for_processing: Dict[int, GSS] = {}
+        temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
-            pruned = self._prune_disallowed_terminals(gss, terminals_map)
-            if not pruned.is_empty():
-                current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
+            pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+            if not pruned_gss.is_empty():
+                mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                temp_states[tokenizer_sid] = mapped_gss
+
+        current_state_for_processing = temp_states
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-        q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
+        q = collections.deque()
+        for tokenizer_sid, gss in current_state_for_processing.items():
+            q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
+
         visited_q_items: set = set()
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
-            q_key = (offset, tokenizer_sid, id(gss))
-            if q_key in visited_q_items:
+            q_item_key = (offset, tokenizer_sid, id(gss))
+            if q_item_key in visited_q_items:
                 continue
-            visited_q_items.add(q_key)
+            visited_q_items.add(q_item_key)
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
                 processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
 
+                # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
                     if terminal_id in accessible_terms:
@@ -381,21 +270,26 @@ class Model(GraphProvider):
 
                 if not processed_gss.is_empty():
                     new_offset = offset + width
-                    next_sid = self.tokenizer_initial_state
+                    next_tokenizer_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        new_states[next_sid].append(processed_gss)
+                        new_states[next_tokenizer_sid].append(processed_gss)
                     else:
-                        q.append((new_offset, next_sid, processed_gss))
+                        q.append((new_offset, next_tokenizer_sid, processed_gss))
 
             if end_state is not None:
                 new_states[end_state].append(gss)
 
-        merged_states = {sid: GSS.merge(glist) for sid, glist in new_states.items() if glist}
-        self.state = {sid: st for sid, st in merged_states.items() if not st.is_empty()}
+        merged_states = {
+            sid: GSS.merge(gss_list)
+            for sid, gss_list in new_states.items()
+            if gss_list
+        }
+        merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+
+        self.state = merged_states
 
         t1 = time.perf_counter()
-        if os.environ.get("REPORT_COMMIT_TIME") == "1":
-            print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
+        print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
@@ -414,27 +308,28 @@ class Model(GraphProvider):
             if not action:
                 continue
 
-            if isinstance(action, int):  # Shift
-                shifted_gsses.append(state_gss.push(action))
-                continue
+            def handle_shift(shift_to_state_id, gss_to_shift):
+                shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
-            if isinstance(action, Reduce):
-                popped = state_gss.popn(action.len)
-                for from_state_id in popped.peek():
-                    goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
-                    heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
-                continue
+            def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
+                popped_gss = gss_to_reduce
+                for _ in range(reduce_action.len):
+                    popped_gss = popped_gss.pop()
+                for from_state_id in popped_gss.peek():
+                    goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                    goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
+                    heads_by_state[goto_state_id].append(goto_gss)
 
-            # Split
-            if action.shift is not None:
-                shifted_gsses.append(state_gss.push(action.shift))
-            for length, nts in action.reduces.items():
-                popped = state_gss.popn(length)
-                for from_state_id in popped.peek():
-                    table_row = self.parser_table.table[from_state_id]
-                    for nt_id in nts.keys():
-                        goto_state_id = table_row.gotos[nt_id]
-                        heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
+            if isinstance(action, int):
+                handle_shift(action, state_gss)
+            elif isinstance(action, Reduce):
+                handle_reduce(action, state_gss)
+            elif isinstance(action, Split):
+                if action.shift is not None:
+                    handle_shift(action.shift, state_gss)
+                for length, nts in action.reduces.items():
+                    for nt_id, pids in nts.items():
+                        handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
         return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
 
@@ -442,7 +337,7 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
         """
-        active_states = self.state
+        state_map = self.state
         all_ones_mask = self.all_internal_llm_tokens_bitset
         final_mask = ffi.Bitset.zeros()
 
@@ -459,22 +354,26 @@ class Model(GraphProvider):
         is_end = self.is_end
 
         # Seed
-        for sid, gss in active_states.items():
+        for sid, gss in state_map.items():
+            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
+
             existing = values.get(root_idx)
             if existing is not None:
-                egss, emask = existing
-                values[root_idx] = (GSS.merge([egss, gss]), emask.union(all_ones_mask))
+                existing_gss, existing_mask = existing
+                merged_gss = GSS.merge([existing_gss, gss])
+                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = (gss, all_ones_mask)
-            d = max_depth[root_idx]
-            bucket = todo.get(d)
+                values[root_idx] = (gss, new_mask)
+
+            depth = max_depth[root_idx]
+            bucket = todo.get(depth)
             if bucket is None:
-                todo[d] = {root_idx}
-                heappush(depth_heap, d)
+                todo[depth] = {root_idx}
+                heappush(depth_heap, depth)
             else:
                 bucket.add(root_idx)
 
@@ -510,33 +409,39 @@ class Model(GraphProvider):
                 # End-node handling
                 if is_end(node_idx):
                     forbidden_llm_tokens = ffi.Bitset.zeros()
-                    disallowed_l2 = get_disallowed_terminals_py(gss_node)
+                    disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
                     possible_matches = self.possible_matches_cache
 
-                    for (start, end), disallowed_bv in disallowed_l2.range_values():
+                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
                         if disallowed_bv.is_empty():
                             continue
                         end = min(end, self.tokenizer.max_state())
                         for tsid in range(start, end + 1):
-                            pm = possible_matches.get(tsid)
-                            if not pm:
+                            possible_matches_for_state = possible_matches.get(tsid)
+                            if not possible_matches_for_state:
                                 continue
-                            for terminal_id, llm_tokens_for_terminal in pm.items():
+                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                terminal_id = int(terminal_id_str)
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    allowed_tokens = llm_mask.difference(forbidden_llm_tokens)
-                    if not allowed_tokens.is_empty():
-                        final_mask = final_mask.union(allowed_tokens)
+                    gss_active_tokens = all_ones_mask
+                    glr_active_tokens = llm_mask.intersection(gss_active_tokens)
+                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                    if not final_allowed_tokens.is_empty():
+                        final_mask = final_mask.union(final_allowed_tokens)
 
                 if llm_mask.is_empty():
                     stopped.add(node_idx)
                     continue
 
-                # Transitions
-                for (pop, llm_bv), dests in arena.get(node_idx, {}).get("children") or []:
+                # Transitions grouped by (pop, llm_bv)
+                node_data = arena.get(node_idx, {})
+                children = node_data.get("children") or []
+                for (pop, llm_bv), dests in children:
                     popped = gss_node.popn(pop)
                     llm_empty = llm_bv.is_empty()
+
                     for dest_idx, state_bv in dests:
                         matched: List[GSS] = []
                         if not state_bv.is_empty():
@@ -545,21 +450,24 @@ class Model(GraphProvider):
                                     matched.append(popped.isolate(sid_val))
                         if not matched:
                             continue
-                        child_gss = GSS.merge(matched)
-                        child_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+
+                        child_gss_node = GSS.merge(matched)
+                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
-                            egss, emask = existing
-                            values[d] = (GSS.merge([egss, child_gss]), emask.union(child_mask))
+                            existing_gss, existing_mask = existing
+                            merged_gss = GSS.merge([existing_gss, child_gss_node])
+                            combined_mask = existing_mask.union(child_llm_mask)
+                            values[d] = (merged_gss, combined_mask)
                         else:
-                            values[d] = (child_gss, child_mask)
+                            values[d] = (child_gss_node, child_llm_mask)
+
                         enqueue(max_depth[d], d)
 
         # Convert internal mask back to original IDs
         original_mask = ffi.Bitset.zeros()
         for internal_id in final_mask.to_indices():
-            orig = self.internal_to_original_map.get(internal_id)
-            if orig is not None:
-                original_mask.insert(orig)
+            if internal_id in self.internal_to_original_map:
+                original_mask.insert(self.internal_to_original_map[internal_id])
         return RangeSet.from_ranges(original_mask.to_ranges())
