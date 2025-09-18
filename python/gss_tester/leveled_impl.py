@@ -301,19 +301,28 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         root: _A[T] = _A_ROOT
 
         for gss in gss_list:
-            # To merge different GSS types, we convert them to a common
-            # representation of (stack_values, acc) pairs via ReferenceGSS.
-            ref_gss = gss.to_reference_impl()
-            for vals, acc in ref_gss._stacks:
-                # Reconstruct the _A node structure for this stack
-                cur = root
-                for v in vals:
-                    cur = _ACell(cur, v)
+            if isinstance(gss, LeveledGSS):
+                # Fast path for LeveledGSS instances
+                for head, acc in gss._iter_heads():
+                    if head in all_heads:
+                        all_heads[head] = all_heads[head].merge(acc)
+                    else:
+                        all_heads[head] = acc
+            else:
+                # Slow path for other GSS types
+                # To merge different GSS types, we convert them to a common
+                # representation of (stack_values, acc) pairs via ReferenceGSS.
+                ref_gss = gss.to_reference_impl()
+                for vals, acc in ref_gss._stacks:
+                    # Reconstruct the _A node structure for this stack
+                    cur = root
+                    for v in vals:
+                        cur = _ACell(cur, v)
 
-                if cur in all_heads:
-                    all_heads[cur] = all_heads[cur].merge(acc)
-                else:
-                    all_heads[cur] = acc
+                    if cur in all_heads:
+                        all_heads[cur] = all_heads[cur].merge(acc)
+                    else:
+                        all_heads[cur] = acc
 
         return LeveledGSS._from_heads_map(all_heads)
 
@@ -322,6 +331,18 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # -------------------------
 
     def __eq__(self, other: object) -> bool:
+        if isinstance(other, LeveledGSS):
+            # Fast path for LeveledGSS vs LeveledGSS
+            if self._kind != other._kind:
+                return False
+            if self._kind == _BKind.EMPTY:
+                return True
+            if self._kind == _BKind.GROUP:
+                return self._heads == other._heads and self._acc == other._acc
+            if self._kind == _BKind.BRANCH:
+                return self._children == other._children
+            return False  # Should be unreachable
+
         if not isinstance(other, GSS):
             return NotImplemented
         # Compare via ReferenceGSS for robust, canonical semantics
