@@ -234,131 +234,81 @@ class _CommitProfiler:
         self.on_finalize()
 
 
-# GSS implementation
-
-@dataclass(frozen=True, eq=False)
-class _StackNode:
-    prev: Optional["_StackNode"]
-    value: int
-
-    def __repr__(self) -> str:
-        return f"_StackNode(value={self.value!r}, prev_id={id(self.prev) if self.prev else None})"
-
-
-class _NodeFactory:
-    def __init__(self) -> None:
-        self._table: Dict[Tuple[Optional[_StackNode], int], _StackNode] = {}
-        self._len_cache: Dict[_StackNode, int] = {}
-
-    def get(self, prev: Optional[_StackNode], value: int) -> _StackNode:
-        key = (prev, value)
-        node = self._table.get(key)
-        if node is None:
-            node = _StackNode(prev, value)
-            self._table[key] = node
-        return node
-
-    def length(self, node: Optional[_StackNode]) -> int:
-        if node is None:
-            return 0
-        cached = self._len_cache.get(node)
-        if cached is not None:
-            return cached
-        l = 1 + self.length(node.prev)
-        self._len_cache[node] = l
-        return l
-
+# GSS implementation (simplified)
 
 class GSS:
+    """
+    A compact Graph-Structured Stack representation.
+
+    Conceptually, it's just a multiset of stacks (each a tuple of state IDs),
+    each annotated with a PyAcc accumulator. We canonicalize by merging
+    accumulators per identical stack, so internally it's:
+        Dict[Tuple[int, ...], PyAcc]
+
+    The empty stack is represented by the empty tuple ().
+    """
     # Active profiler for merge instrumentation (set by _CommitProfiler)
     _active_profiler: Optional[_CommitProfiler] = None
 
-    def __init__(
-        self,
-        node_factory: Optional[_NodeFactory] = None,
-        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
-        empty_accs: Optional[List[PyAcc]] = None,
-    ) -> None:
-        self._factory: _NodeFactory = node_factory if node_factory is not None else _NodeFactory()
-        self._heads: Dict[_StackNode, List[PyAcc]] = heads if heads is not None else {}
-        self._empty_accs: List[PyAcc] = empty_accs if empty_accs is not None else []
+    def __init__(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> None:
+        self._heads: Dict[Tuple[int, ...], PyAcc] = heads if heads is not None else {}
 
     @classmethod
-    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[_NodeFactory] = None) -> "GSS":
+    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
         """
-        Build a GSS from explicit stacks. If node_factory is provided, reuse it so that
-        node sharing is preserved across merges. This drastically reduces the cost of repeated merges.
-        """
-        factory = node_factory if node_factory is not None else _NodeFactory()
-        heads: Dict[_StackNode, List[PyAcc]] = {}
-        empty_accs: List[PyAcc] = []
-        for vals, acc in stacks:
-            if not vals:
-                empty_accs.append(acc)
-                continue
-            prev: Optional[_StackNode] = None
-            for v in vals:
-                prev = factory.get(prev, v)
-            heads.setdefault(prev, []).append(acc)
-        return cls(factory, heads, empty_accs)
+        Build a GSS from explicit stacks.
 
-    def _clone_with(
-        self,
-        heads: Optional[Dict[_StackNode, List[PyAcc]]] = None,
-        empty_accs: Optional[List[PyAcc]] = None,
-    ) -> "GSS":
-        return GSS(
-            self._factory,
-            heads if heads is not None else dict(self._heads),
-            empty_accs if empty_accs is not None else list(self._empty_accs),
-        )
+        node_factory is ignored in this simplified implementation; we keep it in the
+        signature for compatibility with existing call sites.
+        """
+        m: Dict[Tuple[int, ...], PyAcc] = {}
+        for vals, acc in stacks:
+            key = tuple(vals)
+            if key in m:
+                m[key] = m[key].merge(acc)
+            else:
+                m[key] = acc
+        return cls(m)
+
+    def _clone_with(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> "GSS":
+        return GSS(dict(self._heads) if heads is None else heads)
 
     # --- Introspection helpers (used by profiler) ---
 
     def head_count(self) -> int:
-        return len(self._heads)
+        # Non-empty stacks only
+        return sum(1 for k in self._heads.keys() if len(k) > 0)
 
     def acc_count(self) -> int:
-        total = 0
-        for accs in self._heads.values():
-            total += len(accs)
-        total += len(self._empty_accs)
-        return total
+        # One accumulator per unique stack
+        return len(self._heads)
 
     def stack_count(self) -> int:
-        return len(self._heads) + (1 if self._empty_accs else 0)
+        # Unique stacks (including empty if present)
+        return len(self._heads)
 
     def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
         n = 0
-        for head in self._heads.keys():
-            vals: List[int] = []
-            cur: Optional[_StackNode] = head
-            while cur is not None:
-                vals.append(cur.value)
-                cur = cur.prev
-            yield tuple(reversed(vals))
+        for k in self._heads.keys():
+            yield k
             n += 1
             if limit is not None and n >= limit:
                 break
-        if self._empty_accs:
-            yield ()
 
     def compute_stats(self) -> GSSStats:
-        depths: List[int] = []
-        for head in self._heads.keys():
-            depths.append(self._factory.length(head))
-        if self._empty_accs:
-            depths.append(0)
-        if not depths:
+        if not self._heads:
             return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
-        dmin = min(depths)
-        dmax = max(depths)
-        dmean = sum(depths) / len(depths)
+        depths = [len(k) for k in self._heads.keys()]
+        dmin = min(depths) if depths else 0
+        dmax = max(depths) if depths else 0
+        dmean = (sum(depths) / len(depths)) if depths else 0.0
+        empty_present = 1 if () in self._heads else 0
+        heads_nonempty = sum(1 for k in self._heads.keys() if k)
         return GSSStats(
-            heads=len(self._heads),
-            empty_stacks=1 if self._empty_accs else 0,
-            unique_stacks=len(self._heads) + (1 if self._empty_accs else 0),
-            accs=self.acc_count(),
+            heads=heads_nonempty,
+            empty_stacks=empty_present,
+            unique_stacks=len(self._heads),
+            accs=len(self._heads),
             depth_min=dmin,
             depth_max=dmax,
             depth_mean=dmean,
@@ -367,144 +317,96 @@ class GSS:
     # --- Core operations ---
 
     def push(self, value: int) -> "GSS":
-        new_heads: Dict[_StackNode, List[PyAcc]] = {}
-        for head, accs in self._heads.items():
-            new_heads.setdefault(self._factory.get(head, value), []).extend(accs)
-        if self._empty_accs:
-            new_heads.setdefault(self._factory.get(None, value), []).extend(self._empty_accs)
-        return self._clone_with(heads=new_heads, empty_accs=[])
+        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+        for stack, acc in self._heads.items():
+            new_stack = stack + (value,)
+            if new_stack in new_heads:
+                new_heads[new_stack] = new_heads[new_stack].merge(acc)
+            else:
+                new_heads[new_stack] = acc
+        return GSS(new_heads)
 
     def pop(self) -> "GSS":
-        new_heads: Dict[_StackNode, List[PyAcc]] = {}
-        new_empty: List[PyAcc] = []
-        for head, accs in self._heads.items():
-            if head.prev is None:
-                new_empty.extend(accs)
-            else:
-                new_heads.setdefault(head.prev, []).extend(accs)
-        return self._clone_with(heads=new_heads, empty_accs=new_empty)
+        return self.popn(1)
 
     def popn(self, n: int) -> "GSS":
-        """
-        Efficient multi-pop: single pass over heads instead of repeated cloning in a loop.
-        """
         if n <= 0:
             return self
-        new_heads: Dict[_StackNode, List[PyAcc]] = {}
-        new_empty: List[PyAcc] = list(self._empty_accs)
-        for head, accs in self._heads.items():
-            cur = head
-            steps = n
-            while steps > 0 and cur is not None:
-                cur = cur.prev
-                steps -= 1
-            if cur is None:
-                new_empty.extend(accs)
+        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+        for stack, acc in self._heads.items():
+            if len(stack) <= n:
+                new_stack: Tuple[int, ...] = ()
             else:
-                new_heads.setdefault(cur, []).extend(accs)
-        return self._clone_with(heads=new_heads, empty_accs=new_empty)
+                new_stack = stack[:-n]
+            if new_stack in new_heads:
+                new_heads[new_stack] = new_heads[new_stack].merge(acc)
+            else:
+                new_heads[new_stack] = acc
+        return GSS(new_heads)
 
     def is_empty(self) -> bool:
-        return not (self._empty_accs or self._heads)
+        return not self._heads
 
     def isolate(self, value: Optional[int]) -> "GSS":
         if value is None:
-            return self._clone_with(heads={}, empty_accs=list(self._empty_accs))
-        return self._clone_with(
-            heads={h: list(a) for h, a in self._heads.items() if h.value == value},
-            empty_accs=[],
-        )
+            acc = self._heads.get(())
+            return GSS({(): acc} if acc is not None else {})
+        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
+        for stack, acc in self._heads.items():
+            if stack and stack[-1] == value:
+                new_heads[stack] = acc
+        return GSS(new_heads)
 
-    def _partition_by_top(self) -> Dict[int, Dict[_StackNode, List[PyAcc]]]:
-        """
-        Group heads by the top-of-stack state value in a single pass.
-        """
-        groups: Dict[int, Dict[_StackNode, List[PyAcc]]] = {}
-        for head, accs in self._heads.items():
-            groups.setdefault(head.value, {})[head] = accs
+    def _partition_by_top(self) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
+        groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
+        for stack, acc in self._heads.items():
+            if not stack:
+                continue
+            top = stack[-1]
+            bucket = groups.get(top)
+            if bucket is None:
+                bucket = {}
+                groups[top] = bucket
+            bucket[stack] = acc
         return groups
 
     def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
-        return self._clone_with(
-            heads={h: [func(a) for a in accs] for h, accs in self._heads.items()},
-            empty_accs=[func(a) for a in self._empty_accs],
-        )
+        return GSS({stack: func(acc) for stack, acc in self._heads.items()})
 
     def prune(self, predicate: Callable[[PyAcc], bool]) -> "GSS":
-        new_heads = {}
-        for head, accs in self._heads.items():
-            kept = [a for a in accs if predicate(a)]
-            if kept:
-                new_heads[head] = kept
-        return self._clone_with(heads=new_heads, empty_accs=[a for a in self._empty_accs if predicate(a)])
+        return GSS({stack: acc for stack, acc in self._heads.items() if predicate(acc)})
 
     def peek(self) -> Set[int]:
-        return {h.value for h, accs in self._heads.items() if accs}
+        return {stack[-1] for stack in self._heads.keys() if stack}
 
     def reduce_acc(self) -> Optional[PyAcc]:
         combined: Optional[PyAcc] = None
-        for accs in self._heads.values():
-            for a in accs:
-                combined = a if combined is None else combined.merge(a)
-        for a in self._empty_accs:
-            combined = a if combined is None else combined.merge(a)
+        for acc in self._heads.values():
+            combined = acc if combined is None else combined.merge(acc)
         return combined
 
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
-        """
-        Optimized GSS merge using direct _StackNode pointers, avoiding costly
-        stack-to-tuple conversion. Assumes all GSSs in the list share the same
-        _NodeFactory.
-        """
-        merged_heads: Dict[_StackNode, PyAcc] = {}
-        merged_empty: Optional[PyAcc] = None
+        merged: Dict[Tuple[int, ...], PyAcc] = {}
         num_inputs = 0
         input_stacks_total = 0
-        base_factory: Optional[_NodeFactory] = None
-        
+
         gss_list = list(gss_list)
 
         for gss in gss_list:
             num_inputs += 1
             input_stacks_total += gss.stack_count()
-            if gss.is_empty():
-                continue
+            for stack, acc in gss._heads.items():
+                if stack in merged:
+                    merged[stack] = merged[stack].merge(acc)
+                else:
+                    merged[stack] = acc
 
-            if base_factory is None:
-                base_factory = gss._factory
-            else:
-                # This optimization relies on all merged GSSs sharing a node factory.
-                assert gss._factory is base_factory, "Cannot merge GSS with different node factories"
-
-            # Fast path: factories are the same, use _StackNode directly as keys.
-            for head, accs in gss._heads.items():
-                for acc in accs:
-                    if head in merged_heads:
-                        merged_heads[head] = merged_heads[head].merge(acc)
-                    else:
-                        merged_heads[head] = acc
-            
-            for acc in gss._empty_accs:
-                merged_empty = merged_empty.merge(acc) if merged_empty is not None else acc
-
-        if base_factory is None:
-            # All GSSs were empty. Use factory from the first one if available, or create a new one.
-            base_factory = gss_list[0]._factory if gss_list else _NodeFactory()
-
-        output_stacks = len(merged_heads) + (1 if merged_empty is not None else 0)
+        output_stacks = len(merged)
         if GSS._active_profiler is not None:
             GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, output_stacks)
 
-        if not merged_heads and merged_empty is None:
-            return GSS(node_factory=base_factory)
-
-        final_heads: Dict[_StackNode, List[PyAcc]] = {
-            head: [acc] for head, acc in merged_heads.items()
-        }
-        final_empty: List[PyAcc] = [merged_empty] if merged_empty is not None else []
-        
-        return GSS(node_factory=base_factory, heads=final_heads, empty_accs=final_empty)
+        return GSS(merged)
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
@@ -731,7 +633,7 @@ class Model(GraphProvider):
                     new_offset = offset + width
                     next_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        # Merge incrementally to keep factory sharing
+                        # Merge incrementally
                         existing = new_states.get(next_sid)
                         if existing is None:
                             new_states[next_sid] = processed_gss
@@ -769,7 +671,7 @@ class Model(GraphProvider):
         # Seed by partitioning once (avoid O(H^2) from repeated isolate)
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id, heads in gss._partition_by_top().items():
-            heads_by_state[state_id].append(GSS(node_factory=gss._factory, heads=heads, empty_accs=[]))
+            heads_by_state[state_id].append(GSS(heads))
 
         shifted_gsses: List[GSS] = []
         c_shifts = 0
@@ -799,7 +701,7 @@ class Model(GraphProvider):
                 groups = popped._partition_by_top()
                 for from_state_id, heads in groups.items():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
-                    heads_by_state[goto_state_id].append(GSS(node_factory=popped._factory, heads=heads, empty_accs=[]).push(goto_state_id))
+                    heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
                     c_gotos += 1
                 continue
 
@@ -815,14 +717,13 @@ class Model(GraphProvider):
                     table_row = self.parser_table.table[from_state_id]
                     for nt_id in nts.keys():
                         goto_state_id = table_row.gotos[nt_id]
-                        heads_by_state[goto_state_id].append(GSS(node_factory=popped._factory, heads=heads, empty_accs=[]).push(goto_state_id))
+                        heads_by_state[goto_state_id].append(GSS(heads).push(goto_state_id))
                         c_gotos += 1
 
         if profiler is not None:
             profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
 
-        # Preserve factory continuity even if nothing shifted
-        return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
+        return GSS() if not shifted_gsses else GSS.merge(shifted_gsses)
 
     def get_mask(self) -> RangeSet:
         """
