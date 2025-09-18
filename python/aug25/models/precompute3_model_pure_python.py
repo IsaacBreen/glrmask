@@ -204,10 +204,8 @@ class GSS:
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-    merged_acc = gss.reduce_acc()
-    if merged_acc is None:
-        return ffi.HybridL2Bitset.all()
-    return merged_acc.terminals_union.complement()
+    acc = gss.reduce_acc()
+    return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
 
 
 class Model(GraphProvider):
@@ -272,34 +270,36 @@ class Model(GraphProvider):
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
         start_state_id = parser_data['start_state_id']
+
+        def _parse_action(action_data):
+            v = action_data['variant']
+            if v == 'Shift':
+                return action_data['state_id']
+            if v == 'Reduce':
+                return Reduce(
+                    action_data['nonterminal_id'],
+                    action_data['len'],
+                    tuple(sorted(action_data['production_ids'])),
+                )
+            if v == 'Split':
+                shift = action_data['shift']
+                reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {
+                    int(length): {int(nt): tuple(sorted(pids)) for nt, pids in nts}
+                    for length, nts in action_data['reduces']
+                }
+                return Split(shift, reduces)
+            return None
+
         py_table: Dict[int, Row] = {}
-        for state_id_str, row_data in table_data:
+        for state_id_str, row in table_data:
             state_id = int(state_id_str)
-            py_row = Row()
-            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                term_id = int(term_id_str)
-                variant = action_data['variant']
-                if variant == 'Shift':
-                    py_row.actions[term_id] = action_data['state_id']
-                elif variant == 'Reduce':
-                    pids = tuple(sorted(action_data['production_ids']))
-                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                elif variant == 'Split':
-                    shift = action_data['shift']
-                    reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                    for len_str, nts_data in action_data['reduces']:
-                        len_int = int(len_str)
-                        nts: Dict[int, Tuple[int, ...]] = {}
-                        for nt_id_str, pids in nts_data:
-                            nt_id_int = int(nt_id_str)
-                            nts[nt_id_int] = tuple(sorted(pids))
-                        reduces[len_int] = nts
-                    py_row.actions[term_id] = Split(shift, reduces)
-            for nt_id_str, goto_data in row_data['gotos']:
-                nt_id = int(nt_id_str)
-                if goto_data['state_id'] is not None:
-                    py_row.gotos[nt_id] = goto_data['state_id']
-            py_table[state_id] = py_row
+            actions: Dict[int, Action] = {}
+            for term_id_str, action_data in row['shifts_and_reduces_full']:
+                act = _parse_action(action_data)
+                if act is not None:
+                    actions[int(term_id_str)] = act
+            gotos = {int(nt): gd['state_id'] for nt, gd in row['gotos'] if gd['state_id'] is not None}
+            py_table[state_id] = Row(actions, gotos)
         model.parser_table = ParserTable(start_state_id, py_table)
 
         initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
@@ -307,7 +307,9 @@ class Model(GraphProvider):
         model.state = {model.tokenizer_initial_state: initial_gss}
 
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-        model.possible_matches_cache = constraint.possible_matches()
+        # Normalize possible_matches to use int keys for states and terminals
+        raw_pm = constraint.possible_matches()
+        model.possible_matches_cache = {int(tsid): {int(tid): bv for tid, bv in inner.items()} for tsid, inner in raw_pm.items()}
         model.internal_to_original_map = constraint.internal_to_original_map()
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
         return model
@@ -486,7 +488,7 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
         """
-        state_map = self.state
+        active_states = self.state
         all_ones_mask = self.all_internal_llm_tokens_bitset
         final_mask = ffi.Bitset.zeros()
 
@@ -503,7 +505,7 @@ class Model(GraphProvider):
         is_end = self.is_end
 
         # Seed
-        for sid, gss in state_map.items():
+        for sid, gss in active_states.items():
             new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
@@ -569,8 +571,7 @@ class Model(GraphProvider):
                             possible_matches_for_state = possible_matches.get(tsid)
                             if not possible_matches_for_state:
                                 continue
-                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                terminal_id = int(terminal_id_str)
+                            for terminal_id, llm_tokens_for_terminal in possible_matches_for_state.items():
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
@@ -612,9 +613,12 @@ class Model(GraphProvider):
 
                         enqueue(max_depth[d], d)
 
+
         # Convert internal mask back to original IDs
         original_mask = ffi.Bitset.zeros()
         for internal_id in final_mask.to_indices():
-            if internal_id in self.internal_to_original_map:
-                original_mask.insert(self.internal_to_original_map[internal_id])
+            orig = self.internal_to_original_map.get(internal_id)
+            if orig is not None:
+                original_mask.insert(orig)
         return RangeSet.from_ranges(original_mask.to_ranges())
+
