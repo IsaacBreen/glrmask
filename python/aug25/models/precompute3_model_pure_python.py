@@ -51,6 +51,9 @@ class PyAcc:
     def __hash__(self):
         return hash(self.terminals_union)
 
+    def merge(self, other: "PyAcc") -> "PyAcc":
+        return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
+
     def to_json_serializable(self):
         return {"terminals_union": self.terminals_union.to_json_serializable()}
 
@@ -58,15 +61,10 @@ class PyAcc:
         return f"PyAcc({self.terminals_union})"
 
 
-def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
-
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-    # The new LeveledGSS provides `reduce_acc` to merge all accumulators.
     merged_acc = gss.reduce_acc()
     if merged_acc is None:
-        # No active stacks → no disallowed terminals.
-        return ffi.HybridL2Bitset.empty()
+        return ffi.HybridL2Bitset.all()
     return merged_acc.terminals_union.complement()
 
 class Model(GraphProvider):
@@ -187,16 +185,6 @@ class Model(GraphProvider):
 
         return model
 
-    # ----------------- Helper utilities -----------------
-
-    def _popn(self, gss: GSS, n: int) -> GSS:
-        """Pop `n` symbols from the GSS by repeatedly calling `pop`."""
-        for _ in range(n):
-            gss = gss.pop()
-        return gss
-
-    # ----------------- Pruning / Mapping -----------------
-
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             allowed_terminals_l2 = acc.terminals_union
@@ -226,7 +214,8 @@ class Model(GraphProvider):
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         """
         Mirror Rust: disallow_terminals_and_prune_arc over a single tokenizer state
-        by clearing `terminal_id` for that specific `state_id` in the L2 bitset of the GSS acc.
+        by clearing 'terminal_id' for that specific 'state_id' in the L2 bitset of the GSS acc.
+        We clone the L2 bitset first (union with itself) to avoid in-place aliasing.
         """
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_l2 = acc.terminals_union
@@ -241,8 +230,6 @@ class Model(GraphProvider):
                 new_l2.insert_l2_bitset(state_id, new_bv)
             return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_disallow)
-
-    # ----------------- Core GSS operations -----------------
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -266,8 +253,6 @@ class Model(GraphProvider):
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
-    # ----------------- Commit logic -----------------
-
     def commit(self, token_id: int):
         print(f"\n--- commit token_id={token_id} ---")
         # Get Rust state before commit for comparison
@@ -275,16 +260,12 @@ class Model(GraphProvider):
 
         token_bytes = self.id_to_token[token_id]
 
-        # Ensure Python and Rust have the same tokenizer states before we start.
+        # --- Python implementation starts here ---
         py_states = list(self.state.keys())
         rust_states = list(self.constraint_state.get_state_map().keys())
-        assert set(py_states) == set(rust_states), (
-            f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
-        )
+        assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
 
-        # -----------------------------------------------------------------
-        # Pre‑processing: compute the maps that Rust computes internally.
-        # -----------------------------------------------------------------
+        # --- Start: Added pre-processing steps to match Rust ---
         terminals_map: Dict[int, ffi.Bitset] = {}
         state_map: Dict[int, int] = {}
 
@@ -298,7 +279,7 @@ class Model(GraphProvider):
                 terminals.insert(terminal_id)
             terminals_map[tokenizer_sid] = terminals
 
-        # Verify that the Python‑computed maps match what Rust produced.
+        # === ASSERTION 1: Compare maps ===
         rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
         if state_map != rust_state_map:
             print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
@@ -309,62 +290,63 @@ class Model(GraphProvider):
             print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
 
         if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
-            raise ValueError("Pre‑commit maps do not match between Python and Rust implementations.")
+            raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
 
-        # -----------------------------------------------------------------
-        # Apply the three Rust‑style mutators to each per‑state GSS.
-        # -----------------------------------------------------------------
+        # =================================
+
         temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
 
-            # Compare pruned GSS with Rust's version.
+            # === ASSERTION 2: Compare pruned GSS ===
             rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
             ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
             py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-            assert pruned_gss == py_pruned_gss_converted, (
-                f"Pruned GSS mismatch for sid {tokenizer_sid}"
-            )
+            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+            # =======================================
 
             if not pruned_gss.is_empty():
-                mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
 
-                rust_gss_after_prune = rust_gss_before_prune  # mutated in‑place
-                ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                assert mapped_gss == py_mapped_gss_converted, (
-                    f"Mapped GSS mismatch for sid {tokenizer_sid}"
-                )
-                temp_states[tokenizer_sid] = mapped_gss
+                 # === ASSERTION 3: Compare mapped GSS ===
+                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
+                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
+                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                 # =======================================
+
+                 temp_states[tokenizer_sid] = mapped_gss
         
-        # -----------------------------------------------------------------
-        # Main execution loop (identical to the reference implementation).
-        # -----------------------------------------------------------------
         current_state_for_processing = temp_states
+        # --- End: Added pre-processing steps ---
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
 
         q = collections.deque()
         for tokenizer_sid, gss in current_state_for_processing.items():
-            q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
+            q.append((0, tokenizer_sid, gss)) # offset, tokenizer_state, gss
         pm_cache = self.possible_matches_cache
         visited_q_items = set()
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
 
-            q_item = (offset, tokenizer_sid, gss)
-            if q_item in visited_q_items:
+            # GSS is not hashable, use its serializable form for visited check
+            q_item_key = (offset, tokenizer_sid, gss.to_reference_impl())
+            if q_item_key in visited_q_items:
                 continue
-            visited_q_items.add(q_item)
+            visited_q_items.add(q_item_key)
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
                 processed_gss = self._process_token(gss, terminal_id)
-
-                # Immediate re‑match disallow (mirrors Rust behaviour).
+                # Mirror Rust's immediate re-match disallow:
+                # If after consuming the remainder from this offset we end in a tokenizer state
+                # that can produce this same terminal immediately, forbid it for that state.
                 if end_state is not None:
+                    # Use the tokenizer's accessible terminals (exactly as Rust does),
+                    # not possible_matches_cache (which depends on vocab coverage).
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
                     if terminal_id in accessible_terms:
                         processed_gss = self._disallow_terminal_in_state(
@@ -383,65 +365,51 @@ class Model(GraphProvider):
                 new_states[end_state].append(gss)
 
         merged_states = {
-            sid: GSS.merge(gss_list, merge_acc)
+            sid: GSS.merge(gss_list)
             for sid, gss_list in new_states.items()
             if gss_list
         }
 
         self.state = merged_states
 
-        # Commit the Rust side so that subsequent checks see the same state.
         self.constraint_state.commit(token_id)
 
-        # -----------------------------------------------------------------
-        # Debug printing / sanity checks.
-        # -----------------------------------------------------------------
         print("state_map after commit:")
         for sid, gss in self.state.items():
             print(f"  sid={sid}, gss={gss}")
 
         print("Rust state_map after commit:")
-        expected_state_map = {
-            sid: convert_rust_gss_to_python_gss(rust_gss)
-            for sid, rust_gss in self.constraint_state.get_state_map().items()
-        }
+        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
         for sid, rust_gss in expected_state_map.items():
             print(f"  sid={sid}, gss={rust_gss}")
 
-        assert self.state.keys() == self.constraint_state.get_state_map().keys(), (
-            f"Tokenizer states mismatch after commit: Python {self.state.keys()}, "
-            f"Rust {self.constraint_state.get_state_map().keys()}"
-        )
-        assert self.state == expected_state_map, "GSS state mismatch after commit."
+        assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
+        for sid, gss in self.state.items():
+            assert gss.to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"GSS state mismatch after commit for sid {sid}."
 
-    # ----------------- Token processing -----------------
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-        """
-        Apply shift / reduce actions for `terminal_id` to the supplied GSS.
-        This version uses the public LeveledGSS API only.
-        """
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
 
-        shifted_gsses: List[GSS] = []
+        shifted_gsses = []
         reductions_to_do: Dict[Reduce, List[GSS]] = collections.defaultdict(list)
 
         for state_id, state_gsss in heads_by_state.items():
             for state_gss in state_gsss:
                 row = self.parser_table.table.get(state_id)
-                if not row:
-                    continue
+                if not row: continue
                 action = row.actions.get(terminal_id)
-                if not action:
-                    continue
+                if not action: continue
 
                 def handle_shift(shift_to_state_id, gss_to_shift):
                     shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
                 def handle_reduce(reduce_action, gss_to_reduce):
-                    popped_gss = self._popn(gss_to_reduce, reduce_action.len)
+                    popped_gss = gss_to_reduce
+                    for _ in range(reduce_action.len):
+                        popped_gss = popped_gss.pop()
                     reductions_to_do[reduce_action].append(popped_gss)
 
                 if isinstance(action, int):
@@ -455,37 +423,41 @@ class Model(GraphProvider):
                         for nt_id, pids in nts.items():
                             handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-            # After processing all heads for this state, apply any accumulated reductions.
             for reduce_action, gss_list in reductions_to_do.items():
-                merged_popped_gss = GSS.merge(gss_list, merge_acc)
+                merged_popped_gss = GSS.merge(gss_list)
                 for from_state_id in merged_popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                    shifted_gsses.append(
-                        merged_popped_gss.isolate(from_state_id).push(goto_state_id)
-                    )
+                    shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-        # If no shift actions were produced, return an empty GSS.
         if not shifted_gsses:
-            return GSS.from_stacks([])   # empty GSS
+            # Return an empty GSS, preserving the structure and root from the input GSS.
+            return GSS(node_factory=gss._factory)
         else:
-            return GSS.merge(shifted_gsses, merge_acc)
-
-    # ----------------- Mask computation -----------------
+            return GSS.merge(shifted_gsses)
 
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
-        GSS nodes. This routine now works with the public LeveledGSS API.
+        GSS nodes. This is the performance-critical routine.
         """
+
         print("\n--- get_mask START ---")
         print("GSS at start of get_mask:")
         state_map = self.state
 
-        # Convert each LeveledGSS to its canonical ReferenceGSS representation
-        # so we can safely access internal fields needed for traversal.
-        ref_state_map: Dict[int, GSS] = {
-            sid: gss.to_reference_impl() for sid, gss in state_map.items()
-        }
+        expected_state_map = {sid: convert_rust_gss_to_python_gss(rust_gss) for sid, rust_gss in self.constraint_state.get_state_map().items()}
+
+        print(f"state_map:")
+        for sid, gss in state_map.items():
+            print(gss)
+
+        print(f"expected_state_map:")
+        for sid, gss in expected_state_map.items():
+            print(gss)
+
+        assert state_map.keys() == expected_state_map.keys(), f"state_map keys {state_map.keys()} != expected_state_map keys {expected_state_map.keys()}"
+        for sid in state_map:
+            assert state_map[sid].to_reference_impl() == expected_state_map[sid].to_reference_impl(), f"state_map GSS for sid {sid} != expected_state_map GSS"
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
@@ -494,26 +466,29 @@ class Model(GraphProvider):
         # node_idx -> (GSS, Bitset)
         values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
 
-        stopped: Set[int] = set()  # nodes that stopped (no gss parents)
-        todo: Dict[int, Set[int]] = {}  # depth -> set(node_idx)
-        depth_heap: List[int] = []  # min‑heap of depths (may contain duplicates)
+        stopped: set[int] = set()  # nodes that stopped (no gss parents)
+        todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+        depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
 
         # Seed: map tokenizer states and their filtered GSS to trie roots
         heappush = heapq.heappush
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        for sid, gss in ref_state_map.items():
+        # print("\n--- Seeding work queue ---")
+        for sid, gss in state_map.items():
             new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
 
+            # print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_heads={[h.id for h in gss._heads]}, mask={new_mask}")
+
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = GSS.merge([existing_gss, gss], merge_acc)
+                merged_gss = GSS.merge([existing_gss, gss])
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -525,6 +500,8 @@ class Model(GraphProvider):
                 heappush(depth_heap, depth)
             else:
                 bucket.add(root_idx)
+
+        # Main scheduler
 
         # Helper to enqueue a node at a given depth
         def enqueue(depth: int, node_idx: int) -> None:
@@ -539,9 +516,12 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
+        # print("\n--- Main loop ---")
+        iter_count = 0
         while True:
+            iter_count += 1
             # Pop the smallest depth bucket (skip stale heap entries)
-            node_indices: Optional[Set[int]] = None
+            node_indices: Optional[set[int]] = None
             current_depth = -1
             while depth_heap:
                 current_depth = heappop(depth_heap)
@@ -549,19 +529,27 @@ class Model(GraphProvider):
                 if node_indices:
                     break
             if not node_indices:
+                # print(f"[{iter_count}] Loop finished: no more nodes to process.")
                 break  # nothing left to process
 
+            # print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+            # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
+                    # print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 item = values.pop(node_idx, None)
                 if item is None:
+                    # print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
                 gss_node, llm_mask = item
+                # print(f"  - Node {node_idx}: Popped gss_heads={[h.id for h in gss_node._heads]}, mask={llm_mask}")
 
-                # End‑node handling
+                # End-node handling
                 if is_end(node_idx):
+                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
                     disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
                     possible_matches = self.possible_matches_cache
@@ -584,22 +572,32 @@ class Model(GraphProvider):
                     glr_active_tokens = llm_mask.intersection(gss_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     if not final_allowed_tokens.is_empty():
+                        before_len = final_mask.len()
                         final_mask = final_mask.union(final_allowed_tokens)
+                        after_len = final_mask.len()
+                        # if after_len > before_len:
+                        #     print(f"    - END NODE. final_mask len: {before_len} -> {after_len} (+{after_len - before_len}) with tokens {final_allowed_tokens}")
 
                 if llm_mask.is_empty():
                     stopped.add(node_idx)
+                    # print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
-                # Process outgoing edges
+                # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
+                # if not children:
+                #     # print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
+                    # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                    # Collect all pops from GSS parents
                     popped = gss_node.popn(pop)
 
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
-                        matched: List[GSS] = []
+                        # Filter peeks by destination state bitset
+                        matched = []
                         if not state_bv.is_empty():
                             for sid_val in popped.peek():
                                 if state_bv.contains(sid_val):
@@ -607,28 +605,33 @@ class Model(GraphProvider):
                         if not matched:
                             continue
 
-                        child_gss_node = GSS.merge(matched, merge_acc)
+                        # Merge matched parent GSS nodes
+                        child_gss_node = GSS.merge(matched)
 
+                        # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
 
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = GSS.merge([existing_gss, child_gss_node], merge_acc)
+                            merged_gss = GSS.merge([existing_gss, child_gss_node])
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
+                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # print(f"        -> UPDATING gss_heads={[h.id for h in merged_gss._heads]}, mask={combined_mask}")
                         else:
                             values[d] = (child_gss_node, child_llm_mask)
+                            # print(f"      - Dest: idx={d}, state_bv={state_bv}, matched={len(matched)}, child_mask={child_llm_mask}")
+                            # print(f"        -> CREATING gss_heads={[h.id for h in child_gss_node._heads]}, mask={child_llm_mask}")
 
                         enqueue(max_depth[d], d)
 
-        # Translate internal LLM token IDs back to the original token IDs.
         original_mask = ffi.Bitset.zeros()
         for internal_id in final_mask.to_indices():
             if internal_id in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[internal_id])
         temp = RangeSet.from_ranges(original_mask.to_ranges())
-        print("\n--- get_mask END ---")
+        print(f"\n--- get_mask END ---")
         print(f"Final mask: {temp.to_ranges()}")
         return temp
