@@ -439,6 +439,7 @@ class Model(GraphProvider):
             print(f"  sid={sid}, gss={rust_gss}")
 
         assert self.state.keys() == self.constraint_state.get_state_map().keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {self.constraint_state.get_state_map().keys()}"
+        assert self.state == expected_state_map, f"GSS state mismatch after commit."
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
         heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
@@ -504,7 +505,7 @@ class Model(GraphProvider):
         for sid, gss in expected_state_map.items():
             print(gss)
 
-        assert state_map == expected_state_map, f"state_map != expected_state_map: {state_map.keys() ^ expected_state_map.keys()}"
+        assert state_map == expected_state_map, f"state_map != expected_state_map:\n{state_map}\n{expected_state_map}"
 
         all_ones_mask = self.all_internal_llm_tokens_bitset
 
