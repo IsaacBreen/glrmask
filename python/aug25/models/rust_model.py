@@ -20,11 +20,11 @@ class Model:
 
     def get_mask(self) -> RangeSet:
         """Calls the underlying Rust implementation for get_mask."""
-        print("\n--- get_mask START (rust_model.py) ---")
+        # print("\n--- get_mask START (rust_model.py) ---")
 
         mask_bv = self.constraint_state.get_mask_bv()
 
-        print("\n--- get_mask END (rust_model.py) ---")
+        # print("\n--- get_mask END (rust_model.py) ---")
         return RangeSet.from_ranges(mask_bv.to_ranges())
 
     def commit(self, token_id: int):
