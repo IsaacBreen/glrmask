@@ -405,7 +405,8 @@ class Model(GraphProvider):
         shifted_gsses = []
         reductions_to_do: Dict[Reduce, List[GSS]] = collections.defaultdict(list)
 
-        for state_id, state_gsss in heads_by_state.items():
+        while heads_by_state:
+            state_id, state_gsss = heads_by_state.popitem()
             for state_gss in state_gsss:
                 row = self.parser_table.table.get(state_id)
                 if not row: continue
@@ -436,7 +437,8 @@ class Model(GraphProvider):
             merged_popped_gss = GSS.merge(gss_list)
             for from_state_id in merged_popped_gss.peek():
                 goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
+                goto_gss = merged_popped_gss.isolate(from_state_id).push(goto_state_id)
+                heads_by_state[goto_state_id].append(goto_gss)
 
         if not shifted_gsses:
             # Return an empty GSS, preserving the structure and root from the input GSS.
