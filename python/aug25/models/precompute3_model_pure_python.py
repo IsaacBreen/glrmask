@@ -1,7 +1,7 @@
 import json
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Set, Union
+from typing import Dict, List, Tuple, Optional, Set, Union, Any
 from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
@@ -68,6 +68,45 @@ class PyAcc:
     def __repr__(self):
         return f"PyAcc({self.terminals_union})"
 
+
+def get_gss_stats(gss: GSS) -> Dict[str, Any]:
+    """Computes statistics for a LeveledGSS instance."""
+    num_unique_heads = len(gss._heads)
+    total_active_stacks = sum(len(accs) for accs in gss._heads.values()) + len(gss._empty_accs)
+    num_structural_nodes = len(gss._factory._table)
+
+    # Calculate depths
+    depths = []
+    memo = {}
+    def get_depth(node) -> int:
+        if node is None:
+            return 0
+        if node in memo:
+            return memo[node]
+        
+        depth = 1 + get_depth(node.prev)
+        memo[node] = depth
+        return depth
+
+    for head_node, accs in gss._heads.items():
+        d = get_depth(head_node)
+        for _ in accs:
+            depths.append(d)
+    
+    for _ in gss._empty_accs:
+        depths.append(0)
+
+    max_depth = max(depths) if depths else 0
+    
+    depth_distribution = collections.Counter(depths)
+
+    return {
+        "num_unique_heads": num_unique_heads,
+        "total_active_stacks": total_active_stacks,
+        "num_structural_nodes": num_structural_nodes,
+        "max_stack_depth": max_depth,
+        "depth_distribution": dict(sorted(depth_distribution.items())),
+    }
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.reduce_acc()
@@ -268,7 +307,12 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        # print(f"\n--- commit token_id={token_id} ---")
+        print(f"\n--- commit token_id={token_id} ({self.id_to_token.get(token_id)}) ---")
+
+        print("--- GSS stats at start of commit ---")
+        for sid, gss in self.state.items():
+            stats = get_gss_stats(gss)
+            print(f"Tokenizer state {sid}: {stats}")
 
         token_bytes = self.id_to_token[token_id]
 
@@ -400,6 +444,12 @@ class Model(GraphProvider):
 
         self.state = merged_states
 
+        print("--- GSS stats at end of commit ---")
+        for sid, gss in self.state.items():
+            stats = get_gss_stats(gss)
+            print(f"Tokenizer state {sid}: {stats}")
+
+
         if ENABLE_VALIDATION:
             self.constraint_state.commit(token_id)
 
@@ -444,7 +494,8 @@ class Model(GraphProvider):
 
             def handle_reduce(reduce_action, gss_to_reduce):
                 popped_gss = gss_to_reduce
-                popped_gss = popped_gss.popn(reduce_action.len)
+                for _ in range(reduce_action.len):
+                    popped_gss = popped_gss.pop()
                 for from_state_id in popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
