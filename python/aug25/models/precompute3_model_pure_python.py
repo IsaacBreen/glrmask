@@ -15,6 +15,7 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> GSS:
     stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
     for path_ids, terminals_union in flattened_stacks:
         py_acc = PyAcc(terminals_union=terminals_union)
+        path_ids.reverse()
         stacks_for_from_stacks.append((path_ids, py_acc))
 
     return GSS.from_stacks(stacks_for_from_stacks)
