@@ -2,11 +2,15 @@ import argparse
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+import warnings
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
+# Suppress noisy FutureWarning from seaborn/pandas
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, int], ...]:
     """
