@@ -941,23 +941,6 @@ impl PyGrammarConstraintState {
     fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
         self.inner.borrow_constraint().internal_bv_to_original(bv)
     }
-
-    fn compute_commit_maps(&self, py: Python, llm_token_bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
-        let (state_map, terminals_map) = self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
-
-        let py_state_map = PyDict::new_bound(py);
-        for (k, v) in state_map {
-            py_state_map.set_item(k.0, v.0)?;
-        }
-
-        let py_terminals_map = PyDict::new_bound(py);
-        for (k, v) in terminals_map {
-            py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
-        }
-
-        Ok((py_state_map.into(), py_terminals_map.into()))
-    }
-
 }
 
 #[self_referencing]
