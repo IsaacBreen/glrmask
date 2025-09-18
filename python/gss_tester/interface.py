@@ -41,6 +41,14 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
+    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+        """
+        Removes stacks from the GSS based on a predicate on their accumulator.
+        If `predicate(acc)` returns False, the stack is removed.
+        """
+        pass
+
+    @abstractmethod
     def peek(self) -> Set[T]:
         """Returns the set of all values at the top of any stack."""
         pass

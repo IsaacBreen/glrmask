@@ -136,6 +136,15 @@ class FastGSS(GSS[T, Acc]):
             
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 
+    def prune(self, predicate: Callable[[Acc], bool]) -> 'FastGSS[T, Acc]':
+        new_heads = {head for head in self._heads if predicate(head.acc)}
+
+        if not new_heads:
+            # If all stacks are pruned, the result is an empty GSS (represented by the root).
+            return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
+        return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
+
     def peek(self) -> Set[T]:
         peek_values: Set[T] = set()
         for head in self._heads:

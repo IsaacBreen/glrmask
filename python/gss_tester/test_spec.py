@@ -88,3 +88,15 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     
     merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
     yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+    # --- Test 7: Pruning ---
+    gss_e = gss_class.initial(acc_factory).push(1).apply(lambda acc: 5)
+    gss_f = gss_class.initial(acc_factory).push(2).apply(lambda acc: 10)
+    gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+    yield from _yield_state(gss_to_prune)
+
+    pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+    yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+    pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+    yield from _yield_state(pruned_all_gss) # Should be an empty GSS
