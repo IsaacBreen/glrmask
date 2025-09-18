@@ -19,15 +19,15 @@ set -euo pipefail
 #
 # Environment Variables:
 #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-#                    (Default: ../.cache/test_vocabs/js_grammar_constraint.json.gz)
+#                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
 #   CODE_FILE:    Path to the code file to use as input.
-#                 (Default: ../src/example_code.js)
+#                 (Default: ./src/example_code.js)
 # ==============================================================================
 
 # --- Configuration ---
 # Use environment variables if set, otherwise use defaults.
-: "${CONSTRAINT_FILE:="../.cache/test_vocabs/js_grammar_constraint.json.gz"}"
-: "${CODE_FILE:="../src/example_code.js"}"
+: "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+: "${CODE_FILE:="./src/example_code.js"}"
 
 # --- Argument Validation ---
 if [ "$#" -lt 1 ]; then
@@ -81,7 +81,7 @@ echo "Starting benchmark runs..."
 for model_to_benchmark in "${ALL_MODELS[@]}"; do
     echo
     echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
-    cmd=(python -m aug25.benchmark_runner
+    cmd=(python -m python.aug25.benchmark_runner
         --code "$CODE_FILE"
         --constraint-file "$CONSTRAINT_FILE"
         --model "$model_to_benchmark"
@@ -110,7 +110,7 @@ echo "---"
 echo "Analyzing results and generating plots..."
 PLOTS_DIR="${RESULTS_DIR}/analysis"
 BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
-cmd=(python -m aug25.benchmark_analyzer
+cmd=(python -m python.aug25.benchmark_analyzer
     "${RESULTS_DIR}"/*.json
     --baseline "$BASELINE_STEM"
     --output-dir "$PLOTS_DIR")
