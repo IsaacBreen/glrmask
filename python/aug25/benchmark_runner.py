@@ -220,7 +220,7 @@ def run_benchmark(args):
     print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps", disable=os.environ.get("DISABLE_TQDM") == "1")
     for i, token_id in progress_bar:
-        if not os.environ.get("NO_GET_MASK") == 1:
+        if not os.environ.get("NO_GET_MASK") == '1':
             t_start_mask = time.perf_counter()
             progress_bar.set_postfix_str("get_mask")
             mask_rs = model.get_mask()
