@@ -1515,14 +1515,14 @@ pub fn map_allowed_terminals_tokenizer_states(
     let map_one = |terminals: &HybridL2Bitset| -> HybridL2Bitset {
         let mut new_terminals_btreemap = BTreeMap::new();
 
-        for (old_state_id, new_state_id) in map { // This unwrap is probably wrong.
-            let bv_source = terminals.get_l2_bitset(old_state_id.0).cloned().unwrap_or_else(HybridBitset::zeros);
+        for (old_state_id, new_state_id) in map {
+            let bv_source = terminals.get_l2_bitset(old_state_id.0).unwrap();
             new_terminals_btreemap.entry(*new_state_id)
-                .and_modify(|bv| *bv |= &bv_source)
+                .and_modify(|bv| *bv |= bv_source)
                 .or_insert_with(|| bv_source.clone());
         }
 
-        let mut new_terminals_l2_bitset = HybridL2Bitset::new();
+        let mut new_terminals_l2_bitset = HybridL2Bitset::all();
         for (state_id, bv) in new_terminals_btreemap {
             new_terminals_l2_bitset.insert_l2_bitset(state_id.0, bv);
         }

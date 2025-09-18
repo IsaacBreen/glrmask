@@ -652,11 +652,6 @@ pub struct PyHybridL2Bitset {
 
 #[pymethods]
 impl PyHybridL2Bitset {
-    #[new]
-    fn new() -> Self {
-        Self { inner: RustHybridL2Bitset::new() }
-    }
-
     fn range_values(&self) -> Vec<((usize, usize), PyHybridBitset)> {
         self.inner.range_values().map(|(range, bv)| {
             let py_range = (*range.start(), *range.end());
@@ -679,7 +674,7 @@ impl PyHybridL2Bitset {
     }
 
     fn get_l2_bitset(&self, state_id: usize) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).cloned().unwrap_or_else(RustHybridBitset::zeros) }
+        PyHybridBitset { inner: self.inner.get_l2_bitset(state_id).unwrap().clone() }
     }
 
     fn insert_l2_bitset(&mut self, state_id: usize, bitset: &PyHybridBitset) {
