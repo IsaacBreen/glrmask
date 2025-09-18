@@ -217,10 +217,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def is_empty(self) -> bool:
         """
         True iff there is exactly one active stack and that stack is the empty stack.
+        Or no stacks.
         """
         # count active non-empty stacks
         non_empty_count = sum(len(accs) for accs in self._heads.values())
-        return non_empty_count == 0 and len(self._empty_accs) == 1
+        return non_empty_count == 0
 
     def isolate(self, value: Optional[T]) -> "LeveledGSS[T, Acc]":
         """
