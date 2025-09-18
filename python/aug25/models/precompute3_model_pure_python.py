@@ -331,7 +331,7 @@ class Model(GraphProvider):
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-        return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
+        return GSS.merge(shifted_gsses)
 
     def get_mask(self) -> RangeSet:
         """
