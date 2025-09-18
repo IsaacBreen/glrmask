@@ -1863,6 +1863,26 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
+        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+        for (tokenizer_state_id, _state) in self.state.iter() {
+            let exec_result = self.parent.tokenizer.execute_from_state(
+                &llm_token_bytes,
+                *tokenizer_state_id,
+            );
+            if let Some(new_state) = exec_result.end_state {
+                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+            }
+            let mut terminals = TerminalBV::zeros();
+            for token in exec_result.matches {
+                terminals.insert(token.id);
+            }
+            terminals_map.insert(*tokenizer_state_id, terminals);
+        }
+        (state_map, terminals_map)
+    }
+
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
@@ -2746,22 +2766,7 @@ impl<'a> GrammarConstraintState<'a> {
         gss_transformation_memo.clear();
 
         // Handle allowed terminals
-        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-        for (tokenizer_state_id, _state) in self.state.iter() {
-            let exec_result = self.parent.tokenizer.execute_from_state(
-                &llm_token_bytes,
-                *tokenizer_state_id,
-            );
-            if let Some(new_state) = exec_result.end_state {
-                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-            }
-            let mut terminals = TerminalBV::zeros();
-            for token in exec_result.matches {
-                terminals.insert(token.id);
-            }
-            terminals_map.insert(*tokenizer_state_id, terminals);
-        }
+        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
 
         let gss_stats_before_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
