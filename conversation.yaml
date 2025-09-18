@@ -13759,26 +13759,6 @@ local_system:
       }
 
       impl<'a> GrammarConstraintState<'a> {
-          pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
-              let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-              let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-              for (tokenizer_state_id, _state) in self.state.iter() {
-                  let exec_result = self.parent.tokenizer.execute_from_state(
-                      &llm_token_bytes,
-                      *tokenizer_state_id,
-                  );
-                  if let Some(new_state) = exec_result.end_state {
-                      state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-                  }
-                  let mut terminals = TerminalBV::zeros();
-                  for token in exec_result.matches {
-                      terminals.insert(token.id);
-                  }
-                  terminals_map.insert(*tokenizer_state_id, terminals);
-              }
-              (state_map, terminals_map)
-          }
-
           pub fn get_mask(&self) -> LLMTokenBV {
               // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
               // self.get_mask1()
@@ -14662,7 +14642,22 @@ local_system:
               gss_transformation_memo.clear();
 
               // Handle allowed terminals
-              let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
+              let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+              let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+              for (tokenizer_state_id, _state) in self.state.iter() {
+                  let exec_result = self.parent.tokenizer.execute_from_state(
+                      &llm_token_bytes,
+                      *tokenizer_state_id,
+                  );
+                  if let Some(new_state) = exec_result.end_state {
+                      state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+                  }
+                  let mut terminals = TerminalBV::zeros();
+                  for token in exec_result.matches {
+                      terminals.insert(token.id);
+                  }
+                  terminals_map.insert(*tokenizer_state_id, terminals);
+              }
 
               let gss_stats_before_pruning = gather_gss_stats(
                   &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
@@ -19032,22 +19027,6 @@ local_system:
               self.inner.with_inner(|state| state.print_gss_stats());
           }
 
-          fn compute_commit_maps(&self, py: Python, llm_token_bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
-              let (state_map, terminals_map) = self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
-
-              let py_state_map = PyDict::new_bound(py);
-              for (k, v) in state_map {
-                  py_state_map.set_item(k.0, v.0)?;
-              }
-
-              let py_terminals_map = PyDict::new_bound(py);
-              for (k, v) in terminals_map {
-                  py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
-              }
-
-              Ok((py_state_map.into(), py_terminals_map.into()))
-          }
-
           fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
               let mut out = BTreeMap::new();
               self.inner.with_inner(|state| {
@@ -23203,6 +23182,33 @@ local_system:
       from tqdm.auto import tqdm
       from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
 
+      @dataclass(frozen=True)
+      class PyAcc:
+          terminals_union: ffi.HybridL2Bitset
+
+          def __hash__(self):
+              return hash(self.terminals_union)
+
+          def to_json_serializable(self):
+              return {"terminals_union": self.terminals_union.to_json_serializable()}
+
+          def __repr__(self):
+              return f"PyAcc({self.terminals_union})"
+
+
+      def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+          return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+
+      def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+          merged_acc = gss.get_acc(merge_acc)
+          return merged_acc.terminals_union.complement()
+
+      def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+          result = gss
+          for _ in range(n):
+              result = result.pop()
+          return result
+
       def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
           memo_nodes: Dict[int, PyGSSNodeInternal] = {}
           child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
@@ -23233,7 +23239,6 @@ local_system:
               return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
           py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
           return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-
 
       @dataclass(frozen=True)
       class Reduce:
@@ -23505,16 +23510,11 @@ local_system:
                                       yield (int(pop), sid, int(dest_idx))
 
           def commit(self, token_id: int):
-              # Get Rust state before commit for comparison
-              rust_state_map_before_commit = self.constraint_state.get_state_map()
-
               self.constraint_state.commit(token_id)
               token_bytes = self.id_to_token.get(token_id)
               if not token_bytes:
                   self.state = {}
                   return
-
-              # --- Python implementation starts here ---
 
               # --- Start: Added pre-processing steps to match Rust ---
               terminals_map: Dict[int, ffi.Bitset] = {}
@@ -23524,44 +23524,41 @@ local_system:
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
-                  
+                 
+              rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
+              assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+              py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+              rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+              assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
+
                   terminals = ffi.Bitset.zeros()
                   for terminal_id, _ in matches:
                       terminals.insert(terminal_id)
                   terminals_map[tokenizer_sid] = terminals
 
-              # === ASSERTION 1: Compare maps ===
-              rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-              assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
-              
-              py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
-              rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-              assert py_terminals_map_serializable == rust_terminals_map_serializable, f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}"
-              # =================================
-
               temp_states: Dict[int, FastGSS] = {}
               for tokenizer_sid, gss in self.state.items():
                   pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-
-                  # === ASSERTION 2: Compare pruned GSS ===
-                  rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-                  ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-                  py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-                  assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
-                  # =======================================
-
                   if any(h is not pruned_gss._root for h in pruned_gss._heads):
                        mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-
-                       # === ASSERTION 3: Compare mapped GSS ===
-                       rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-                       ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                       py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                       assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
-                       # =======================================
-
                        temp_states[tokenizer_sid] = mapped_gss
               
+              rust_states_before_prune = self.constraint_state.get_state_map()
+              for tokenizer_sid, gss in self.state.items():
+                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+                  rust_gss_before_prune = rust_states_before_prune[tokenizer_sid]
+                  rust_gss_after_prune = rust_gss_before_prune.clone_node()
+                  ffi.gss_prune_disallowed_terminals(rust_gss_after_prune, terminals_map)
+                  py_gss_from_rust_after_prune = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+                  assert pruned_gss == py_gss_from_rust_after_prune, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+                  if any(h is not pruned_gss._root for h in pruned_gss._heads):
+                       mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                       rust_gss_after_map = rust_gss_after_prune.clone_node()
+                       ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_map, state_map)
+                       py_gss_from_rust_after_map = convert_rust_gss_to_python_gss(rust_gss_after_map)
+                       assert mapped_gss == py_gss_from_rust_after_map, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                       temp_states[tokenizer_sid] = mapped_gss
+
               current_state_for_processing = temp_states
               # --- End: Added pre-processing steps ---
 
@@ -35852,141 +35849,313 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to apply the requested changes, followed by the git diffs.
+      Here are the step-by-step instructions to apply the changes, followed by the git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **In `src/constraint.rs`:**
-          *   Navigate to the `impl<'a> GrammarConstraintState<'a>` block.
-          *   Add a new public function `compute_commit_maps` that takes `llm_token_bytes` and returns the `state_map` and `terminals_map`.
-          *   Cut the logic for computing these maps from the beginning of the `commit_bytes` function and paste it into `compute_commit_maps`.
-          *   In `commit_bytes`, replace the removed logic with a call to `self.compute_commit_maps(llm_token_bytes)`.
+      **1. Refactor `commit_bytes` in `src/constraint.rs`**
 
-      2.  **In `python/src/lib.rs`:**
-          *   In the `#[pymethods]` block for `PyGrammarConstraintState`, add a new method `compute_commit_maps`. This method will call the new Rust function and convert the returned `BTreeMap`s into Python dictionaries.
-          *   Locate the `#[pymodule]` function `_sep1`.
-          *   Inside this function, add two lines to register the existing `gss_prune_disallowed_terminals` and `gss_map_allowed_terminals_tokenizer_states` functions, which are currently defined but not exposed to Python.
+      *   **File**: `src/constraint.rs`
+      *   **Action**: In the `impl<'a> GrammarConstraintState<'a>` block, add a new public function `compute_commit_maps` to encapsulate the logic for calculating `state_map` and `terminals_map`.
+      *   **Location**: Inside `impl<'a> GrammarConstraintState<'a>`, for example, before the `commit` function.
+      *   **Code to add**:
+          ```rust
+          pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TerminalBV>, BTreeMap<TokenizerStateID, TokenizerStateID>) {
+              let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+              let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+              for (tokenizer_state_id, _state) in self.state.iter() {
+                  let exec_result = self.parent.tokenizer.execute_from_state(
+                      &llm_token_bytes,
+                      *tokenizer_state_id,
+                  );
+                  if let Some(new_state) = exec_result.end_state {
+                      state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+                  }
+                  let mut terminals = TerminalBV::zeros();
+                  for token in exec_result.matches {
+                      terminals.insert(token.id);
+                  }
+                  terminals_map.insert(*tokenizer_state_id, terminals);
+              }
+              (terminals_map, state_map)
+          }
+          ```
+      *   **Action**: In the `commit_bytes` function within the same `impl` block, replace the map calculation logic with a call to the new function.
+      *   **Code to replace**:
+          ```rust
+          // Handle allowed terminals
+          let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+          let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+          for (tokenizer_state_id, _state) in self.state.iter() {
+              let exec_result = self.parent.tokenizer.execute_from_state(
+                  &llm_token_bytes,
+                  *tokenizer_state_id,
+              );
+              if let Some(new_state) = exec_result.end_state {
+                  state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+              }
+              let mut terminals = TerminalBV::zeros();
+              for token in exec_result.matches {
+                  terminals.insert(token.id);
+              }
+              terminals_map.insert(*tokenizer_state_id, terminals);
+          }
+          ```
+      *   **With this code**:
+          ```rust
+          // Handle allowed terminals
+          let (terminals_map, state_map) = self.compute_commit_maps(llm_token_bytes);
+          ```
 
-      3.  **In `python/aug25/models/precompute3_model_pure_python.py`:**
-          *   Add the provided `convert_rust_gss_to_python_gss` helper function just before the `Model` class definition.
-          *   In the `commit` method of the `Model` class:
-              *   At the very beginning, before calling `self.constraint_state.commit(token_id)`, add a line to get the current Rust GSS states: `rust_state_map_before_commit = self.constraint_state.get_state_map()`.
-              *   After computing the Python `state_map` and `terminals_map`, add an assertion block to call `self.constraint_state.compute_commit_maps` and verify that the Python and Rust maps are identical.
-              *   Inside the `for tokenizer_sid, gss in self.state.items():` loop:
-                  *   After `pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)`, add an assertion block. This block should take the corresponding initial Rust GSS from `rust_state_map_before_commit`, apply the Rust `ffi.gss_prune_disallowed_terminals` function, convert the result back to a Python `FastGSS` using the new helper, and assert its equality with `pruned_gss`.
-                  *   After `mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)`, add a similar assertion block. This block will take the pruned Rust GSS, apply `ffi.gss_map_allowed_terminals_tokenizer_states`, convert the result, and assert its equality with `mapped_gss`.
+      **2. Expose GSS manipulation functions to Python in `python/src/lib.rs`**
+
+      *   **File**: `python/src/lib.rs`
+      *   **Action**: Add new helper methods to the `#[pymethods]` block for `PyGSSNode`. These are needed for the Python-side GSS reconstruction.
+      *   **Location**: Inside `#[pymethods] impl PyGSSNode`.
+      *   **Code to add**:
+          ```rust
+          fn clone_node(&self) -> PyGSSNode {
+              self.clone()
+          }
+
+          fn is_root(&self) -> bool {
+              self.inner.is_root()
+          }
+
+          fn depth(&self) -> usize {
+              self.inner.max_depth()
+          }
+
+          fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
+              PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
+          }
+
+          fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
+              let mut result = Vec::new();
+              for (edge_content, preds_by_depth) in self.inner.predecessors() {
+                  for pred_vec in preds_by_depth.values() {
+                      for pred_arc in pred_vec {
+                          result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+                      }
+                  }
+              }
+              result
+          }
+          ```
+      *   **Action**: Add a new method to the `#[pymethods]` block for `PyGrammarConstraintState` to expose the map computation logic.
+      *   **Location**: Inside `#[pymethods] impl PyGrammarConstraintState`.
+      *   **Code to add**:
+          ```rust
+          fn compute_commit_maps(&self, py: Python, bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
+              let (terminals_map, state_map) = self.inner.with_inner(|s| s.compute_commit_maps(bytes));
+
+              let py_state_map = PyDict::new_bound(py);
+              for (k, v) in state_map {
+                  py_state_map.set_item(k.0, v.0)?;
+              }
+
+              let py_terminals_map = PyDict::new_bound(py);
+              for (k, v) in terminals_map {
+                  py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
+              }
+
+              Ok((py_terminals_map.into(), py_state_map.into()))
+          }
+          ```
+      *   **Action**: Add two new `#[pyfunction]`s for GSS pruning and mapping.
+      *   **Location**: At the file level, near other `pyfunction`s (e.g., before `gss_fuse_predecessors`).
+      *   **Code to add**:
+          ```rust
+          #[pyfunction]
+          fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+              let mut rust_terminals_map = BTreeMap::new();
+              for (k, v) in terminals_map.iter() {
+                  let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+                  let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+                  rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+              }
+              
+              let mut arc = node.inner.clone();
+              sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+              node.inner = arc;
+              Ok(())
+          }
+
+          #[pyfunction]
+          fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+              let mut rust_state_map = BTreeMap::new();
+              for (k, v) in state_map.iter() {
+                  let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+                  let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+                  rust_state_map.insert(from_state, to_state);
+              }
+
+              let mut arc = node.inner.clone();
+              sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+              node.inner = arc;
+              Ok(())
+          }
+          ```
+      *   **Action**: Register the new functions in the `_sep1` module.
+      *   **Location**: Inside `#[pymodule] fn _sep1`.
+      *   **Code to add**:
+          ```rust
+          m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+          m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+          ```
+
+      **3. Add validation assertions in `python/aug25/models/precompute3_model_pure_python.py`**
+
+      *   **File**: `python/aug25/models/precompute3_model_pure_python.py`
+      *   **Action**: Add helper classes and functions for the Python GSS implementation and for converting between Rust and Python GSS representations.
+      *   **Location**: At the top of the file, after the imports.
+      *   **Code to add**:
+          ```python
+          from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+
+          @dataclass(frozen=True)
+          class PyAcc:
+              terminals_union: ffi.HybridL2Bitset
+
+              def __hash__(self):
+                  return hash(self.terminals_union)
+
+              def to_json_serializable(self):
+                  return {"terminals_union": self.terminals_union.to_json_serializable()}
+
+              def __repr__(self):
+                  return f"PyAcc({self.terminals_union})"
+
+
+          def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+              return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+
+          def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+              merged_acc = gss.get_acc(merge_acc)
+              return merged_acc.terminals_union.complement()
+
+          def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+              result = gss
+              for _ in range(n):
+                  result = result.pop()
+              return result
+
+          def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+              memo_nodes: Dict[int, PyGSSNodeInternal] = {}
+              child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
+              q = collections.deque([rust_gss_node])
+              visited_rust_ptrs = {rust_gss_node.ptr()}
+              while q:
+                  rust_node = q.popleft()
+                  py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+                  py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
+                  memo_nodes[rust_node.ptr()] = py_node
+                  for _, pred_rust_node in rust_node.predecessors():
+                      if pred_rust_node.ptr() not in visited_rust_ptrs:
+                          visited_rust_ptrs.add(pred_rust_node.ptr())
+                          q.append(pred_rust_node)
+              q = collections.deque([rust_gss_node])
+              visited_rust_ptrs = {rust_gss_node.ptr()}
+              while q:
+                  rust_node = q.popleft()
+                  py_node = memo_nodes[rust_node.ptr()]
+                  for state_id, pred_rust_node in rust_node.predecessors():
+                      py_pred_node = memo_nodes[pred_rust_node.ptr()]
+                      child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
+                      if pred_rust_node.ptr() not in visited_rust_ptrs:
+                          visited_rust_ptrs.add(pred_rust_node.ptr())
+                          q.append(pred_rust_node)
+              py_head_node = memo_nodes[rust_gss_node.ptr()]
+              def acc_factory():
+                  return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+              py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
+              return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+          ```
+      *   **Action**: In the `commit` method of the `Model` class, add assertions to compare the Python and Rust logic at each pre-processing step.
+      *   **Location**: Inside `Model.commit`.
+      *   **Code to modify**:
+          ```python
+          # In Model.commit, after computing python's state_map and terminals_map
+          # ...
+          terminals_map: Dict[int, ffi.Bitset] = {}
+          state_map: Dict[int, int] = {}
+          
+          for tokenizer_sid in self.state.keys():
+              # ... (existing logic to populate maps)
+          
+          # ADD THIS:
+          rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
+          assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+          py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+          rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+          assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
+
+          temp_states: Dict[int, FastGSS] = {}
+          # ADD THIS:
+          rust_states_before_prune = self.constraint_state.get_state_map()
+          for tokenizer_sid, gss in self.state.items():
+              pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+              # ADD THIS:
+              rust_gss_before_prune = rust_states_before_prune[tokenizer_sid]
+              rust_gss_after_prune = rust_gss_before_prune.clone_node()
+              ffi.gss_prune_disallowed_terminals(rust_gss_after_prune, terminals_map)
+              py_gss_from_rust_after_prune = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+              assert pruned_gss == py_gss_from_rust_after_prune, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+
+              if any(h is not pruned_gss._root for h in pruned_gss._heads):
+                   mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                   # ADD THIS:
+                   rust_gss_after_map = rust_gss_after_prune.clone_node()
+                   ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_map, state_map)
+                   py_gss_from_rust_after_map = convert_rust_gss_to_python_gss(rust_gss_after_map)
+                   assert mapped_gss == py_gss_from_rust_after_map, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                   temp_states[tokenizer_sid] = mapped_gss
+          # ...
+          ```
+
+      ---
 
       ### Git Diffs
-
-      Here are the git diffs to apply the changes:
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1810,6 +1810,28 @@
-       }
-       
-       impl<'a> GrammarConstraintState<'a> {
-      +    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
-      +        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-      +        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-      +        for (tokenizer_state_id, _state) in self.state.iter() {
-      +            let exec_result = self.parent.tokenizer.execute_from_state(
-      +                &llm_token_bytes,
-      +                *tokenizer_state_id,
-      +            );
-      +            if let Some(new_state) = exec_result.end_state {
-      +                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-      +            }
-      +            let mut terminals = TerminalBV::zeros();
-      +            for token in exec_result.matches {
-      +                terminals.insert(token.id);
-      +            }
-      +            terminals_map.insert(*tokenizer_state_id, terminals);
-      +        }
-      +        (state_map, terminals_map)
-      +    }
-      +
-           pub fn get_mask(&self) -> LLMTokenBV {
-               // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
-               // self.get_mask1()
-      @@ -2418,24 +2440,7 @@
-               gss_transformation_memo.clear();
-       
-               // Handle allowed terminals
-      -        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-      -        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-      -        for (tokenizer_state_id, _state) in self.state.iter() {
-      -            let exec_result = self.parent.tokenizer.execute_from_state(
-      -                &llm_token_bytes,
-      -                *tokenizer_state_id,
-      -            );
-      -            if let Some(new_state) = exec_result.end_state {
-      -                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-      -            }
-      -            let mut terminals = TerminalBV::zeros();
-      -            for token in exec_result.matches {
-      -                terminals.insert(token.id);
-      -            }
-      -            terminals_map.insert(*tokenizer_state_id, terminals);
-      -        }
-      +        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
-       
-               let gss_stats_before_pruning = gather_gss_stats(
-                   &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-
-      ```
-
-      ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -624,6 +624,25 @@
-               self.inner.with_inner(|state| state.print_gss_stats());
-           }
-       
-      +    fn compute_commit_maps(&self, py: Python, llm_token_bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
-      +        let (state_map, terminals_map) = self.inner.with_inner(|s| s.compute_commit_maps(llm_token_bytes));
-      +
-      +        let py_state_map = PyDict::new_bound(py);
-      +        for (k, v) in state_map {
-      +            py_state_map.set_item(k.0, v.0)?;
-      +        }
-      +
-      +        let py_terminals_map = PyDict::new_bound(py);
-      +        for (k, v) in terminals_map {
-      +            py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
-      +        }
-      +
-      +        Ok((py_state_map.into(), py_terminals_map.into()))
-      +    }
-      +
-           fn get_state_map(&self) -> PyResult<BTreeMap<usize, PyGSSNode>> {
-               let mut out = BTreeMap::new();
-               self.inner.with_inner(|state| {
-      @@ -673,8 +692,8 @@
-           m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
-           m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
-           m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
-      -    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-      -    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
-      +    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
-           m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
-           m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
-           m.add_class::<PyIncrementalParser>()?;
-
-      ```
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -10,6 +10,38 @@
-       from tqdm.auto import tqdm
-       from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+      @@ -4,7 +4,59 @@
+       from dataclasses import dataclass, field
        
+       from ..common_interface import GraphProvider, RangeSet
+       import _sep1 as ffi  # the compiled module
+       from tqdm.auto import tqdm
+      +from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+      +
+      +@dataclass(frozen=True)
+      +class PyAcc:
+      +    terminals_union: ffi.HybridL2Bitset
+      +
+      +    def __hash__(self):
+      +        return hash(self.terminals_union)
+      +
+      +    def to_json_serializable(self):
+      +        return {"terminals_union": self.terminals_union.to_json_serializable()}
+      +
+      +    def __repr__(self):
+      +        return f"PyAcc({self.terminals_union})"
+      +
+      +
+      +def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+      +    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+      +
+      +def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+      +    merged_acc = gss.get_acc(merge_acc)
+      +    return merged_acc.terminals_union.complement()
+      +
+      +def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+      +    result = gss
+      +    for _ in range(n):
+      +        result = result.pop()
+      +    return result
+      +
       +def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
       +    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
       +    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
@@ -36017,89 +36186,430 @@ messages:
       +        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
       +    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
       +    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-      +
-      +
+       
        @dataclass(frozen=True)
        class Reduce:
-           nonterminal_id: int
-      @@ -251,12 +283,48 @@
-                                       yield (int(pop), sid, int(dest_idx))
-       
-           def commit(self, token_id: int):
-      +        # Get Rust state before commit for comparison
-      +        rust_state_map_before_commit = self.constraint_state.get_state_map()
-      +
-               self.constraint_state.commit(token_id)
-               token_bytes = self.id_to_token.get(token_id)
-               if not token_bytes:
-                   self.state = {}
-                   return
-       
-      +        # --- Python implementation starts here ---
-      +
-               # --- Start: Added pre-processing steps to match Rust ---
-               terminals_map: Dict[int, ffi.Bitset] = {}
-               state_map: Dict[int, int] = {}
-      @@ -272,6 +340,14 @@
+      @@ -211,6 +263,13 @@
                        terminals.insert(terminal_id)
                    terminals_map[tokenizer_sid] = terminals
        
-      +        # === ASSERTION 1: Compare maps ===
-      +        rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
+      +        rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
       +        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
-      +        
-      +        py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
-      +        rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-      +        assert py_terminals_map_serializable == rust_terminals_map_serializable, f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}"
-      +        # =================================
+      +        py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+      +        rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+      +        assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
       +
-               temp_states: Dict[int, FastGSS] = {}
+               temp_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
                for tokenizer_sid, gss in self.state.items():
                    pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-      +
-      +            # === ASSERTION 2: Compare pruned GSS ===
-      +            rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-      +            ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-      +            py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-      +            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
-      +            # =======================================
-      +
-                   if any(h is not pruned_gss._root for h in pruned_gss._heads):
+      @@ -218,6 +277,18 @@
                         mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-      +
-      +                 # === ASSERTION 3: Compare mapped GSS ===
-      +                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-      +                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-      +                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-      +                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
-      +                 # =======================================
-      +
                         temp_states[tokenizer_sid] = mapped_gss
                
+      +        rust_states_before_prune = self.constraint_state.get_state_map()
+      +        for tokenizer_sid, gss in self.state.items():
+      +            pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+      +            rust_gss_before_prune = rust_states_before_prune[tokenizer_sid]
+      +            rust_gss_after_prune = rust_gss_before_prune.clone_node()
+      +            ffi.gss_prune_disallowed_terminals(rust_gss_after_prune, terminals_map)
+      +            py_gss_from_rust_after_prune = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+      +            assert pruned_gss == py_gss_from_rust_after_prune, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+      +            if any(h is not pruned_gss._root for h in pruned_gss._heads):
+      +                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+      +                 rust_gss_after_map = rust_gss_after_prune.clone_node()
+      +                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_map, state_map)
+      +                 py_gss_from_rust_after_map = convert_rust_gss_to_python_gss(rust_gss_after_map)
+      +                 assert mapped_gss == py_gss_from_rust_after_map, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+      +                 temp_states[tokenizer_sid] = mapped_gss
+      +
                current_state_for_processing = temp_states
+               # --- End: Added pre-processing steps ---
+       
+
+      ```
+      ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -511,6 +511,26 @@
+               self.inner.is_alive()
+           }
+       
+      +    fn clone_node(&self) -> PyGSSNode {
+      +        self.clone()
+      +    }
+      +
+      +    fn is_root(&self) -> bool {
+      +        self.inner.is_root()
+      +    }
+      +
+      +    fn depth(&self) -> usize {
+      +        self.inner.max_depth()
+      +    }
+      +
+      +    fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
+      +        PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
+      +    }
+      +
+      +    fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
+      +        let mut result = Vec::new();
+      +        for (edge_content, preds_by_depth) in self.inner.predecessors() {
+      +            for pred_vec in preds_by_depth.values() {
+      +                for pred_arc in pred_vec {
+      +                    result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+      +                }
+      +            }
+      +        }
+      +        result
+      +    }
+      +
+           fn is_ok(&self) -> bool {
+               self.inner.is_ok()
+           }
+      @@ -540,30 +560,6 @@
+               }
+           }
+       
+      -    fn is_root(&self) -> bool {
+      -        self.inner.is_root()
+      -    }
+      -
+      -    fn depth(&self) -> usize {
+      -        self.inner.max_depth()
+      -    }
+      -
+      -    fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
+      -        PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
+      -    }
+      -
+      -    fn local_acc_llm_tokens_union(&self) -> PyHybridBitset {
+      -        PyHybridBitset { inner: self.inner.local_acc().llm_tokens_union.clone() }
+      -    }
+      -
+      -    fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
+      -        let mut result = Vec::new();
+      -        for (edge_content, preds_by_depth) in self.inner.predecessors() {
+      -            for pred_vec in preds_by_depth.values() {
+      -                for pred_arc in pred_vec {
+      -                    result.push((edge_content.state_id.0, PyGSSNode { inner: pred_arc.clone() }));
+      -                }
+      -            }
+      -        }
+      -        result
+      -    }
+       }
+       
+       #[pyfunction]
+      @@ -582,6 +578,34 @@
+           sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+           node.inner = arc;
+       }
+      +
+      +#[pyfunction]
+      +fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
+      +    let mut rust_terminals_map = BTreeMap::new();
+      +    for (k, v) in terminals_map.iter() {
+      +        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+      +        let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+      +        rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
+      +    }
+      +    
+      +    let mut arc = node.inner.clone();
+      +    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+      +    node.inner = arc;
+      +    Ok(())
+      +}
+      +
+      +#[pyfunction]
+      +fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
+      +    let mut rust_state_map = BTreeMap::new();
+      +    for (k, v) in state_map.iter() {
+      +        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+      +        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+      +        rust_state_map.insert(from_state, to_state);
+      +    }
+      +
+      +    let mut arc = node.inner.clone();
+      +    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+      +    node.inner = arc;
+      +    Ok(())
+      +}
+       
+       #[pyfunction]
+       fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
+      @@ -668,6 +692,24 @@
+               self.inner.borrow_constraint().internal_bv_to_original(bv)
+           }
+       }
+      +    fn compute_commit_maps(&self, py: Python, bytes: &[u8]) -> PyResult<(PyObject, PyObject)> {
+      +        let (terminals_map, state_map) = self.inner.with_inner(|s| s.compute_commit_maps(bytes));
+      +
+      +        let py_state_map = PyDict::new_bound(py);
+      +        for (k, v) in state_map {
+      +            py_state_map.set_item(k.0, v.0)?;
+      +        }
+      +
+      +        let py_terminals_map = PyDict::new_bound(py);
+      +        for (k, v) in terminals_map {
+      +            py_terminals_map.set_item(k.0, PyHybridBitset { inner: v })?;
+      +        }
+      +
+      +        Ok((py_terminals_map.into(), py_state_map.into()))
+      +    }
+      +}
+       
+       #[self_referencing]
+       struct PyIncrementalParserWrapper {
+      @@ -710,9 +752,9 @@
+           m.add_class::<PyGSSNode>()?;
+           m.add_function(wrap_pyfunction!(gss_merge_many_with_depth, m)?)?;
+           m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
+           m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+      -    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+           m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
+           m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
+      +    m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+      +    m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
+           m.add_class::<PyIncrementalParser>()?;
+           Ok(())
+       }
+
+      ```
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1711,6 +1711,27 @@
+       }
+       
+       impl<'a> GrammarConstraintState<'a> {
+      +    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TerminalBV>, BTreeMap<TokenizerStateID, TokenizerStateID>) {
+      +        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+      +        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+      +        for (tokenizer_state_id, _state) in self.state.iter() {
+      +            let exec_result = self.parent.tokenizer.execute_from_state(
+      +                &llm_token_bytes,
+      +                *tokenizer_state_id,
+      +            );
+      +            if let Some(new_state) = exec_result.end_state {
+      +                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+      +            }
+      +            let mut terminals = TerminalBV::zeros();
+      +            for token in exec_result.matches {
+      +                terminals.insert(token.id);
+      +            }
+      +            terminals_map.insert(*tokenizer_state_id, terminals);
+      +        }
+      +        (terminals_map, state_map)
+      +    }
+      +
+           pub fn get_mask(&self) -> LLMTokenBV {
+               // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
+               // self.get_mask1()
+      @@ -2181,26 +2202,8 @@
+               gss_transformation_memo.clear();
+       
+               // Handle allowed terminals
+      -        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+      -        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+      -        for (tokenizer_state_id, _state) in self.state.iter() {
+      -            let exec_result = self.parent.tokenizer.execute_from_state(
+      -                &llm_token_bytes,
+      -                *tokenizer_state_id,
+      -            );
+      -            if let Some(new_state) = exec_result.end_state {
+      -                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+      -            }
+      -            let mut terminals = TerminalBV::zeros();
+      -            for token in exec_result.matches {
+      -                terminals.insert(token.id);
+      -            }
+      -            terminals_map.insert(*tokenizer_state_id, terminals);
+      -        }
+      +        let (terminals_map, state_map) = self.compute_commit_maps(llm_token_bytes);
+       
+               let gss_stats_before_pruning = gather_gss_stats(
+                   &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+
+      ```
+    metadata:
+  - user: |-
+      Failed Hunk:
+
+      ```diff
+      @@ -211,6 +263,13 @@
+                       terminals.insert(terminal_id)
+                   terminals_map[tokenizer_sid] = terminals
+       
+      +        rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
+      +        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+      +        py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+      +        rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+      +        assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
+      +
+               temp_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+               for tokenizer_sid, gss in self.state.items():
+                   pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+                      terminals.insert(terminal_id)
+                  terminals_map[tokenizer_sid] = terminals
+
+              temp_states: Dict[int, List[FastGSS]] = collections.defaultdict(list)
+              for tokenizer_sid, gss in self.state.items():
+                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+      ```
+
+      Nearest Match in `python/aug25/models/precompute3_model_pure_python.py` (found at line 357 with 83.33% similarity, shown with padding):
+
+      ```python
+                  if end_state is not None:
+                      state_map[tokenizer_sid] = end_state
+                  
+                  terminals = ffi.Bitset.zeros()
+                  for terminal_id, _ in matches:
+                      terminals.insert(terminal_id)
+                  terminals_map[tokenizer_sid] = terminals
+
+              temp_states: Dict[int, FastGSS] = {}
+              for tokenizer_sid, gss in self.state.items():
+                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+                  if any(h is not pruned_gss._root for h in pruned_gss._heads):
+                       mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                       temp_states[tokenizer_sid] = mapped_gss
+              
+              current_state_for_processing = temp_states
+      ```
+
+      The git diff hunk above failed to apply to the file `python/aug25/models/precompute3_model_pure_python.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -4,7 +4,59 @@
+       from dataclasses import dataclass, field
+       
+       from ..common_interface import GraphProvider, RangeSet
+       import _sep1 as ffi  # the compiled module
+       from tqdm.auto import tqdm
+      +from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+      +
+      +@dataclass(frozen=True)
+      +class PyAcc:
+      +    terminals_union: ffi.HybridL2Bitset
+      +
+      +    def __hash__(self):
+      +        return hash(self.terminals_union)
+      +
+      +    def to_json_serializable(self):
+      +        return {"terminals_union": self.terminals_union.to_json_serializable()}
+      +
+      +    def __repr__(self):
+      +        return f"PyAcc({self.terminals_union})"
+      +
+      +
+      +def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+      +    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+      +
+      +def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+      +    merged_acc = gss.get_acc(merge_acc)
+      +    return merged_acc.terminals_union.complement()
+      +
+      +def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+      +    result = gss
+      +    for _ in range(n):
+      +        result = result.pop()
+      +    return result
+      +
+      +def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
+      +    memo_nodes: Dict[int, PyGSSNodeInternal] = {}
+      +    child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
+      +    q = collections.deque([rust_gss_node])
+      +    visited_rust_ptrs = {rust_gss_node.ptr()}
+      +    while q:
+      +        rust_node = q.popleft()
+      +        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+      +        py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
+      +        memo_nodes[rust_node.ptr()] = py_node
+      +        for _, pred_rust_node in rust_node.predecessors():
+      +            if pred_rust_node.ptr() not in visited_rust_ptrs:
+      +                visited_rust_ptrs.add(pred_rust_node.ptr())
+      +                q.append(pred_rust_node)
+      +    q = collections.deque([rust_gss_node])
+      +    visited_rust_ptrs = {rust_gss_node.ptr()}
+      +    while q:
+      +        rust_node = q.popleft()
+      +        py_node = memo_nodes[rust_node.ptr()]
+      +        for state_id, pred_rust_node in rust_node.predecessors():
+      +            py_pred_node = memo_nodes[pred_rust_node.ptr()]
+      +            child_to_parents.setdefault(py_node, set()).add((state_id, py_pred_node))
+      +            if pred_rust_node.ptr() not in visited_rust_ptrs:
+      +                visited_rust_ptrs.add(pred_rust_node.ptr())
+      +                q.append(pred_rust_node)
+      +    py_head_node = memo_nodes[rust_gss_node.ptr()]
+      +    def acc_factory():
+      +        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+      +    py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
+      +    return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
+       
+       @dataclass(frozen=True)
+       class Reduce:
+      @@ -357,6 +357,13 @@
+                   if end_state is not None:
+                       state_map[tokenizer_sid] = end_state
+                  
+      +        rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
+      +        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+      +        py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+      +        rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+      +        assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
+      +
+                   terminals = ffi.Bitset.zeros()
+                   for terminal_id, _ in matches:
+                       terminals.insert(terminal_id)
+      @@ -218,6 +277,18 @@
+                        mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                        temp_states[tokenizer_sid] = mapped_gss
+               
+      +        rust_states_before_prune = self.constraint_state.get_state_map()
+      +        for tokenizer_sid, gss in self.state.items():
+      +            pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+      +            rust_gss_before_prune = rust_states_before_prune[tokenizer_sid]
+      +            rust_gss_after_prune = rust_gss_before_prune.clone_node()
+      +            ffi.gss_prune_disallowed_terminals(rust_gss_after_prune, terminals_map)
+      +            py_gss_from_rust_after_prune = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+      +            assert pruned_gss == py_gss_from_rust_after_prune, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+      +            if any(h is not pruned_gss._root for h in pruned_gss._heads):
+      +                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+      +                 rust_gss_after_map = rust_gss_after_prune.clone_node()
+      +                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_map, state_map)
+      +                 py_gss_from_rust_after_map = convert_rust_gss_to_python_gss(rust_gss_after_map)
+      +                 assert mapped_gss == py_gss_from_rust_after_map, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+      +                 temp_states[tokenizer_sid] = mapped_gss
+      +
+               current_state_for_processing = temp_states
+               # --- End: Added pre-processing steps ---
+       
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-
-      --- Processing Diff Block 3 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Expose Rust map computation and
-      add Python/Rust GSS processing validation"'
+  - user: 'Changes committed with message: "Refactor Rust commit map calculation and
+      add Python/Rust GSS validation"'
     metadata:
 ...

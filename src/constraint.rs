@@ -1863,9 +1863,9 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
-        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TerminalBV>, BTreeMap<TokenizerStateID, TokenizerStateID>) {
         let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         for (tokenizer_state_id, _state) in self.state.iter() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
@@ -1880,7 +1880,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             terminals_map.insert(*tokenizer_state_id, terminals);
         }
-        (state_map, terminals_map)
+        (terminals_map, state_map)
     }
 
     pub fn get_mask(&self) -> LLMTokenBV {
@@ -2766,7 +2766,7 @@ impl<'a> GrammarConstraintState<'a> {
         gss_transformation_memo.clear();
 
         // Handle allowed terminals
-        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
+        let (terminals_map, state_map) = self.compute_commit_maps(llm_token_bytes);
 
         let gss_stats_before_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),

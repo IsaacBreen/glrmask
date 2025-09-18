@@ -9,6 +9,33 @@ import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
 
+@dataclass(frozen=True)
+class PyAcc:
+    terminals_union: ffi.HybridL2Bitset
+
+    def __hash__(self):
+        return hash(self.terminals_union)
+
+    def to_json_serializable(self):
+        return {"terminals_union": self.terminals_union.to_json_serializable()}
+
+    def __repr__(self):
+        return f"PyAcc({self.terminals_union})"
+
+
+def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
+    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+
+def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+    merged_acc = gss.get_acc(merge_acc)
+    return merged_acc.terminals_union.complement()
+
+def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
+    result = gss
+    for _ in range(n):
+        result = result.pop()
+    return result
+
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     memo_nodes: Dict[int, PyGSSNodeInternal] = {}
     child_to_parents: Dict[PyGSSNodeInternal, Set[Tuple[int, PyGSSNodeInternal]]] = {}
@@ -39,7 +66,6 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
         return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
     py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
     return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
-
 
 @dataclass(frozen=True)
 class Reduce:
@@ -311,16 +337,11 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
-        # Get Rust state before commit for comparison
-        rust_state_map_before_commit = self.constraint_state.get_state_map()
-
         self.constraint_state.commit(token_id)
         token_bytes = self.id_to_token.get(token_id)
         if not token_bytes:
             self.state = {}
             return
-
-        # --- Python implementation starts here ---
 
         # --- Start: Added pre-processing steps to match Rust ---
         terminals_map: Dict[int, ffi.Bitset] = {}
@@ -330,44 +351,41 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
-            
+           
+        rust_terminals_map, rust_state_map = self.constraint_state.compute_commit_maps(token_bytes)
+        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+        py_terminals_map_serial = {k: v.to_json_string() for k, v in terminals_map.items()}
+        rust_terminals_map_serial = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
+        assert py_terminals_map_serial == rust_terminals_map_serial, f"terminals_map mismatch. Python: {py_terminals_map_serial}, Rust: {rust_terminals_map_serial}"
+
             terminals = ffi.Bitset.zeros()
             for terminal_id, _ in matches:
                 terminals.insert(terminal_id)
             terminals_map[tokenizer_sid] = terminals
 
-        # === ASSERTION 1: Compare maps ===
-        rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
-        
-        py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
-        rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-        assert py_terminals_map_serializable == rust_terminals_map_serializable, f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}"
-        # =================================
-
         temp_states: Dict[int, FastGSS] = {}
         for tokenizer_sid, gss in self.state.items():
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-
-            # === ASSERTION 2: Compare pruned GSS ===
-            rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
-            ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
-            py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
-            # =======================================
-
             if any(h is not pruned_gss._root for h in pruned_gss._heads):
                  mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-
-                 # === ASSERTION 3: Compare mapped GSS ===
-                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
-                 # =======================================
-
                  temp_states[tokenizer_sid] = mapped_gss
         
+        rust_states_before_prune = self.constraint_state.get_state_map()
+        for tokenizer_sid, gss in self.state.items():
+            pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+            rust_gss_before_prune = rust_states_before_prune[tokenizer_sid]
+            rust_gss_after_prune = rust_gss_before_prune.clone_node()
+            ffi.gss_prune_disallowed_terminals(rust_gss_after_prune, terminals_map)
+            py_gss_from_rust_after_prune = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+            assert pruned_gss == py_gss_from_rust_after_prune, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+            if any(h is not pruned_gss._root for h in pruned_gss._heads):
+                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                 rust_gss_after_map = rust_gss_after_prune.clone_node()
+                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_map, state_map)
+                 py_gss_from_rust_after_map = convert_rust_gss_to_python_gss(rust_gss_after_map)
+                 assert mapped_gss == py_gss_from_rust_after_map, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                 temp_states[tokenizer_sid] = mapped_gss
+
         current_state_for_processing = temp_states
         # --- End: Added pre-processing steps ---
 
