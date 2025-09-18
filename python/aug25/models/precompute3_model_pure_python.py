@@ -11,7 +11,10 @@ from gss_tester.leveled_impl import LeveledGSS as GSS
 
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> GSS:
     flattened_stacks = rust_gss_node.flatten()
-    
+
+    if len(flattened_stacks) == 1 and flattened_stacks[0][0] == []:
+        return GSS.from_stacks([])
+
     stacks_for_from_stacks: List[Tuple[List[int], PyAcc]] = []
     for path_ids, terminals_union in flattened_stacks:
         py_acc = PyAcc(terminals_union=terminals_union)
@@ -303,7 +306,7 @@ class Model(GraphProvider):
             rust_gss_before_prune = rust_state_map_before_commit[tokenizer_sid]
             ffi.gss_prune_disallowed_terminals(rust_gss_before_prune, terminals_map)
             py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
-            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
+            assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
             # =======================================
 
             if not pruned_gss.is_empty():
@@ -313,7 +316,7 @@ class Model(GraphProvider):
                  rust_gss_after_prune = rust_gss_before_prune # it was modified in place
                  ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
                  py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}"
+                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
                  # =======================================
 
                  temp_states[tokenizer_sid] = mapped_gss
