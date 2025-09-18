@@ -90,6 +90,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         self._heads: Dict[_StackNode[T], List[Acc]] = heads if heads is not None else {}
         # accumulators for empty stacks (each entry is one stack's acc)
         self._empty_accs: List[Acc] = empty_accs if empty_accs is not None else []
+        self._hash: Optional[int] = None
         # Edge metadata: (parent_node, T) -> max depth (absolute depth from the implicit root)
         # parent_node is None for the first edge (i.e., edge to single-element stacks).
         self._edge_max_depth: Dict[Tuple[Optional[_StackNode[T]], T], int] = {}
@@ -344,6 +345,42 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         new_inst = LeveledGSS(self._factory, new_heads, new_empty)
         # __init__ invokes _recompute_edge_max_depth
         return new_inst
+
+    def __hash__(self) -> int:
+        if self._hash is not None:
+            return self._hash
+
+        from collections import defaultdict
+
+        stacks_to_accs: DefaultDict[Tuple[T, ...], List[Acc]] = defaultdict(list)
+
+        # Non-empty stacks
+        for head, accs in self._heads.items():
+            # reconstruct the list of T from the head
+            vals: List[T] = []
+            cur: Optional[_StackNode[T]] = head
+            while cur is not None:
+                vals.append(cur.value)
+                cur = cur.prev
+            vals.reverse()
+            stack_tuple = tuple(vals)
+            stacks_to_accs[stack_tuple].extend(accs)
+
+        # Empty stacks
+        if self._empty_accs:
+            stacks_to_accs[()].extend(self._empty_accs)
+
+        canonical_set = set()
+        for stack_tuple, accs in stacks_to_accs.items():
+            if not accs:
+                continue
+            # The problem states merge is commutative-associative, so order of reduction doesn't matter for the result.
+            merged_acc = reduce(lambda a, b: a.merge(b), accs)
+            canonical_set.add((stack_tuple, merged_acc))
+
+        # Cache the hash
+        self._hash = hash(frozenset(canonical_set))
+        return self._hash
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, LeveledGSS):
