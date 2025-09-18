@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, 
 from dataclasses import dataclass, field
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
+from typing import cast
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,52 @@ class PyAcc:
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         return PyAcc(self.terminals_union.union(other.terminals_union))
+
+
+# -----------------------------------------------------------------------------
+# Prefix-sharing stack node for the GSS (true DAG representation)
+# -----------------------------------------------------------------------------
+class StackNode:
+    """
+    Interned node representing a stack frame: (state, prev, depth).
+    - state: int for non-empty; None for the empty stack
+    - prev: previous StackNode (None for empty)
+    - depth: cached depth for O(1) access
+    Interner ensures identical (state, prev) pairs share the same object.
+    """
+    __slots__ = ("state", "prev", "depth")
+    _intern: Dict[Tuple[int, "StackNode"], "StackNode"] = {}
+    EMPTY: "StackNode" = cast("StackNode", None)  # set after class definition
+
+    @classmethod
+    def make(cls, state: int, prev: "StackNode") -> "StackNode":
+        key = (int(state), prev)
+        n = cls._intern.get(key)
+        if n is None:
+            n = object.__new__(cls)
+            n.state = int(state)
+            n.prev = prev
+            n.depth = prev.depth + 1
+            cls._intern[key] = n
+        return n
+
+    @classmethod
+    def from_list(cls, vals: List[int]) -> "StackNode":
+        node = cls.EMPTY
+        for v in vals:
+            node = cls.make(int(v), node)
+        return node
+
+    def __repr__(self) -> str:
+        # Debug-friendly representation (avoid reconstructing full tuple by default)
+        return f"StackNode(state={self.state}, depth={self.depth})"
+
+
+# Initialize EMPTY sentinel
+StackNode.EMPTY = object.__new__(StackNode)
+StackNode.EMPTY.state = None
+StackNode.EMPTY.prev = None
+StackNode.EMPTY.depth = 0
 
 
 # -----------------------------
@@ -247,18 +294,18 @@ class GSS:
     """
     A compact Graph-Structured Stack representation.
 
-    Conceptually, it's just a multiset of stacks (each a tuple of state IDs),
-    each annotated with a PyAcc accumulator. We canonicalize by merging
-    accumulators per identical stack, so internally it's:
-        Dict[Tuple[int, ...], PyAcc]
+    Conceptually, it's a multiset of stacks, each annotated with a PyAcc.
+    Unlike the earlier simplified version that used full tuples, we store
+    prefix-sharing nodes to avoid O(depth) tuple copying. Internally:
+        Dict[StackNode, PyAcc]   (one accumulator per unique stack head)
 
-    The empty stack is represented by the empty tuple ().
+    The empty stack is represented by StackNode.EMPTY.
     """
     # Active profiler for merge instrumentation (set by _CommitProfiler)
     _active_profiler: Optional[_CommitProfiler] = None
 
-    def __init__(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> None:
-        self._heads: Dict[Tuple[int, ...], PyAcc] = heads if heads is not None else {}
+    def __init__(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> None:
+        self._heads: Dict[StackNode, PyAcc] = heads if heads is not None else {}
 
     @classmethod
     def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[Any] = None) -> "GSS":
@@ -268,23 +315,24 @@ class GSS:
         node_factory is ignored in this simplified implementation; we keep it in the
         signature for compatibility with existing call sites.
         """
-        m: Dict[Tuple[int, ...], PyAcc] = {}
+        m: Dict[StackNode, PyAcc] = {}
         for vals, acc in stacks:
-            key = tuple(vals)
-            if key in m:
-                m[key] = m[key].merge(acc)
+            node = StackNode.from_list(vals)
+            existing = m.get(node)
+            if existing is None:
+                m[node] = acc
             else:
-                m[key] = acc
+                m[node] = existing.merge(acc)
         return cls(m)
 
-    def _clone_with(self, heads: Optional[Dict[Tuple[int, ...], PyAcc]] = None) -> "GSS":
-        return GSS(dict(self._heads) if heads is None else heads)
+    def _clone_with(self, heads: Optional[Dict[StackNode, PyAcc]] = None) -> "GSS":
+        return GSS(dict(self._heads) if heads is None else cast(Dict[StackNode, PyAcc], heads))
 
     # --- Introspection helpers (used by profiler) ---
 
     def head_count(self) -> int:
         # Non-empty stacks only
-        return sum(1 for k in self._heads.keys() if len(k) > 0)
+        return sum(1 for k in self._heads.keys() if k.state is not None)
 
     def acc_count(self) -> int:
         # One accumulator per unique stack
@@ -295,22 +343,33 @@ class GSS:
         return len(self._heads)
 
     def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
-        n = 0
-        for k in self._heads.keys():
-            yield k
-            n += 1
-            if limit is not None and n >= limit:
+        def node_to_tuple(node: StackNode) -> Tuple[int, ...]:
+            if node.state is None:
+                return ()
+            out: List[int] = []
+            p = node
+            while p.state is not None:
+                out.append(p.state)
+                p = p.prev
+            out.reverse()
+            return tuple(out)
+
+        count = 0
+        for node in self._heads.keys():
+            yield node_to_tuple(node)
+            count += 1
+            if limit is not None and count >= limit:
                 break
 
     def compute_stats(self) -> GSSStats:
         if not self._heads:
             return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
-        depths = [len(k) for k in self._heads.keys()]
+        depths = [k.depth for k in self._heads.keys()]
         dmin = min(depths) if depths else 0
         dmax = max(depths) if depths else 0
         dmean = (sum(depths) / len(depths)) if depths else 0.0
-        empty_present = 1 if () in self._heads else 0
-        heads_nonempty = sum(1 for k in self._heads.keys() if k)
+        empty_present = 1 if StackNode.EMPTY in self._heads else 0
+        heads_nonempty = sum(1 for k in self._heads.keys() if k.state is not None)
         return GSSStats(
             heads=heads_nonempty,
             empty_stacks=empty_present,
@@ -326,15 +385,21 @@ class GSS:
             print("[GSS PREFIX ANALYSIS] Empty GSS")
             return
 
-        prefixes = collections.defaultdict(int)
+        # Count unique nodes (prefixes) across all stacks, and how frequently each prefix occurs.
+        visited: Set[StackNode] = set()
+        prefix_counts: Dict[StackNode, int] = collections.Counter()
         total_stack_els = 0
-        for stack in self._heads.keys():
-            total_stack_els += len(stack)
-            for i in range(1, len(stack) + 1):
-                prefixes[stack[:i]] += 1
+        for node in self._heads.keys():
+            total_stack_els += node.depth
+            p = node
+            while p.state is not None:
+                prefix_counts[p] += 1
+                if p not in visited:
+                    visited.add(p)
+                p = p.prev
 
         num_unique_stacks = len(self._heads)
-        num_unique_prefixes = len(prefixes)
+        num_unique_prefixes = len(visited)
 
         print("[GSS PREFIX ANALYSIS]")
         print(f"  Unique stacks: {num_unique_stacks}")
@@ -346,18 +411,28 @@ class GSS:
 
         if num_unique_stacks > 10:
             print("  Top 10 most common prefixes:")
-            for p, count in sorted(prefixes.items(), key=lambda item: item[1], reverse=True)[:10]:
-                print(f"    - Prefix {p} occurred {count} times")
+            # Reconstruct tuple for readability when printing
+            def node_to_tuple(n: StackNode) -> Tuple[int, ...]:
+                path: List[int] = []
+                p = n
+                while p.state is not None:
+                    path.append(p.state)
+                    p = p.prev
+                path.reverse()
+                return tuple(path)
+            for node, count in sorted(prefix_counts.items(), key=lambda item: item[1], reverse=True)[:10]:
+                print(f"    - Prefix {node_to_tuple(node)} occurred {count} times")
     # --- Core operations ---
 
     def push(self, value: int) -> "GSS":
-        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-        for stack, acc in self._heads.items():
-            new_stack = stack + (value,)
-            if new_stack in new_heads:
-                new_heads[new_stack] = new_heads[new_stack].merge(acc)
+        new_heads: Dict[StackNode, PyAcc] = {}
+        for node, acc in self._heads.items():
+            new_node = StackNode.make(int(value), node)
+            existing = new_heads.get(new_node)
+            if existing is None:
+                new_heads[new_node] = acc
             else:
-                new_heads[new_stack] = acc
+                new_heads[new_node] = existing.merge(acc)
         return GSS(new_heads)
 
     def pop(self) -> "GSS":
@@ -366,16 +441,18 @@ class GSS:
     def popn(self, n: int) -> "GSS":
         if n <= 0:
             return self
-        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-        for stack, acc in self._heads.items():
-            if len(stack) <= n:
-                new_stack: Tuple[int, ...] = ()
+        new_heads: Dict[StackNode, PyAcc] = {}
+        for node, acc in self._heads.items():
+            p = node
+            steps = n
+            while steps > 0 and p.state is not None:
+                p = p.prev
+                steps -= 1
+            existing = new_heads.get(p)
+            if existing is None:
+                new_heads[p] = acc
             else:
-                new_stack = stack[:-n]
-            if new_stack in new_heads:
-                new_heads[new_stack] = new_heads[new_stack].merge(acc)
-            else:
-                new_heads[new_stack] = acc
+                new_heads[p] = existing.merge(acc)
         return GSS(new_heads)
 
     def is_empty(self) -> bool:
@@ -383,35 +460,35 @@ class GSS:
 
     def isolate(self, value: Optional[int]) -> "GSS":
         if value is None:
-            acc = self._heads.get(())
-            return GSS({(): acc} if acc is not None else {})
-        new_heads: Dict[Tuple[int, ...], PyAcc] = {}
-        for stack, acc in self._heads.items():
-            if stack and stack[-1] == value:
-                new_heads[stack] = acc
+            acc = self._heads.get(StackNode.EMPTY)
+            return GSS({StackNode.EMPTY: acc} if acc is not None else {})
+        new_heads: Dict[StackNode, PyAcc] = {}
+        for node, acc in self._heads.items():
+            if node.state == value:
+                new_heads[node] = acc
         return GSS(new_heads)
 
-    def _partition_by_top(self) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
-        groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
-        for stack, acc in self._heads.items():
-            if not stack:
+    def _partition_by_top(self) -> Dict[int, Dict[StackNode, PyAcc]]:
+        groups: Dict[int, Dict[StackNode, PyAcc]] = {}
+        for node, acc in self._heads.items():
+            if node.state is None:
                 continue
-            top = stack[-1]
+            top = node.state
             bucket = groups.get(top)
             if bucket is None:
                 bucket = {}
                 groups[top] = bucket
-            bucket[stack] = acc
+            bucket[node] = acc
         return groups
 
     def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
-        return GSS({stack: func(acc) for stack, acc in self._heads.items()})
+        return GSS({node: func(acc) for node, acc in self._heads.items()})
 
     def prune(self, predicate: Callable[[PyAcc], bool]) -> "GSS":
-        return GSS({stack: acc for stack, acc in self._heads.items() if predicate(acc)})
+        return GSS({node: acc for node, acc in self._heads.items() if predicate(acc)})
 
     def peek(self) -> Set[int]:
-        return {stack[-1] for stack in self._heads.keys() if stack}
+        return {node.state for node in self._heads.keys() if node.state is not None}
 
     def reduce_acc(self) -> Optional[PyAcc]:
         combined: Optional[PyAcc] = None
@@ -421,7 +498,7 @@ class GSS:
 
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
-        merged: Dict[Tuple[int, ...], PyAcc] = {}
+        merged: Dict[StackNode, PyAcc] = {}
         num_inputs = 0
         input_stacks_total = 0
 
@@ -437,11 +514,12 @@ class GSS:
         for gss in gss_list:
             num_inputs += 1
             input_stacks_total += gss.stack_count()
-            for stack, acc in gss._heads.items():
-                if stack in merged:
-                    merged[stack] = merged[stack].merge(acc)
+            for node, acc in gss._heads.items():
+                existing = merged.get(node)
+                if existing is None:
+                    merged[node] = acc
                 else:
-                    merged[stack] = acc
+                    merged[node] = existing.merge(acc)
 
         output_stacks = len(merged)
         if GSS._active_profiler is not None:
@@ -637,9 +715,17 @@ class Model(GraphProvider):
             if not pruned.is_empty():
                 current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
 
-        # Accumulate results incrementally per tokenizer state (avoid large lists)
-        # We first bucket all partial GSS fragments per tokenizer state, then merge once at the end.
-        new_states_bins: Dict[int, List[GSS]] = collections.defaultdict(list)
+        # Accumulate results incrementally per tokenizer state using an in-place head aggregator.
+        # This avoids building large lists of GSS fragments and then GSS.merge()-ing all of them.
+        new_states_aggs: Dict[int, Dict[StackNode, PyAcc]] = {}
+
+        def merge_heads_inplace(dst: Dict[StackNode, PyAcc], src_gss: GSS) -> None:
+            for node, acc in src_gss._heads.items():
+                existing = dst.get(node)
+                if existing is None:
+                    dst[node] = acc
+                else:
+                    dst[node] = existing.merge(acc)
         q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
         visited_q_items: set = set()
         if profiler is not None:
@@ -683,27 +769,34 @@ class Model(GraphProvider):
                     new_offset = offset + width
                     next_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        # Defer merging; just bucket results
-                        new_states_bins[next_sid].append(processed_gss)
+                        # Directly merge into aggregator to avoid later N-way merges
+                        bucket = new_states_aggs.get(next_sid)
+                        if bucket is None:
+                            bucket = {}
+                            new_states_aggs[next_sid] = bucket
+                        merge_heads_inplace(bucket, processed_gss)
                     else:
-                        q.append((new_offset, next_sid, processed_gss))
+                        q.append((new_offset, next_sid, processed_gss))  # continue exploring
                         if profiler is not None:
                             profiler.on_enqueue_after_match()
 
             if end_state is not None:
                 # carry-forward without consumption
-                new_states_bins[end_state].append(gss)
+                bucket = new_states_aggs.get(end_state)
+                if bucket is None:
+                    bucket = {}
+                    new_states_aggs[end_state] = bucket
+                merge_heads_inplace(bucket, gss)
                 if profiler is not None:
                     profiler.on_carry_forward()
 
         # Finalize: single merge per tokenizer state, then prune empties
         new_states: Dict[int, GSS] = {}
-        for sid, pieces in new_states_bins.items():
-            if not pieces:
-                continue
-            merged = pieces[0] if len(pieces) == 1 else GSS.merge(pieces)
-            if not merged.is_empty():
-                new_states[sid] = merged
+        for sid, heads in new_states_aggs.items():
+            if heads:
+                g = GSS(heads)
+                if not g.is_empty():
+                    new_states[sid] = g
         self.state = new_states
 
         t1 = time.perf_counter()
@@ -726,59 +819,60 @@ class Model(GraphProvider):
             return GSS({})
 
         # Worklist: state_id -> dict of heads for that state
-        work: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {sid: dict(heads) for sid, heads in initial_groups.items()}
+        work: Dict[int, Dict[StackNode, PyAcc]] = {sid: dict(heads) for sid, heads in initial_groups.items()}
         # Aggregate all shifted results into a single dict
-        shifted_agg: Dict[Tuple[int, ...], PyAcc] = {}
+        shifted_agg: Dict[StackNode, PyAcc] = {}
 
         c_shifts = 0
         c_reduces = 0
         c_splits = 0
         c_gotos = 0
 
-        def merge_inplace(dst: Dict[Tuple[int, ...], PyAcc], src: Dict[Tuple[int, ...], PyAcc]) -> None:
-            for st, acc in src.items():
-                existing = dst.get(st)
+        def merge_inplace(dst: Dict[StackNode, PyAcc], src: Dict[StackNode, PyAcc]) -> None:
+            for node, acc in src.items():
+                existing = dst.get(node)
                 if existing is None:
-                    dst[st] = acc
+                    dst[node] = acc
                 else:
-                    dst[st] = existing.merge(acc)
+                    dst[node] = existing.merge(acc)
 
-        def push_into(heads: Dict[Tuple[int, ...], PyAcc], value: int, target: Dict[Tuple[int, ...], PyAcc]) -> None:
-            for stack, acc in heads.items():
-                new_stack = stack + (value,)
-                existing = target.get(new_stack)
+        def push_into(heads: Dict[StackNode, PyAcc], value: int, target: Dict[StackNode, PyAcc]) -> None:
+            for node, acc in heads.items():
+                new_node = StackNode.make(int(value), node)
+                existing = target.get(new_node)
                 if existing is None:
-                    target[new_stack] = acc
+                    target[new_node] = acc
                 else:
-                    target[new_stack] = existing.merge(acc)
+                    target[new_node] = existing.merge(acc)
 
-        def popn_dict(heads: Dict[Tuple[int, ...], PyAcc], n: int) -> Dict[Tuple[int, ...], PyAcc]:
+        def popn_dict(heads: Dict[StackNode, PyAcc], n: int) -> Dict[StackNode, PyAcc]:
             if n <= 0:
                 return dict(heads)
-            out: Dict[Tuple[int, ...], PyAcc] = {}
-            for stack, acc in heads.items():
-                if len(stack) <= n:
-                    new_stack: Tuple[int, ...] = ()
-                else:
-                    new_stack = stack[:-n]
-                existing = out.get(new_stack)
+            out: Dict[StackNode, PyAcc] = {}
+            for node, acc in heads.items():
+                p = node
+                steps = n
+                while steps > 0 and p.state is not None:
+                    p = p.prev
+                    steps -= 1
+                existing = out.get(p)
                 if existing is None:
-                    out[new_stack] = acc
+                    out[p] = acc
                 else:
-                    out[new_stack] = existing.merge(acc)
+                    out[p] = existing.merge(acc)
             return out
 
-        def partition_by_top_dict(heads: Dict[Tuple[int, ...], PyAcc]) -> Dict[int, Dict[Tuple[int, ...], PyAcc]]:
-            groups: Dict[int, Dict[Tuple[int, ...], PyAcc]] = {}
-            for stack, acc in heads.items():
-                if not stack:
+        def partition_by_top_dict(heads: Dict[StackNode, PyAcc]) -> Dict[int, Dict[StackNode, PyAcc]]:
+            groups: Dict[int, Dict[StackNode, PyAcc]] = {}
+            for node, acc in heads.items():
+                if node.state is None:
                     continue
-                top = stack[-1]
+                top = node.state
                 bucket = groups.get(top)
                 if bucket is None:
                     bucket = {}
                     groups[top] = bucket
-                bucket[stack] = acc
+                bucket[node] = acc
             return groups
 
         while work:
