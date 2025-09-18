@@ -116,30 +116,41 @@ class ReferenceGSS(GSS[T, Acc]):
         """Converts to canonical ReferenceGSS by merging duplicate stacks."""
         return ReferenceGSS.merge([self])
 
-    def to_json_serializable(self) -> Any:
-        # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-        # First, merge any stacks with identical values.
-        merged: Dict[Tuple[T, ...], Acc] = {}
-        for vals, acc in self._stacks:
-            key = tuple(vals)
-            if key in merged:
-                merged[key] = merged[key].merge(acc)
-            else:
-                merged[key] = acc
-
-        items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+    def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
+        """Helper to merge and sort stacks for deterministic representations."""
+        canonical_gss = self.to_reference_impl()
+        items = canonical_gss._stacks
 
         def _encode_for_sort(obj: Any) -> str:
-            # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
             try:
                 return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
             except Exception:
-                # Fallback to repr if something goes wrong
                 return repr(obj)
 
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+        return items
+
+    def to_json_serializable(self) -> Any:
+        # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+        items = self._get_canonical_sorted_stacks()
         # Return a plain JSON-serializable structure
         return [[vals, acc] for vals, acc in items]
+
+    def __str__(self) -> str:
+        """Provides a human-readable, deterministic string representation."""
+        items = self._get_canonical_sorted_stacks()
+        if not items:
+            return f"{self.__class__.__name__}(empty)"
+
+        lines = [f"{self.__class__.__name__}:"]
+        for vals, acc in items:
+            lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        """Provides an unambiguous, deterministic string representation."""
+        items = self._get_canonical_sorted_stacks()
+        return f"{self.__class__.__name__}(_stacks={items!r})"
 
     def is_empty(self) -> bool:
         # True iff there is exactly one active stack and that stack is empty.

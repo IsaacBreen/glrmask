@@ -105,7 +105,9 @@ class GSS(ABC, Generic[T, Acc]):
         return ref_impl.to_json_serializable()
 
     def __str__(self) -> str:
-        """Provides a default string representation for debugging."""
-        # The canonical JSON representation requires a merge function, so it cannot be
-        # used for a simple string conversion.
-        return super().__str__()
+        """Provides a human-readable string representation for debugging."""
+        return str(self.to_reference_impl())
+
+    def __repr__(self) -> str:
+        """Provides an unambiguous string representation of the GSS."""
+        return repr(self.to_reference_impl())
