@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any
+from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
 import json
 
 T = TypeVar('T')  # Stack item type
@@ -69,8 +69,11 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-        """Merges the accumulators of all active stacks into a single value."""
+    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
+        """
+        Merges the accumulators of all active stacks into a single optional value.
+        Returns None if there are no active stacks.
+        """
         pass
 
     @staticmethod

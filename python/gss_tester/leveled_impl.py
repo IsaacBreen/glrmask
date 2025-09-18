@@ -351,20 +351,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 vals.add(v)
         return vals
 
-    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
+    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
         """
         Merge the accumulators of all active stacks using merge_func (left fold).
+        Returns None if there are no active stacks.
         """
-        it = iter(self._heads)
-        try:
-            first = next(it)
-        except StopIteration:
-            # Shouldn't happen; empty GSS has root with an acc
-            return self._root_acc
-        acc_val = first.acc
-        for h in it:
-            acc_val = merge_func(acc_val, h.acc)
-        return acc_val
+        if not self._heads:
+            return None
+        return reduce(merge_func, (h.acc for h in self._heads))
 
     @staticmethod
     def merge(gss_list: Iterable["LeveledGSS[T, Acc]"], merge_func: Callable[[Acc, Acc], Acc]) -> "LeveledGSS[T, Acc]":

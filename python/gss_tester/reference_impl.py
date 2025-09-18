@@ -1,4 +1,4 @@
-from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type
+from typing import List, Tuple, Callable, Set, Iterable, Dict, Any, Type, Optional
 from functools import reduce
 from .interface import GSS, T, Acc
 
@@ -56,9 +56,14 @@ class ReferenceGSS(GSS[T, Acc]):
     def peek(self) -> Set[T]:
         return {stack[-1] for stack, acc in self.stacks if stack}
 
-    def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
-        """Merges the accumulators of all active stacks into a single value."""
+    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
+        """
+        Merges the accumulators of all active stacks into a single optional value.
+        Returns None if there are no active stacks.
+        """
         accumulators = [acc for _, acc in self.stacks]
+        if not accumulators:
+            return None
         return reduce(merge_func, accumulators)
 
     @staticmethod
