@@ -682,11 +682,12 @@ local_system:
                           curr = nxt
                       else:
                           curr = nxt
-                          # Best-effort cache fill if missing
-                          if nxt.id not in path_cache:
-                              # Reconstruct from parent_of
-                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
-                              path_cache[nxt.id] = ppath
+                          # When traversing an existing node, we must update curr_path
+                          # to ensure the next segment is built on the correct prefix.
+                          if curr.id not in path_cache:
+                              # This is a best-effort cache fill.
+                              path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+                          curr_path = path_cache[curr.id]
                       node = curr
                   return node
 
@@ -2069,10 +2070,10 @@ local_system:
               return ReferenceGSS(new_stacks, self._root_acc)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              new_stacks = []
-              for stack, acc in self.stacks:
-                  if stack:
-                      new_stacks.append((stack[:-1], acc))
+              # Pop each stack, then use a set to deduplicate (stack, acc) pairs.
+              # Stacks (lists) are converted to tuples to be hashable.
+              popped_stacks = {(tuple(stack[:-1]), acc) for stack, acc in self.stacks if stack}
+              new_stacks = [(list(s), a) for s, a in popped_stacks]
               return ReferenceGSS(new_stacks, self._root_acc)
 
           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
@@ -3209,11 +3210,12 @@ messages:
                           curr = nxt
                       else:
                           curr = nxt
-                          # Best-effort cache fill if missing
-                          if nxt.id not in path_cache:
-                              # Reconstruct from parent_of
-                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
-                              path_cache[nxt.id] = ppath
+                          # When traversing an existing node, we must update curr_path
+                          # to ensure the next segment is built on the correct prefix.
+                          if curr.id not in path_cache:
+                              # This is a best-effort cache fill.
+                              path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
+                          curr_path = path_cache[curr.id]
                       node = curr
                   return node
 
@@ -3797,7 +3799,7 @@ messages:
       filename: python/gss_tester/run_tests.sh
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-18_13-14-18
+      Test results will be saved in: gss_test_results/2025-09-18_13-16-35
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -3805,25 +3807,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-18_13-16-35/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 28 checks.
-      Results saved to gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-18_13-16-35/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-18_13-16-35/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
       Successfully ran 28 checks.
-      Results saved to gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-18_13-16-35/gss_tester.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-18_13-14-18/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-18_13-14-18/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-18_13-16-35/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-18_13-16-35/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-18_13-16-35/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -3841,15 +3843,15 @@ messages:
       --- Divergence Report ---
 
       Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
-        - First divergence at yield index 5:
-          - gss_tester.leveled_impl.LeveledGSS (L45): [{"stack": [1, 2], "acc": 0}, {"stack": [3], "acc": 0}]
-          - gss_tester.reference_impl.ReferenceGSS (L45): [{"stack": [1, 2], "acc": 0}, {"stack": [1, 3], "acc": 0}]
+        - First divergence at yield index 21:
+          - gss_tester.leveled_impl.LeveledGSS (L114): [{"stack": [100], "acc": 0}]
+          - gss_tester.reference_impl.ReferenceGSS (L114): [{"stack": [100], "acc": 0}, {"stack": [100], "acc": 0}]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-18_13-14-18
+      Full JSON results are in: gss_test_results/2025-09-18_13-16-35
     metadata:
   - user: Fix this.
     metadata:
@@ -3870,73 +3872,61 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the divergence report, there's a bug in the `LeveledGSS.merge` method. When rebuilding a GSS from multiple paths that share a prefix (like `[1, 2]` and `[1, 3]`), the implementation fails to correctly track the path prefix when traversing the shared part of the structure. This results in an incorrect path being cached for the non-shared part, causing the divergence you observed.
+      Based on the divergence report, the `ReferenceGSS` implementation has a bug in its `pop` method. When multiple stacks are popped and result in identical parent stacks with identical accumulators, `ReferenceGSS` incorrectly keeps them as duplicates instead of merging them into a single stack. The `LeveledGSS` implementation behaves correctly.
 
-      Here are the step-by-step instructions to fix the bug, followed by the corresponding git diff.
+      Here are the step-by-step instructions to fix the bug in `ReferenceGSS`.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
+      1.  **Open the file `python/gss_tester/reference_impl.py`**.
 
-      2.  **Navigate to the `merge` static method** within the `LeveledGSS` class. Inside this method, locate the nested helper function `get_or_create_node`.
-
-      3.  **Find the `for` loop** inside `get_or_create_node`. The bug is in the `else` block of the main conditional statement within this loop. This block is executed when traversing a part of the path that already exists in the new GSS structure being built.
-
-      4.  **Modify the `else` block.** The original code correctly moves to the next node but fails to update the `curr_path` variable, which tracks the path to the current node. You need to replace the existing `else` block with logic that updates `curr_path` from the `path_cache` after traversing to an existing node.
-
-          Specifically, replace this block:
-
+      2.  **Find the `pop` method**. The current implementation looks like this:
           ```python
-                          curr = nxt
-                          # Best-effort cache fill if missing
-                          if nxt.id not in path_cache:
-                              # Reconstruct from parent_of
-                              ppath = _reconstruct_path(nxt, parent_of, path_cache)
-                              path_cache[nxt.id] = ppath
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              new_stacks = []
+              for stack, acc in self.stacks:
+                  if stack:
+                      new_stacks.append((stack[:-1], acc))
+              return ReferenceGSS(new_stacks, self._root_acc)
           ```
 
-          With this corrected block:
+      3.  **Replace this method** with a corrected version that uses a `set` to automatically deduplicate the resulting `(stack, accumulator)` pairs. To add stacks to a set, the stack `list` must first be converted to a `tuple`.
 
+          The corrected method is:
           ```python
-                          curr = nxt
-                          # When traversing an existing node, we must update curr_path
-                          # to ensure the next segment is built on the correct prefix.
-                          if curr.id not in path_cache:
-                              # This is a best-effort cache fill.
-                              path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
-                          curr_path = path_cache[curr.id]
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              # Pop each stack, then use a set to deduplicate (stack, acc) pairs.
+              # Stacks (lists) are converted to tuples to be hashable.
+              popped_stacks = {(tuple(stack[:-1]), acc) for stack, acc in self.stacks if stack}
+              new_stacks = [(list(s), a) for s, a in popped_stacks]
+              return ReferenceGSS(new_stacks, self._root_acc)
           ```
-
-      This change ensures that `curr_path` always holds the correct prefix, so when the path diverges and new nodes are created, their paths are cached correctly.
+      This change ensures that the `ReferenceGSS` correctly models stack merging on pop operations, aligning its behavior with the more sophisticated `LeveledGSS` implementation.
 
       ### Git Diff
 
-      Here is the git patch to apply the fix.
+      Here is the git diff for the required change:
 
       ```diff
-      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 99d9183..c9725f0 100644
-      --- a/python/gss_tester/leveled_impl.py
-      +++ b/python/gss_tester/leveled_impl.py
-      @@ -485,12 +485,12 @@
-                           path_cache[nxt.id] = curr_path
-                           curr = nxt
-                       else:
-                           curr = nxt
-      -                    # Best-effort cache fill if missing
-      -                    if nxt.id not in path_cache:
-      -                        # Reconstruct from parent_of
-      -                        ppath = _reconstruct_path(nxt, parent_of, path_cache)
-      -                        path_cache[nxt.id] = ppath
-      +                    # When traversing an existing node, we must update curr_path
-      +                    # to ensure the next segment is built on the correct prefix.
-      +                    if curr.id not in path_cache:
-      +                        # This is a best-effort cache fill.
-      +                        path_cache[curr.id] = _reconstruct_path(curr, parent_of, path_cache)
-      +                    curr_path = path_cache[curr.id]
-                       node = curr
-                   return node
+      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
+      index 2826645..089148d 100644
+      --- a/python/gss_tester/reference_impl.py
+      +++ b/python/gss_tester/reference_impl.py
+      @@ -32,11 +32,11 @@
+               return ReferenceGSS(new_stacks, self._root_acc)
        
+           def pop(self) -> 'ReferenceGSS[T, Acc]':
+      -        new_stacks = []
+      -        for stack, acc in self.stacks:
+      -            if stack:
+      -                new_stacks.append((stack[:-1], acc))
+      +        # Pop each stack, then use a set to deduplicate (stack, acc) pairs.
+      +        # Stacks (lists) are converted to tuples to be hashable.
+      +        popped_stacks = {(tuple(stack[:-1]), acc) for stack, acc in self.stacks if stack}
+      +        new_stacks = [(list(s), a) for s, a in popped_stacks]
+               return ReferenceGSS(new_stacks, self._root_acc)
+       
+           def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
 
       ```
     metadata:
@@ -3945,11 +3935,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/leveled_impl.py
-      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
+      Identified target file: python/gss_tester/reference_impl.py
+      Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly update curr_path in LeveledGSS.merge
-      to resolve divergence"'
+  - user: 'Changes committed with message: "Fix: Deduplicate stacks in ReferenceGSS.pop()
+      to merge identical stacks"'
     metadata:
 ...

@@ -32,10 +32,10 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks, self._root_acc)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        new_stacks = []
-        for stack, acc in self.stacks:
-            if stack:
-                new_stacks.append((stack[:-1], acc))
+        # Pop each stack, then use a set to deduplicate (stack, acc) pairs.
+        # Stacks (lists) are converted to tuples to be hashable.
+        popped_stacks = {(tuple(stack[:-1]), acc) for stack, acc in self.stacks if stack}
+        new_stacks = [(list(s), a) for s, a in popped_stacks]
         return ReferenceGSS(new_stacks, self._root_acc)
 
     def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
