@@ -1,277 +1,147 @@
 local_system:
   attached_files:
+    - python/gss_tester/__init__.py
+    - python/gss_tester/analyzer.py
     - python/gss_tester/interface.py
+    - python/gss_tester/leveled_impl.py
     - python/gss_tester/reference_impl.py
+    - python/gss_tester/runner.py
+    - python/gss_tester/test_spec.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/gss_tester/interface.py: |-
-      from abc import ABC, abstractmethod
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
       import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
 
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc') # Accumulator type
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
 
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def push(self, value: T) -> 'GSS[T, Acc]':
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop(merge_func)
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains only the initial empty stack."""
-              pass
-
-          @abstractmethod
-          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          @staticmethod
-          @abstractmethod
-          def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
-              pass
-
-          @abstractmethod
-          def to_json_serializable(self) -> Any:
-              """Returns a JSON-serializable representation of the GSS state for comparison."""
-              pass
-
-          def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
+          for file_path in result_files:
               try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
-              except Exception:
-                  return super().__str__()
-
-          def __eq__(self, other):
-              """Defines equality based on the canonical JSON representation."""
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __hash__(self):
-              """Defines hash based on the canonical JSON representation."""
-              pass
-    python/gss_tester/reference_impl.py: |
-      from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
-      from functools import reduce
-      from dataclasses import dataclass
-      import json
-
-      from .interface import GSS, T, Acc
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
 
 
-      @dataclass(eq=False)
-      class ReferenceGSS(GSS[T, Acc]):
-          """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Each stack is represented as a pair: (list_of_values, accumulator).
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
 
-          Notes on semantics (aligned with GSS interface):
-          - from_stacks: constructs a new GSS from explicit stacks.
-          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
-                   Stacks that are already empty are dropped by pop().
-          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
-          - apply(func): transforms each accumulator independently; returns a new GSS.
-          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
-          - peek(): returns the set of top values across all stacks (ignores empty stacks).
-          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
-                                    if there are no active stacks.
-          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
-                                         identical stacks using `merge_func`.
-          - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
-          """
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
 
-          _stacks: List[Tuple[List[T], Acc]]
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
 
-          def __post_init__(self):
-              # Ensure we have our own copies of the stack lists to prevent external mutation.
-              self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
 
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # The dataclass __init__ will be called, and __post_init__ will handle copying.
-              return cls(stacks)
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
 
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Push `value` onto all stacks (copy each list to avoid mutating original)
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  new_vals = list(vals)
-                  new_vals.append(value)
-                  new_stacks.append((new_vals, acc))
-              return ReferenceGSS(new_stacks)
-
-          def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks, merging accumulators for resulting identical stacks.
-              popped_stacks: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  if vals:
-                      new_vals_tuple = tuple(vals[:-1])
-                      if new_vals_tuple in popped_stacks:
-                          popped_stacks[new_vals_tuple] = merge_func(popped_stacks[new_vals_tuple], acc)
-                      else:
-                          popped_stacks[new_vals_tuple] = acc
-
-              result_stacks = [(list(key), acc) for key, acc in popped_stacks.items()]
-              return ReferenceGSS(result_stacks)
-
-          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
-              filtered: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if value is None:
-                      if not vals:
-                          filtered.append((list(vals), acc))
-                  else:
-                      if vals and vals[-1] == value:
-                          filtered.append((list(vals), acc))
-              return ReferenceGSS(filtered)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              # Apply func to each accumulator independently
-              transformed: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  transformed.append((list(vals), func(acc)))
-              return ReferenceGSS(transformed)
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks where predicate(acc) is True
-              kept: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if predicate(acc):
-                      kept.append((list(vals), acc))
-              return ReferenceGSS(kept)
-
-          def peek(self) -> Set[T]:
-              # Return all top values across non-empty stacks
-              tops: Set[T] = set()
-              for vals, _ in self._stacks:
-                  if vals:
-                      tops.add(vals[-1])
-              return tops
-
-          def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
-              # Reduce all accumulators into a single Acc (or None if no stacks)
-              if not self._stacks:
-                  return None
-              accs = [acc for _, acc in self._stacks]
-              return reduce(merge_func, accs)
-
-          @staticmethod
-          def merge(
-              gss_list: Iterable['ReferenceGSS[T, Acc]'],
-              merge_func: Callable[[Acc, Acc], Acc]
-          ) -> 'ReferenceGSS[T, Acc]':
-              # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for gss in gss_list:
-                  for vals, acc in gss._stacks:
-                      key = tuple(vals)
-                      if key in merged:
-                          merged[key] = merge_func(merged[key], acc)
-                      else:
-                          merged[key] = acc
-              result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
-              return ReferenceGSS(result_stacks)
-
-          def to_json_serializable(self) -> Any:
-              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-              items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
-
-              def _encode_for_sort(obj: Any) -> str:
-                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      # Fallback to repr if something goes wrong
-                      return repr(obj)
-
-              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              # Return a plain JSON-serializable structure
-              return [[vals, acc] for vals, acc in items]
-
-          def __hash__(self):
-              # Hash consistent with equality based on the canonical JSON representation.
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
               try:
-                  canonical = self.to_json_serializable()
-                  # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
-                  s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
-                  return hash(s)
-              except Exception:
-                  # Fallback: hash the tuple of tuples if possible, else id-based hash
-                  try:
-                      tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
-                      return hash(tup)
-                  except Exception:
-                      return object.__hash__(self)
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
 
-          def is_empty(self) -> bool:
-              # True iff there is exactly one active stack and that stack is empty.
-              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
-  prev_file_contents:
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
     python/gss_tester/interface.py: |
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
@@ -378,6 +248,7 @@ local_system:
               # The canonical JSON representation requires a merge function, so it cannot be
               # used for a simple string conversion.
               return super().__str__()
+    python/gss_tester/leveled_impl.py: ''
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
@@ -528,6 +399,843 @@ local_system:
           def is_empty(self) -> bool:
               # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+          gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+  prev_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/interface.py: |
+      from abc import ABC, abstractmethod
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol
+      import json
+
+      class Mergeable(Protocol):
+          """Protocol for accumulator types that can be merged."""
+          @abstractmethod
+          def merge(self, other: 'Mergeable') -> 'Mergeable':
+              ...
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self, n: int) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains only the initial empty stack."""
+              pass
+
+          @abstractmethod
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def reduce_acc(self) -> Optional[Acc]:
+              """
+              Merges the accumulators of all active stacks into a single optional value.
+              Returns None if there are no active stacks.
+              """
+              pass
+
+          @abstractmethod
+          def to_reference_impl(self) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              pass
+
+          @staticmethod
+          @abstractmethod
+          def merge(gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+              """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
+              pass
+
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              # to_reference_impl is expected to return a ReferenceGSS instance.
+              ref_impl = self.to_reference_impl()
+              # We can now call the ReferenceGSS's specific implementation.
+              return ref_impl.to_json_serializable()
+
+          def __str__(self) -> str:
+              """Provides a default string representation for debugging."""
+              # The canonical JSON representation requires a merge function, so it cannot be
+              # used for a simple string conversion.
+              return super().__str__()
+    python/gss_tester/leveled_impl.py: ''
+    python/gss_tester/reference_impl.py: |
+      from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
+      from functools import reduce
+      from dataclasses import dataclass
+      import json
+
+      from .interface import GSS, T, Acc
+
+
+      @dataclass(eq=False)
+      class ReferenceGSS(GSS[T, Acc]):
+          """
+          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+          Each stack is represented as a pair: (list_of_values, accumulator).
+
+          Notes on semantics (aligned with GSS interface):
+          - from_stacks: constructs a new GSS from explicit stacks.
+          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
+          - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
+                   Stacks that are already empty are dropped by pop().
+          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
+          - apply(func): transforms each accumulator independently; returns a new GSS.
+          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
+          - peek(): returns the set of top values across all stacks (ignores empty stacks).
+          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
+                                    if there are no active stacks.
+          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
+                                         identical stacks using `merge_func`.
+          - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
+          """
+
+          _stacks: List[Tuple[List[T], Acc]]
+
+          def __post_init__(self):
+              # Ensure we have our own copies of the stack lists to prevent external mutation.
+              self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
+
+          @classmethod
+          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
+              # The dataclass __init__ will be called, and __post_init__ will handle copying.
+              return cls(stacks)
+
+          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
+              # Push `value` onto all stacks (copy each list to avoid mutating original)
+              new_stacks: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  new_vals = list(vals)
+                  new_vals.append(value)
+                  new_stacks.append((new_vals, acc))
+              return ReferenceGSS(new_stacks)
+
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              # Pop from all non-empty stacks, without merging.
+              popped_stacks: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if vals:
+                      popped_stacks.append((vals[:-1], acc))
+              return ReferenceGSS(popped_stacks)
+
+          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
+              filtered: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if value is None:
+                      if not vals:
+                          filtered.append((list(vals), acc))
+                  else:
+                      if vals and vals[-1] == value:
+                          filtered.append((list(vals), acc))
+              return ReferenceGSS(filtered)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              # Apply func to each accumulator independently
+              transformed: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  transformed.append((list(vals), func(acc)))
+              return ReferenceGSS(transformed)
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks where predicate(acc) is True
+              kept: List[Tuple[List[T], Acc]] = []
+              for vals, acc in self._stacks:
+                  if predicate(acc):
+                      kept.append((list(vals), acc))
+              return ReferenceGSS(kept)
+
+          def peek(self) -> Set[T]:
+              # Return all top values across non-empty stacks
+              tops: Set[T] = set()
+              for vals, _ in self._stacks:
+                  if vals:
+                      tops.add(vals[-1])
+              return tops
+
+          def reduce_acc(self) -> Optional[Acc]:
+              # Reduce all accumulators into a single Acc (or None if no stacks)
+              if not self._stacks:
+                  return None
+              accs = [acc for _, acc in self._stacks]
+              return reduce(lambda a, b: a.merge(b), accs)
+
+          @staticmethod
+          def merge(gss_list: Iterable['ReferenceGSS[T, Acc]']) -> 'ReferenceGSS[T, Acc]':
+              # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for gss in gss_list:
+                  for vals, acc in gss._stacks:
+                      key = tuple(vals)
+                      if key in merged:
+                          merged[key] = merged[key].merge(acc)
+                      else:
+                          merged[key] = acc
+              result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+              return ReferenceGSS(result_stacks)
+
+          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
+              """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+              return ReferenceGSS.merge([self])
+
+          def to_json_serializable(self) -> Any:
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              # First, merge any stacks with identical values.
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in self._stacks:
+                  key = tuple(vals)
+                  if key in merged:
+                      merged[key] = merged[key].merge(acc)
+                  else:
+                      merged[key] = acc
+
+              items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+
+              def _encode_for_sort(obj: Any) -> str:
+                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      # Fallback to repr if something goes wrong
+                      return repr(obj)
+
+              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              # Return a plain JSON-serializable structure
+              return [[vals, acc] for vals, acc in items]
+
+          def is_empty(self) -> bool:
+              # True iff there is exactly one active stack and that stack is empty.
+              return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      class MergeableInt(int):
+          """
+          An integer that is mergeable (for testing `Acc` typevars) and
+          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+          """
+          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+              return MergeableInt(super().__add__(other))
+
+          def __add__(self, other: int) -> 'MergeableInt':
+              if isinstance(other, int):
+                  return MergeableInt(super().__add__(other))
+              return NotImplemented
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: MergeableInt(0)
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b])
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c])
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3])
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8])
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty])
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
+          gss_to_prune = gss_class.merge([gss_e, gss_f])
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2])
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
+          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
+          s_merged2 = gss_class.merge([s_branch3, s_branch4])
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2])
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
+          gss_i_merged = gss_class.merge([gss_i1, gss_i2])
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -573,6 +1281,148 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
+      ```python 'python/gss_tester/__init__.py'
+      # This file makes 'gss_tester' a Python package.
+
+      ```
+    metadata:
+      filename: python/gss_tester/__init__.py
+  - user: |-
+      ```python 'python/gss_tester/analyzer.py'
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+
+      ```
+    metadata:
+      filename: python/gss_tester/analyzer.py
+  - user: |-
       ```python 'python/gss_tester/interface.py'
       from abc import ABC, abstractmethod
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
@@ -596,21 +1446,21 @@ messages:
               pass
 
           @abstractmethod
-          def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+          def pop(self) -> 'GSS[T, Acc]':
               """
               For all active stacks, creates new stacks by removing the top value.
               Returns a new GSS state containing the popped stacks.
               """
               pass
 
-          def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+          def popn(self, n: int) -> 'GSS[T, Acc]':
               """
               For all active stacks, creates new stacks by removing the top `n` values.
               Returns a new GSS state containing the popped stacks.
               """
               gss = self
               for _ in range(n):
-                  gss = gss.pop(merge_func)
+                  gss = gss.pop()
               return gss
 
           @abstractmethod
@@ -653,37 +1503,42 @@ messages:
               """
               pass
 
+          @abstractmethod
+          def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              pass
+
           @staticmethod
           @abstractmethod
           def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
               """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
               pass
 
-          @abstractmethod
-          def to_json_serializable(self) -> Any:
+          def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
               """Returns a JSON-serializable representation of the GSS state for comparison."""
-              pass
+              # to_reference_impl is expected to return a ReferenceGSS instance.
+              ref_impl = self.to_reference_impl(merge_func)
+              # We can now call the ReferenceGSS's specific implementation.
+              return ref_impl.to_json_serializable(merge_func)
 
           def __str__(self) -> str:
               """Provides a default string representation for debugging."""
-              try:
-                  data = self.to_json_serializable()
-                  return json.dumps(data, indent=2, sort_keys=True)
-              except Exception:
-                  return super().__str__()
+              # The canonical JSON representation requires a merge function, so it cannot be
+              # used for a simple string conversion.
+              return super().__str__()
 
-          def __eq__(self, other):
-              """Defines equality based on the canonical JSON representation."""
-              if not isinstance(other, GSS):
-                  return NotImplemented
-              return self.to_json_serializable() == other.to_json_serializable()
-
-          def __hash__(self):
-              """Defines hash based on the canonical JSON representation."""
-              pass
       ```
     metadata:
       filename: python/gss_tester/interface.py
+  - user: |-
+      ```python 'python/gss_tester/leveled_impl.py'
+
+      ```
+    metadata:
+      filename: python/gss_tester/leveled_impl.py
   - user: |-
       ```python 'python/gss_tester/reference_impl.py'
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
@@ -736,19 +1591,13 @@ messages:
                   new_stacks.append((new_vals, acc))
               return ReferenceGSS(new_stacks)
 
-          def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks, merging accumulators for resulting identical stacks.
-              popped_stacks: Dict[Tuple[T, ...], Acc] = {}
+          def pop(self) -> 'ReferenceGSS[T, Acc]':
+              # Pop from all non-empty stacks, without merging.
+              popped_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
-                      new_vals_tuple = tuple(vals[:-1])
-                      if new_vals_tuple in popped_stacks:
-                          popped_stacks[new_vals_tuple] = merge_func(popped_stacks[new_vals_tuple], acc)
-                      else:
-                          popped_stacks[new_vals_tuple] = acc
-
-              result_stacks = [(list(key), acc) for key, acc in popped_stacks.items()]
-              return ReferenceGSS(result_stacks)
+                      popped_stacks.append((vals[:-1], acc))
+              return ReferenceGSS(popped_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
               # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
@@ -809,9 +1658,22 @@ messages:
               result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
               return ReferenceGSS(result_stacks)
 
-          def to_json_serializable(self) -> Any:
+          def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+              """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+              return ReferenceGSS.merge([self], merge_func)
+
+          def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
               # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-              items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
+              # First, merge any stacks with identical values.
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in self._stacks:
+                  key = tuple(vals)
+                  if key in merged:
+                      merged[key] = merge_func(merged[key], acc)
+                  else:
+                      merged[key] = acc
+
+              items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
 
               def _encode_for_sort(obj: Any) -> str:
                   # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
@@ -825,21 +1687,6 @@ messages:
               # Return a plain JSON-serializable structure
               return [[vals, acc] for vals, acc in items]
 
-          def __hash__(self):
-              # Hash consistent with equality based on the canonical JSON representation.
-              try:
-                  canonical = self.to_json_serializable()
-                  # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
-                  s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
-                  return hash(s)
-              except Exception:
-                  # Fallback: hash the tuple of tuples if possible, else id-based hash
-                  try:
-                      tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
-                      return hash(tup)
-                  except Exception:
-                      return object.__hash__(self)
-
           def is_empty(self) -> bool:
               # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
@@ -848,10 +1695,233 @@ messages:
     metadata:
       filename: python/gss_tester/reference_impl.py
   - user: |-
-      Add `to_reference_impl` to interface.py.
-      Add a default impl for `to_json_serializable` to interface.py that converts to reference impl and then calls `to_json_serializable` on it. And add an override impl for the reference impl. `to_json_serializable` will, in all cases, need to take a merge function. It'll need to ensure there's only one instance of each stack, and merge accs if there is mutliple.
+      ```python 'python/gss_tester/runner.py'
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
 
-      Make it so `pop` does *NOT* merge, and doesn't take merge fn.
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+
+      ```
+    metadata:
+      filename: python/gss_tester/runner.py
+  - user: |-
+      ```python 'python/gss_tester/test_spec.py'
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: 0
+          merge_func = lambda a, b: a + b
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = gss_class.merge([merged1, gss_c], merge_func)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = gss_class.merge([s2, s3], merge_func)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = gss_class.merge([s7, s8], merge_func)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+          gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: 7)
+          s_branch4 = s_base2.push(202).apply(lambda _: 8)
+          s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+          gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+          gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+
+      ```
+    metadata:
+      filename: python/gss_tester/test_spec.py
+  - user: Actually, instead of passing this merge fn everywhere, let's enforce that
+      Acc is some type that implements some kind of merge fn.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -870,257 +1940,339 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the requested changes, followed by the git diffs.
+      Of course. Here are the step-by-step instructions to refactor the GSS interface to use a `Mergeable` protocol for accumulators, followed by the corresponding git diffs.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      #### 1. Modify `python/gss_tester/interface.py`
+      #### 1. File: `python/gss_tester/interface.py`
 
-      1.  **Update the `pop` method:** In the `GSS` class, change the signature to remove the `merge_func` parameter.
-          *   **From:** `def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':`
-          *   **To:** `def pop(self) -> 'GSS[T, Acc]':`
+      First, we'll modify the GSS interface to enforce that accumulator types (`Acc`) are mergeable, removing the need to pass a `merge_func` everywhere.
 
-      2.  **Update the `popn` method:** Change the signature to remove `merge_func` and update the loop to call the modified `pop`.
-          *   **From:** `def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':`
-          *   **To:** `def popn(self, n: int) -> 'GSS[T, Acc]':`
-          *   In the method body, change `gss = gss.pop(merge_func)` to `gss = gss.pop()`.
-
-      3.  **Add the `to_reference_impl` abstract method:** After the `reduce_acc` method, insert the new abstract method `to_reference_impl`.
-
+      1.  **Import `Protocol`**: Add `Protocol` to the `typing` import.
+      2.  **Define `Mergeable` Protocol**: Add the following protocol definition before the `GSS` class. This specifies that any accumulator type must have a `merge` method.
           ```python
-          @abstractmethod
-          def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+          class Mergeable(Protocol):
+              """Protocol for accumulator types that can be merged."""
+              @abstractmethod
+              def merge(self, other: 'Mergeable') -> 'Mergeable':
+                  ...
+          ```
+      3.  **Constrain `Acc` TypeVar**: Update the `Acc` type variable to be bound to this new protocol.
+          ```python
+          # Change this:
+          Acc = TypeVar('Acc') # Accumulator type
+          # To this:
+          Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+          ```
+      4.  **Update Method Signatures**: Remove the `merge_func` parameter from the signatures of `reduce_acc`, `to_reference_impl`, `merge`, and `to_json_serializable` in the `GSS` abstract base class. The implementation of `to_json_serializable` should also be updated to call `to_reference_impl` and `to_json_serializable` without arguments.
+
+      #### 2. File: `python/gss_tester/reference_impl.py`
+
+      Next, update the `ReferenceGSS` implementation to align with the new interface.
+
+      1.  **Update `reduce_acc`**: Modify the method to use `a.merge(b)` instead of `merge_func(a, b)`.
+      2.  **Update `merge`**: In the static `merge` method, remove the `merge_func` parameter and change the accumulator merge logic from `merge_func(merged[key], acc)` to `merged[key].merge(acc)`.
+      3.  **Update `to_reference_impl`**: Remove the `merge_func` parameter and update the call to `ReferenceGSS.merge`.
+      4.  **Update `to_json_serializable`**: Remove the `merge_func` parameter and change the merge logic to use the `acc.merge()` method, similar to the change in the `merge` method.
+
+      #### 3. File: `python/gss_tester/test_spec.py`
+
+      Finally, update the test specification to use a mergeable accumulator type and adapt the test cases.
+
+      1.  **Define `MergeableInt`**: At the top of the file, add a new class `MergeableInt` that subclasses `int` and implements the `merge` method. This class will serve as the accumulator type for the tests. It also overrides `__add__` to ensure that operations within an `apply` call return the correct type.
+          ```python
+          class MergeableInt(int):
               """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
+              An integer that is mergeable (for testing `Acc` typevars) and
+              returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
               """
-              pass
+              def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+                  return MergeableInt(super().__add__(other))
+
+              def __add__(self, other: int) -> 'MergeableInt':
+                  if isinstance(other, int):
+                      return MergeableInt(super().__add__(other))
+                  return NotImplemented
           ```
-
-      4.  **Update the `to_json_serializable` method:**
-          *   Remove the `@abstractmethod` decorator.
-          *   Change the signature to accept a `merge_func`: `def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:`.
-          *   Provide a default implementation that converts to the reference implementation first.
-
-          ```python
-          def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
-              """Returns a JSON-serializable representation of the GSS state for comparison."""
-              # to_reference_impl is expected to return a ReferenceGSS instance.
-              ref_impl = self.to_reference_impl(merge_func)
-              # We can now call the ReferenceGSS's specific implementation.
-              return ref_impl.to_json_serializable(merge_func)
-          ```
-
-      5.  **Update the `__str__` method:** Since `to_json_serializable` now requires a `merge_func`, the `__str__` method can no longer use it. Replace its body to fall back to the default object representation.
-
-          ```python
-          def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
-              # The canonical JSON representation requires a merge function, so it cannot be
-              # used for a simple string conversion.
-              return super().__str__()
-          ```
-
-      6.  **Remove `__eq__` and `__hash__`:** Delete the `__eq__` and `__hash__` methods from the `GSS` class entirely.
-
-      #### 2. Modify `python/gss_tester/reference_impl.py`
-
-      1.  **Update the `pop` method:** In the `ReferenceGSS` class, modify the `pop` method to no longer accept a `merge_func` and to stop merging accumulators of resulting identical stacks.
-          *   **From:** `def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':`
-          *   **To:** `def pop(self) -> 'ReferenceGSS[T, Acc]':`
-          *   Replace the implementation with the following:
-          ```python
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks, without merging.
-              popped_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if vals:
-                      popped_stacks.append((vals[:-1], acc))
-              return ReferenceGSS(popped_stacks)
-          ```
-
-      2.  **Add the `to_reference_impl` method:** Implement the `to_reference_impl` method in the `ReferenceGSS` class. A good place is after the `merge` static method.
-
-          ```python
-          def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-              """Converts to canonical ReferenceGSS by merging duplicate stacks."""
-              return ReferenceGSS.merge([self], merge_func)
-          ```
-
-      3.  **Update the `to_json_serializable` method:**
-          *   Change the signature to accept a `merge_func`: `def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:`.
-          *   Update the implementation to first merge stacks with identical values using the provided `merge_func` before creating the sorted, serializable list.
-
-      4.  **Remove the `__hash__` method:** Delete the `__hash__` method from the `ReferenceGSS` class.
+      2.  **Update Test Setup**: In `run_test_spec`, remove the `merge_func` variable and change `acc_factory` to produce `MergeableInt(0)`.
+      3.  **Update `_yield_state`**: Modify the helper function to call `gss_state.to_json_serializable()` without any arguments.
+      4.  **Update `apply` calls**: Some `apply` calls use lambdas that return a raw integer (e.g., `lambda _: 7`). These must be changed to return an instance of `MergeableInt` (e.g., `lambda _: MergeableInt(7)`).
+      5.  **Update `from_stacks` calls**: Some tests create a GSS with a hardcoded integer accumulator (e.g., `from_stacks([([], 0)])`). These must be updated to use `MergeableInt` (e.g., `from_stacks([([], MergeableInt(0))])`).
+      6.  **Update `merge` calls**: Remove the `merge_func` argument from all calls to `gss_class.merge`.
 
       ---
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes.
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
       --- a/python/gss_tester/interface.py
       +++ b/python/gss_tester/interface.py
-      @@ -18,18 +18,18 @@
-               pass
+      @@ -1,12 +1,18 @@
+       from abc import ABC, abstractmethod
+      -from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional
+      +from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol
+       import json
        
-           @abstractmethod
-      -    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-      +    def pop(self) -> 'GSS[T, Acc]':
-               """
-               For all active stacks, creates new stacks by removing the top value.
-               Returns a new GSS state containing the popped stacks.
-               """
-               pass
-       
-      -    def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-      +    def popn(self, n: int) -> 'GSS[T, Acc]':
-               """
-               For all active stacks, creates new stacks by removing the top `n` values.
-               Returns a new GSS state containing the popped stacks.
-               """
-               gss = self
-               for _ in range(n):
-      -            gss = gss.pop(merge_func)
-      +            gss = gss.pop()
-               return gss
-       
-           @abstractmethod
-      @@ -70,29 +70,29 @@
-               """
-               pass
-       
+      +class Mergeable(Protocol):
+      +    """Protocol for accumulator types that can be merged."""
       +    @abstractmethod
-      +    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
-      +        """
-      +        Converts the GSS to its canonical ReferenceGSS representation.
-      +        This involves merging accumulators for identical stacks.
-      +        """
-      +        pass
+      +    def merge(self, other: 'Mergeable') -> 'Mergeable':
+      +        ...
       +
+       T = TypeVar('T')  # Stack item type
+      -Acc = TypeVar('Acc') # Accumulator type
+      +Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+       
+       class GSS(ABC, Generic[T, Acc]):
+           """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+      @@ -68,30 +74,30 @@
+               pass
+       
+           @abstractmethod
+      -    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
+      +    def reduce_acc(self) -> Optional[Acc]:
+               """
+               Merges the accumulators of all active stacks into a single optional value.
+               Returns None if there are no active stacks.
+               """
+               pass
+       
+           @abstractmethod
+      -    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+      +    def to_reference_impl(self) -> 'GSS[T, Acc]':
+               """
+               Converts the GSS to its canonical ReferenceGSS representation.
+               This involves merging accumulators for identical stacks.
+               """
+               pass
+       
            @staticmethod
            @abstractmethod
-           def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+      -    def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+      +    def merge(gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
                """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
                pass
        
-      -    @abstractmethod
-      -    def to_json_serializable(self) -> Any:
-      +    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
+      -    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
+      +    def to_json_serializable(self) -> Any:
                """Returns a JSON-serializable representation of the GSS state for comparison."""
-      -        pass
-      +        # to_reference_impl is expected to return a ReferenceGSS instance.
-      +        ref_impl = self.to_reference_impl(merge_func)
-      +        # We can now call the ReferenceGSS's specific implementation.
-      +        return ref_impl.to_json_serializable(merge_func)
+               # to_reference_impl is expected to return a ReferenceGSS instance.
+      -        ref_impl = self.to_reference_impl(merge_func)
+      +        ref_impl = self.to_reference_impl()
+               # We can now call the ReferenceGSS's specific implementation.
+      -        return ref_impl.to_json_serializable(merge_func)
+      +        return ref_impl.to_json_serializable()
        
            def __str__(self) -> str:
                """Provides a default string representation for debugging."""
-      -        try:
-      -            data = self.to_json_serializable()
-      -            return json.dumps(data, indent=2, sort_keys=True)
-      -        except Exception:
-      -            return super().__str__()
-      -
-      -    def __eq__(self, other):
-      -        """Defines equality based on the canonical JSON representation."""
-      -        if not isinstance(other, GSS):
-      -            return NotImplemented
-      -        return self.to_json_serializable() == other.to_json_serializable()
-      -
-      -    def __hash__(self):
-      -        """Defines hash based on the canonical JSON representation."""
-      -        pass
-      +        # The canonical JSON representation requires a merge function, so it cannot be
-      +        # used for a simple string conversion.
-      +        return super().__str__()
 
       ```
-
       ```diff
       diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
       --- a/python/gss_tester/reference_impl.py
       +++ b/python/gss_tester/reference_impl.py
-      @@ -38,19 +38,13 @@
-                   new_stacks.append((new_vals, acc))
-               return ReferenceGSS(new_stacks)
+      @@ -96,29 +96,25 @@
+                       tops.add(vals[-1])
+               return tops
        
-      -    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-      -        # Pop from all non-empty stacks, merging accumulators for resulting identical stacks.
-      -        popped_stacks: Dict[Tuple[T, ...], Acc] = {}
-      +    def pop(self) -> 'ReferenceGSS[T, Acc]':
-      +        # Pop from all non-empty stacks, without merging.
-      +        popped_stacks: List[Tuple[List[T], Acc]] = []
-               for vals, acc in self._stacks:
-                   if vals:
-      -                new_vals_tuple = tuple(vals[:-1])
-      -                if new_vals_tuple in popped_stacks:
-      -                    popped_stacks[new_vals_tuple] = merge_func(popped_stacks[new_vals_tuple], acc)
-      -                else:
-      -                    popped_stacks[new_vals_tuple] = acc
-      -
-      -        result_stacks = [(list(key), acc) for key, acc in popped_stacks.items()]
-      -        return ReferenceGSS(result_stacks)
-      +                popped_stacks.append((vals[:-1], acc))
-      +        return ReferenceGSS(popped_stacks)
+      -    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
+      +    def reduce_acc(self) -> Optional[Acc]:
+               # Reduce all accumulators into a single Acc (or None if no stacks)
+               if not self._stacks:
+                   return None
+               accs = [acc for _, acc in self._stacks]
+      -        return reduce(merge_func, accs)
+      +        return reduce(lambda a, b: a.merge(b), accs)
        
-           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
-               # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
-      @@ -111,9 +105,23 @@
+           @staticmethod
+      -    def merge(
+      -        gss_list: Iterable['ReferenceGSS[T, Acc]'],
+      -        merge_func: Callable[[Acc, Acc], Acc]
+      -    ) -> 'ReferenceGSS[T, Acc]':
+      +    def merge(gss_list: Iterable['ReferenceGSS[T, Acc]']) -> 'ReferenceGSS[T, Acc]':
+               # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
+               merged: Dict[Tuple[T, ...], Acc] = {}
+               for gss in gss_list:
+                   for vals, acc in gss._stacks:
+                       key = tuple(vals)
+                       if key in merged:
+      -                    merged[key] = merge_func(merged[key], acc)
+      +                    merged[key] = merged[key].merge(acc)
+                       else:
+                           merged[key] = acc
                result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
                return ReferenceGSS(result_stacks)
        
-      -    def to_json_serializable(self) -> Any:
-      +    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-      +        """Converts to canonical ReferenceGSS by merging duplicate stacks."""
-      +        return ReferenceGSS.merge([self], merge_func)
-      +
-      +    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
+      -    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+      +    def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
+               """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+      -        return ReferenceGSS.merge([self], merge_func)
+      +        return ReferenceGSS.merge([self])
+       
+      -    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
+      +    def to_json_serializable(self) -> Any:
                # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-      -        items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
-      +        # First, merge any stacks with identical values.
-      +        merged: Dict[Tuple[T, ...], Acc] = {}
-      +        for vals, acc in self._stacks:
-      +            key = tuple(vals)
-      +            if key in merged:
-      +                merged[key] = merge_func(merged[key], acc)
-      +            else:
-      +                merged[key] = acc
+               # First, merge any stacks with identical values.
+               merged: Dict[Tuple[T, ...], Acc] = {}
+               for vals, acc in self._stacks:
+                   key = tuple(vals)
+                   if key in merged:
+      -                merged[key] = merge_func(merged[key], acc)
+      +                merged[key] = merged[key].merge(acc)
+                   else:
+                       merged[key] = acc
+       
+
+      ```
+      ```diff
+      diff --git a/python/gss_tester/test_spec.py b/python/gss_tester/test_spec.py
+      --- a/python/gss_tester/test_spec.py
+      +++ b/python/gss_tester/test_spec.py
+      @@ -2,6 +2,19 @@
+       from typing import Generator, Tuple, Any, Type
+       from .interface import GSS
+       
+      +class MergeableInt(int):
+      +    """
+      +    An integer that is mergeable (for testing `Acc` typevars) and
+      +    returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+      +    """
+      +    def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+      +        return MergeableInt(super().__add__(other))
       +
-      +        items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+      +    def __add__(self, other: int) -> 'MergeableInt':
+      +        if isinstance(other, int):
+      +            return MergeableInt(super().__add__(other))
+      +        return NotImplemented
+      +
+       def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+           """
+           A generator that defines a sequence of GSS operations and yields states at
+      @@ -12,13 +25,12 @@
+           """
+           
+           # For this test, the accumulator is an integer and stack items are integers.
+      -    acc_factory = lambda: 0
+      -    merge_func = lambda a, b: a + b
+      +    acc_factory = lambda: MergeableInt(0)
        
-               def _encode_for_sort(obj: Any) -> str:
-                   # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
-      @@ -126,18 +134,6 @@
-               # Return a plain JSON-serializable structure
-               return [[vals, acc] for vals, acc in items]
+           def _yield_state(gss_state: GSS):
+               """Helper to yield the state and the caller's line number."""
+               caller_frame = inspect.currentframe().f_back
+               line_no = caller_frame.f_lineno
+      -        yield (gss_state.to_json_serializable(), line_no)
+      +        yield (gss_state.to_json_serializable(), line_no)
        
-      -    def __hash__(self):
-      -        # Hash consistent with equality based on the canonical JSON representation.
-      -        try:
-      -            canonical = self.to_json_serializable()
-      -            # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
-      -            s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
-      -            return hash(s)
-      -        except Exception:
-      -            # Fallback: hash the tuple of tuples if possible, else id-based hash
-      -            try:
-      -                tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
-      -                return hash(tup)
-      -            except Exception:
-      -                return object.__hash__(self)
-      -
-           def is_empty(self) -> bool:
-               # True iff there is exactly one active stack and that stack is empty.
-               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+           # --- Test 1: Basic push/pop ---
+           gss1 = gss_class.from_stacks([([], acc_factory())])
+      @@ -37,12 +49,12 @@
+           gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+           gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+           
+      -    merged1 = gss_class.merge([gss_a, gss_b], merge_func)
+      +    merged1 = gss_class.merge([gss_a, gss_b])
+           yield from _yield_state(merged1)
+           
+           # Merge a stack that already exists to test accumulator merging
+           gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+      -    merged2 = gss_class.merge([merged1, gss_c], merge_func)
+      +    merged2 = gss_class.merge([merged1, gss_c])
+           yield from _yield_state(merged2)
+       
+           # --- Test 3: Apply accumulator function ---
+      @@ -58,7 +70,7 @@
+           s1 = s0.push(1)
+           s2 = s1.push(2)
+           s3 = s1.push(3)
+      -    s4 = gss_class.merge([s2, s3], merge_func)
+      +    s4 = gss_class.merge([s2, s3])
+           yield from _yield_state(s4)
+           
+           s5 = s4.push(4)
+      @@ -71,7 +83,7 @@
+           yield from _yield_state(s7)
+           yield from _yield_state(s8)
+           
+      -    s9 = gss_class.merge([s7, s8], merge_func)
+      +    s9 = gss_class.merge([s7, s8])
+           yield from _yield_state(s9) # should be same as s1
+           
+           # --- Test 6: Merging empty GSS ---
+      @@ -79,14 +91,14 @@
+           gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+           yield from _yield_state(gss_empty)
+           
+      -    merged_with_empty = gss_class.merge([gss_d, gss_empty], merge_func)
+      +    merged_with_empty = gss_class.merge([gss_d, gss_empty])
+           yield from _yield_state(merged_with_empty) # should be same as gss_d
+       
+           # --- Test 7: Pruning ---
+      -    gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: 5)
+      -    gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: 10)
+      -    gss_to_prune = gss_class.merge([gss_e, gss_f], merge_func)
+      +    gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+      +    gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
+      +    gss_to_prune = gss_class.merge([gss_e, gss_f])
+           yield from _yield_state(gss_to_prune)
+       
+           pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+      @@ -99,7 +111,7 @@
+           s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+           s_branch1 = s_base.push(101)
+           s_branch2 = s_base.push(102)
+      -    s_merged = gss_class.merge([s_branch1, s_branch2], merge_func)
+      +    s_merged = gss_class.merge([s_branch1, s_branch2])
+           yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+       
+           s_popped = s_merged.pop()
+      @@ -112,9 +124,9 @@
+           # Case 8c: Pop to a common parent with different accumulators.
+           # This exposes a bug in FastGSS which loses accumulator information on pop.
+           s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+      -    s_branch3 = s_base2.push(201).apply(lambda _: 7)
+      -    s_branch4 = s_base2.push(202).apply(lambda _: 8)
+      -    s_merged2 = gss_class.merge([s_branch3, s_branch4], merge_func)
+      +    s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
+      +    s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
+      +    s_merged2 = gss_class.merge([s_branch3, s_branch4])
+           yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+       
+           s_popped2 = s_merged2.pop()
+      @@ -123,9 +135,9 @@
+       
+           # --- Test 9: popn ---
+           # Case 9a: popn less than stack depth
+      -    gss_pn1 = gss_class.from_stacks([([], 0)]).push(1).push(2).push(3)
+      -    gss_pn2 = gss_class.from_stacks([([], 0)]).push(4).push(5)
+      -    gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2], merge_func)
+      +    gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+      +    gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
+      +    gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2])
+           yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+       
+           gss_pn_pop2 = gss_pn_merged.popn(2)
+      @@ -137,9 +149,9 @@
+           yield from _yield_state(gss_pn_pop4) # has []
+       
+           # --- Test 10: Isolate empty stacks ---
+      -    gss_i1 = gss_class.from_stacks([([], 1)]) # An empty stack
+      -    gss_i2 = gss_class.from_stacks([([10], 2)]) # A non-empty stack
+      -    gss_i_merged = gss_class.merge([gss_i1, gss_i2], merge_func)
+      +    gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
+      +    gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
+      +    gss_i_merged = gss_class.merge([gss_i1, gss_i2])
+           yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+       
+           gss_isolated_empty = gss_i_merged.isolate(None)
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/gss_tester/interface.py
@@ -1131,8 +2283,13 @@ messages:
       Identified target file: python/gss_tester/reference_impl.py
       Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/gss_tester/test_spec.py
+      Applying patch to 'python/gss_tester/test_spec.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/test_spec.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS: Simplify pop, introduce
-      canonicalization via to_reference_impl, update serialization"'
+  - user: 'Changes committed with message: "Refactor GSS interface to use Mergeable
+      protocol for accumulators"'
     metadata:
 ...

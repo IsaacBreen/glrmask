@@ -91,42 +91,39 @@ class ReferenceGSS(GSS[T, Acc]):
                 tops.add(vals[-1])
         return tops
 
-    def reduce_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Optional[Acc]:
+    def reduce_acc(self) -> Optional[Acc]:
         # Reduce all accumulators into a single Acc (or None if no stacks)
         if not self._stacks:
             return None
         accs = [acc for _, acc in self._stacks]
-        return reduce(merge_func, accs)
+        return reduce(lambda a, b: a.merge(b), accs)
 
     @staticmethod
-    def merge(
-        gss_list: Iterable['ReferenceGSS[T, Acc]'],
-        merge_func: Callable[[Acc, Acc], Acc]
-    ) -> 'ReferenceGSS[T, Acc]':
+    def merge(gss_list: Iterable['ReferenceGSS[T, Acc]']) -> 'ReferenceGSS[T, Acc]':
         # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
         merged: Dict[Tuple[T, ...], Acc] = {}
         for gss in gss_list:
             for vals, acc in gss._stacks:
                 key = tuple(vals)
                 if key in merged:
-                    merged[key] = merge_func(merged[key], acc)
+                    merged[key] = merged[key].merge(acc)
                 else:
                     merged[key] = acc
         result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
         return ReferenceGSS(result_stacks)
 
-    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+    def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
         """Converts to canonical ReferenceGSS by merging duplicate stacks."""
-        return ReferenceGSS.merge([self], merge_func)
+        return ReferenceGSS.merge([self])
 
-    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
+    def to_json_serializable(self) -> Any:
         # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
         # First, merge any stacks with identical values.
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in self._stacks:
             key = tuple(vals)
             if key in merged:
-                merged[key] = merge_func(merged[key], acc)
+                merged[key] = merged[key].merge(acc)
             else:
                 merged[key] = acc
 
