@@ -20,21 +20,21 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def pop(self) -> 'GSS[T, Acc]':
+    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
         """
         For all active stacks, creates new stacks by removing the top value.
         Returns a new GSS state containing the popped stacks.
         """
         pass
 
-    def popn(self, n: int) -> 'GSS[T, Acc]':
+    def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
         """
         For all active stacks, creates new stacks by removing the top `n` values.
         Returns a new GSS state containing the popped stacks.
         """
         gss = self
         for _ in range(n):
-            gss = gss.pop()
+            gss = gss.pop(merge_func)
         return gss
 
     @abstractmethod

@@ -1,10 +1,12 @@
 from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
 from functools import reduce
+from dataclasses import dataclass
 import json
 
 from .interface import GSS, T, Acc
 
 
+@dataclass(eq=False)
 class ReferenceGSS(GSS[T, Acc]):
     """
     A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
@@ -26,14 +28,16 @@ class ReferenceGSS(GSS[T, Acc]):
     - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
     """
 
-    def __init__(self, stacks: List[Tuple[List[T], Acc]]):
-        # Store a private copy to prevent aliasing
-        self._stacks: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in stacks]
+    _stacks: List[Tuple[List[T], Acc]]
+
+    def __post_init__(self):
+        # Ensure we have our own copies of the stack lists to prevent external mutation.
+        self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
 
     @classmethod
     def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-        # Construct from a shallow copy of lists (to avoid external mutation)
-        return cls([(list(vals), acc) for vals, acc in stacks])
+        # The dataclass __init__ will be called, and __post_init__ will handle copying.
+        return cls(stacks)
 
     def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
         # Push `value` onto all stacks (copy each list to avoid mutating original)
@@ -44,14 +48,19 @@ class ReferenceGSS(GSS[T, Acc]):
             new_stacks.append((new_vals, acc))
         return ReferenceGSS(new_stacks)
 
-    def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all stacks that are non-empty; drop empty stacks
-        popped: List[Tuple[List[T], Acc]] = []
+    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+        # Pop from all non-empty stacks, merging accumulators for resulting identical stacks.
+        popped_stacks: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in self._stacks:
             if vals:
-                new_vals = list(vals[:-1])
-                popped.append((new_vals, acc))
-        return ReferenceGSS(popped)
+                new_vals_tuple = tuple(vals[:-1])
+                if new_vals_tuple in popped_stacks:
+                    popped_stacks[new_vals_tuple] = merge_func(popped_stacks[new_vals_tuple], acc)
+                else:
+                    popped_stacks[new_vals_tuple] = acc
+
+        result_stacks = [(list(key), acc) for key, acc in popped_stacks.items()]
+        return ReferenceGSS(result_stacks)
 
     def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
         # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
