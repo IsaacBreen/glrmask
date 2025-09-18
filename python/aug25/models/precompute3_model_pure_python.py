@@ -315,10 +315,7 @@ class Model(GraphProvider):
         rust_state_map_before_commit = self.constraint_state.get_state_map()
 
         self.constraint_state.commit(token_id)
-        token_bytes = self.id_to_token.get(token_id)
-        if not token_bytes:
-            self.state = {}
-            return
+        token_bytes = self.id_to_token[token_id]
 
         # --- Python implementation starts here ---
         py_states = list(self.state.keys())
