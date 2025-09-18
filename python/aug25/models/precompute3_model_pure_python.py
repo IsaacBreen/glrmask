@@ -17,11 +17,6 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> GSS:
         py_acc = PyAcc(terminals_union=terminals_union)
         stacks_for_from_stacks.append((path_ids, py_acc))
 
-    # Ensure there's an empty stack to define the root accumulator.
-    if not any(not s for s, _ in stacks_for_from_stacks):
-        root_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-        stacks_for_from_stacks.append(([], root_acc))
-
     return GSS.from_stacks(stacks_for_from_stacks)
 
 
