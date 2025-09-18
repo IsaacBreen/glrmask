@@ -251,11 +251,13 @@ local_system:
               return ref_impl.to_json_serializable()
 
           def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
-              # The canonical JSON representation requires a merge function, so it cannot be
-              # used for a simple string conversion.
-              return super().__str__()
-    python/gss_tester/leveled_impl.py: |
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
+    python/gss_tester/leveled_impl.py: |-
       from __future__ import annotations
 
       from dataclasses import dataclass
@@ -603,6 +605,14 @@ local_system:
               new_inst = LeveledGSS(self._factory, new_heads, new_empty)
               # __init__ invokes _recompute_edge_max_depth
               return new_inst
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_reference_impl() == other.to_reference_impl()
+
+          def __hash__(self) -> int:
+              return hash(self
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
@@ -722,34 +732,50 @@ local_system:
               """Converts to canonical ReferenceGSS by merging duplicate stacks."""
               return ReferenceGSS.merge([self])
 
-          def to_json_serializable(self) -> Any:
-              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-              # First, merge any stacks with identical values.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-
-              items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+          def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
+              """Helper to merge and sort stacks for deterministic representations."""
+              canonical_gss = self.to_reference_impl()
+              items = canonical_gss._stacks
 
               def _encode_for_sort(obj: Any) -> str:
-                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
                   try:
                       return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
                   except Exception:
-                      # Fallback to repr if something goes wrong
                       return repr(obj)
 
               items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return items
+
+          def to_json_serializable(self) -> Any:
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              items = self._get_canonical_sorted_stacks()
               # Return a plain JSON-serializable structure
               return [[vals, acc] for vals, acc in items]
+
+          def __str__(self) -> str:
+              """Provides a human-readable, deterministic string representation."""
+              items = self._get_canonical_sorted_stacks()
+              if not items:
+                  return f"{self.__class__.__name__}(empty)"
+
+              lines = [f"{self.__class__.__name__}:"]
+              for vals, acc in items:
+                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
+              return "\n".join(lines)
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous, deterministic string representation."""
+              items = self._get_canonical_sorted_stacks()
+              return f"{self.__class__.__name__}(_stacks={items!r})"
 
           def is_empty(self) -> bool:
               # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, ReferenceGSS):
+                  return NotImplemented
+              return self._stacks == other._stacks
     python/gss_tester/runner.py: |
       import argparse
       import importlib
@@ -1313,7 +1339,7 @@ local_system:
                   offset, tokenizer_sid, gss = q.popleft()
 
                   # GSS is not hashable, use its serializable form for visited check
-                  q_item_key = (offset, tokenizer_sid, gss.to_reference_impl())
+                  q_item_key = (offset, tokenizer_sid, gss)
                   if q_item_key in visited_q_items:
                       continue
                   visited_q_items.add(q_item_key)
@@ -1858,11 +1884,11 @@ local_system:
 
           def __str__(self) -> str:
               """Provides a human-readable string representation for debugging."""
-              return str(self.to_reference_impl())
+              return f"{self.__class__.__name__}({self.to_json_serializable()})"
 
           def __repr__(self) -> str:
               """Provides an unambiguous string representation of the GSS."""
-              return repr(self.to_reference_impl())
+              return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
     python/gss_tester/leveled_impl.py: |
       from __future__ import annotations
 
@@ -2167,9 +2193,8 @@ local_system:
               for a in self._empty_accs:
                   stacks.append(([], a))
 
-              # Build a ReferenceGSS and then merge to canonical representation
-              ref = ReferenceGSS.from_stacks(stacks)
-              return ReferenceGSS.merge([ref])
+              # Build a ReferenceGSS, which will be canonical on creation.
+              return ReferenceGSS.from_stacks(stacks)
 
           @staticmethod
           def merge(gss_list: Iterable["GSS[T, Acc]"]) -> "LeveledGSS[T, Acc]":
@@ -2211,6 +2236,11 @@ local_system:
               new_inst = LeveledGSS(self._factory, new_heads, new_empty)
               # __init__ invokes _recompute_edge_max_depth
               return new_inst
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_reference_impl() == other.to_reference_impl()
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
@@ -2225,6 +2255,10 @@ local_system:
           """
           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
           Each stack is represented as a pair: (list_of_values, accumulator).
+
+          This implementation ensures that for any given stack content, there is at most
+          one entry, with accumulators merged. This canonical form is enforced on
+          creation and after any operation that could produce duplicate stacks (like pop).
 
           Notes on semantics (aligned with GSS interface):
           - from_stacks: constructs a new GSS from explicit stacks.
@@ -2245,8 +2279,16 @@ local_system:
           _stacks: List[Tuple[List[T], Acc]]
 
           def __post_init__(self):
-              # Ensure we have our own copies of the stack lists to prevent external mutation.
-              self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
+              # On creation, merge any stacks with identical values by merging their accumulators.
+              # This ensures the GSS is always in a canonical form.
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in self._stacks:
+                  key = tuple(vals)
+                  if key in merged:
+                      merged[key] = merged[key].merge(acc)
+                  else:
+                      merged[key] = acc
+              self._stacks = [(list(key), acc) for key, acc in merged.items()]
 
           @classmethod
           def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
@@ -2263,7 +2305,7 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks, without merging.
+              # Pop from all non-empty stacks. If multiple stacks become identical, they are merged.
               popped_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
@@ -2327,13 +2369,14 @@ local_system:
               return ReferenceGSS(result_stacks)
 
           def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+              """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
               return ReferenceGSS.merge([self])
 
           def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Helper to merge and sort stacks for deterministic representations."""
-              canonical_gss = self.to_reference_impl()
-              items = canonical_gss._stacks
+              """Helper to sort stacks for deterministic representations."""
+              # With __post_init__ merging, self is always canonical. We just need to
+              # sort for deterministic output.
+              items = self._stacks[:] # Create a shallow copy to sort in-place
 
               def _encode_for_sort(obj: Any) -> str:
                   try:
@@ -2369,6 +2412,12 @@ local_system:
           def is_empty(self) -> bool:
               # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, ReferenceGSS):
+                  return NotImplemented
+              # Sort stacks to ensure comparison is order-independent.
+              return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
     python/gss_tester/runner.py: |
       import argparse
       import importlib
@@ -2932,7 +2981,7 @@ local_system:
                   offset, tokenizer_sid, gss = q.popleft()
 
                   # GSS is not hashable, use its serializable form for visited check
-                  q_item_key = (offset, tokenizer_sid, gss.to_reference_impl())
+                  q_item_key = (offset, tokenizer_sid, gss)
                   if q_item_key in visited_q_items:
                       continue
                   visited_q_items.add(q_item_key)
@@ -3530,10 +3579,12 @@ messages:
               return ref_impl.to_json_serializable()
 
           def __str__(self) -> str:
-              """Provides a default string representation for debugging."""
-              # The canonical JSON representation requires a merge function, so it cannot be
-              # used for a simple string conversion.
-              return super().__str__()
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
 
       ```
     metadata:
@@ -3888,6 +3939,13 @@ messages:
               # __init__ invokes _recompute_edge_max_depth
               return new_inst
 
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, LeveledGSS):
+                  return NotImplemented
+              return self.to_reference_impl() == other.to_reference_impl()
+
+          def __hash__(self) -> int:
+              return hash(self
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
@@ -4011,34 +4069,50 @@ messages:
               """Converts to canonical ReferenceGSS by merging duplicate stacks."""
               return ReferenceGSS.merge([self])
 
-          def to_json_serializable(self) -> Any:
-              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-              # First, merge any stacks with identical values.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-
-              items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
+          def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
+              """Helper to merge and sort stacks for deterministic representations."""
+              canonical_gss = self.to_reference_impl()
+              items = canonical_gss._stacks
 
               def _encode_for_sort(obj: Any) -> str:
-                  # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
                   try:
                       return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
                   except Exception:
-                      # Fallback to repr if something goes wrong
                       return repr(obj)
 
               items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return items
+
+          def to_json_serializable(self) -> Any:
+              # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
+              items = self._get_canonical_sorted_stacks()
               # Return a plain JSON-serializable structure
               return [[vals, acc] for vals, acc in items]
+
+          def __str__(self) -> str:
+              """Provides a human-readable, deterministic string representation."""
+              items = self._get_canonical_sorted_stacks()
+              if not items:
+                  return f"{self.__class__.__name__}(empty)"
+
+              lines = [f"{self.__class__.__name__}:"]
+              for vals, acc in items:
+                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
+              return "\n".join(lines)
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous, deterministic string representation."""
+              items = self._get_canonical_sorted_stacks()
+              return f"{self.__class__.__name__}(_stacks={items!r})"
 
           def is_empty(self) -> bool:
               # True iff there is exactly one active stack and that stack is empty.
               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, ReferenceGSS):
+                  return NotImplemented
+              return self._stacks == other._stacks
 
       ```
     metadata:
@@ -4617,7 +4691,7 @@ messages:
                   offset, tokenizer_sid, gss = q.popleft()
 
                   # GSS is not hashable, use its serializable form for visited check
-                  q_item_key = (offset, tokenizer_sid, gss.to_reference_impl())
+                  q_item_key = (offset, tokenizer_sid, gss)
                   if q_item_key in visited_q_items:
                       continue
                   visited_q_items.add(q_item_key)
@@ -4923,10 +4997,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Add a proper __str__ and __repr__ for the GSSs. Add good, pretty default
-      impls to the interface. You can do them by converting into reference impl first
-      if you want. Yes. And so implement them on reference impl explicitly, and then
-      in interface default impls convert to reference impl and use its one.
+  - user: Modify this so that stacks in the reference impl are always deduplicated.
+      This means we'll need to merge accs on pop.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4945,122 +5017,123 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add `__str__` and `__repr__` methods for better GSS representations, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to apply the changes, followed by the git diffs.
 
       ### Step-by-Step Instructions
 
-      #### 1. Update the `ReferenceGSS` Implementation
+      1.  **File: `python/gss_tester/reference_impl.py`**
 
-      In `python/gss_tester/reference_impl.py`, we will add the core logic for creating deterministic, readable string representations.
+          a.  **Update `ReferenceGSS` class docstring**: Modify the docstring to clarify that instances are always kept in a canonical, deduplicated form by merging accumulators for identical stacks.
 
-      1.  **Add a helper method:** Inside the `ReferenceGSS` class, create a new private method `_get_canonical_sorted_stacks`. This method will first merge duplicate stacks by calling `self.to_reference_impl()` and then sort the resulting stacks to ensure a deterministic order for printing.
-      2.  **Refactor `to_json_serializable`:** Modify the existing `to_json_serializable` method to use the new `_get_canonical_sorted_stacks` helper. This simplifies its implementation significantly.
-      3.  **Implement `__str__`:** Add a `__str__` method. It will use the helper to get sorted stacks and format them into a human-readable, multi-line string (e.g., showing each stack on its own line).
-      4.  **Implement `__repr__`:** Add a `__repr__` method. It will also use the helper to produce an unambiguous, single-line representation that looks like a constructor call (e.g., `ReferenceGSS(_stacks=[...])`).
+          b.  **Modify `ReferenceGSS.__post_init__`**: Replace the existing implementation. The new logic will iterate through the initial stacks, merging any with identical values into a single entry with a combined accumulator. This enforces the canonical representation for all new instances.
 
-      The changes should be inserted after the `to_reference_impl` method and will replace the existing `to_json_serializable` method.
+          c.  **Update comment in `ReferenceGSS.pop`**: Change the comment to state that if multiple stacks become identical after popping, their accumulators are merged.
 
-      #### 2. Update the `GSS` Interface
+          d.  **Update docstring for `ReferenceGSS.to_reference_impl`**: Adjust the docstring to explain that since the implementation is always canonical, this method now effectively returns a copy of the instance.
 
-      In `python/gss_tester/interface.py`, we will update the `GSS` abstract base class to provide these new representations to all implementations by default.
+          e.  **Simplify `ReferenceGSS._get_canonical_sorted_stacks`**: Remove the redundant merging step (which is now handled on creation). The method will now just sort a copy of the internal `_stacks` list for deterministic representation.
 
-      1.  **Replace `__str__`:** In the `GSS` class, replace the body of the `__str__` method. The new implementation will delegate the call to the `ReferenceGSS` implementation by returning `str(self.to_reference_impl())`.
-      2.  **Add `__repr__`:** Add a new `__repr__` method to the `GSS` class. It will similarly delegate by returning `repr(self.to_reference_impl())`.
+          f.  **Fix `ReferenceGSS.__eq__`**: Replace the implementation to compare sorted lists of stacks using `_get_canonical_sorted_stacks`. This makes the equality check order-independent and correct.
 
-      This ensures that any GSS implementation (like `LeveledGSS`) automatically gets a high-quality, deterministic string representation without needing to implement it separately.
+      2.  **File: `python/gss_tester/leveled_impl.py`**
+
+          a.  **Simplify `LeveledGSS.to_reference_impl`**: Since `ReferenceGSS` now canonicalizes on creation, the explicit `ReferenceGSS.merge()` call is redundant. Update the method to directly return the result of `ReferenceGSS.from_stacks()`.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here are the git diffs to apply these changes:
 
       ```diff
-      diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
-      --- a/python/gss_tester/interface.py
-      +++ b/python/gss_tester/interface.py
-      @@ -100,9 +100,11 @@
-               return ref_impl.to_json_serializable()
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 9411111..1111111 100644
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -318,9 +318,8 @@
+               for a in self._empty_accs:
+                   stacks.append(([], a))
        
-           def __str__(self) -> str:
-      -        """Provides a default string representation for debugging."""
-      -        # The canonical JSON representation requires a merge function, so it cannot be
-      -        # used for a simple string conversion.
-      -        return super().__str__()
-      +        """Provides a human-readable string representation for debugging."""
-      +        return str(self.to_reference_impl())
-      +
-      +    def __repr__(self) -> str:
-      +        """Provides an unambiguous string representation of the GSS."""
-      +        return repr(self.to_reference_impl())
+      -        # Build a ReferenceGSS and then merge to canonical representation
+      -        ref = ReferenceGSS.from_stacks(stacks)
+      -        return ReferenceGSS.merge([ref])
+      +        # Build a ReferenceGSS, which will be canonical on creation.
+      +        return ReferenceGSS.from_stacks(stacks)
+       
+           @staticmethod
+           def merge(gss_list: Iterable["GSS[T, Acc]"]) -> "LeveledGSS[T, Acc]":
 
       ```
 
       ```diff
       diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
+      index 1111111..2222222 100644
       --- a/python/gss_tester/reference_impl.py
       +++ b/python/gss_tester/reference_impl.py
-      @@ -128,28 +128,48 @@
-               """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+      @@ -10,6 +10,11 @@
+           """
+           A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
+           Each stack is represented as a pair: (list_of_values, accumulator).
+      +
+      +    This implementation ensures that for any given stack content, there is at most
+      +    one entry, with accumulators merged. This canonical form is enforced on
+      +    creation and after any operation that could produce duplicate stacks (like pop).
+       
+           Notes on semantics (aligned with GSS interface):
+           - from_stacks: constructs a new GSS from explicit stacks.
+      @@ -29,8 +34,16 @@
+           _stacks: List[Tuple[List[T], Acc]]
+       
+           def __post_init__(self):
+      -        # Ensure we have our own copies of the stack lists to prevent external mutation.
+      -        self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
+      +        # On creation, merge any stacks with identical values by merging their accumulators.
+      +        # This ensures the GSS is always in a canonical form.
+      +        merged: Dict[Tuple[T, ...], Acc] = {}
+      +        for vals, acc in self._stacks:
+      +            key = tuple(vals)
+      +            if key in merged:
+      +                merged[key] = merged[key].merge(acc)
+      +            else:
+      +                merged[key] = acc
+      +        self._stacks = [(list(key), acc) for key, acc in merged.items()]
+       
+           @classmethod
+           def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
+      @@ -46,7 +59,7 @@
+               return ReferenceGSS(new_stacks)
+       
+           def pop(self) -> 'ReferenceGSS[T, Acc]':
+      -        # Pop from all non-empty stacks, without merging.
+      +        # Pop from all non-empty stacks. If multiple stacks become identical, they are merged.
+               popped_stacks: List[Tuple[List[T], Acc]] = []
+               for vals, acc in self._stacks:
+                   if vals:
+      @@ -104,13 +117,14 @@
+               return ReferenceGSS(result_stacks)
+       
+           def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
+      -        """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+      +        """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
                return ReferenceGSS.merge([self])
        
-      +    def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-      +        """Helper to merge and sort stacks for deterministic representations."""
-      +        canonical_gss = self.to_reference_impl()
-      +        items = canonical_gss._stacks
-      +
-      +        def _encode_for_sort(obj: Any) -> str:
-      +            try:
-      +                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-      +            except Exception:
-      +                return repr(obj)
-      +
-      +        items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-      +        return items
-      +
-           def to_json_serializable(self) -> Any:
-               # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-      -        # First, merge any stacks with identical values.
-      -        merged: Dict[Tuple[T, ...], Acc] = {}
-      -        for vals, acc in self._stacks:
-      -            key = tuple(vals)
-      -            if key in merged:
-      -                merged[key] = merged[key].merge(acc)
-      -            else:
-      -                merged[key] = acc
-      -
-      -        items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
-      -
-      -        def _encode_for_sort(obj: Any) -> str:
-      -            # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
-      -            try:
-      -                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-      -            except Exception:
-      -                # Fallback to repr if something goes wrong
-      -                return repr(obj)
-      -
-      -        items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-      +        items = self._get_canonical_sorted_stacks()
-               # Return a plain JSON-serializable structure
-               return [[vals, acc] for vals, acc in items]
+           def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
+      -        """Helper to merge and sort stacks for deterministic representations."""
+      -        canonical_gss = self.to_reference_impl()
+      -        items = canonical_gss._stacks
+      +        """Helper to sort stacks for deterministic representations."""
+      +        # With __post_init__ merging, self is always canonical. We just need to
+      +        # sort for deterministic output.
+      +        items = self._stacks[:] # Create a shallow copy to sort in-place
        
-      +    def __str__(self) -> str:
-      +        """Provides a human-readable, deterministic string representation."""
-      +        items = self._get_canonical_sorted_stacks()
-      +        if not items:
-      +            return f"{self.__class__.__name__}(empty)"
-      +
-      +        lines = [f"{self.__class__.__name__}:"]
-      +        for vals, acc in items:
-      +            lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
-      +        return "\n".join(lines)
-      +
-      +    def __repr__(self) -> str:
-      +        """Provides an unambiguous, deterministic string representation."""
-      +        items = self._get_canonical_sorted_stacks()
-      +        return f"{self.__class__.__name__}(_stacks={items!r})"
-      +
-           def is_empty(self) -> bool:
-               # True iff there is exactly one active stack and that stack is empty.
-               return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+               def _encode_for_sort(obj: Any) -> str:
+                   try:
+      @@ -144,8 +158,9 @@
+       
+           def __eq__(self, other: object) -> bool:
+               if not isinstance(other, ReferenceGSS):
+                   return NotImplemented
+      -        return self._stacks == other._stacks
+      +        # Sort stacks to ensure comparison is order-independent.
+      +        return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
 
       ```
     metadata:
@@ -5069,16 +5142,16 @@ messages:
       Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/interface.py
-      Applying patch to 'python/gss_tester/interface.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/interface.py.
+      Identified target file: python/gss_tester/leveled_impl.py
+      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
 
       --- Processing Diff Block 2 ---
       Identified target file: python/gss_tester/reference_impl.py
       Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add __str__ and __repr__ for GSS,
-      delegating to ReferenceGSS"'
+  - user: 'Changes committed with message: "Ensure ReferenceGSS maintains canonical
+      form by merging duplicate stacks"'
     metadata:
 ...

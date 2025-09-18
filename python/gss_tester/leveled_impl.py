@@ -301,9 +301,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         for a in self._empty_accs:
             stacks.append(([], a))
 
-        # Build a ReferenceGSS and then merge to canonical representation
-        ref = ReferenceGSS.from_stacks(stacks)
-        return ReferenceGSS.merge([ref])
+        # Build a ReferenceGSS, which will be canonical on creation.
+        return ReferenceGSS.from_stacks(stacks)
 
     @staticmethod
     def merge(gss_list: Iterable["GSS[T, Acc]"]) -> "LeveledGSS[T, Acc]":
@@ -345,3 +344,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         new_inst = LeveledGSS(self._factory, new_heads, new_empty)
         # __init__ invokes _recompute_edge_max_depth
         return new_inst
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LeveledGSS):
+            return NotImplemented
+        return self.to_reference_impl() == other.to_reference_impl()

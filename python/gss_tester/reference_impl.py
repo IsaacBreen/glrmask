@@ -12,6 +12,10 @@ class ReferenceGSS(GSS[T, Acc]):
     A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
     Each stack is represented as a pair: (list_of_values, accumulator).
 
+    This implementation ensures that for any given stack content, there is at most
+    one entry, with accumulators merged. This canonical form is enforced on
+    creation and after any operation that could produce duplicate stacks (like pop).
+
     Notes on semantics (aligned with GSS interface):
     - from_stacks: constructs a new GSS from explicit stacks.
     - push(value): pushes `value` onto all active stack heads; returns a new GSS.
@@ -31,8 +35,16 @@ class ReferenceGSS(GSS[T, Acc]):
     _stacks: List[Tuple[List[T], Acc]]
 
     def __post_init__(self):
-        # Ensure we have our own copies of the stack lists to prevent external mutation.
-        self._stacks = [(list(vals), acc) for vals, acc in self._stacks]
+        # On creation, merge any stacks with identical values by merging their accumulators.
+        # This ensures the GSS is always in a canonical form.
+        merged: Dict[Tuple[T, ...], Acc] = {}
+        for vals, acc in self._stacks:
+            key = tuple(vals)
+            if key in merged:
+                merged[key] = merged[key].merge(acc)
+            else:
+                merged[key] = acc
+        self._stacks = [(list(key), acc) for key, acc in merged.items()]
 
     @classmethod
     def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
@@ -49,7 +61,7 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks, without merging.
+        # Pop from all non-empty stacks. If multiple stacks become identical, they are merged.
         popped_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
             if vals:
@@ -113,13 +125,14 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(result_stacks)
 
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-        """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+        """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
         return ReferenceGSS.merge([self])
 
     def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-        """Helper to merge and sort stacks for deterministic representations."""
-        canonical_gss = self.to_reference_impl()
-        items = canonical_gss._stacks
+        """Helper to sort stacks for deterministic representations."""
+        # With __post_init__ merging, self is always canonical. We just need to
+        # sort for deterministic output.
+        items = self._stacks[:] # Create a shallow copy to sort in-place
 
         def _encode_for_sort(obj: Any) -> str:
             try:
@@ -155,3 +168,9 @@ class ReferenceGSS(GSS[T, Acc]):
     def is_empty(self) -> bool:
         # True iff there is exactly one active stack and that stack is empty.
         return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ReferenceGSS):
+            return NotImplemented
+        # Sort stacks to ensure comparison is order-independent.
+        return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
