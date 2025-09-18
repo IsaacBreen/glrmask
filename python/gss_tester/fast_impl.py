@@ -160,34 +160,24 @@ class FastGSS(GSS[T, Acc]):
             return FastGSS(frozenset([self._root]), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, self._child_to_parents, self._path_cache)
 
-    def _recursive_apply(self, node: _Node[T, Acc], func: Callable[[Acc], Acc], memo: Dict[_Node[T, Acc], _Node[T, Acc]], new_child_to_parents: Dict) -> _Node[T, Acc]:
-        if node in memo:
-            return memo[node]
-
-        new_acc = func(node.acc)
-        new_node = _Node(acc=new_acc, depth=node.depth)
-        memo[node] = new_node
-
-        if node in self._child_to_parents:
-            new_parents_set = set()
-            for value, parent_node in self._child_to_parents[node]:
-                new_parent = self._recursive_apply(parent_node, func, memo, new_child_to_parents)
-                new_parents_set.add((value, new_parent))
-            new_child_to_parents[new_node] = new_parents_set
-        
-        return new_node
-
     def apply(self, func: Callable[[Acc], Acc]) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
-        new_child_to_parents = {}
+        new_child_to_parents = self._child_to_parents.copy()
         memo: Dict[_Node[T, Acc], _Node[T, Acc]] = {}
 
-        # The root's acc should not be changed.
-        memo[self._root] = self._root
-
         for head in self._heads:
-            new_head = self._recursive_apply(head, func, memo, new_child_to_parents)
-            new_heads.add(new_head)
+            if head in memo:
+                new_heads.add(memo[head])
+                continue
+
+            new_acc = func(head.acc)
+            new_node = _Node(acc=new_acc, depth=head.depth)
+            
+            if head in self._child_to_parents:
+                new_child_to_parents[new_node] = self._child_to_parents[head]
+            
+            new_heads.add(new_node)
+            memo[head] = new_node
             
         return FastGSS(frozenset(new_heads), self._acc_default_factory, self._root, new_child_to_parents, self._path_cache.copy())
 

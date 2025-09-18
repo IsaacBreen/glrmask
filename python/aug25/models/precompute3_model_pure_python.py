@@ -1,7 +1,7 @@
 import json
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Set, Union, Callable
+from typing import Dict, List, Tuple, Optional, Set, Union
 from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
@@ -21,13 +21,6 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
         return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
 
     return FastGSS.from_stacks(stacks_for_from_stacks, acc_factory)
-
-def reset_llm_tokens_py(gss: FastGSS) -> FastGSS:
-    # This is a placeholder. The current PyAcc doesn't track LLM tokens.
-    # The important part is that gss.apply is now recursive.
-    def reset_func(acc: PyAcc) -> PyAcc:
-        return acc
-    return gss.apply(reset_func)
 
 
 @dataclass(frozen=True)
@@ -276,13 +269,6 @@ class Model(GraphProvider):
         token_bytes = self.id_to_token[token_id]
 
         # --- Python implementation starts here ---
-        
-        # ADD THIS BLOCK: Reset LLM tokens to match Rust's commit logic
-        new_py_state = {}
-        for sid, gss in self.state.items():
-            new_py_state[sid] = reset_llm_tokens_py(gss)
-        self.state = new_py_state
-        # END OF ADDED BLOCK
         py_states = list(self.state.keys())
         rust_states = list(self.constraint_state.get_state_map().keys())
         assert set(py_states) == set(rust_states), f"Tokenizer states mismatch before commit: Python {py_states}, Rust {rust_states}"
