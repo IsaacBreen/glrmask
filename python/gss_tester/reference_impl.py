@@ -35,6 +35,12 @@ class ReferenceGSS(GSS[T, Acc]):
 
         return ReferenceGSS(new_stacks, self._acc_default_factory)
 
+    def popn(self, n: int) -> 'ReferenceGSS[T, Acc]':
+        gss = self
+        for _ in range(n):
+            gss = gss.pop()
+        return gss
+
     def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
         new_stacks = []
         for stack, acc in self.stacks:
@@ -103,3 +109,9 @@ class ReferenceGSS(GSS[T, Acc]):
 
     def __hash__(self):
         return hash(tuple((tuple(stack), acc) for stack, acc in self.stacks))
+
+    def is_empty(self) -> bool:
+        return len(self.stacks) == 1 and not self.stacks[0][0]
+
+    def get_acc_factory(self) -> Callable[[], Acc]:
+        return self._acc_default_factory

@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
-from gss_tester.fast_impl import FastGSS, _Node as PyGSSNodeInternal
+from gss_tester.interface import GSS
+from gss_tester.fast_impl import FastGSS
 
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     flattened_stacks = rust_gss_node.flatten()
@@ -64,16 +65,9 @@ class PyAcc:
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
     return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
 
-def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
+def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
     return merged_acc.terminals_union.complement()
-
-def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
-    result = gss
-    for _ in range(n):
-        result = result.pop()
-    return result
-
 
 class Model(GraphProvider):
     """
@@ -313,7 +307,7 @@ class Model(GraphProvider):
             assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}"
             # =======================================
 
-            if any(h is not pruned_gss._root for h in pruned_gss._heads):
+            if not pruned_gss.is_empty():
                  mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
 
                  # === ASSERTION 3: Compare mapped GSS ===
@@ -361,7 +355,7 @@ class Model(GraphProvider):
                             processed_gss, end_state, terminal_id
                         )
 
-                if any(h is not processed_gss._root for h in processed_gss._heads):
+                if not processed_gss.is_empty():
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
@@ -433,7 +427,7 @@ class Model(GraphProvider):
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     shifted_gsses.append(merged_popped_gss.isolate(from_state_id).push(goto_state_id))
 
-        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else FastGSS.initial(gss._acc_default_factory)
+        return FastGSS.merge(shifted_gsses, merge_acc) if shifted_gsses else type(gss).initial(gss.get_acc_factory())
 
     def get_mask(self) -> RangeSet:
         """
@@ -589,7 +583,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     # print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
                     # Collect all pops from GSS parents
-                    popped = popn_fast_py(gss_node, pop)
+                    popped = gss_node.popn(pop)
 
                     llm_empty = llm_bv.is_empty()
 

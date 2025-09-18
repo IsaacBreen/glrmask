@@ -148,6 +148,13 @@ class FastGSS(GSS[T, Acc]):
             gss = gss.pop()
         return gss
 
+    def is_empty(self) -> bool:
+        """Checks if the GSS contains only the initial empty stack."""
+        return self._heads == frozenset([self._root])
+
+    def get_acc_factory(self) -> Callable[[], Acc]:
+        return self._acc_default_factory
+
     def isolate(self, value: T) -> 'FastGSS[T, Acc]':
         new_heads: Set[_Node[T, Acc]] = set()
         for head in self._heads:

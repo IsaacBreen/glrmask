@@ -34,6 +34,24 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
+    def popn(self, n: int) -> 'GSS[T, Acc]':
+        """
+        For all active stacks, creates new stacks by removing the top `n` values.
+        Returns a new GSS state containing the popped stacks.
+        """
+        pass
+
+    @abstractmethod
+    def is_empty(self) -> bool:
+        """Checks if the GSS contains only the initial empty stack."""
+        pass
+
+    @abstractmethod
+    def get_acc_factory(self) -> Callable[[], Acc]:
+        """Returns the accumulator default factory used by this GSS instance."""
+        pass
+
+    @abstractmethod
     def isolate(self, value: T) -> 'GSS[T, Acc]':
         """
         Keeps only the stacks that have `value` at the top.
