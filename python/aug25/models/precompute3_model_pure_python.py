@@ -828,6 +828,24 @@ class Model(GraphProvider):
         c_splits = 0
         c_gotos = 0
 
+        pop_cache: Dict[Tuple[StackNode, int], StackNode] = {}
+
+        def pop_node_cached(node: StackNode, n: int) -> StackNode:
+            if n <= 0:
+                return node
+            key = (node, n)
+            cached = pop_cache.get(key)
+            if cached is not None:
+                return cached
+            
+            p = node
+            steps = n
+            while steps > 0 and p.state is not None:
+                p = p.prev
+                steps -= 1
+            pop_cache[key] = p
+            return p
+
         def merge_inplace(dst: Dict[StackNode, PyAcc], src: Dict[StackNode, PyAcc]) -> None:
             for node, acc in src.items():
                 existing = dst.get(node)
@@ -850,11 +868,7 @@ class Model(GraphProvider):
                 return dict(heads)
             out: Dict[StackNode, PyAcc] = {}
             for node, acc in heads.items():
-                p = node
-                steps = n
-                while steps > 0 and p.state is not None:
-                    p = p.prev
-                    steps -= 1
+                p = pop_node_cached(node, n)
                 existing = out.get(p)
                 if existing is None:
                     out[p] = acc
