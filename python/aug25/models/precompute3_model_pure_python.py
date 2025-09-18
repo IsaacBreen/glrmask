@@ -308,18 +308,17 @@ class Model(GraphProvider):
             py_pruned_gss_converted = convert_rust_gss_to_python_gss(rust_gss_before_prune)
             assert pruned_gss == py_pruned_gss_converted, f"Pruned GSS mismatch for sid {tokenizer_sid}: Python {pruned_gss}, Rust {py_pruned_gss_converted}"
             # =======================================
+            
+            mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
 
-            if not pruned_gss.is_empty():
-                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+            # === ASSERTION 3: Compare mapped GSS ===
+            rust_gss_after_prune = rust_gss_before_prune # it was modified in place
+            ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
+            py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
+            assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
+            # =======================================
 
-                 # === ASSERTION 3: Compare mapped GSS ===
-                 rust_gss_after_prune = rust_gss_before_prune # it was modified in place
-                 ffi.gss_map_allowed_terminals_tokenizer_states(rust_gss_after_prune, state_map)
-                 py_mapped_gss_converted = convert_rust_gss_to_python_gss(rust_gss_after_prune)
-                 assert mapped_gss == py_mapped_gss_converted, f"Mapped GSS mismatch for sid {tokenizer_sid}: Python {mapped_gss}, Rust {py_mapped_gss_converted}"
-                 # =======================================
-
-                 temp_states[tokenizer_sid] = mapped_gss
+            temp_states[tokenizer_sid] = mapped_gss
         
         current_state_for_processing = temp_states
         # --- End: Added pre-processing steps ---
