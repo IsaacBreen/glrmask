@@ -4,7 +4,7 @@ import heapq
 import collections
 import os
 import time
-from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, Type
+from typing import Dict, List, Tuple, Optional, Union, Callable, Iterable, Set, Type, Any
 from dataclasses import dataclass, field
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
@@ -49,6 +49,191 @@ class PyAcc:
         return PyAcc(self.terminals_union.union(other.terminals_union))
 
 
+# -----------------------------
+# Debug/profiling infrastructure
+# -----------------------------
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v not in ("", "0", "false", "False", "no", "NO")
+
+
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    try:
+        return float(v) if v is not None else default
+    except Exception:
+        return default
+
+
+@dataclass
+class GSSStats:
+    heads: int
+    empty_stacks: int
+    unique_stacks: int
+    accs: int
+    depth_min: int
+    depth_max: int
+    depth_mean: float
+
+    def brief(self) -> str:
+        return f"heads={self.heads} unique_stacks={self.unique_stacks} empty={self.empty_stacks} depth[min/mean/max]={self.depth_min}/{round(self.depth_mean,2)}/{self.depth_max} accs={self.accs}"
+
+
+class _CommitProfiler:
+    """
+    Lightweight, opt-in per-commit profiler and tracer.
+    Controlled by environment variables:
+      - PROFILE_COMMIT=1: enable profiling
+      - PROFILE_THRESHOLD_MS=float (default 5.0): only print detailed stats if commit exceeds this
+      - DEBUG_COMMIT_VERBOSE=1: always print detailed trace
+      - DEBUG_PROCESS_TOKEN_TRACE=1: print details from _process_token
+      - DEBUG_GSS_SAMPLES=int: print example stacks for the largest GSS (limit count)
+    """
+
+    def __init__(self, step_index: int, token_bytes: bytes) -> None:
+        self.step_index = step_index
+        self.token_bytes = token_bytes
+        self.start_time = time.perf_counter()
+        self.threshold_ms = _env_float("PROFILE_THRESHOLD_MS", 5.0)
+        self.verbose = _env_flag("DEBUG_COMMIT_VERBOSE", False)
+        self.trace_process = _env_flag("DEBUG_PROCESS_TOKEN_TRACE", False)
+        self.sample_limit = int(os.environ.get("DEBUG_GSS_SAMPLES", "0") or "0")
+
+        # Pre/post state stats
+        self.pre_stats: Dict[int, GSSStats] = {}
+        self.post_stats: Dict[int, GSSStats] = {}
+
+        # Queue traversal
+        self.queue_enqueued = 0
+        self.queue_popped = 0
+        self.offsets_explored: Set[int] = set()
+        self.max_offset = 0
+
+        # Tokenizer branching
+        self.matches_total = 0
+        self.matches_by_offset: Dict[int, int] = collections.Counter()
+        self.width_hist: Dict[int, int] = collections.Counter()
+
+        # _process_token counters
+        self.process_calls = 0
+        self.process_shifts = 0
+        self.process_reduces = 0
+        self.process_splits = 0
+        self.process_gotos = 0
+
+        # GSS merges
+        self.merge_calls = 0
+        self.merge_inputs_gss = 0
+        self.merge_input_stacks = 0
+        self.merge_output_stacks = 0
+
+        # Others
+        self.carry_forward_count = 0  # times we carried gss to end_state (no consumption)
+        self.enqueue_after_match = 0  # times we enqueued next offset
+        self.end_state_prunes = 0     # times we explicitly disallowed terminal at end_state
+
+        # Hook into GSS.merge
+        self.prev_profiler = GSS._active_profiler
+        GSS._active_profiler = self
+
+    def on_finalize(self) -> None:
+        GSS._active_profiler = self.prev_profiler
+
+    def add_pre_stats(self, sid: int, stats: GSSStats) -> None:
+        self.pre_stats[int(sid)] = stats
+
+    def add_post_stats(self, sid: int, stats: GSSStats) -> None:
+        self.post_stats[int(sid)] = stats
+
+    def on_queue_enqueued(self, n: int) -> None:
+        self.queue_enqueued += n
+
+    def on_queue_pop(self, offset: int) -> None:
+        self.queue_popped += 1
+        self.offsets_explored.add(offset)
+        if offset > self.max_offset:
+            self.max_offset = offset
+
+    def on_matches(self, offset: int, matches: List[Tuple[int, int]]) -> None:
+        self.matches_total += len(matches)
+        self.matches_by_offset[offset] += len(matches)
+        for _, width in matches:
+            self.width_hist[width] += 1
+
+    def on_end_state_prune(self) -> None:
+        self.end_state_prunes += 1
+
+    def on_enqueue_after_match(self) -> None:
+        self.enqueue_after_match += 1
+
+    def on_carry_forward(self) -> None:
+        self.carry_forward_count += 1
+
+    def on_process_token(self, terminal_id: int, shifts: int, reduces: int, splits: int, gotos: int) -> None:
+        self.process_calls += 1
+        self.process_shifts += shifts
+        self.process_reduces += reduces
+        self.process_splits += splits
+        self.process_gotos += gotos
+        if self.trace_process:
+            print(f"[process_token] term={terminal_id} shifts={shifts} reduces={reduces} splits={splits} gotos={gotos}")
+
+    def on_gss_merge(self, inputs_gss: int, input_stacks: int, output_stacks: int) -> None:
+        self.merge_calls += 1
+        self.merge_inputs_gss += inputs_gss
+        self.merge_input_stacks += input_stacks
+        self.merge_output_stacks += output_stacks
+
+    def summarize_gss_map(self, m: Dict[int, GSSStats]) -> str:
+        if not m:
+            return "0 states"
+        sids = sorted(m.keys())
+        total_heads = sum(st.heads for st in m.values())
+        total_stacks = sum(st.unique_stacks for st in m.values())
+        max_depth = max(st.depth_max for st in m.values())
+        return f"{len(m)} states, heads={total_heads}, stacks={total_stacks}, max_depth={max_depth}"
+
+    def maybe_print(self) -> None:
+        end = time.perf_counter()
+        elapsed_ms = (end - self.start_time) * 1000.0
+        should_print = self.verbose or elapsed_ms >= self.threshold_ms or _env_flag("PROFILE_COMMIT", False)
+        if not should_print:
+            return
+
+        tb = self.token_bytes
+        token_preview = tb[:80]
+        token_repr = token_preview.decode('utf-8', 'replace')
+        if len(tb) > 80:
+            token_repr += "…"
+
+        print("=== COMMIT PROFILE START ===")
+        print(f"step={self.step_index} token='{token_repr}' time_ms={round(elapsed_ms, 3)}")
+        print(f"pre:  {self.summarize_gss_map(self.pre_stats)}")
+        print(f"post: {self.summarize_gss_map(self.post_stats)}")
+        print(f"queue: enq={self.queue_enqueued} pop={self.queue_popped} offsets={len(self.offsets_explored)} max_offset={self.max_offset}")
+        print(f"tokenizer: matches_total={self.matches_total} width_hist={dict(self.width_hist)}")
+        print(f"process_token: calls={self.process_calls} shifts={self.process_shifts} reduces={self.process_reduces} splits={self.process_splits} gotos={self.process_gotos}")
+        print(f"merges: calls={self.merge_calls} inputs_gss={self.merge_inputs_gss} input_stacks={self.merge_input_stacks} output_stacks={self.merge_output_stacks} dedup_saved={self.merge_input_stacks - self.merge_output_stacks}")
+        print(f"end_state: carry_forward={self.carry_forward_count} prunes={self.end_state_prunes} enqueue_after_match={self.enqueue_after_match}")
+
+        if self.verbose and self.pre_stats:
+            largest_sid = max(self.pre_stats.items(), key=lambda kv: kv[1].unique_stacks)[0]
+            pre = self.pre_stats[largest_sid]
+            post = self.post_stats.get(largest_sid)
+            print(f"largest pre-state sid={largest_sid} {pre.brief()}")
+            if post:
+                print(f"same sid post-state {post.brief()}")
+
+        print("=== COMMIT PROFILE END ===")
+
+    def finalize(self) -> None:
+        self.maybe_print()
+        self.on_finalize()
+
+
 # GSS implementation
 
 @dataclass(frozen=True, eq=False)
@@ -63,6 +248,7 @@ class _StackNode:
 class _NodeFactory:
     def __init__(self) -> None:
         self._table: Dict[Tuple[Optional[_StackNode], int], _StackNode] = {}
+        self._len_cache: Dict[_StackNode, int] = {}
 
     def get(self, prev: Optional[_StackNode], value: int) -> _StackNode:
         key = (prev, value)
@@ -72,8 +258,21 @@ class _NodeFactory:
             self._table[key] = node
         return node
 
+    def length(self, node: Optional[_StackNode]) -> int:
+        if node is None:
+            return 0
+        cached = self._len_cache.get(node)
+        if cached is not None:
+            return cached
+        l = 1 + self.length(node.prev)
+        self._len_cache[node] = l
+        return l
+
 
 class GSS:
+    # Active profiler for merge instrumentation (set by _CommitProfiler)
+    _active_profiler: Optional[_CommitProfiler] = None
+
     def __init__(
         self,
         node_factory: Optional[_NodeFactory] = None,
@@ -109,6 +308,59 @@ class GSS:
             heads if heads is not None else dict(self._heads),
             empty_accs if empty_accs is not None else list(self._empty_accs),
         )
+
+    # --- Introspection helpers (used by profiler) ---
+
+    def head_count(self) -> int:
+        return len(self._heads)
+
+    def acc_count(self) -> int:
+        total = 0
+        for accs in self._heads.values():
+            total += len(accs)
+        total += len(self._empty_accs)
+        return total
+
+    def stack_count(self) -> int:
+        return len(self._heads) + (1 if self._empty_accs else 0)
+
+    def _iter_stack_tuples(self, limit: Optional[int] = None) -> Iterable[Tuple[int, ...]]:
+        n = 0
+        for head in self._heads.keys():
+            vals: List[int] = []
+            cur: Optional[_StackNode] = head
+            while cur is not None:
+                vals.append(cur.value)
+                cur = cur.prev
+            yield tuple(reversed(vals))
+            n += 1
+            if limit is not None and n >= limit:
+                break
+        if self._empty_accs:
+            yield ()
+
+    def compute_stats(self) -> GSSStats:
+        depths: List[int] = []
+        for head in self._heads.keys():
+            depths.append(self._factory.length(head))
+        if self._empty_accs:
+            depths.append(0)
+        if not depths:
+            return GSSStats(0, 0, 0, 0, 0, 0, 0.0)
+        dmin = min(depths)
+        dmax = max(depths)
+        dmean = sum(depths) / len(depths)
+        return GSSStats(
+            heads=len(self._heads),
+            empty_stacks=1 if self._empty_accs else 0,
+            unique_stacks=len(self._heads) + (1 if self._empty_accs else 0),
+            accs=self.acc_count(),
+            depth_min=dmin,
+            depth_max=dmax,
+            depth_mean=dmean,
+        )
+
+    # --- Core operations ---
 
     def push(self, value: int) -> "GSS":
         new_heads: Dict[_StackNode, List[PyAcc]] = {}
@@ -174,7 +426,12 @@ class GSS:
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
         merged: Dict[Tuple[int, ...], PyAcc] = {}
+        num_inputs = 0
+        input_stacks_total = 0
         for gss in gss_list:
+            num_inputs += 1
+            # count stacks in input
+            input_stacks_total += len(gss._heads) + (1 if gss._empty_accs else 0)
             for head, accs in gss._heads.items():
                 vals: List[int] = []
                 cur: Optional[_StackNode] = head
@@ -188,7 +445,11 @@ class GSS:
                 key = ()
                 merged[key] = merged[key].merge(a) if key in merged else a
         if not merged:
+            if GSS._active_profiler is not None:
+                GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, 0)
             return GSS()
+        if GSS._active_profiler is not None:
+            GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, len(merged))
         return GSS.from_stacks([(list(k), v) for k, v in merged.items()])
 
 
@@ -216,6 +477,7 @@ class Model(GraphProvider):
         self.internal_to_original_map: Dict[int, int] = {}
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
         self.tokenizer_initial_state: Optional[int] = None
+        self._commit_step: int = 0  # for profiling
 
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
@@ -286,6 +548,11 @@ class Model(GraphProvider):
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
         return model
 
+    # --- Internal helpers for commit() profiling ---
+
+    def _gss_stats_map(self, m: Dict[int, GSS]) -> Dict[int, GSSStats]:
+        return {sid: gss.compute_stats() for sid, gss in m.items()}
+
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             allowed_l2 = acc.terminals_union
@@ -336,8 +603,20 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
+        """
+        Core incremental update. This method is the main focus for performance analysis.
+        Optional profiling/tracing is controlled by environment variables (see _CommitProfiler).
+        """
+        self._commit_step += 1
         t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
+
+        profiler: Optional[_CommitProfiler] = None
+        if _env_flag("PROFILE_COMMIT", False) or _env_flag("DEBUG_COMMIT_VERBOSE", False):
+            profiler = _CommitProfiler(self._commit_step, token_bytes)
+            # Pre-state summary
+            for sid, st in self._gss_stats_map(self.state).items():
+                profiler.add_pre_stats(sid, st)
 
         # Build tokenizer maps
         terminals_map: Dict[int, ffi.Bitset] = {}
@@ -361,23 +640,31 @@ class Model(GraphProvider):
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
         q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
         visited_q_items: set = set()
+        if profiler is not None:
+            profiler.on_queue_enqueued(len(q))
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
+            if profiler is not None:
+                profiler.on_queue_pop(offset)
             q_key = (offset, tokenizer_sid, id(gss))
             if q_key in visited_q_items:
                 continue
             visited_q_items.add(q_key)
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            if profiler is not None:
+                profiler.on_matches(offset, matches)
 
             for terminal_id, width in matches:
-                processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
+                processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id, profiler=profiler)
 
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
                     if terminal_id in accessible_terms:
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+                        if profiler is not None:
+                            profiler.on_end_state_prune()
 
                 if not processed_gss.is_empty():
                     new_offset = offset + width
@@ -386,23 +673,37 @@ class Model(GraphProvider):
                         new_states[next_sid].append(processed_gss)
                     else:
                         q.append((new_offset, next_sid, processed_gss))
+                        if profiler is not None:
+                            profiler.on_enqueue_after_match()
 
             if end_state is not None:
                 new_states[end_state].append(gss)
+                if profiler is not None:
+                    profiler.on_carry_forward()
 
         merged_states = {sid: GSS.merge(glist) for sid, glist in new_states.items() if glist}
         self.state = {sid: st for sid, st in merged_states.items() if not st.is_empty()}
 
         t1 = time.perf_counter()
+
+        if profiler is not None:
+            for sid, st in self._gss_stats_map(self.state).items():
+                profiler.add_post_stats(sid, st)
+            profiler.finalize()
+
         if os.environ.get("REPORT_COMMIT_TIME") == "1":
             print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
-    def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+    def _process_token(self, gss: GSS, terminal_id: int, profiler: Optional[_CommitProfiler] = None) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
 
         shifted_gsses: List[GSS] = []
+        c_shifts = 0
+        c_reduces = 0
+        c_splits = 0
+        c_gotos = 0
 
         while heads_by_state:
             state_id, state_gsss = heads_by_state.popitem()
@@ -416,18 +717,23 @@ class Model(GraphProvider):
 
             if isinstance(action, int):  # Shift
                 shifted_gsses.append(state_gss.push(action))
+                c_shifts += 1
                 continue
 
             if isinstance(action, Reduce):
+                c_reduces += 1
                 popped = state_gss.popn(action.len)
                 for from_state_id in popped.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
                     heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
+                    c_gotos += 1
                 continue
 
             # Split
+            c_splits += 1
             if action.shift is not None:
                 shifted_gsses.append(state_gss.push(action.shift))
+                c_shifts += 1
             for length, nts in action.reduces.items():
                 popped = state_gss.popn(length)
                 for from_state_id in popped.peek():
@@ -435,6 +741,10 @@ class Model(GraphProvider):
                     for nt_id in nts.keys():
                         goto_state_id = table_row.gotos[nt_id]
                         heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
+                        c_gotos += 1
+
+        if profiler is not None:
+            profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
 
         return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
 
