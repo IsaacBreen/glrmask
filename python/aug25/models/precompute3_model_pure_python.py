@@ -1,6 +1,7 @@
 import json
 import heapq
 import collections
+import time
 from typing import Dict, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass, field
 
@@ -217,6 +218,7 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
+        t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
@@ -286,6 +288,9 @@ class Model(GraphProvider):
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
         self.state = merged_states
+
+        t1 = time.perf_counter()
+        print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
