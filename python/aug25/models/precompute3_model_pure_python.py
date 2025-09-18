@@ -8,7 +8,7 @@ from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 from gss_tester.interface import GSS
-from gss_tester.fast_impl import FastGSS
+from gss_tester.leveled_impl import FastGSS
 
 def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     flattened_stacks = rust_gss_node.flatten()
