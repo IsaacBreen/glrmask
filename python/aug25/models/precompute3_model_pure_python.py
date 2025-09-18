@@ -311,10 +311,10 @@ class Model(GraphProvider):
                                 yield (int(pop), sid, int(dest_idx))
 
     def commit(self, token_id: int):
+        print(f"\n--- commit token_id={token_id} ---")
         # Get Rust state before commit for comparison
         rust_state_map_before_commit = self.constraint_state.get_state_map()
 
-        self.constraint_state.commit(token_id)
         token_bytes = self.id_to_token[token_id]
 
         # --- Python implementation starts here ---
@@ -426,6 +426,10 @@ class Model(GraphProvider):
         }
 
         self.state = merged_states
+
+        self.constraint_state.commit(token_id)
+
+        assert self.state.keys() == rust_state_map.keys(), f"Tokenizer states mismatch after commit: Python {self.state.keys()}, Rust {rust_state_map.keys()}"
 
     def _process_token(self, gss: FastGSS, terminal_id: int) -> FastGSS:
         heads_by_state: Dict[int, List[PyGSSNodeInternal]] = collections.defaultdict(list)
