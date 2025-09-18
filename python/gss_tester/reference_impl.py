@@ -48,19 +48,13 @@ class ReferenceGSS(GSS[T, Acc]):
             new_stacks.append((new_vals, acc))
         return ReferenceGSS(new_stacks)
 
-    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks, merging accumulators for resulting identical stacks.
-        popped_stacks: Dict[Tuple[T, ...], Acc] = {}
+    def pop(self) -> 'ReferenceGSS[T, Acc]':
+        # Pop from all non-empty stacks, without merging.
+        popped_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
             if vals:
-                new_vals_tuple = tuple(vals[:-1])
-                if new_vals_tuple in popped_stacks:
-                    popped_stacks[new_vals_tuple] = merge_func(popped_stacks[new_vals_tuple], acc)
-                else:
-                    popped_stacks[new_vals_tuple] = acc
-
-        result_stacks = [(list(key), acc) for key, acc in popped_stacks.items()]
-        return ReferenceGSS(result_stacks)
+                popped_stacks.append((vals[:-1], acc))
+        return ReferenceGSS(popped_stacks)
 
     def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
         # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
@@ -121,9 +115,22 @@ class ReferenceGSS(GSS[T, Acc]):
         result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
         return ReferenceGSS(result_stacks)
 
-    def to_json_serializable(self) -> Any:
+    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+        """Converts to canonical ReferenceGSS by merging duplicate stacks."""
+        return ReferenceGSS.merge([self], merge_func)
+
+    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
         # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-        items: List[Tuple[List[T], Acc]] = [(list(vals), acc) for vals, acc in self._stacks]
+        # First, merge any stacks with identical values.
+        merged: Dict[Tuple[T, ...], Acc] = {}
+        for vals, acc in self._stacks:
+            key = tuple(vals)
+            if key in merged:
+                merged[key] = merge_func(merged[key], acc)
+            else:
+                merged[key] = acc
+
+        items: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
 
         def _encode_for_sort(obj: Any) -> str:
             # Produce a stable string for sorting-comparison, even if obj isn't natively JSON-serializable
@@ -136,21 +143,6 @@ class ReferenceGSS(GSS[T, Acc]):
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
         # Return a plain JSON-serializable structure
         return [[vals, acc] for vals, acc in items]
-
-    def __hash__(self):
-        # Hash consistent with equality based on the canonical JSON representation.
-        try:
-            canonical = self.to_json_serializable()
-            # Use JSON string for stable hashing; default=repr to handle non-serializable objects gracefully.
-            s = json.dumps(canonical, sort_keys=True, default=repr, separators=(",", ":"))
-            return hash(s)
-        except Exception:
-            # Fallback: hash the tuple of tuples if possible, else id-based hash
-            try:
-                tup = tuple((tuple(vals), acc) for vals, acc in self._stacks)
-                return hash(tup)
-            except Exception:
-                return object.__hash__(self)
 
     def is_empty(self) -> bool:
         # True iff there is exactly one active stack and that stack is empty.

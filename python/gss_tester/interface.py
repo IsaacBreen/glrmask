@@ -20,21 +20,21 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def pop(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+    def pop(self) -> 'GSS[T, Acc]':
         """
         For all active stacks, creates new stacks by removing the top value.
         Returns a new GSS state containing the popped stacks.
         """
         pass
 
-    def popn(self, n: int, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+    def popn(self, n: int) -> 'GSS[T, Acc]':
         """
         For all active stacks, creates new stacks by removing the top `n` values.
         Returns a new GSS state containing the popped stacks.
         """
         gss = self
         for _ in range(n):
-            gss = gss.pop(merge_func)
+            gss = gss.pop()
         return gss
 
     @abstractmethod
@@ -77,31 +77,29 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
+    @abstractmethod
+    def to_reference_impl(self, merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
+        """
+        Converts the GSS to its canonical ReferenceGSS representation.
+        This involves merging accumulators for identical stacks.
+        """
+        pass
+
     @staticmethod
     @abstractmethod
     def merge(gss_list: Iterable['GSS[T, Acc]'], merge_func: Callable[[Acc, Acc], Acc]) -> 'GSS[T, Acc]':
         """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
         pass
 
-    @abstractmethod
-    def to_json_serializable(self) -> Any:
+    def to_json_serializable(self, merge_func: Callable[[Acc, Acc], Acc]) -> Any:
         """Returns a JSON-serializable representation of the GSS state for comparison."""
-        pass
+        # to_reference_impl is expected to return a ReferenceGSS instance.
+        ref_impl = self.to_reference_impl(merge_func)
+        # We can now call the ReferenceGSS's specific implementation.
+        return ref_impl.to_json_serializable(merge_func)
 
     def __str__(self) -> str:
         """Provides a default string representation for debugging."""
-        try:
-            data = self.to_json_serializable()
-            return json.dumps(data, indent=2, sort_keys=True)
-        except Exception:
-            return super().__str__()
-
-    def __eq__(self, other):
-        """Defines equality based on the canonical JSON representation."""
-        if not isinstance(other, GSS):
-            return NotImplemented
-        return self.to_json_serializable() == other.to_json_serializable()
-
-    def __hash__(self):
-        """Defines hash based on the canonical JSON representation."""
-        pass
+        # The canonical JSON representation requires a merge function, so it cannot be
+        # used for a simple string conversion.
+        return super().__str__()
