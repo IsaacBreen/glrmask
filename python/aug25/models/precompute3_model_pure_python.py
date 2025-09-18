@@ -548,6 +548,8 @@ class Model(GraphProvider):
                         if disallowed_bv.is_empty():
                             continue
 
+                        end = min(end, self.tokenizer.max_state())
+
                         for tsid in range(start, end + 1):
                             possible_matches_for_state = possible_matches.get(tsid)
                             if not possible_matches_for_state:

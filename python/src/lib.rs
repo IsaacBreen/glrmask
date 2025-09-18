@@ -219,6 +219,10 @@ impl PyRegex {
     fn initial_state_id(&self) -> usize {
         self.inner.initial_state_id().0
     }
+
+    fn max_state(&self) -> usize {
+        self.inner.max_state()
+    }
 }
 
 #[pyclass(name = "GrammarDefinition")]

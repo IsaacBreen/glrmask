@@ -118,7 +118,7 @@ impl Regex {
         regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
-    fn max_state(&self) -> usize {
+    pub fn max_state(&self) -> usize {
         self.dfa.states.len()
     }
 
