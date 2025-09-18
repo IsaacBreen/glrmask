@@ -36,23 +36,32 @@ class ParserTable:
 @dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
+    llm_tokens_union: ffi.Bitset
 
     def __hash__(self):
-        return hash(self.terminals_union)
+        # ffi.Bitset is not hashable, so we use its JSON string representation.
+        return hash((self.terminals_union, self.llm_tokens_union.to_json_string()))
 
     def to_json_serializable(self):
-        return {"terminals_union": self.terminals_union.to_json_serializable()}
+        # This method is not used in the current logic but is good practice to keep updated.
+        return {
+            "terminals_union": self.terminals_union.to_json_serializable(),
+            "llm_tokens_union": self.llm_tokens_union.to_json_string()
+        }
 
     def __repr__(self):
-        return f"PyAcc({self.terminals_union})"
+        return f"PyAcc(terminals_union={self.terminals_union}, llm_tokens_union=...)"
 
 
 def merge_acc(acc1: PyAcc, acc2: PyAcc) -> PyAcc:
-    return PyAcc(terminals_union=acc1.terminals_union.union(acc2.terminals_union))
+    return PyAcc(
+        terminals_union=acc1.terminals_union.union(acc2.terminals_union),
+        llm_tokens_union=acc1.llm_tokens_union.union(acc2.llm_tokens_union)
+    )
 
 def get_disallowed_terminals_py(gss: FastGSS) -> ffi.HybridL2Bitset:
     merged_acc = gss.get_acc(merge_acc)
-    return merged_acc.terminals_union.complement()
+    return merged_acc.terminals_union.complement() if merged_acc else ffi.HybridL2Bitset.all().complement()
 
 def popn_fast_py(gss: FastGSS, n: int) -> FastGSS:
     result = gss
@@ -67,7 +76,10 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
     visited_rust_ptrs = {rust_gss_node.ptr()}
     while q:
         rust_node = q.popleft()
-        py_acc = PyAcc(terminals_union=rust_node.local_acc_terminals_union())
+        py_acc = PyAcc(
+            terminals_union=rust_node.local_acc_terminals_union(),
+            llm_tokens_union=rust_node.local_acc_llm_tokens_union()
+        )
         py_node = PyGSSNodeInternal(acc=py_acc, depth=rust_node.depth())
         memo_nodes[rust_node.ptr()] = py_node
         for _, pred_rust_node in rust_node.predecessors():
@@ -87,7 +99,10 @@ def convert_rust_gss_to_python_gss(rust_gss_node: ffi.GSSNode) -> FastGSS:
                 q.append(pred_rust_node)
     py_head_node = memo_nodes[rust_gss_node.ptr()]
     def acc_factory():
-        return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        return PyAcc(
+            terminals_union=ffi.HybridL2Bitset.all(),
+            llm_tokens_union=ffi.Bitset.ones(1) # Placeholder, should be sized correctly
+        )
     py_root_node = next((node for node in memo_nodes.values() if node.depth == 0), PyGSSNodeInternal(acc=acc_factory(), depth=0))
     return FastGSS(heads=frozenset([py_head_node]), acc_default_factory=acc_factory, root=py_root_node, child_to_parents=child_to_parents, path_cache={})
 
@@ -197,7 +212,10 @@ class Model(GraphProvider):
         model.parser_table = ParserTable(start_state_id, py_table)
 
         def acc_factory():
-            return PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+            return PyAcc(
+                terminals_union=ffi.HybridL2Bitset.all(),
+                llm_tokens_union=constraint.all_internal_llm_tokens_bitset()
+            )
         initial_gss = FastGSS.initial(acc_factory).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -224,16 +242,17 @@ class Model(GraphProvider):
         def apply_map(acc: PyAcc) -> PyAcc:
             old_l2 = acc.terminals_union
             new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-            
+
             for old_sid, new_sid in state_map.items():
                 bv_source = old_l2.get_l2_bitset(old_sid)
                 new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-            
+
             new_l2 = ffi.HybridL2Bitset.all()
             for new_sid, bv in new_bvs.items():
                 new_l2.insert_l2_bitset(new_sid, bv)
-            
-            return PyAcc(terminals_union=new_l2)
+
+            # Preserve llm_tokens_union
+            return PyAcc(terminals_union=new_l2, llm_tokens_union=acc.llm_tokens_union)
         return gss.apply(apply_map)
 
     def _disallow_terminal_in_state(self, gss: FastGSS, state_id: int, terminal_id: int) -> FastGSS:
@@ -253,8 +272,15 @@ class Model(GraphProvider):
                 to_remove = ffi.Bitset.from_indices([terminal_id])
                 new_bv = curr_bv.difference(to_remove)
                 new_l2.insert_l2_bitset(state_id, new_bv)
-            return PyAcc(terminals_union=new_l2)
+            return PyAcc(terminals_union=new_l2, llm_tokens_union=acc.llm_tokens_union)
         return gss.apply(apply_disallow)
+
+    def _reset_llm_tokens(self, gss: FastGSS) -> FastGSS:
+        """Mirrors Rust's reset_llm_tokens by setting llm_tokens_union to all ones."""
+        all_tokens = self.all_internal_llm_tokens_bitset
+        def apply_reset(acc: PyAcc) -> PyAcc:
+            return PyAcc(terminals_union=acc.terminals_union, llm_tokens_union=all_tokens)
+        return gss.apply(apply_reset)
 
     def get_root(self, state_id: int) -> int:
         return self.roots_map[int(state_id)]
@@ -285,6 +311,11 @@ class Model(GraphProvider):
             self.state = {}
             return
 
+        # --- Start: Mirror Rust's reset_llm_tokens at the beginning of commit ---
+        temp_states_reset: Dict[int, FastGSS] = {}
+        for tokenizer_sid, gss in self.state.items():
+            temp_states_reset[tokenizer_sid] = self._reset_llm_tokens(gss)
+        self.state = temp_states_reset
         # --- Start: Added pre-processing steps to match Rust ---
         terminals_map: Dict[int, ffi.Bitset] = {}
         state_map: Dict[int, int] = {}
@@ -302,7 +333,7 @@ class Model(GraphProvider):
         temp_states: Dict[int, FastGSS] = {}
         for tokenizer_sid, gss in self.state.items():
             pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-            if any(h is not pruned_gss._root for h in pruned_gss._heads):
+            if pruned_gss.is_alive():
                  mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
                  temp_states[tokenizer_sid] = mapped_gss
         
@@ -340,7 +371,7 @@ class Model(GraphProvider):
                     if possible_for_end is not None and terminal_id in possible_for_end:
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
-                if any(h is not processed_gss._root for h in processed_gss._heads):
+                if processed_gss.is_alive():
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
@@ -380,7 +411,7 @@ class Model(GraphProvider):
 
             def handle_reduce(reduce_action, gss_to_reduce):
                 popped_gss = gss_to_reduce.popn(reduce_action.len)
-                if any(h is not popped_gss._root for h in popped_gss._heads):
+                if popped_gss.is_alive():
                     reductions_to_do[reduce_action].append(popped_gss)
 
             if isinstance(action, int):

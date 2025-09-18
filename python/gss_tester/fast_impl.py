@@ -159,6 +159,11 @@ class FastGSS(GSS[T, Acc]):
             peek_values.update(v for v, _ in self._child_to_parents[head])
         return peek_values
 
+    def is_alive(self) -> bool:
+        """Checks if any head has a non-empty llm_tokens_union in its accumulator."""
+        # This mirrors the Rust GSSNode::is_alive logic.
+        return any(not head.acc.llm_tokens_union.is_empty() for head in self._heads)
+
     def get_acc(self, merge_func: Callable[[Acc, Acc], Acc]) -> Acc:
         """Merges the accumulators of all active stacks into a single value."""
         accumulators = [head.acc for head in self._heads]
