@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
-from gss_tester.leveled_impl import LeveledGSS as GSS
+from python.gss_tester.leveled_impl import LeveledGSS as GSS
 
 
 @dataclass(frozen=True)
