@@ -106,8 +106,8 @@ class GSS(ABC, Generic[T, Acc]):
 
     def __str__(self) -> str:
         """Provides a human-readable string representation for debugging."""
-        return str(self.to_reference_impl())
+        return f"{self.__class__.__name__}({self.to_json_serializable()})"
 
     def __repr__(self) -> str:
         """Provides an unambiguous string representation of the GSS."""
-        return repr(self.to_reference_impl())
+        return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
