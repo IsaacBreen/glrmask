@@ -284,8 +284,12 @@ class GSS:
         self._empty_accs: List[PyAcc] = empty_accs if empty_accs is not None else []
 
     @classmethod
-    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]]) -> "GSS":
-        factory = _NodeFactory()
+    def from_stacks(cls: Type["GSS"], stacks: List[Tuple[List[int], PyAcc]], node_factory: Optional[_NodeFactory] = None) -> "GSS":
+        """
+        Build a GSS from explicit stacks. If node_factory is provided, reuse it so that
+        node sharing is preserved across merges. This drastically reduces the cost of repeated merges.
+        """
+        factory = node_factory if node_factory is not None else _NodeFactory()
         heads: Dict[_StackNode, List[PyAcc]] = {}
         empty_accs: List[PyAcc] = []
         for vals, acc in stacks:
@@ -381,10 +385,24 @@ class GSS:
         return self._clone_with(heads=new_heads, empty_accs=new_empty)
 
     def popn(self, n: int) -> "GSS":
-        gss = self
-        for _ in range(n):
-            gss = gss.pop()
-        return gss
+        """
+        Efficient multi-pop: single pass over heads instead of repeated cloning in a loop.
+        """
+        if n <= 0:
+            return self
+        new_heads: Dict[_StackNode, List[PyAcc]] = {}
+        new_empty: List[PyAcc] = list(self._empty_accs)
+        for head, accs in self._heads.items():
+            cur = head
+            steps = n
+            while steps > 0 and cur is not None:
+                cur = cur.prev
+                steps -= 1
+            if cur is None:
+                new_empty.extend(accs)
+            else:
+                new_heads.setdefault(cur, []).extend(accs)
+        return self._clone_with(heads=new_heads, empty_accs=new_empty)
 
     def is_empty(self) -> bool:
         return not (self._empty_accs or self._heads)
@@ -396,6 +414,15 @@ class GSS:
             heads={h: list(a) for h, a in self._heads.items() if h.value == value},
             empty_accs=[],
         )
+
+    def _partition_by_top(self) -> Dict[int, Dict[_StackNode, List[PyAcc]]]:
+        """
+        Group heads by the top-of-stack state value in a single pass.
+        """
+        groups: Dict[int, Dict[_StackNode, List[PyAcc]]] = {}
+        for head, accs in self._heads.items():
+            groups.setdefault(head.value, {})[head] = accs
+        return groups
 
     def apply(self, func: Callable[[PyAcc], PyAcc]) -> "GSS":
         return self._clone_with(
@@ -425,13 +452,22 @@ class GSS:
 
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
+        """
+        Merge several GSS structures:
+          - Deduplicate identical stacks while merging accumulators.
+          - Critically: reuse a persistent NodeFactory from the first non-empty input
+            so nodes are shared across merges within a commit, avoiding re-allocation.
+        """
         merged: Dict[Tuple[int, ...], PyAcc] = {}
         num_inputs = 0
         input_stacks_total = 0
+        base_factory: Optional[_NodeFactory] = None
+
         for gss in gss_list:
             num_inputs += 1
-            # count stacks in input
             input_stacks_total += len(gss._heads) + (1 if gss._empty_accs else 0)
+            if base_factory is None and (gss._heads or gss._empty_accs):
+                base_factory = gss._factory
             for head, accs in gss._heads.items():
                 vals: List[int] = []
                 cur: Optional[_StackNode] = head
@@ -444,13 +480,21 @@ class GSS:
             for a in gss._empty_accs:
                 key = ()
                 merged[key] = merged[key].merge(a) if key in merged else a
+
+        # Ensure we have a factory even if all inputs were empty
+        if base_factory is None:
+            base_factory = _NodeFactory()
+
         if not merged:
             if GSS._active_profiler is not None:
                 GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, 0)
-            return GSS()
+            return GSS(node_factory=base_factory)
+
         if GSS._active_profiler is not None:
             GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, len(merged))
-        return GSS.from_stacks([(list(k), v) for k, v in merged.items()])
+
+        # Build using the chosen base factory to preserve node sharing across merges
+        return GSS.from_stacks([(list(k), v) for k, v in merged.items()], node_factory=base_factory)
 
 
 def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
@@ -637,11 +681,15 @@ class Model(GraphProvider):
             if not pruned.is_empty():
                 current_state_for_processing[tokenizer_sid] = self._map_allowed_terminals_tokenizer_states(pruned, state_map)
 
-        new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
+        # Accumulate results incrementally per tokenizer state (avoid large lists)
+        new_states: Dict[int, GSS] = {}
         q = collections.deque((0, sid, gss) for sid, gss in current_state_for_processing.items())
         visited_q_items: set = set()
         if profiler is not None:
             profiler.on_queue_enqueued(len(q))
+
+        # Small cache for tokens accessible from tokenizer end states
+        accessible_cache: Dict[int, Set[int]] = {}
 
         while q:
             offset, tokenizer_sid, gss = q.popleft()
@@ -657,11 +705,14 @@ class Model(GraphProvider):
                 profiler.on_matches(offset, matches)
 
             for terminal_id, width in matches:
+                # Process parser transitions for this terminal
                 processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id, profiler=profiler)
 
+                # Prune the same terminal from the tokenizer end_state to avoid double-consume
                 if end_state is not None:
-                    accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                    if terminal_id in accessible_terms:
+                    if end_state not in accessible_cache:
+                        accessible_cache[end_state] = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                    if terminal_id in accessible_cache[end_state]:
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
                         if profiler is not None:
                             profiler.on_end_state_prune()
@@ -670,19 +721,29 @@ class Model(GraphProvider):
                     new_offset = offset + width
                     next_sid = self.tokenizer_initial_state
                     if new_offset == len(token_bytes):
-                        new_states[next_sid].append(processed_gss)
+                        # Merge incrementally to keep factory sharing
+                        existing = new_states.get(next_sid)
+                        if existing is None:
+                            new_states[next_sid] = processed_gss
+                        else:
+                            new_states[next_sid] = GSS.merge([existing, processed_gss])
                     else:
                         q.append((new_offset, next_sid, processed_gss))
                         if profiler is not None:
                             profiler.on_enqueue_after_match()
 
             if end_state is not None:
-                new_states[end_state].append(gss)
+                # carry-forward without consumption
+                existing = new_states.get(end_state)
+                if existing is None:
+                    new_states[end_state] = gss
+                else:
+                    new_states[end_state] = GSS.merge([existing, gss])
                 if profiler is not None:
                     profiler.on_carry_forward()
 
-        merged_states = {sid: GSS.merge(glist) for sid, glist in new_states.items() if glist}
-        self.state = {sid: st for sid, st in merged_states.items() if not st.is_empty()}
+        # Prune empty GSS states
+        self.state = {sid: st for sid, st in new_states.items() if not st.is_empty()}
 
         t1 = time.perf_counter()
 
@@ -695,9 +756,10 @@ class Model(GraphProvider):
             print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     def _process_token(self, gss: GSS, terminal_id: int, profiler: Optional[_CommitProfiler] = None) -> GSS:
+        # Seed by partitioning once (avoid O(H^2) from repeated isolate)
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-        for state_id in gss.peek():
-            heads_by_state[state_id].append(gss.isolate(state_id))
+        for state_id, heads in gss._partition_by_top().items():
+            heads_by_state[state_id].append(GSS(node_factory=gss._factory, heads=heads, empty_accs=[]))
 
         shifted_gsses: List[GSS] = []
         c_shifts = 0
@@ -723,9 +785,11 @@ class Model(GraphProvider):
             if isinstance(action, Reduce):
                 c_reduces += 1
                 popped = state_gss.popn(action.len)
-                for from_state_id in popped.peek():
+                # Partition once by from_state_id after reduction
+                groups = popped._partition_by_top()
+                for from_state_id, heads in groups.items():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[action.nonterminal_id]
-                    heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
+                    heads_by_state[goto_state_id].append(GSS(node_factory=popped._factory, heads=heads, empty_accs=[]).push(goto_state_id))
                     c_gotos += 1
                 continue
 
@@ -736,16 +800,18 @@ class Model(GraphProvider):
                 c_shifts += 1
             for length, nts in action.reduces.items():
                 popped = state_gss.popn(length)
-                for from_state_id in popped.peek():
+                groups = popped._partition_by_top()
+                for from_state_id, heads in groups.items():
                     table_row = self.parser_table.table[from_state_id]
                     for nt_id in nts.keys():
                         goto_state_id = table_row.gotos[nt_id]
-                        heads_by_state[goto_state_id].append(popped.isolate(from_state_id).push(goto_state_id))
+                        heads_by_state[goto_state_id].append(GSS(node_factory=popped._factory, heads=heads, empty_accs=[]).push(goto_state_id))
                         c_gotos += 1
 
         if profiler is not None:
             profiler.on_process_token(terminal_id, shifts=c_shifts, reduces=c_reduces, splits=c_splits, gotos=c_gotos)
 
+        # Preserve factory continuity even if nothing shifted
         return GSS(node_factory=gss._factory) if not shifted_gsses else GSS.merge(shifted_gsses)
 
     def get_mask(self) -> RangeSet:
