@@ -499,8 +499,6 @@ class GSS:
     @staticmethod
     def merge(gss_list: Iterable["GSS"]) -> "GSS":
         merged: Dict[StackNode, PyAcc] = {}
-        num_inputs = 0
-        input_stacks_total = 0
 
         gss_list = list(gss_list)
         # Fast paths to cut unnecessary overhead on trivial merges
@@ -511,9 +509,21 @@ class GSS:
         if len(gss_list) == 1:
             return gss_list[0]
 
-        for gss in gss_list:
-            num_inputs += 1
-            input_stacks_total += gss.stack_count()
+        # Profiling stats from original list
+        num_inputs_orig = len(gss_list)
+        input_stacks_total_orig = sum(g.stack_count() for g in gss_list)
+
+        # Deduplicate GSS objects by their memory address (id)
+        unique_gss_map: Dict[int, "GSS"] = {id(g): g for g in gss_list}
+
+        if len(unique_gss_map) == 1:
+            result_gss = next(iter(unique_gss_map.values()))
+            if GSS._active_profiler is not None:
+                GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, result_gss.stack_count())
+            return result_gss
+
+        # The rest of the merge logic operates on the unique_gss list.
+        for gss in unique_gss_map.values():
             for node, acc in gss._heads.items():
                 existing = merged.get(node)
                 if existing is None:
@@ -523,7 +533,7 @@ class GSS:
 
         output_stacks = len(merged)
         if GSS._active_profiler is not None:
-            GSS._active_profiler.on_gss_merge(num_inputs, input_stacks_total, output_stacks)
+            GSS._active_profiler.on_gss_merge(num_inputs_orig, input_stacks_total_orig, output_stacks)
 
         return GSS(merged)
 
