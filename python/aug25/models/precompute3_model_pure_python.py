@@ -338,11 +338,17 @@ class Model(GraphProvider):
 
         # === ASSERTION 1: Compare maps ===
         rust_state_map, rust_terminals_map = self.constraint_state.compute_commit_maps(token_bytes)
-        assert state_map == rust_state_map, f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}"
+        if state_map != rust_state_map:
+            print(f"state_map mismatch. Python: {state_map}, Rust: {rust_state_map}")
         
         py_terminals_map_serializable = {k: v.to_json_string() for k, v in terminals_map.items()}
         rust_terminals_map_serializable = {k: v.to_json_string() for k, v in rust_terminals_map.items()}
-        assert py_terminals_map_serializable == rust_terminals_map_serializable, f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}"
+        if py_terminals_map_serializable != rust_terminals_map_serializable:
+            print(f"terminals_map mismatch. Python: {py_terminals_map_serializable}, Rust: {rust_terminals_map_serializable}")
+
+        if state_map != rust_state_map or py_terminals_map_serializable != rust_terminals_map_serializable:
+            raise ValueError("Pre-commit maps do not match between Python and Rust implementations.")
+
         # =================================
 
         temp_states: Dict[int, FastGSS] = {}
