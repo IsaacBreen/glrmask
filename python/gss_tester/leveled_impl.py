@@ -179,7 +179,16 @@ def _remove_root_acc(lower: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
     if isinstance(lower.inner, Leaf):
         return lower, None
     labels, accs = _split_children(lower.inner.children)
-    new_children = _build_children_from_map(labels, None)
+
+    merged_labels: Dict[T, Lower[T]] = {}
+    for label, lowers in labels.items():
+        merged: Optional[Lower[T]] = None
+        for child in lowers:
+            merged = child if merged is None else _merge_lower(merged, child)
+        if merged is not None:
+            merged_labels[label] = merged
+
+    new_children = _build_children_from_map(merged_labels, None)
     return Lower(LowerBranch(children=new_children)), _acc_reduce(accs)
 
 

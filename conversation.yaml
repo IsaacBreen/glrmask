@@ -546,7 +546,16 @@ local_system:
 
           labels, accs = _split_children(lower.inner.children)
           merged_acc = _merge_acc(_acc_reduce(accs), acc)
-          return Lower(LowerBranch(children=_build_children_from_map(labels, merged_acc)))
+
+          merged_labels: Dict[T, Lower[T]] = {}
+          for label, lowers in labels.items():
+              merged: Optional[Lower[T]] = None
+              for child in lowers:
+                  merged = child if merged is None else _merge_lower(merged, child)
+              if merged is not None:
+                  merged_labels[label] = merged
+
+          return Lower(LowerBranch(children=_build_children_from_map(merged_labels, merged_acc)))
 
 
       def _remove_root_acc(lower: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
@@ -2059,7 +2068,16 @@ local_system:
           if isinstance(lower.inner, Leaf):
               return lower, None
           labels, accs = _split_children(lower.inner.children)
-          new_children = _build_children_from_map(labels, None)
+
+          merged_labels: Dict[T, Lower[T]] = {}
+          for label, lowers in labels.items():
+              merged: Optional[Lower[T]] = None
+              for child in lowers:
+                  merged = child if merged is None else _merge_lower(merged, child)
+              if merged is not None:
+                  merged_labels[label] = merged
+
+          new_children = _build_children_from_map(merged_labels, None)
           return Lower(LowerBranch(children=new_children)), _acc_reduce(accs)
 
 
@@ -3607,7 +3625,16 @@ messages:
 
           labels, accs = _split_children(lower.inner.children)
           merged_acc = _merge_acc(_acc_reduce(accs), acc)
-          return Lower(LowerBranch(children=_build_children_from_map(labels, merged_acc)))
+
+          merged_labels: Dict[T, Lower[T]] = {}
+          for label, lowers in labels.items():
+              merged: Optional[Lower[T]] = None
+              for child in lowers:
+                  merged = child if merged is None else _merge_lower(merged, child)
+              if merged is not None:
+                  merged_labels[label] = merged
+
+          return Lower(LowerBranch(children=_build_children_from_map(merged_labels, merged_acc)))
 
 
       def _remove_root_acc(lower: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
@@ -4586,7 +4613,7 @@ messages:
       filename: python/gss_tester/test_spec.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_20-21-52
+      Test results will be saved in: gss_test_results/2025-09-19_20-26-33
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -4594,15 +4621,15 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_20-21-52/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_20-26-33/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-19_20-21-52/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-19_20-26-33/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_20-21-52/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_20-26-33/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
       Traceback (most recent call last):
@@ -4615,16 +4642,16 @@ messages:
         File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/test_spec.py", line 34, in run_test_spec
           gss_popped_20 = gss1.isolate(20).pop()
                           ^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 558, in pop
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 567, in pop
           new_lower = _pop_lower(lower)
                       ^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 238, in _pop_lower
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 247, in _pop_lower
           popped_child = _pop_lower(child_wo_acc)
                          ^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 235, in _pop_lower
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 244, in _pop_lower
           child_wo_acc, acc_at_child_root = _remove_root_acc(child)
                                             ^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 170, in _remove_root_acc
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 179, in _remove_root_acc
           if isinstance(lower.inner, Leaf):
                         ^^^^^^^^^^^
       AttributeError: 'list' object has no attribute 'inner'. Did you mean: 'index'?
@@ -4634,7 +4661,7 @@ messages:
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_20-21-52/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_20-21-52/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-19_20-26-33/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_20-26-33/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 1 equivalence class(es) among 1 implementations.
 
@@ -4649,7 +4676,7 @@ messages:
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_20-21-52
+      Full JSON results are in: gss_test_results/2025-09-19_20-26-33
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4668,60 +4695,58 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you've encountered a runtime error in the `leveled_impl.py` implementation. The traceback points to a type confusion deep within the recursive trie manipulation functions, specifically when handling `pop` operations.
+      Hello! I see you've encountered a runtime error in the `leveled_impl.py` implementation. The traceback indicates a type mismatch deep within the recursive logic of the `pop` operation. I can help you fix that.
 
-      The root cause is a bug in the `_add_root_acc` helper function. It was passing a `Dict[T, List[Lower[T]]]` to `_build_children_from_map`, which expects a `Dict[T, Lower[T]]`. This created a malformed data structure where a `list` was stored in place of a `Lower` node object, causing the `AttributeError: 'list' object has no attribute 'inner'` when that part of the structure was later accessed.
+      The error `AttributeError: 'list' object has no attribute 'inner'` occurs because the helper function `_remove_root_acc` incorrectly rebuilds part of the internal trie structure. It passes a dictionary with list values (`Dict[T, List[Lower[T]]]`) to the `_build_children_from_map` function, which expects a dictionary with single node values (`Dict[T, Lower[T]]`).
 
-      Here are the step-by-step instructions to fix the bug, followed by the git diff.
+      The fix is to add logic to `_remove_root_acc` to merge the lists of child nodes before rebuilding the trie, ensuring the data structure remains consistent. This canonicalization step is already present in other helper functions, but was missing here.
+
+      Here are the step-by-step instructions to apply the fix.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
+      1.  **Open the file `python/gss_tester/leveled_impl.py`**.
 
-      2.  **Locate the function** `_add_root_acc`, which starts around line 176.
+      2.  **Navigate to the `_remove_root_acc` function**, which starts around line 175.
 
-      3.  **Replace the entire function** with the corrected version below. The fix is to correctly merge the lists of child nodes before passing them to `_build_children_from_map`.
+      3.  **Replace the body of the function.** The current implementation incorrectly calls `_build_children_from_map`. You will replace the line `new_children = _build_children_from_map(labels, None)` with a loop that merges children before calling the function.
 
+          **Delete** these two lines from the function:
           ```python
-          def _add_root_acc(lower: Lower[T], acc: Optional[Acc]) -> Lower[T]:
-              """
-              Returns a new Lower equal to `lower` but with its root having an added accumulator (merged if present).
-              """
-              if acc is None:
-                  return lower
-              if isinstance(lower.inner, Leaf):
-                  # A leaf doesn't carry any children; make a branch that only stores the accumulator.
-                  return Lower(LowerBranch(children=_build_children_from_map({}, acc)))
-          
-              labels, accs = _split_children(lower.inner.children)
-              merged_acc = _merge_acc(_acc_reduce(accs), acc)
-          
-              merged_labels: Dict[T, Lower[T]] = {}
-              for label, lowers in labels.items():
-                  merged: Optional[Lower[T]] = None
-                  for child in lowers:
-                      merged = child if merged is None else _merge_lower(merged, child)
-                  if merged is not None:
-                      merged_labels[label] = merged
-          
-              return Lower(LowerBranch(children=_build_children_from_map(merged_labels, merged_acc)))
+          new_children = _build_children_from_map(labels, None)
+          return Lower(LowerBranch(children=new_children)), _acc_reduce(accs)
           ```
 
-      After applying this change, the `leveled_impl` should pass the test suite successfully.
+          **Insert** the following code in their place:
+          ```python
+          merged_labels: Dict[T, Lower[T]] = {}
+          for label, lowers in labels.items():
+              merged: Optional[Lower[T]] = None
+              for child in lowers:
+                  merged = child if merged is None else _merge_lower(merged, child)
+              if merged is not None:
+                  merged_labels[label] = merged
+
+          new_children = _build_children_from_map(merged_labels, None)
+          return Lower(LowerBranch(children=new_children)), _acc_reduce(accs)
+          ```
+
+      After these changes, the `_remove_root_acc` function will correctly handle the internal data structures, resolving the `AttributeError`.
 
       ### Git Diff
 
-      Here is the patch to apply the fix:
+      Here is the corresponding git diff to apply the change automatically.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 9906661..b9b65d1 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -183,7 +183,16 @@
-       
+      @@ -179,8 +179,16 @@
+           if isinstance(lower.inner, Leaf):
+               return lower, None
            labels, accs = _split_children(lower.inner.children)
-           merged_acc = _merge_acc(_acc_reduce(accs), acc)
-      -    return Lower(LowerBranch(children=_build_children_from_map(labels, merged_acc)))
+      -    new_children = _build_children_from_map(labels, None)
       +
       +    merged_labels: Dict[T, Lower[T]] = {}
       +    for label, lowers in labels.items():
@@ -4731,12 +4756,14 @@ messages:
       +        if merged is not None:
       +            merged_labels[label] = merged
       +
-      +    return Lower(LowerBranch(children=_build_children_from_map(merged_labels, merged_acc)))
+      +    new_children = _build_children_from_map(merged_labels, None)
+           return Lower(LowerBranch(children=new_children)), _acc_reduce(accs)
        
        
-       def _remove_root_acc(lower: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
 
       ```
+
+      Applying this patch will fix the bug, and the test suite should now run successfully for the `LeveledGSS` implementation. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -4747,7 +4774,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly merge child nodes in _add_root_acc
+  - user: 'Changes committed with message: "Fix: Correctly merge child nodes in _remove_root_acc
       for LeveledGSS"'
     metadata:
 ...
