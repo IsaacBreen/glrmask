@@ -19,8 +19,8 @@ class ReferenceGSS(GSS[T, Acc]):
     Notes on semantics (aligned with GSS interface):
     - from_stacks: constructs a new GSS from explicit stacks.
     - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-    - pop(): for all active stacks with at least one element, pop the top; returns those popped stacks.
-             Stacks that are already empty are dropped by pop().
+    - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
+             Returns a new GSS with the resulting stacks.
     - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
     - apply(func): transforms each accumulator independently; returns a new GSS.
     - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
@@ -61,12 +61,16 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks. If multiple stacks become identical, they are merged.
-        popped_stacks: List[Tuple[List[T], Acc]] = []
+        # Pop from all non-empty stacks. Empty stacks are preserved.
+        # If multiple stacks become identical, they are merged by the constructor.
+        new_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
             if vals:
-                popped_stacks.append((vals[:-1], acc))
-        return ReferenceGSS(popped_stacks)
+                new_stacks.append((vals[:-1], acc))
+            else:
+                # Preserve empty stacks
+                new_stacks.append((vals, acc))
+        return ReferenceGSS(new_stacks)
 
     def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
         # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
