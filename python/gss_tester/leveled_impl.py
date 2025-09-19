@@ -76,245 +76,130 @@ def _merge_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
 
 
 # ------------------------------
-# Canonical helpers
+# Simple, canonical helpers based on path maps
 # ------------------------------
 
-def _is_empty_lower(node: Lower[T]) -> bool:
-    """True iff this Lower represents no stacks at all."""
-    return isinstance(node.inner, LowerBranch) and not node.inner.children
+def _make_empty_lower[T]() -> Lower[T]:
+    return Lower(LowerBranch(children={}))
 
 
-def _split(node: Lower[T]) -> Tuple[Dict[T, Lower[T]], Optional[Acc]]:
+def _lower_has_any_acc[T](node: Lower[T]) -> bool:
     """
-    Split a canonical Lower node into (children_by_label, root_acc).
-    Assumes canonical form:
-      - For each label, there is at most index 0 in the inner map.
-      - At most one _AccKey (with index 0) exists to encode the node's accumulator.
+    True iff there is any accumulator stored anywhere in this trie.
     """
     if isinstance(node.inner, Leaf):
-        return {}, None
-
-    labels: Dict[T, Lower[T]] = {}
-    root_acc: Optional[Acc] = None
-
-    for key, idx_map in node.inner.children.items():
-        # Canonical: only index 0 used; fallback to any present for robustness.
-        child = idx_map.get(0) or (next(iter(idx_map.values())) if idx_map else None)
-
-        if _is_acc_key(key):
-            if child is not None:
-                # Merge defensively in case multiple sentinels appear (won't happen in canonical form).
-                root_acc = _merge_acc(root_acc, key.acc)  # type: ignore[attr-defined]
-        else:
-            if child is not None and not _is_empty_lower(child):
-                labels[key] = child  # type: ignore[assignment]
-
-    return labels, root_acc
-
-
-def _make_node(labels: Dict[T, Lower[T]], root_acc: Optional[Acc]) -> Lower[T]:
-    """Create a canonical Lower node from child labels and an optional root accumulator."""
-    if not labels and root_acc is None:
-        return Lower(LowerBranch(children={}))
-
-    children: Dict[Any, Dict[int, Lower[T]]] = {}
-    for label, child in labels.items():
-        if not _is_empty_lower(child):
-            children[label] = {0: child}
-    if root_acc is not None:
-        children[_AccKey(root_acc)] = {0: Lower(Leaf())}
-    return Lower(LowerBranch(children=children))
-
-
-def _add_root_acc(node: Lower[T], acc: Optional[Acc]) -> Lower[T]:
-    if acc is None:
-        return node
-    if isinstance(node.inner, Leaf):
-        return _make_node({}, acc)
-    labels, existing = _split(node)
-    return _make_node(labels, _merge_acc(existing, acc))
-
-
-def _remove_root_acc(node: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
-    if isinstance(node.inner, Leaf):
-        return node, None
-    labels, root_acc = _split(node)
-    return _make_node(labels, None), root_acc
-
-
-# ------------------------------
-# Core trie operations (simple and canonical)
-# ------------------------------
-
-def _merge_lower(a: Lower[T], b: Lower[T]) -> Lower[T]:
-    """Union of tries; accumulators on identical stacks are merged."""
-    if _is_empty_lower(a):
-        return b
-    if _is_empty_lower(b):
-        return a
-
-    a_labels, a_acc = _split(a)
-    b_labels, b_acc = _split(b)
-
-    merged_labels: Dict[T, Lower[T]] = {}
-    for key in set(a_labels) | set(b_labels):
-        ca = a_labels.get(key)
-        cb = b_labels.get(key)
-        if ca is None:
-            merged_labels[key] = cb  # type: ignore[assignment]
-        elif cb is None:
-            merged_labels[key] = ca
-        else:
-            merged_labels[key] = _merge_lower(ca, cb)
-
-    return _make_node(merged_labels, _merge_acc(a_acc, b_acc))
-
-
-def _push_lower(node: Lower[T], value: T) -> Lower[T]:
-    """Push `value` on all stacks encoded by this trie."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return node
-
-    labels, root_acc = _split(node)
-    new_labels: Dict[T, Lower[T]] = {}
-
-    # Recurse into children
-    for label, child in labels.items():
-        pushed_child = _push_lower(child, value)
-        if not _is_empty_lower(pushed_child):
-            new_labels[label] = pushed_child
-
-    # Move this node's accumulator under the `value` child
-    if root_acc is not None:
-        if value in new_labels:
-            new_labels[value] = _add_root_acc(new_labels[value], root_acc)
-        else:
-            new_labels[value] = _make_node({}, root_acc)
-
-    return _make_node(new_labels, None)
-
-
-def _pop_lower(node: Lower[T]) -> Lower[T]:
-    """Pop one element from all non-empty stacks in this trie."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return node
-
-    labels, _ = _split(node)  # root_acc ignored: empty stacks can't be popped
-
-    carry_up: Optional[Acc] = None
-    new_labels: Dict[T, Lower[T]] = {}
-
-    for label, child in labels.items():
-        child_wo_acc, acc_at_child = _remove_root_acc(child)
-        carry_up = _merge_acc(carry_up, acc_at_child)
-
-        popped_child = _pop_lower(child_wo_acc)
-        if not _is_empty_lower(popped_child):
-            new_labels[label] = popped_child
-
-    return _make_node(new_labels, carry_up)
-
-
-def _isolate_lower_by_top(
-    node: Lower[T],
-    target: Optional[T],
-    incoming_label: Optional[T] = None
-) -> Optional[Lower[T]]:
-    """
-    Keep only stacks whose top element equals `target` (or empty stacks if target is None).
-    Returns None if the resulting subtree contains no stacks.
-    """
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return None
-
-    labels, root_acc = _split(node)
-
-    keep_root = (incoming_label is None and target is None) or (incoming_label is not None and incoming_label == target)
-    kept_root = root_acc if keep_root else None
-
-    new_labels: Dict[T, Lower[T]] = {}
-    for label, child in labels.items():
-        filtered = _isolate_lower_by_top(child, target, incoming_label=label)
-        if filtered is not None and not _is_empty_lower(filtered):
-            new_labels[label] = filtered
-
-    if not new_labels and kept_root is None:
-        return None
-    return _make_node(new_labels, kept_root)
-
-
-def _apply_lower(node: Lower[T], func: Callable[[Acc], Acc]) -> Lower[T]:
-    """Apply a transformation to every accumulator in the trie."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return node
-
-    labels, root_acc = _split(node)
-    transformed_root = func(root_acc) if root_acc is not None else None
-
-    new_labels: Dict[T, Lower[T]] = {}
-    for label, child in labels.items():
-        t_child = _apply_lower(child, func)
-        if not _is_empty_lower(t_child):
-            new_labels[label] = t_child
-
-    return _make_node(new_labels, transformed_root)
-
-
-def _prune_lower(node: Lower[T], predicate: Callable[[Acc], bool]) -> Optional[Lower[T]]:
-    """Remove stacks whose accumulator does not satisfy `predicate`."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return None
-
-    labels, root_acc = _split(node)
-    kept_root = root_acc if (root_acc is not None and predicate(root_acc)) else None
-
-    new_labels: Dict[T, Lower[T]] = {}
-    for label, child in labels.items():
-        p_child = _prune_lower(child, predicate)
-        if p_child is not None and not _is_empty_lower(p_child):
-            new_labels[label] = p_child
-
-    if not new_labels and kept_root is None:
-        return None
-    return _make_node(new_labels, kept_root)
-
-
-def _has_any_stack(node: Lower[T]) -> bool:
-    """True iff there is any accumulator anywhere in this trie."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
         return False
-    labels, root_acc = _split(node)
-    if root_acc is not None:
-        return True
-    return any(_has_any_stack(child) for child in labels.values())
+    # node.inner is a LowerBranch
+    for key, idx_map in node.inner.children.items():
+        if _is_acc_key(key):
+            return True
+        for child in idx_map.values():
+            if _lower_has_any_acc(child):
+                return True
+    return False
 
 
-def _peek_values(node: Lower[T], incoming_label: Optional[T], out: Set[T]) -> Set[T]:
-    """Collect all top-of-stack values for non-empty stacks."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return out
+def _lower_to_map[T, A](node: Lower[T]) -> Dict[Tuple[T, ...], A]:
+    """
+    Decode a Lower-trie into a map from stack paths (bottom->top) to accumulators.
+    """
+    result: Dict[Tuple[T, ...], A] = {}
 
-    labels, root_acc = _split(node)
+    def visit(cur: Lower[T], prefix: List[T]) -> None:
+        if isinstance(cur.inner, Leaf):
+            return
+        children = cur.inner.children
 
-    # Root accumulator at this node means stacks with top == incoming_label (if any)
-    if root_acc is not None and incoming_label is not None:
-        out.add(incoming_label)
+        # Collect accumulator(s) at this node (should be at most one in canonical form).
+        acc_here: Optional[A] = None
+        for key, idx_map in children.items():
+            if _is_acc_key(key):
+                # Each idx_map should only have index 0. Be robust: take any if present.
+                if idx_map:
+                    # We store Leaf under _AccKey in canonical construction; we only need the key's acc.
+                    key_obj = key  # _AccKey
+                    acc_here = _merge_acc(acc_here, key_obj.acc)  # type: ignore[attr-defined]
 
-    for label, child in labels.items():
-        _peek_values(child, label, out)
+        if acc_here is not None:
+            result[tuple(prefix)] = acc_here
+
+        # Recurse to label-children
+        for label, idx_map in children.items():
+            if _is_acc_key(label):
+                continue
+            # Canonical form uses index 0; be robust and traverse any one (or all)
+            child = idx_map.get(0) or (next(iter(idx_map.values())) if idx_map else None)
+            if child is not None:
+                prefix.append(label)  # type: ignore[arg-type]
+                visit(child, prefix)
+                prefix.pop()
+
+    visit(node, [])
+    return result
+
+
+def _map_merge_paths[T, A](a: Dict[Tuple[T, ...], A], b: Dict[Tuple[T, ...], A]) -> Dict[Tuple[T, ...], A]:
+    """
+    Merge two path->acc maps, combining accumulators for identical paths.
+    """
+    out: Dict[Tuple[T, ...], A] = dict(a)
+    for path, acc in b.items():
+        if path in out:
+            out[path] = out[path].merge(acc)  # type: ignore[union-attr]
+        else:
+            out[path] = acc
     return out
 
 
-def _reduce_all_acc(node: Lower[T]) -> Optional[Acc]:
-    """Merge all accumulators in the trie (or None if empty)."""
-    if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-        return None
+def _map_to_lower[T, A](paths: Dict[Tuple[T, ...], A]) -> Lower[T]:
+    """
+    Build a canonical Lower-trie from a path->acc map.
+    """
+    if not paths:
+        return _make_empty_lower()
 
-    labels, root_acc = _split(node)
-    total: Optional[Acc] = root_acc
-    for child in labels.values():
-        total = _merge_acc(total, _reduce_all_acc(child))
-    return total
+    # First build a nested Python dict trie for simplicity
+    ACC = object()
+    root: Dict[Any, Dict] = {}
+
+    for path, acc in paths.items():
+        node = root
+        for label in path:
+            node = node.setdefault(label, {})
+        prev = node.get(ACC)
+        node[ACC] = acc if prev is None else prev.merge(acc)  # type: ignore[union-attr]
+
+    # Convert the nested dict trie into immutable Lower nodes
+    def build(node_dict: Dict[Any, Dict]) -> Lower[T]:
+        labels: Dict[T, Lower[T]] = {}
+        root_acc: Optional[A] = None
+
+        for key, sub in node_dict.items():
+            if key is ACC:
+                root_acc = sub  # type: ignore[assignment]
+            else:
+                labels[key] = build(sub)  # type: ignore[index]
+
+        # Build canonical Lower node: children labeled by value, and optional _AccKey(root_acc)
+        children: Dict[Any, Dict[int, Lower[T]]] = {}
+        for label, child in labels.items():
+            # Skip empty subtrees (shouldn't appear, but keep canonical)
+            if isinstance(child.inner, LowerBranch) and not child.inner.children:
+                continue
+            children[label] = {0: child}
+        if root_acc is not None:
+            children[_AccKey(root_acc)] = {0: Lower(Leaf())}  # type: ignore[arg-type]
+
+        return Lower(LowerBranch(children=children))
+
+    return build(root)
+
+
+def _encode_for_sort(obj: Any) -> str:
+    try:
+        return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+    except Exception:
+        return repr(obj)
 
 
 # ------------------------------
@@ -331,9 +216,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         Build a LeveledGSS from explicit stacks.
         - Merge accumulators for identical stacks.
-        - Build a bottom->top trie; at each node, a special _AccKey(acc) child encodes the accumulator.
+        - Encode as a canonical trie (Lower) with _AccKey at nodes containing an accumulator.
         """
-        # Canonicalize and merge duplicate stacks
         merged: Dict[Tuple[Any, ...], Acc] = {}
         for vals, acc in stacks:
             key = tuple(vals)
@@ -342,86 +226,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 merged[key] = acc
 
-        # Build a nested Python dict trie first for simplicity
-        acc_key = object()
-        trie: Dict[Any, Dict] = {}
-
-        def insert(path: List[T], acc: Acc) -> None:
-            node = trie
-            for item in path:
-                node = node.setdefault(item, {})
-            prev = node.get(acc_key)
-            node[acc_key] = acc if prev is None else prev.merge(acc)
-
-        for key, acc in merged.items():
-            insert(list(key), acc)
-
-        # Convert the nested dict trie into immutable Lower nodes
-        def build_lower(node_dict: Dict[Any, Dict]) -> Lower[T]:
-            labels: Dict[T, Lower[T]] = {}
-            root_acc: Optional[Acc] = None
-            for key, sub in node_dict.items():
-                if key is acc_key:
-                    root_acc = sub  # type: ignore[assignment]
-                else:
-                    labels[key] = build_lower(sub)
-            return _make_node(labels, root_acc)
-
-        lower_root = build_lower(trie)
+        lower_root = _map_to_lower(merged)
         return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         """
         Decode the trie into a canonical, sorted list of (stack, acc) pairs.
         """
-        results: List[Tuple[List[T], Acc]] = []
-
-        def collect(node: Lower[T], prefix: List[T]) -> None:
-            if isinstance(node.inner, Leaf) or _is_empty_lower(node):
-                return
-            labels, root_acc = _split(node)
-            if root_acc is not None:
-                results.append((list(prefix), root_acc))
-            for label, child in labels.items():
-                prefix.append(label)
-                collect(child, prefix)
-                prefix.pop()
-
-        # We always use a single Interface at the top
         iface = self.inner.inner  # type: ignore[union-attr]
         if isinstance(iface, Interface):
-            collect(iface.node, [])
+            paths = _lower_to_map(iface.node)
         else:
-            # Should never happen with this implementation, but keep a safe fallback traversal.
-            def collect_from_upper(u: Upper[T, Acc], top_prefix: List[T]) -> None:
+            # Fallback traversal: convert UpperBranch to a Lower and then to map
+            def upper_to_lower(u: Upper[T, Acc]) -> Lower[T]:
                 if isinstance(u.inner, Interface):
-                    collect(u.inner.node, top_prefix)
-                    return
+                    return u.inner.node
                 br: UpperBranch[T, Acc] = u.inner
-                for val, idx_map in br.children.items():
+                lb_children: Dict[Any, Dict[int, Lower[T]]] = {}
+                for label, idx_map in br.children.items():
                     for child in idx_map.values():
-                        top_prefix.append(val)
-                        collect_from_upper(child, top_prefix)
-                        top_prefix.pop()
-            collect_from_upper(self.inner, [])
+                        lb_children.setdefault(label, {})[0] = upper_to_lower(child)
+                return Lower(LowerBranch(children=lb_children))
+            paths = _lower_to_map(upper_to_lower(self.inner))
 
-        # Merge again defensively (though structure should already be canonical), then sort
-        merged: Dict[Tuple[Any, ...], Acc] = {}
-        for vals, acc in results:
-            key = tuple(vals)
-            if key in merged:
-                merged[key] = merged[key].merge(acc)
-            else:
-                merged[key] = acc
-
-        items = [(list(k), v) for k, v in merged.items()]
-
-        def _encode_for_sort(obj: Any) -> str:
-            try:
-                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-            except Exception:
-                return repr(obj)
-
+        items = [(list(k), v) for k, v in paths.items()]
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
         return items
 
@@ -446,55 +274,99 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         lower = self._get_lower()
-        if not _has_any_stack(lower):
-            return LeveledGSS.from_stacks([])
-        return self._with_lower(_push_lower(lower, value))
+        if not _lower_has_any_acc(lower):
+            return self._with_lower(_make_empty_lower())
+        paths = _lower_to_map(lower)
+        pushed: Dict[Tuple[T, ...], Acc] = {}
+        for p, acc in paths.items():
+            new_path = tuple(list(p) + [value])  # build new tuple efficiently
+            if new_path in pushed:
+                pushed[new_path] = pushed[new_path].merge(acc)
+            else:
+                pushed[new_path] = acc
+        return self._with_lower(_map_to_lower(pushed))
 
     def pop(self) -> LeveledGSS[T, Acc]:
         lower = self._get_lower()
-        if not _has_any_stack(lower):
-            return LeveledGSS.from_stacks([])
-        return self._with_lower(_pop_lower(lower))
+        if not _lower_has_any_acc(lower):
+            return self._with_lower(_make_empty_lower())
+        paths = _lower_to_map(lower)
+        popped: Dict[Tuple[T, ...], Acc] = {}
+        for p, acc in paths.items():
+            if p:  # only non-empty stacks can be popped
+                new_path = p[:-1]
+                if new_path in popped:
+                    popped[new_path] = popped[new_path].merge(acc)
+                else:
+                    popped[new_path] = acc
+        return self._with_lower(_map_to_lower(popped))
 
     def is_empty(self) -> bool:
-        return not _has_any_stack(self._get_lower())
+        return not _lower_has_any_acc(self._get_lower())
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         lower = self._get_lower()
-        if not _has_any_stack(lower):
-            return LeveledGSS.from_stacks([])
-        filtered = _isolate_lower_by_top(lower, value, incoming_label=None)
-        if filtered is None:
-            return LeveledGSS.from_stacks([])
-        return self._with_lower(filtered)
+        if not _lower_has_any_acc(lower):
+            return self._with_lower(_make_empty_lower())
+        paths = _lower_to_map(lower)
+        filtered: Dict[Tuple[T, ...], Acc] = {}
+        if value is None:
+            if () in paths:
+                filtered[()] = paths[()]
+        else:
+            for p, acc in paths.items():
+                if p and p[-1] == value:
+                    filtered[p] = acc
+        return self._with_lower(_map_to_lower(filtered))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         lower = self._get_lower()
-        if not _has_any_stack(lower):
-            return LeveledGSS.from_stacks([])
-        return self._with_lower(_apply_lower(lower, func))
+        if not _lower_has_any_acc(lower):
+            return self._with_lower(_make_empty_lower())
+        paths = _lower_to_map(lower)
+        transformed: Dict[Tuple[T, ...], Acc] = {p: func(acc) for p, acc in paths.items()}
+        return self._with_lower(_map_to_lower(transformed))
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         lower = self._get_lower()
-        pruned = _prune_lower(lower, predicate)
-        if pruned is None:
-            return LeveledGSS.from_stacks([])
-        return self._with_lower(pruned)
+        if not _lower_has_any_acc(lower):
+            return self._with_lower(_make_empty_lower())
+        paths = _lower_to_map(lower)
+        kept: Dict[Tuple[T, ...], Acc] = {p: acc for p, acc in paths.items() if predicate(acc)}
+        return self._with_lower(_map_to_lower(kept))
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         a = self._get_lower()
         b = other._get_lower()
-        if not _has_any_stack(a):
+        if not _lower_has_any_acc(a):
             return other
-        if not _has_any_stack(b):
+        if not _lower_has_any_acc(b):
             return self
-        return self._with_lower(_merge_lower(a, b))
+        map_a = _lower_to_map(a)
+        map_b = _lower_to_map(b)
+        merged = _map_merge_paths(map_a, map_b)
+        return self._with_lower(_map_to_lower(merged))
 
     def peek(self) -> Set[T]:
-        return _peek_values(self._get_lower(), incoming_label=None, out=set())
+        lower = self._get_lower()
+        if not _lower_has_any_acc(lower):
+            return set()
+        paths = _lower_to_map(lower)
+        out: Set[T] = set()
+        for p in paths.keys():
+            if p:
+                out.add(p[-1])
+        return out
 
     def reduce_acc(self) -> Optional[Acc]:
-        return _reduce_all_acc(self._get_lower())
+        lower = self._get_lower()
+        if not _lower_has_any_acc(lower):
+            return None
+        paths = _lower_to_map(lower)
+        total: Optional[Acc] = None
+        for acc in paths.values():
+            total = _merge_acc(total, acc)
+        return total
 
 
 # ------------------------------
