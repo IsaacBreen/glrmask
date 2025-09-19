@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
+from functools import reduce
 
 from .interface import GSS, T, Acc, MergeableInt
 from .reference_impl import ReferenceGSS
@@ -69,11 +70,6 @@ def _dedup_pairs(pairs: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
         else:
             merged[key] = acc
     return [(list(k), v) for k, v in merged.items()]
-
-
-def _pairs_from_ref(ref: ReferenceGSS[T, Acc]) -> List[Tuple[List[T], Acc]]:
-    # The ReferenceGSS stores canonical stacks in _stacks already merged
-    return [(list(vals), acc) for (vals, acc) in ref._stacks]  # type: ignore[attr-defined]
 
 
 def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
@@ -355,101 +351,76 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     """
 
     # Construction
-    def __init__(self, ref: ReferenceGSS[T, Acc], node: _LeveledNode[T, Acc]):
-        self._ref = ref
+    def __init__(self, node: _LeveledNode[T, Acc]):
         self._node = node
         # Validate invariants in debug-oriented fashion (can be toggled off if performance becomes a concern)
-        try:
-            _validate_invariants_node(self._node)
-        except InvariantViolation:
-            # As a fallback, try to rebuild from current reference impl (which is canonical) and re-validate.
-            rebuilt = _build_leveled_from_pairs(_pairs_from_ref(self._ref))
-            _validate_invariants_node(rebuilt)
-            self._node = rebuilt
+        _validate_invariants_node(self._node)
 
     # ---- GSS interface ----
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        # Build a canonical ReferenceGSS first
-        ref = ReferenceGSS.from_stacks(stacks)
-        # Build our leveled node from the deduped pairs
-        pairs = _pairs_from_ref(ref)
-        node = _build_leveled_from_pairs(pairs)
-        return cls(ref, node)
+        node = _build_leveled_from_pairs(stacks)
+        return cls(node)
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        # Delegate semantics to ReferenceGSS
-        new_ref = self._ref.push(value)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        pairs = _enumerate_pairs_from_node(self._node)
+        new_pairs = [(vals + [value], acc) for vals, acc in pairs]
+        return LeveledGSS.from_stacks(new_pairs)
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        new_ref = self._ref.pop()
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        pairs = _enumerate_pairs_from_node(self._node)
+        new_pairs = [(vals[:-1], acc) for vals, acc in pairs if vals]
+        return LeveledGSS.from_stacks(new_pairs)
 
     def is_empty(self) -> bool:
-        return self._ref.is_empty()
+        return isinstance(self._node, Empty)
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        # Semantics: keep only stacks whose top equals value; if value is None, keep only empty stacks.
-        pairs = _pairs_from_ref(self._ref)
+        pairs = _enumerate_pairs_from_node(self._node)
         if value is None:
-            filtered = [(v, a) for v, a in pairs if len(v) == 0]
+            filtered = [(v, a) for v, a in pairs if not v]
         else:
             filtered = [(v, a) for v, a in pairs if v and v[-1] == value]
-        new_ref = ReferenceGSS.from_stacks(filtered)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS.from_stacks(filtered)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        # Apply func independently to each accumulator
-        pairs = _pairs_from_ref(self._ref)
+        pairs = _enumerate_pairs_from_node(self._node)
         applied = [(vals, func(acc)) for vals, acc in pairs]
-        new_ref = ReferenceGSS.from_stacks(applied)
-        # Memoized rebuild would preserve sharing; for now rebuild canonical leveled node
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS.from_stacks(applied)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        pairs = _pairs_from_ref(self._ref)
+        pairs = _enumerate_pairs_from_node(self._node)
         kept = [(v, a) for v, a in pairs if predicate(a)]
-        new_ref = ReferenceGSS.from_stacks(kept)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS.from_stacks(kept)
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        # Convert other's reference representation and merge via ReferenceGSS semantics
+        self_pairs = _enumerate_pairs_from_node(self._node)
         other_ref = other.to_reference_impl()
-        assert isinstance(other_ref, ReferenceGSS)
-        merged_ref = ReferenceGSS(self._ref._stacks + other_ref._stacks)  # type: ignore[attr-defined]
-        # ReferenceGSS constructor canonicalizes and merges duplicate stacks
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(merged_ref))
-        return LeveledGSS(merged_ref, new_node)
+        other_pairs = other_ref._stacks
+        all_pairs = self_pairs + other_pairs
+        return LeveledGSS.from_stacks(all_pairs)
 
     def peek(self) -> Set[T]:
-        # Set of all top values across non-empty stacks
         result: Set[T] = set()
-        for vals, _ in _pairs_from_ref(self._ref):
+        pairs = _enumerate_pairs_from_node(self._node)
+        for vals, _ in pairs:
             if vals:
                 result.add(vals[-1])
         return result
 
     def reduce_acc(self) -> Optional[Acc]:
-        return self._ref.reduce_acc()
+        pairs = _enumerate_pairs_from_node(self._node)
+        if not pairs:
+            return None
+        accs = [acc for _, acc in pairs]
+        return reduce(lambda a, b: a.merge(b), accs)
 
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-        # Return the canonical ReferenceGSS (gold standard for comparisons)
-        return ReferenceGSS(_pairs_from_ref(self._ref))  # type: ignore[arg-type]
+        pairs = _enumerate_pairs_from_node(self._node)
+        return ReferenceGSS.from_stacks(pairs)
 
     # Also expose a human-friendly validator
     def validate_invariants(self) -> None:
         _validate_invariants_node(self._node)
 
-    # Optional: convenience for debugging
-    def __repr__(self) -> str:
-        return f"LeveledGSS(ref={self._ref!r})"
-
-    def __str__(self) -> str:
-        return f"LeveledGSS({self._ref.to_json_serializable()})"
