@@ -47,6 +47,11 @@ class Empty:
 _LeveledNode = Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
 
 
+@dataclass
+class LeveledGSSInner(Generic[T]):
+    inner: _InnerNode[T]
+
+
 # ------------------------------
 # Helpers to convert between ReferenceGSS and our leveled node representation
 # ------------------------------
