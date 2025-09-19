@@ -340,14 +340,7 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
             if child_types and all(ct is WithAcc for ct in child_types):
                 # All children are WithAcc; if their accs are equal, it should have been sucked up
                 if child_accs and all(a == child_accs[0] for a in child_accs):
-                    # It's only a violation if a suck-up would NOT lose information.
-                    # Information is lost if we mix empty (_EPS) and non-empty (T) stacks.
-                    keys = node_b.children.keys()
-                    has_eps_child = _EPS in keys
-                    has_non_eps_child = any(k is not _EPS for k in keys)
-
-                    if not (has_eps_child and has_non_eps_child):
-                        raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
+                    raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
             return True, None
         return True, None
 
