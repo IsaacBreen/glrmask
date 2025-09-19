@@ -120,13 +120,56 @@ class LeveledGSSInner(Generic[T]):
                 return LeveledGSSInner.internal({key: by_depth})
 
     def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-        if other is self:
+        if self is other:
             return self
-        
-        s1 = {s for s in self.enumerate_stacks()}
-        s2 = {s for s in other.enumerate_stacks()}
-        res = _build_inner_from_seqs(self.__class__, s1.union(s2))
-        return cast('LeveledGSSInner[T]', res)
+
+        match self.variant, other.variant:
+            case Leaf(), Leaf():
+                return self
+
+            case Leaf(), BranchInner(other_children):
+                if EPSILON in other_children:
+                    return other  # other already contains the empty stack
+                new_children = {t: d.copy() for t, d in other_children.items()}
+                new_children[EPSILON] = {0: LeveledGSSInner.leaf()}
+                return LeveledGSSInner(BranchInner(new_children))
+
+            case BranchInner(self_children), Leaf():
+                if EPSILON in self_children:
+                    return self
+                new_children = {t: d.copy() for t, d in self_children.items()}
+                new_children[EPSILON] = {0: LeveledGSSInner.leaf()}
+                return LeveledGSSInner(BranchInner(new_children))
+
+            case BranchInner(self_children), BranchInner(other_children):
+                new_children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']] = {}
+                all_keys = self_children.keys() | other_children.keys()
+
+                for t in all_keys:
+                    self_by_depth = self_children.get(t, {})
+                    other_by_depth = other_children.get(t, {})
+                    
+                    new_by_depth: Dict[int, 'LeveledGSSInner[T]'] = {}
+                    all_depths = self_by_depth.keys() | other_by_depth.keys()
+
+                    for d in all_depths:
+                        self_child = self_by_depth.get(d)
+                        other_child = other_by_depth.get(d)
+
+                        if self_child and other_child:
+                            new_by_depth[d] = self_child.merge(other_child)
+                        elif self_child:
+                            new_by_depth[d] = self_child
+                        else:  # other_child
+                            new_by_depth[d] = other_child
+                    
+                    if new_by_depth:
+                        new_children[t] = new_by_depth
+                
+                result = LeveledGSSInner.internal(new_children)
+                if result is None:
+                    raise ValueError("Internal error: merge of LeveledGSSInner produced None")
+                return result
 
     def peek(self) -> Set[T]:
         match self.variant:
@@ -368,15 +411,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return prune_b(self)
 
     def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-        if other is self: return self
-        if self.is_empty(): return cast(LeveledGSS[T, Acc], other)
-        if other.is_empty(): return self
+        if not isinstance(other, LeveledGSS):
+            other_ref = other.to_reference_impl()
+            if other_ref.is_empty():
+                return self
+            other_leveled = LeveledGSS.from_stacks(other_ref._stacks)
+        else:
+            other_leveled = other
 
-        d1 = _to_stack_map(self)
-        d2 = _to_stack_map(cast(LeveledGSS[T, Acc], other))
-        for k, acc2 in d2.items():
-            d1[k] = d1[k].merge(acc2) if k in d1 else acc2
-        return _build_from_stack_map(self.__class__, d1)
+        return _merge_leveled(self, other_leveled, memo={})
 
     def peek(self) -> Set[T]:
         match self.variant:
@@ -411,6 +454,89 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         _validate(self, errors)
         if errors:
             raise ValueError("LeveledGSS invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
+
+def _add_constant_to_children(
+    children: MutableMapping[Optional[T], Dict[int, LeveledGSS[T, Acc]]],
+    g_const: LeveledGSS[T, Acc],
+    memo: Dict[Tuple[int, int], LeveledGSS[T, Acc]],
+) -> None:
+    v_const = g_const.variant
+    assert isinstance(v_const, Constant)
+    a, acc = v_const.node, v_const.acc
+
+    match a.variant:
+        case Leaf():
+            child1 = LeveledGSS.with_acc(LeveledGSSInner.leaf(), acc)
+            child2 = children.get(EPSILON, {}).get(0, LeveledGSS.empty())
+            merged = _merge_leveled(child1, child2, memo)
+            if EPSILON not in children:
+                children[EPSILON] = {}
+            children[EPSILON][0] = merged
+        case BranchInner(ac):
+            for t, by_depth in ac.items():
+                if t not in children:
+                    children[t] = {}
+                for d, a_child in by_depth.items():
+                    child1 = LeveledGSS.with_acc(a_child, acc)
+                    child2 = children.get(t, {}).get(d, LeveledGSS.empty())
+                    merged = _merge_leveled(child1, child2, memo)
+                    children[t][d] = merged
+
+
+def _merge_leveled(
+    g1: LeveledGSS[T, Acc], g2: LeveledGSS[T, Acc], memo: Dict[Tuple[int, int], LeveledGSS[T, Acc]]
+) -> LeveledGSS[T, Acc]:
+    if g1 is g2: return g1
+    if g1.is_empty(): return g2
+    if g2.is_empty(): return g1
+
+    key = (id(g1), id(g2)) if id(g1) < id(g2) else (id(g2), id(g1))
+    if key in memo:
+        return memo[key]
+
+    res: LeveledGSS[T, Acc]
+    v1, v2 = g1.variant, g2.variant
+
+    if isinstance(v1, Branch) and isinstance(v2, Constant):
+        g1, g2, v1, v2 = g2, g1, v2, v1
+
+    match v1, v2:
+        case Constant(a1, acc1), Constant(a2, acc2):
+            if acc1 == acc2:
+                res = LeveledGSS.with_acc(a1.merge(a2), acc1)
+            else:
+                new_children: Dict[Optional[T], Dict[int, LeveledGSS[T, Acc]]] = {}
+                _add_constant_to_children(new_children, g1, memo)
+                _add_constant_to_children(new_children, g2, memo)
+                res = _canonicalize(LeveledGSS.internal(new_children))
+        
+        case Constant(), Branch():
+            assert isinstance(v2, Branch)
+            new_children = {t: d.copy() for t, d in v2.children.items()}
+            _add_constant_to_children(new_children, g1, memo)
+            res = _canonicalize(LeveledGSS.internal(new_children))
+
+        case Branch(c1), Branch(c2):
+            new_children = {}
+            all_keys = c1.keys() | c2.keys()
+            for t in all_keys:
+                c1_by_depth = c1.get(t, {})
+                c2_by_depth = c2.get(t, {})
+                new_by_depth = {}
+                all_depths = c1_by_depth.keys() | c2_by_depth.keys()
+                for d in all_depths:
+                    child1 = c1_by_depth.get(d, LeveledGSS.empty())
+                    child2 = c2_by_depth.get(d, LeveledGSS.empty())
+                    new_by_depth[d] = _merge_leveled(child1, child2, memo)
+                if new_by_depth:
+                    new_children[t] = new_by_depth
+            res = _canonicalize(LeveledGSS.internal(new_children))
+        
+        case _, _:
+            raise TypeError(f"Unhandled merge case: {type(v1)} and {type(v2)}")
+
+    memo[key] = res
+    return res
 
 def _build_from_stack_map(cls: Type[LeveledGSS[T, Acc]], stack_map: Dict[Tuple[T, ...], Acc]) -> LeveledGSS[T, Acc]:
     if not stack_map:
