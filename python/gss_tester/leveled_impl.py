@@ -179,6 +179,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def reduce_acc(self) -> Optional[Acc]:
         return self.to_reference_impl().reduce_acc()
 
+    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+        return self.to_reference_impl().to_stacks()
+
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
         pairs = _enumerate_pairs_from_node(self.inner)
         return ReferenceGSS.from_stacks(pairs)

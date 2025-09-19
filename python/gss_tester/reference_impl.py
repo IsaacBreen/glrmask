@@ -51,6 +51,10 @@ class ReferenceGSS(GSS[T, Acc]):
         # The dataclass __init__ will be called, and __post_init__ will handle copying.
         return cls(stacks)
 
+    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+        """Returns a canonical, sorted list of stacks."""
+        return self._get_canonical_sorted_stacks()
+
     def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
         # Push `value` onto all stacks (copy each list to avoid mutating original)
         new_stacks: List[Tuple[List[T], Acc]] = []
@@ -135,15 +139,9 @@ class ReferenceGSS(GSS[T, Acc]):
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
         return items
 
-    def to_json_serializable(self) -> Any:
-        # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
-        items = self._get_canonical_sorted_stacks()
-        # Return a plain JSON-serializable structure
-        return [(vals, acc) for vals, acc in items]
-
     def __str__(self) -> str:
         """Provides a human-readable, deterministic string representation."""
-        items = self._get_canonical_sorted_stacks()
+        items = self.to_stacks()
         if not items:
             return f"{self.__class__.__name__}(empty)"
 
@@ -154,7 +152,7 @@ class ReferenceGSS(GSS[T, Acc]):
 
     def __repr__(self) -> str:
         """Provides an unambiguous, deterministic string representation."""
-        items = self._get_canonical_sorted_stacks()
+        items = self.to_stacks()
         return f"{self.__class__.__name__}(_stacks={items!r})"
 
     def is_empty(self) -> bool:

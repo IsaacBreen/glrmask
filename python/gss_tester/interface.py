@@ -35,6 +35,14 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
+    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+        """
+        Converts the GSS to its canonical representation as a sorted list of stacks.
+        This involves merging accumulators for identical stacks and sorting.
+        """
+        pass
+
+    @abstractmethod
     def push(self, value: T) -> 'GSS[T, Acc]':
         """Pushes a value onto all active stack heads, returning a new GSS state."""
         pass
@@ -121,17 +129,10 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
-    def to_json_serializable(self) -> Any:
-        """Returns a JSON-serializable representation of the GSS state for comparison."""
-        # to_reference_impl is expected to return a ReferenceGSS instance.
-        ref_impl = self.to_reference_impl()
-        # We can now call the ReferenceGSS's specific implementation.
-        return ref_impl.to_json_serializable()
-
     def __str__(self) -> str:
         """Provides a human-readable string representation for debugging."""
-        return f"{self.__class__.__name__}({self.to_json_serializable()})"
+        return f"{self.__class__.__name__}({self.to_stacks()})"
 
     def __repr__(self) -> str:
         """Provides an unambiguous string representation of the GSS."""
-        return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
+        return f"{self.__class__.__name__}({self.to_stacks()!r})"

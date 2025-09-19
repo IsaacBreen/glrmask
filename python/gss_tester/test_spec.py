@@ -19,7 +19,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
         """Helper to yield the state and the caller's line number."""
         caller_frame = inspect.currentframe().f_back
         line_no = caller_frame.f_lineno
-        yield (gss_state.to_json_serializable(), line_no)
+        yield (gss_state.to_stacks(), line_no)
 
     # --- Test 1: Basic push/pop ---
     gss1 = gss_class.from_stacks([([], acc_factory())])
