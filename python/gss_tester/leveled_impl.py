@@ -74,7 +74,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
 
     def is_empty(self) -> bool:
-        return isinstance(self.inner, Branch) and not self.inner.children
+        return len(self.to_stacks()) == 0
 
     def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
         ref_impl = self.to_reference_impl()
