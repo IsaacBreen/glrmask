@@ -54,12 +54,7 @@ class RootInner:
     """Represents a GSS containing just one empty stack: {[]}. """
     pass
 
-@dataclass(frozen=True, eq=True)
-class EmptyInner:
-    """Represents an empty GSS: {}."""
-    pass
-
-LeveledGSSInnerVariant = Union[InternalInner[T], RootInner, EmptyInner]
+LeveledGSSInnerVariant = Union[InternalInner[T], RootInner]
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSSInner(GSS[T, Unit], Generic[T]):
@@ -68,12 +63,12 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
     The accumulator type is fixed to `Unit`.
     This is used for the inner nodes in the main LeveledGSS.
     """
-    variant: LeveledGSSInnerVariant
+    variant: Optional[LeveledGSSInnerVariant]
 
     # --- Constructors ---
     @classmethod
     def empty(cls) -> 'LeveledGSSInner[T]':
-        return cls(EmptyInner())
+        return cls(None)
 
     @classmethod
     def root(cls) -> 'LeveledGSSInner[T]':
@@ -111,7 +106,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def pop(self) -> 'LeveledGSSInner[T]':
         match self.variant:
-            case EmptyInner():
+            case None:
                 return self
             case RootInner():
                 return self.empty()
@@ -125,11 +120,11 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
                 return result
 
     def is_empty(self) -> bool:
-        return isinstance(self.variant, EmptyInner)
+        return self.variant is None
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSSInner[T]':
         match self.variant:
-            case EmptyInner():
+            case None:
                 return self
             case RootInner():
                 return self if value is None else self.empty()
@@ -162,7 +157,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def peek(self) -> Set[T]:
         match self.variant:
-            case EmptyInner() | RootInner():
+            case None | RootInner():
                 return set()
             case InternalInner(children):
                 return {cast(T, t) for t in children.keys() if t is not EPSILON}
@@ -186,7 +181,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def max_depth(self) -> int:
         match self.variant:
-            case EmptyInner() | RootInner():
+            case None | RootInner():
                 return 0
             case InternalInner(children):
                 max_d = 0
@@ -197,7 +192,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def enumerate_stacks(self) -> Iterator[Tuple[T, ...]]:
         match self.variant:
-            case EmptyInner():
+            case None:
                 return
             case RootInner():
                 yield tuple()
@@ -246,7 +241,7 @@ def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T
 
 def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
     match a.variant:
-        case EmptyInner() | RootInner():
+        case None | RootInner():
             return
         case InternalInner(children):
             for t, by_depth in children.items():
