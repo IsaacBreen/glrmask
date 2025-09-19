@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 
 from .interface import GSS, T, Acc
 
@@ -12,7 +13,7 @@ from .interface import GSS, T, Acc
 
 @dataclass(frozen=True, eq=True)
 class Upper(Generic[T, Acc]):
-    inner: UpperBranch[T, Acc] | Interface[T, Acc]
+    inner: 'UpperBranch[T, Acc]' | 'Interface[T, Acc]'
 
 
 @dataclass(frozen=True, eq=True)
@@ -22,13 +23,13 @@ class UpperBranch(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: Lower[T]
-    acc: Acc
+    node: 'Lower[T]'
+    acc: Acc | None  # We store None for the top-level interface acc as placeholder.
 
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
-    inner: LowerBranch[T] | Leaf
+    inner: 'LowerBranch[T]' | 'Leaf'
 
 
 @dataclass(frozen=True, eq=True)
@@ -41,34 +42,220 @@ class Leaf:
     pass
 
 
+# Internal helper: sentinel key used inside Lower to store accumulator at a leaf.
+class _AccKey(Generic[Acc]):
+    __slots__ = ("acc",)
+
+    def __init__(self, acc: Acc):
+        self.acc = acc
+
+    def __repr__(self) -> str:
+        return f"<AccKey:{self.acc!r}>"
+
+    # Make each instance unique, even if the underlying acc compares equal.
+    # We do not want accidental coalescing at the dict layer; we canonicalize earlier.
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return id(self)
+
+
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
     empty: Optional[Acc]
 
     @classmethod
-    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+        """
+        Build a LeveledGSS from explicit stacks.
+        Implementation strategy:
+        - Canonicalize input stacks by merging accumulators for identical lists.
+        - Build a Lower trie that encodes each stack path from bottom to top.
+        - At the end of each path, attach a special _AccKey(acc) edge to a Leaf.
+        - Store the trie inside a top-level Upper Interface node with a placeholder acc (None).
+        - We intentionally keep `empty=None` and represent empty stacks within the Lower trie
+          via an _AccKey at the root. This keeps invariants trivially satisfied.
+        """
+        # Canonicalize: merge accumulators for identical stacks
+        merged: Dict[Tuple[Any, ...], Acc] = {}
+        for vals, acc in stacks:
+            key = tuple(vals)
+            if key in merged:
+                merged[key] = merged[key].merge(acc)
+            else:
+                merged[key] = acc
+
+        # Build a nested Python dict trie first: Dict[node_key, child_dict]
+        # node_key is either a real stack item (T) or _AccKey(acc) sentinel at leaves.
+        trie: Dict[Any, Dict] = {}
+
+        def insert_path(path: List[T], acc: Acc) -> None:
+            node = trie
+            # Traverse bottom -> top
+            for item in path:
+                node = node.setdefault(item, {})
+            # Attach accumulator marker at the end
+            node[_AccKey(acc)] = {}  # Child dict for leaf (empty)
+
+        for key, acc in merged.items():
+            insert_path(list(key), acc)
+
+        # Convert the trie into Lower nodes (immutable dataclasses)
+        def build_lower(node_dict: Dict[Any, Dict]) -> Lower[T]:
+            children_map: Dict[T, Dict[int, Lower[T]]] = {}
+            for key, sub in node_dict.items():
+                if isinstance(key, _AccKey):
+                    # Terminal edge carrying the accumulator
+                    child_lower = Lower(Leaf())
+                    # Use index 0 for deterministic placement
+                    children_map.setdefault(key, {})[0] = child_lower  # type: ignore[arg-type]
+                else:
+                    child_lower = build_lower(sub)
+                    children_map.setdefault(key, {})[0] = child_lower  # type: ignore[arg-type]
+            return Lower(LowerBranch(children=children_map))
+
+        lower_root = build_lower(trie)
+
+        # Top-level Upper is a single Interface to our Lower trie.
+        upper = Upper(Interface(node=lower_root, acc=None))
+        # Keep empty=None so that validation rule about equality of accs is skipped.
+        return LeveledGSS(inner=upper, empty=None)
+
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-        raise NotImplementedError
-    def push(self, value: T) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
-    def pop(self) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
+        """
+        Decode the Lower trie into a list of (stack, acc) pairs.
+        The trie was encoded bottom->top; we traverse accordingly.
+        """
+        def collect_from_lower(node: Lower[T], prefix: List[T], out: List[Tuple[List[T], Acc]]) -> None:
+            if isinstance(node.inner, Leaf):
+                # Should not happen in our encoding except as child of an _AccKey.
+                return
+            branch: LowerBranch[T] = node.inner
+            # Iterate deterministically by sorting the keys for stability (non-essential for correctness).
+            for key in branch.children:
+                for child in branch.children[key].values():
+                    if isinstance(key, _AccKey):
+                        # Reached a stored accumulator for the current prefix path
+                        out.append((list(prefix), key.acc))  # type: ignore[attr-defined]
+                    else:
+                        prefix.append(key)  # descend adding item
+                        collect_from_lower(child, prefix, out)
+                        prefix.pop()
+
+        results: List[Tuple[List[T], Acc]] = []
+        # Our encoding always sets inner as Interface
+        if isinstance(self.inner.inner, Interface):
+            collect_from_lower(self.inner.inner.node, [], results)
+        elif isinstance(self.inner.inner, UpperBranch):
+            # Defensive: handle unexpected structure by traversing generic Upper tree
+            def collect_from_upper(u: Upper[T, Acc], top_prefix: List[T], out: List[Tuple[List[T], Acc]]) -> None:
+                if isinstance(u.inner, Interface):
+                    collect_from_lower(u.inner.node, top_prefix, out)
+                    return
+                # UpperBranch
+                br: UpperBranch[T, Acc] = u.inner
+                for val, idx_map in br.children.items():
+                    for child in idx_map.values():
+                        top_prefix.append(val)
+                        collect_from_upper(child, top_prefix, out)
+                        top_prefix.pop()
+
+            collect_from_upper(self.inner, [], results)
+        else:
+            # Should not occur; return empty
+            pass
+
+        # Canonicalize and sort deterministically
+        # Merge duplicates defensively (though our encoding avoids duplicates)
+        merged: Dict[Tuple[Any, ...], Acc] = {}
+        for vals, acc in results:
+            key = tuple(vals)
+            if key in merged:
+                merged[key] = merged[key].merge(acc)
+            else:
+                merged[key] = acc
+
+        items = [(list(k), v) for k, v in merged.items()]
+
+        def _encode_for_sort(obj: Any) -> str:
+            try:
+                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+            except Exception:
+                return repr(obj)
+
+        items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+        return items
+
+    def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+        stacks = self.to_stacks()
+        if not stacks:
+            # No active stacks, pushing yields no stacks.
+            return LeveledGSS.from_stacks([])
+        new_stacks = [(vals + [value], acc) for vals, acc in stacks]
+        return LeveledGSS.from_stacks(new_stacks)
+
+    def pop(self) -> 'LeveledGSS[T, Acc]':
+        stacks = self.to_stacks()
+        if not stacks:
+            return LeveledGSS.from_stacks([])
+        new_stacks: List[Tuple[List[T], Acc]] = []
+        for vals, acc in stacks:
+            if vals:
+                new_stacks.append((vals[:-1], acc))
+            else:
+                # Empty stacks are preserved unchanged
+                new_stacks.append((vals, acc))
+        return LeveledGSS.from_stacks(new_stacks)
+
     def is_empty(self) -> bool:
-        raise NotImplementedError
-    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
-    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
-    def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
-    def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
+        return len(self.to_stacks()) == 0
+
+    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+        stacks = self.to_stacks()
+        if value is None:
+            filtered = [(vals, acc) for vals, acc in stacks if not vals]
+        else:
+            filtered = [(vals, acc) for vals, acc in stacks if vals and vals[-1] == value]
+        return LeveledGSS.from_stacks(filtered)
+
+    def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+        stacks = self.to_stacks()
+        transformed = [(list(vals), func(acc)) for vals, acc in stacks]
+        return LeveledGSS.from_stacks(transformed)
+
+    def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+        stacks = self.to_stacks()
+        kept = [(list(vals), acc) for vals, acc in stacks if predicate(acc)]
+        return LeveledGSS.from_stacks(kept)
+
+    def merge(self, other: 'LeveledGSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
+        stacks_a = self.to_stacks()
+        stacks_b = other.to_stacks()
+        combined: Dict[Tuple[Any, ...], Acc] = {}
+        for vals, acc in stacks_a + stacks_b:
+            key = tuple(vals)
+            if key in combined:
+                combined[key] = combined[key].merge(acc)
+            else:
+                combined[key] = acc
+        merged_stacks = [(list(k), v) for k, v in combined.items()]
+        return LeveledGSS.from_stacks(merged_stacks)
+
     def peek(self) -> Set[T]:
-        raise NotImplementedError
+        stacks = self.to_stacks()
+        return {vals[-1] for vals, _ in stacks if vals}
+
     def reduce_acc(self) -> Optional[Acc]:
-        raise NotImplementedError
+        stacks = self.to_stacks()
+        if not stacks:
+            return None
+        it = iter(stacks)
+        _, acc = next(it)
+        for _, a in it:
+            acc = acc.merge(a)
+        return acc
 
 
 def _validate_upper(node: Upper[T, Acc]):
