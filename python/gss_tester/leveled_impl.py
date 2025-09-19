@@ -49,23 +49,23 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     empty: Optional[Acc]
 
     @classmethod
-    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         raise NotImplementedError
-    def push(self, value: T) -> 'GSS[T, Acc]':
+    def push(self, value: T) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
-    def pop(self) -> 'GSS[T, Acc]':
+    def pop(self) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
     def is_empty(self) -> bool:
         raise NotImplementedError
-    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
-    def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
-    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+    def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
-    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+    def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         raise NotImplementedError
     def peek(self) -> Set[T]:
         raise NotImplementedError

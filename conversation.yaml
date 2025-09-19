@@ -431,6 +431,73 @@ local_system:
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
           inner: Upper[T, Acc]
           empty: Optional[Acc]
+
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              raise NotImplementedError
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def pop(self) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def is_empty(self) -> bool:
+              raise NotImplementedError
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def peek(self) -> Set[T]:
+              raise NotImplementedError
+          def reduce_acc(self) -> Optional[Acc]:
+              raise NotImplementedError
+
+
+      def _validate_upper(node: Upper[T, Acc]):
+          """Recursively validates invariants on Upper nodes."""
+          if isinstance(node.inner, Upper):
+              # Recurse on wrapper
+              _validate_upper(node.inner)
+          elif isinstance(node.inner, UpperBranch):
+              branch = node.inner
+              all_children = [
+                  child
+                  for children_by_val in branch.children.values()
+                  for child in children_by_val.values()
+              ]
+
+              # Invariant 1: If all children are interfaces, their accs must be unique.
+              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+                  accs = [child.inner.acc for child in all_children]
+                  if len(set(accs)) != len(accs):
+                      raise AssertionError(
+                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+                      )
+
+              # Recurse into children
+              for child in all_children:
+                  _validate_upper(child)
+          # Base case: node.inner is an Interface, do nothing further down this path.
+
+
+      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+          """
+          Checks internal invariants of the LeveledGSS structure.
+          Raises AssertionError if an invariant is violated.
+          """
+          # Check recursive invariants on the inner structure.
+          _validate_upper(gss.inner)
+
+          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+          if isinstance(gss.inner, Interface) and gss.empty is not None:
+              if gss.inner.acc == gss.empty:
+                  raise AssertionError(
+                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+                  )
     python/gss_tester/reference_impl.py: |
       import json
       from dataclasses import dataclass
@@ -1142,6 +1209,7 @@ local_system:
                   # We'll just skip the step and continue fuzzing.
                   continue
     python/gss_tester/interface.py: |
+      from __future__ import annotations
       from abc import ABC, abstractmethod
       from functools import reduce
       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
@@ -1168,13 +1236,14 @@ local_system:
 
       T = TypeVar('T')  # Stack item type
       Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
 
       class GSS(ABC, Generic[T, Acc]):
           """Abstract Base Class for a Graph-Structured Stack (GSS)."""
 
           @classmethod
           @abstractmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
               """Creates a GSS from a list of explicit stacks."""
               pass
 
@@ -1187,19 +1256,19 @@ local_system:
               pass
 
           @abstractmethod
-          def push(self, value: T) -> 'GSS[T, Acc]':
+          def push(self: GSSType, value: T) -> GSSType:
               """Pushes a value onto all active stack heads, returning a new GSS state."""
               pass
 
           @abstractmethod
-          def pop(self) -> 'GSS[T, Acc]':
+          def pop(self: GSSType) -> GSSType:
               """
               For all active stacks, creates new stacks by removing the top value.
               Returns a new GSS state containing the popped stacks.
               """
               pass
 
-          def popn(self, n: int) -> 'GSS[T, Acc]':
+          def popn(self: GSSType, n: int) -> GSSType:
               """
               For all active stacks, creates new stacks by removing the top `n` values.
               Returns a new GSS state containing the popped stacks.
@@ -1215,7 +1284,7 @@ local_system:
               pass
 
           @abstractmethod
-          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
               """
               Keeps only the stacks that have `value` at the top.
               If `value` is None, it keeps only the empty stacks.
@@ -1224,12 +1293,12 @@ local_system:
               pass
 
           @abstractmethod
-          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
               """Applies a function to each accumulator, returning a new GSS state."""
               pass
 
           @abstractmethod
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
               """
               Removes stacks from the GSS based on a predicate on their accumulator.
               If `predicate(acc)` returns False, the stack is removed.
@@ -1237,12 +1306,12 @@ local_system:
               pass
 
           @abstractmethod
-          def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+          def merge(self: GSSType, other: GSSType) -> GSSType:
               """Merges this GSS with another, combining accumulators for identical stacks."""
               pass
 
           @classmethod
-          def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
               """
               Merges multiple GSS instances into one.
               This default implementation uses functools.reduce with the instance `merge` method.
@@ -1331,6 +1400,30 @@ local_system:
           inner: Upper[T, Acc]
           empty: Optional[Acc]
 
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              raise NotImplementedError
+          def push(self, value: T) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def pop(self) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def is_empty(self) -> bool:
+              raise NotImplementedError
+          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+              raise NotImplementedError
+          def peek(self) -> Set[T]:
+              raise NotImplementedError
+          def reduce_acc(self) -> Optional[Acc]:
+              raise NotImplementedError
+
 
       def _validate_upper(node: Upper[T, Acc]):
           """Recursively validates invariants on Upper nodes."""
@@ -1374,6 +1467,7 @@ local_system:
                       "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
                   )
     python/gss_tester/reference_impl.py: |
+      from __future__ import annotations
       import json
       from dataclasses import dataclass
       from functools import reduce
@@ -1478,10 +1572,9 @@ local_system:
                       kept.append((list(vals), acc))
               return ReferenceGSS(kept)
 
-          def merge(self, other: GSS[T, Acc]) -> 'ReferenceGSS[T, Acc]':
-              other_ref = other.to_reference_impl()
+          def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
               # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
-              return ReferenceGSS(self._stacks + other_ref._stacks)
+              return ReferenceGSS(self._stacks + other._stacks)
 
           def peek(self) -> Set[T]:
               # Return all top values across non-empty stacks
@@ -2337,6 +2430,73 @@ messages:
           inner: Upper[T, Acc]
           empty: Optional[Acc]
 
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              raise NotImplementedError
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def pop(self) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def is_empty(self) -> bool:
+              raise NotImplementedError
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+              raise NotImplementedError
+          def peek(self) -> Set[T]:
+              raise NotImplementedError
+          def reduce_acc(self) -> Optional[Acc]:
+              raise NotImplementedError
+
+
+      def _validate_upper(node: Upper[T, Acc]):
+          """Recursively validates invariants on Upper nodes."""
+          if isinstance(node.inner, Upper):
+              # Recurse on wrapper
+              _validate_upper(node.inner)
+          elif isinstance(node.inner, UpperBranch):
+              branch = node.inner
+              all_children = [
+                  child
+                  for children_by_val in branch.children.values()
+                  for child in children_by_val.values()
+              ]
+
+              # Invariant 1: If all children are interfaces, their accs must be unique.
+              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+                  accs = [child.inner.acc for child in all_children]
+                  if len(set(accs)) != len(accs):
+                      raise AssertionError(
+                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+                      )
+
+              # Recurse into children
+              for child in all_children:
+                  _validate_upper(child)
+          # Base case: node.inner is an Interface, do nothing further down this path.
+
+
+      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+          """
+          Checks internal invariants of the LeveledGSS structure.
+          Raises AssertionError if an invariant is violated.
+          """
+          # Check recursive invariants on the inner structure.
+          _validate_upper(gss.inner)
+
+          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+          if isinstance(gss.inner, Interface) and gss.empty is not None:
+              if gss.inner.acc == gss.empty:
+                  raise AssertionError(
+                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+                  )
+
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
@@ -2834,10 +2994,9 @@ messages:
     metadata:
       filename: python/gss_tester/test_spec.py
   - user: |-
-      Write a function that takes `LeveledGSS`, validates that this invariant is respected recursively on its inner:
-      - if all of an upper branch's children are interfaces, they must not have equal accs (their accs should have been 'sucked up' into the parent)
-      Additionally, this invariant should be respected on the `LeveledGSS` itself:
-      - if `inner` is an interface and `empty` is not None, then the acc on `inner` should not equal the acc on `empty`
+      Make it so `merge` takes another GSS of the same type as this one, not just any old GSS.
+      And make it so from_stacks, push, pop, isolate, apply, prune, merge all return the same type they take.
+      Is there any good way to specify this from an abstract type?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2856,125 +3015,217 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the invariant validation function for `LeveledGSS`, followed by the corresponding git diff.
+      Of course. You've hit on a common and important pattern in object-oriented programming with static types. You want methods to return an instance of the *current* class (`Self`), not just the base class.
 
-      ### Step-by-step Instructions
+      Yes, there is a good way to specify this from an abstract type using a `TypeVar` bound to the class itself. This allows the abstract class's method signatures to refer to the concrete subclass that is being used.
 
-      1.  **Open the file `python/gss_tester/leveled_impl.py`.**
-      2.  **Navigate to the end of the file.**
-      3.  **Append the following code** after the `LeveledGSS` class definition. This code introduces the `validate_invariants` function and its recursive helper, `_validate_upper`, to enforce the specified structural rules.
+      Here are the step-by-step instructions to apply these changes, followed by the git diffs.
 
-          ```python
-          def _validate_upper(node: Upper[T, Acc]):
-              """Recursively validates invariants on Upper nodes."""
-              if isinstance(node.inner, Upper):
-                  # Recurse on wrapper
-                  _validate_upper(node.inner)
-              elif isinstance(node.inner, UpperBranch):
-                  branch = node.inner
-                  all_children = [
-                      child
-                      for children_by_val in branch.children.values()
-                      for child in children_by_val.values()
-                  ]
-          
-                  # Invariant 1: If all children are interfaces, their accs must be unique.
-                  if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-                      accs = [child.inner.acc for child in all_children]
-                      if len(set(accs)) != len(accs):
-                          raise AssertionError(
-                              "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-                          )
-          
-                  # Recurse into children
-                  for child in all_children:
-                      _validate_upper(child)
-              # Base case: node.inner is an Interface, do nothing further down this path.
-          
-          
-          def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-              """
-              Checks internal invariants of the LeveledGSS structure.
-              Raises AssertionError if an invariant is violated.
-              """
-              # Check recursive invariants on the inner structure.
-              _validate_upper(gss.inner)
-          
-              # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-              if isinstance(gss.inner, Interface) and gss.empty is not None:
-                  if gss.inner.acc == gss.empty:
-                      raise AssertionError(
-                          "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-                      )
-          
-          ```
+      ### Step-by-Step Instructions
 
-      ### Git Diff
+      #### 1. Update the GSS Interface (`interface.py`)
+
+      First, we'll modify the abstract base class `GSS` to use a `TypeVar` to represent the concrete subclass.
+
+      -   **File:** `python/gss_tester/interface.py`
+      -   **Action:**
+          1.  Add `from __future__ import annotations` to the top of the file. This is good practice for modern type hinting.
+          2.  Define a new `TypeVar` called `GSSType` before the `GSS` class definition, like this: `GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")`. This `TypeVar` will stand in for any concrete subclass of `GSS`.
+          3.  Update the signatures of `from_stacks`, `push`, `pop`, `popn`, `isolate`, `apply`, `prune`, `merge`, and `merge_many` to use `GSSType`. This will enforce that they return an instance of the same class they are called on, and that `merge` accepts an instance of the same class.
+
+      #### 2. Update the Reference Implementation (`reference_impl.py`)
+
+      Next, we'll update the `ReferenceGSS` to conform to the stricter new interface, particularly for the `merge` method.
+
+      -   **File:** `python/gss_tester/reference_impl.py`
+      -   **Action:**
+          1.  Add `from __future__ import annotations` to the top of the file.
+          2.  Change the signature of the `merge` method. The `other` parameter's type will be changed from the general `GSS[T, Acc]` to the specific `'ReferenceGSS[T, Acc]'`.
+          3.  Update the implementation of `merge` to reflect this change. Since `other` is now guaranteed to be a `ReferenceGSS`, you can directly access its `_stacks` attribute instead of calling `other.to_reference_impl()`.
+
+      #### 3. Update the Leveled Implementation (`leveled_impl.py`)
+
+      Finally, we'll update the type hints in the `LeveledGSS` stub implementation to match the new interface.
+
+      -   **File:** `python/gss_tester/leveled_impl.py`
+      -   **Action:**
+          1.  In the `LeveledGSS` class, change the return type hints for `from_stacks`, `push`, `pop`, `isolate`, `apply`, `prune`, and `merge` from the generic `'GSS[T, Acc]'` to the concrete `'LeveledGSS[T, Acc]'`.
+          2.  Update the `merge` method's `other` parameter to also be of type `'LeveledGSS[T, Acc]'`.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes directly.
 
       ```diff
+      diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
+      --- a/python/gss_tester/interface.py
+      +++ b/python/gss_tester/interface.py
+      @@ -1,5 +1,6 @@
+      +from __future__ import annotations
+       from abc import ABC, abstractmethod
+       from functools import reduce
+       from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+       
+      @@ -21,12 +22,13 @@
+       
+       T = TypeVar('T')  # Stack item type
+       Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+      +GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+       
+       class GSS(ABC, Generic[T, Acc]):
+           """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+       
+           @classmethod
+           @abstractmethod
+      -    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+      +    def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
+               """Creates a GSS from a list of explicit stacks."""
+               pass
+       
+      @@ -39,19 +41,19 @@
+               pass
+       
+           @abstractmethod
+      -    def push(self, value: T) -> 'GSS[T, Acc]':
+      +    def push(self: GSSType, value: T) -> GSSType:
+               """Pushes a value onto all active stack heads, returning a new GSS state."""
+               pass
+       
+           @abstractmethod
+      -    def pop(self) -> 'GSS[T, Acc]':
+      +    def pop(self: GSSType) -> GSSType:
+               """
+               For all active stacks, creates new stacks by removing the top value.
+               Returns a new GSS state containing the popped stacks.
+               """
+               pass
+       
+      -    def popn(self, n: int) -> 'GSS[T, Acc]':
+      +    def popn(self: GSSType, n: int) -> GSSType:
+               """
+               For all active stacks, creates new stacks by removing the top `n` values.
+               Returns a new GSS state containing the popped stacks.
+      @@ -66,7 +68,7 @@
+               pass
+       
+           @abstractmethod
+      -    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+      +    def isolate(self: GSSType, value: Optional[T]) -> GSSType:
+               """
+               Keeps only the stacks that have `value` at the top.
+               If `value` is None, it keeps only the empty stacks.
+      @@ -75,25 +77,25 @@
+               pass
+       
+           @abstractmethod
+      -    def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+      +    def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
+               """Applies a function to each accumulator, returning a new GSS state."""
+               pass
+       
+           @abstractmethod
+      -    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+      +    def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
+               """
+               Removes stacks from the GSS based on a predicate on their accumulator.
+               If `predicate(acc)` returns False, the stack is removed.
+               """
+               pass
+       
+           @abstractmethod
+      -    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+      +    def merge(self: GSSType, other: GSSType) -> GSSType:
+               """Merges this GSS with another, combining accumulators for identical stacks."""
+               pass
+       
+           @classmethod
+      -    def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+      +    def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
+               """
+               Merges multiple GSS instances into one.
+               This default implementation uses functools.reduce with the instance `merge` method.
+
+      ``````diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 281878d..b0d9129 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -52,3 +52,40 @@
-       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-           inner: Upper[T, Acc]
+      @@ -38,25 +38,25 @@
            empty: Optional[Acc]
-      +
-      +
-      +def _validate_upper(node: Upper[T, Acc]):
-      +    """Recursively validates invariants on Upper nodes."""
-      +    if isinstance(node.inner, Upper):
-      +        # Recurse on wrapper
-      +        _validate_upper(node.inner)
-      +    elif isinstance(node.inner, UpperBranch):
-      +        branch = node.inner
-      +        all_children = [
-      +            child
-      +            for children_by_val in branch.children.values()
-      +            for child in children_by_val.values()
-      +        ]
-      +
-      +        # Invariant 1: If all children are interfaces, their accs must be unique.
-      +        if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-      +            accs = [child.inner.acc for child in all_children]
-      +            if len(set(accs)) != len(accs):
-      +                raise AssertionError(
-      +                    "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-      +                )
-      +
-      +        # Recurse into children
-      +        for child in all_children:
-      +            _validate_upper(child)
-      +    # Base case: node.inner is an Interface, do nothing further down this path.
-      +
-      +
-      +def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-      +    """
-      +    Checks internal invariants of the LeveledGSS structure.
-      +    Raises AssertionError if an invariant is violated.
-      +    """
-      +    # Check recursive invariants on the inner structure.
-      +    _validate_upper(gss.inner)
-      +
-      +    # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-      +    if isinstance(gss.inner, Interface) and gss.empty is not None:
-      +        if gss.inner.acc == gss.empty:
-      +            raise AssertionError(
-      +                "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-      +            )
+       
+           @classmethod
+      -    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+      +    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+               raise NotImplementedError
+      -    def push(self, value: T) -> 'GSS[T, Acc]':
+      +    def push(self, value: T) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+      -    def pop(self) -> 'GSS[T, Acc]':
+      +    def pop(self) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+           def is_empty(self) -> bool:
+               raise NotImplementedError
+      -    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+      +    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+      -    def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+      +    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+      -    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+      +    def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+      -    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+      +    def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+               raise NotImplementedError
+           def peek(self) -> Set[T]:
+               raise NotImplementedError
+
+      ``````diff
+      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
+      --- a/python/gss_tester/reference_impl.py
+      +++ b/python/gss_tester/reference_impl.py
+      @@ -1,3 +1,4 @@
+      +from __future__ import annotations
+       import json
+       from dataclasses import dataclass
+       from functools import reduce
+      @@ -109,10 +110,9 @@
+                       kept.append((list(vals), acc))
+               return ReferenceGSS(kept)
+       
+      -    def merge(self, other: GSS[T, Acc]) -> 'ReferenceGSS[T, Acc]':
+      -        other_ref = other.to_reference_impl()
+      +    def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
+               # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
+      -        return ReferenceGSS(self._stacks + other_ref._stacks)
+      +        return ReferenceGSS(self._stacks + other._stacks)
+       
+           def peek(self) -> Set[T]:
+               # Return all top values across non-empty stacks
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/interface.py
+      Applying patch to 'python/gss_tester/interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/interface.py.
+
+      --- Processing Diff Block 2 ---
       Identified target file: python/gss_tester/leveled_impl.py
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/gss_tester/reference_impl.py
+      Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add invariant validation for LeveledGSS"'
+  - user: 'Changes committed with message: "Refactor: Ensure GSS methods return covariant
+      types and merge accepts same GSS type"'
     metadata:
 ...

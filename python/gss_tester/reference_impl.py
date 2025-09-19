@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 from dataclasses import dataclass
 from functools import reduce
@@ -102,10 +103,9 @@ class ReferenceGSS(GSS[T, Acc]):
                 kept.append((list(vals), acc))
         return ReferenceGSS(kept)
 
-    def merge(self, other: GSS[T, Acc]) -> 'ReferenceGSS[T, Acc]':
-        other_ref = other.to_reference_impl()
+    def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
         # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
-        return ReferenceGSS(self._stacks + other_ref._stacks)
+        return ReferenceGSS(self._stacks + other._stacks)
 
     def peek(self) -> Set[T]:
         # Return all top values across non-empty stacks

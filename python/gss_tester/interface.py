@@ -1,3 +1,4 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from functools import reduce
 from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
@@ -24,13 +25,14 @@ class MergeableInt(int):
 
 T = TypeVar('T')  # Stack item type
 Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
 
 class GSS(ABC, Generic[T, Acc]):
     """Abstract Base Class for a Graph-Structured Stack (GSS)."""
 
     @classmethod
     @abstractmethod
-    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+    def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
         """Creates a GSS from a list of explicit stacks."""
         pass
 
@@ -43,19 +45,19 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def push(self, value: T) -> 'GSS[T, Acc]':
+    def push(self: GSSType, value: T) -> GSSType:
         """Pushes a value onto all active stack heads, returning a new GSS state."""
         pass
 
     @abstractmethod
-    def pop(self) -> 'GSS[T, Acc]':
+    def pop(self: GSSType) -> GSSType:
         """
         For all active stacks, creates new stacks by removing the top value.
         Returns a new GSS state containing the popped stacks.
         """
         pass
 
-    def popn(self, n: int) -> 'GSS[T, Acc]':
+    def popn(self: GSSType, n: int) -> GSSType:
         """
         For all active stacks, creates new stacks by removing the top `n` values.
         Returns a new GSS state containing the popped stacks.
@@ -71,7 +73,7 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+    def isolate(self: GSSType, value: Optional[T]) -> GSSType:
         """
         Keeps only the stacks that have `value` at the top.
         If `value` is None, it keeps only the empty stacks.
@@ -80,12 +82,12 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+    def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
         """Applies a function to each accumulator, returning a new GSS state."""
         pass
 
     @abstractmethod
-    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+    def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
         """
         Removes stacks from the GSS based on a predicate on their accumulator.
         If `predicate(acc)` returns False, the stack is removed.
@@ -93,12 +95,12 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+    def merge(self: GSSType, other: GSSType) -> GSSType:
         """Merges this GSS with another, combining accumulators for identical stacks."""
         pass
 
     @classmethod
-    def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+    def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
         """
         Merges multiple GSS instances into one.
         This default implementation uses functools.reduce with the instance `merge` method.
