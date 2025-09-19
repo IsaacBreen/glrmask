@@ -16,7 +16,6 @@ from .interface import GSS, T, Acc
 class Upper(Generic[T, Acc]):
     # children: T -> depth -> LeveledGSS
     children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
-    empty_stack_acc: Optional[Acc] = None
 
 
 @dataclass(frozen=True, eq=True)
@@ -114,10 +113,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if not isinstance(self.inner, Upper):
             return self
 
-        # Cannot suck up if there's an empty stack at this level, as Interface can't represent it.
-        if self.inner.empty_stack_acc is not None:
-            return self
-
         all_children = [
             child
             for children_at_depth in self.inner.children.values()
@@ -146,42 +141,29 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
         if not stacks:
-            return LeveledGSS(Upper({}, None))
+            return LeveledGSS(Upper({}))
 
         children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
-        empty_stack_accs: List[Acc] = []
 
         for stack, acc in stacks:
             if stack:
                 top = stack[-1]
                 prefix = stack[:-1]
                 stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
-            else:
-                empty_stack_accs.append(acc)
 
         for (top, length), group in stacks_by_top_and_len.items():
             if top not in children:
                 children[top] = {}
             children[top][length] = cls.from_stacks(group)
 
-        merged_empty_acc: Optional[Acc] = None
-        if empty_stack_accs:
-            merged_empty_acc = reduce(lambda a, b: a.merge(b), empty_stack_accs)
-
-        # Optimization: if there are no non-empty stacks, we can use an Interface node.
-        if not children and merged_empty_acc is not None:
-            return LeveledGSS(Interface(Lower(children={}, is_leaf=True), merged_empty_acc))
-
-        return LeveledGSS(Upper(children, merged_empty_acc))._suck_up_accs()
+        return LeveledGSS(Upper(children))._suck_up_accs()
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         if isinstance(self.inner, Interface):
             return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
         elif isinstance(self.inner, Upper):
             all_stacks: List[Tuple[List[T], Acc]] = []
-            if self.inner.empty_stack_acc is not None:
-                all_stacks.append(([], self.inner.empty_stack_acc))
             for top, children_at_depths in self.inner.children.items():
                 for _, child_gss in children_at_depths.items():
                     all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
@@ -200,8 +182,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def is_empty(self) -> bool:
         if isinstance(self.inner, Interface):
             return self.inner.node.is_empty()
-        # It's an Upper node. It's empty if it has no children and no empty stack.
-        return not self.inner.children and self.inner.empty_stack_acc is None
+        # It's an Upper node. It's empty if it has no children.
+        return not self.inner.children
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
         ref_gss = self.to_reference_impl()
@@ -234,7 +216,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self.inner.acc
 
         # It's an Upper node
-        if not self.inner.children and self.inner.empty_stack_acc is None:
+        if not self.inner.children:
             return None
 
         child_accs = (
@@ -243,9 +225,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             for child in children_at_depth.values()
         )
         valid_accs = [acc for acc in child_accs if acc is not None]
-
-        if self.inner.empty_stack_acc is not None:
-            valid_accs.append(self.inner.empty_stack_acc)
 
         if not valid_accs:
             return None
