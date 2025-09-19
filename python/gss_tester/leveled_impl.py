@@ -296,6 +296,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def with_acc(cls, node: LeveledA[T], acc: Acc) -> 'LeveledGSS[T, Acc]':
+        if node.is_empty():
+            return cls.empty()
         return cls(WithAcc(node=node, acc=acc))
 
     @classmethod
@@ -333,10 +335,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             case Empty():
                 return self
             case WithAcc(node=a, acc=acc):
-                popped_a = a.pop()
-                if popped_a.is_empty():
-                    return LeveledGSS.empty()
-                return LeveledGSS.with_acc(popped_a, acc)
+                return LeveledGSS.with_acc(a.pop(), acc)
             case Internal(children=children):
                 result = LeveledGSS.empty()
                 for t, by_depth in children.items():
@@ -358,10 +357,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     return LeveledGSS.empty()
                 return LeveledGSS.internal({key: by_depth})
             case WithAcc(node=a, acc=acc):
-                isolated_a = a.isolate(value)
-                if isolated_a.is_empty():
-                    return LeveledGSS.empty()
-                return LeveledGSS.with_acc(isolated_a, acc)
+                return LeveledGSS.with_acc(a.isolate(value), acc)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
         memo_b: Dict[int, 'LeveledGSS[T, Acc]'] = {}
