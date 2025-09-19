@@ -221,9 +221,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return self._empty()
             # Distribute and merge the children
             distributed = self._distribute()
-            return self.merge(cast(Dict, distributed._children).values())
+            return LeveledGSS.merge_many(cast(Dict, distributed._children).values())
         # BRANCH
-        return self.merge(cast(Dict, self._children).values())
+        return LeveledGSS.merge_many(cast(Dict, self._children).values())
 
     def is_empty(self) -> bool:
         if self._kind == "GROUP":
@@ -289,6 +289,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         }
         return self._create(new_empty_acc, new_children)
 
+    def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
+        return LeveledGSS.merge_many([self, other])
+
     def peek(self) -> Set[T]:
         gss = self._distribute()
         if gss._kind == "BRANCH":
@@ -323,9 +326,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return ReferenceGSS.from_stacks(stacks_for_ref)
 
     @staticmethod
-    def merge(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
+    def merge_many(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
+        # De-duplicate GSS instances based on object identity for efficiency.
+        # The order doesn't matter for merge.
+        unique_gss = {id(g): g for g in gss_list}.values()
+
         live_gss_list = [
-            g for g in gss_list if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
+            g for g in unique_gss if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
         ]
         if not live_gss_list:
             return LeveledGSS._empty()
@@ -366,7 +373,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     all_children_by_key[k].append(v)
 
         merged_children = {
-            k: LeveledGSS.merge(v_list) for k, v_list in all_children_by_key.items()
+            k: LeveledGSS.merge_many(v_list) for k, v_list in all_children_by_key.items()
         }
         return LeveledGSS._create(merged_empty_acc, merged_children)
 
@@ -375,6 +382,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # -------------------------
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if isinstance(other, LeveledGSS):
             # Fast path for two canonical LeveledGSS instances
             return (
