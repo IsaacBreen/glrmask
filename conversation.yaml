@@ -59,8 +59,7 @@ local_system:
           @abstractmethod
           def pop(self) -> 'GSS[T, Acc]':
               """
-              For all active stacks with more than one element, creates new stacks
-              by removing the top value. Stacks that become empty are discarded.
+              For all active stacks, creates new stacks by removing the top value.
               Returns a new GSS state containing the popped stacks.
               """
               pass
@@ -81,9 +80,10 @@ local_system:
               pass
 
           @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
               """
               Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
               Returns a new GSS state containing only these stacks.
               """
               pass
@@ -167,7 +167,7 @@ local_system:
           Notes on semantics (aligned with GSS interface):
           - from_stacks: constructs a new GSS from explicit stacks.
           - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Stacks that become empty are discarded.
+          - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
                    Returns a new GSS with the resulting stacks.
           - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
           - apply(func): transforms each accumulator independently; returns a new GSS.
@@ -216,20 +216,24 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Stacks that become empty are discarded.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if len(vals) > 1:
+                  if vals:
                       new_stacks.append((vals[:-1], acc))
               return ReferenceGSS(new_stacks)
 
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`.
+          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
               filtered: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if vals and vals[-1] == value:
-                      filtered.append((list(vals), acc))
+                  if value is None:
+                      if not vals:
+                          filtered.append((list(vals), acc))
+                  else:
+                      if vals and vals[-1] == value:
+                          filtered.append((list(vals), acc))
               return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
@@ -325,52 +329,41 @@ local_system:
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      @dataclass(frozen=True, eq=True)
-      class InnerBranch(Generic[T]):
-          # children: T -> depth -> LeveledGSSInner
-          children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
-
-
-      @dataclass(frozen=True, eq=True)
-      class MiddleBranch(Generic[T, Acc]):
-          # children: T -> depth -> (Acc, LeveledGSSInner)
-          children: Dict[T, Dict[int, Tuple[Acc, 'LeveledGSSInner[T]']]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Branch(Generic[T, Acc]):
+      class Upper(Generic[T, Acc]):
           # children: T -> depth -> LeveledGSS
           children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
       @dataclass(frozen=True, eq=True)
-      class Empty:
-          pass
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
 
 
       @dataclass(frozen=True, eq=True)
-      class LeveledGSSInner(Generic[T]):
-          inner: Union[Leaf, InnerBranch[T]]
+      class Lower(Generic[T]):
+          # children: T -> depth -> LeveledGSSInner
+          children: Dict[T, Dict[int, 'Lower[T]']]
+          is_leaf: bool
 
           @classmethod
-          def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+          def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
               raise NotImplementedError
 
           def to_stacks(self) -> List[List[T]]:
               raise NotImplementedError
 
+          def validate_invariants(self) -> None:
+              raise NotImplementedError
 
-      # ------------------------------
-      # Public LeveledGSS implementation
-      # ------------------------------
+
+      class InvariantViolation(Exception):
+          pass
+
 
       @dataclass(frozen=True, eq=True)
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]
+          inner: Union[Upper[T, Acc], Interface[T, Acc]]
 
           def __post_init__(self):
               self.validate_invariants()
@@ -383,50 +376,34 @@ local_system:
               raise NotImplementedError
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.push(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.pop()
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def is_empty(self) -> bool:
-              return len(self.to_stacks()) == 0
+              raise NotImplementedError
 
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.isolate(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.apply(func)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.prune(predicate)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.merge(other)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
+              raise NotImplementedError
 
           def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
+              raise NotImplementedError
 
           def validate_invariants(self) -> None:
               raise NotImplementedError
-
-
-      class InvariantViolation(Exception):
-          pass
   prev_file_contents:
     python/gss_tester/interface.py: |
       from abc import ABC, abstractmethod
@@ -481,8 +458,7 @@ local_system:
           @abstractmethod
           def pop(self) -> 'GSS[T, Acc]':
               """
-              For all active stacks with more than one element, creates new stacks
-              by removing the top value. Stacks that become empty are discarded.
+              For all active stacks, creates new stacks by removing the top value.
               Returns a new GSS state containing the popped stacks.
               """
               pass
@@ -503,9 +479,10 @@ local_system:
               pass
 
           @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
               """
               Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
               Returns a new GSS state containing only these stacks.
               """
               pass
@@ -589,7 +566,7 @@ local_system:
           Notes on semantics (aligned with GSS interface):
           - from_stacks: constructs a new GSS from explicit stacks.
           - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Stacks that become empty are discarded.
+          - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
                    Returns a new GSS with the resulting stacks.
           - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
           - apply(func): transforms each accumulator independently; returns a new GSS.
@@ -638,20 +615,24 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Stacks that become empty are discarded.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if len(vals) > 1:
+                  if vals:
                       new_stacks.append((vals[:-1], acc))
               return ReferenceGSS(new_stacks)
 
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`.
+          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
               filtered: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if vals and vals[-1] == value:
-                      filtered.append((list(vals), acc))
+                  if value is None:
+                      if not vals:
+                          filtered.append((list(vals), acc))
+                  else:
+                      if vals and vals[-1] == value:
+                          filtered.append((list(vals), acc))
               return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
@@ -747,52 +728,48 @@ local_system:
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      @dataclass(frozen=True, eq=True)
-      class LowerBranch(Generic[T]):
-          # children: T -> depth -> LeveledGSSInner
-          children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
-
-
-      @dataclass(frozen=True, eq=True)
-      class MiddleBranch(Generic[T, Acc]):
-          # children: T -> depth -> (Acc, LeveledGSSInner)
-          children: Dict[T, Dict[int, Tuple[Acc, 'LeveledGSSInner[T]']]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class UpperBranch(Generic[T, Acc]):
+      class Upper(Generic[T, Acc]):
           # children: T -> depth -> LeveledGSS
           children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
       @dataclass(frozen=True, eq=True)
-      class Empty:
-          pass
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
 
 
       @dataclass(frozen=True, eq=True)
-      class LeveledGSSInner(Generic[T]):
-          inner: Union[Leaf, LowerBranch[T]]
+      class Lower(Generic[T]):
+          # children: T -> depth -> LeveledGSSInner
+          children: Dict[T, Dict[int, 'Lower[T]']]
+          is_leaf: bool
 
           @classmethod
-          def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+          def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
               raise NotImplementedError
 
           def to_stacks(self) -> List[List[T]]:
               raise NotImplementedError
 
+          def validate_invariants(self) -> None:
+              # Invariant: lower must either have children or be a leaf (or both)
+              if not self.children and not self.is_leaf:
+                  raise InvariantViolation("Lower node must have children or be a leaf.")
 
-      # ------------------------------
-      # Public LeveledGSS implementation
-      # ------------------------------
+              # Recurse to children
+              for children_at_depth in self.children.values():
+                  for child in children_at_depth.values():
+                      child.validate_invariants()
+
+
+      class InvariantViolation(Exception):
+          pass
+
 
       @dataclass(frozen=True, eq=True)
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Union[MiddleBranch[T, Acc], UpperBranch[T, Acc], Empty]
+          inner: Union[Upper[T, Acc], Interface[T, Acc]]
 
           def __post_init__(self):
               self.validate_invariants()
@@ -805,50 +782,64 @@ local_system:
               raise NotImplementedError
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.push(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.pop()
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def is_empty(self) -> bool:
-              return len(self.to_stacks()) == 0
-
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.isolate(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.apply(func)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.prune(predicate)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.merge(other)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
-
-          def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
-
-          def validate_invariants(self) -> None:
               raise NotImplementedError
 
+          def pop(self) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
 
-      class InvariantViolation(Exception):
-          pass
+          def is_empty(self) -> bool:
+              raise NotImplementedError
+
+          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
+
+          def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
+
+          def peek(self) -> Set[T]:
+              raise NotImplementedError
+
+          def reduce_acc(self) -> Optional[Acc]:
+              raise NotImplementedError
+
+          def validate_invariants(self) -> None:
+              if isinstance(self.inner, Upper):
+                  # Invariant: upper must have at least one child.
+                  all_children = [
+                      child
+                      for children_at_depth in self.inner.children.values()
+                      for child in children_at_depth.values()
+                  ]
+                  if not all_children:
+                      raise InvariantViolation("Upper node must have at least one child.")
+
+                  # Recurse validation to children.
+                  for child in all_children:
+                      child.validate_invariants()
+
+                  # Invariant: if all children are interfaces, they must not have equal accs.
+                  all_children_are_interfaces = all(isinstance(c.inner, Interface) for c in all_children)
+                  if all_children_are_interfaces:
+                      accs = [c.inner.acc for c in all_children]
+                      # Accumulators may not be hashable, so we can't use a set.
+                      # This is O(n^2) but likely fine for tests.
+                      if len(accs) > 1:
+                          for i in range(len(accs)):
+                              for j in range(i + 1, len(accs)):
+                                  if accs[i] == accs[j]:
+                                      raise InvariantViolation(
+                                          "Upper with all-interface children has duplicate accumulators."
+                                      )
+
+              elif isinstance(self.inner, Interface):
+                  # Delegate validation to the inner Lower node.
+                  self.inner.node.validate_invariants()
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -947,8 +938,7 @@ messages:
           @abstractmethod
           def pop(self) -> 'GSS[T, Acc]':
               """
-              For all active stacks with more than one element, creates new stacks
-              by removing the top value. Stacks that become empty are discarded.
+              For all active stacks, creates new stacks by removing the top value.
               Returns a new GSS state containing the popped stacks.
               """
               pass
@@ -969,9 +959,10 @@ messages:
               pass
 
           @abstractmethod
-          def isolate(self, value: T) -> 'GSS[T, Acc]':
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
               """
               Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
               Returns a new GSS state containing only these stacks.
               """
               pass
@@ -1060,7 +1051,7 @@ messages:
           Notes on semantics (aligned with GSS interface):
           - from_stacks: constructs a new GSS from explicit stacks.
           - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Stacks that become empty are discarded.
+          - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
                    Returns a new GSS with the resulting stacks.
           - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
           - apply(func): transforms each accumulator independently; returns a new GSS.
@@ -1109,20 +1100,24 @@ messages:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Stacks that become empty are discarded.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if len(vals) > 1:
+                  if vals:
                       new_stacks.append((vals[:-1], acc))
               return ReferenceGSS(new_stacks)
 
-          def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`.
+          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
               filtered: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
-                  if vals and vals[-1] == value:
-                      filtered.append((list(vals), acc))
+                  if value is None:
+                      if not vals:
+                          filtered.append((list(vals), acc))
+                  else:
+                      if vals and vals[-1] == value:
+                          filtered.append((list(vals), acc))
               return ReferenceGSS(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
@@ -1223,52 +1218,41 @@ messages:
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      @dataclass(frozen=True, eq=True)
-      class InnerBranch(Generic[T]):
-          # children: T -> depth -> LeveledGSSInner
-          children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
-
-
-      @dataclass(frozen=True, eq=True)
-      class MiddleBranch(Generic[T, Acc]):
-          # children: T -> depth -> (Acc, LeveledGSSInner)
-          children: Dict[T, Dict[int, Tuple[Acc, 'LeveledGSSInner[T]']]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Branch(Generic[T, Acc]):
+      class Upper(Generic[T, Acc]):
           # children: T -> depth -> LeveledGSS
           children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
       @dataclass(frozen=True, eq=True)
-      class Empty:
-          pass
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
 
 
       @dataclass(frozen=True, eq=True)
-      class LeveledGSSInner(Generic[T]):
-          inner: Union[Leaf, InnerBranch[T]]
+      class Lower(Generic[T]):
+          # children: T -> depth -> LeveledGSSInner
+          children: Dict[T, Dict[int, 'Lower[T]']]
+          is_leaf: bool
 
           @classmethod
-          def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+          def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
               raise NotImplementedError
 
           def to_stacks(self) -> List[List[T]]:
               raise NotImplementedError
 
+          def validate_invariants(self) -> None:
+              raise NotImplementedError
 
-      # ------------------------------
-      # Public LeveledGSS implementation
-      # ------------------------------
+
+      class InvariantViolation(Exception):
+          pass
+
 
       @dataclass(frozen=True, eq=True)
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]
+          inner: Union[Upper[T, Acc], Interface[T, Acc]]
 
           def __post_init__(self):
               self.validate_invariants()
@@ -1281,59 +1265,43 @@ messages:
               raise NotImplementedError
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.push(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.pop()
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def is_empty(self) -> bool:
-              return len(self.to_stacks()) == 0
+              raise NotImplementedError
 
-          def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.isolate(value)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+              raise NotImplementedError
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.apply(func)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.prune(predicate)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_impl = self.to_reference_impl()
-              new_ref_impl = ref_impl.merge(other)
-              return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+              raise NotImplementedError
 
           def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
+              raise NotImplementedError
 
           def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
+              raise NotImplementedError
 
           def validate_invariants(self) -> None:
               raise NotImplementedError
-
-
-      class InvariantViolation(Exception):
-          pass
 
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
   - user: |-
-      Rename like this:
-      - inner branch -> lower branch
-      - middle branch -> middle branch
-      - branch -> upper branch
+      Implement `validate_invariants` with these invariants:
+      - lower must either have children or be an end or both
+      - upper must have at least one child
+      - if all of an upper's children are interfaces, they must not have equal accs (their accs should have been 'sucked up' into the parent)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1352,70 +1320,78 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the requested renames, followed by the corresponding git diff.
+      Here are the step-by-step instructions to implement the `validate_invariants` methods.
 
-      ### Step-by-step Instructions
+      ### File: `python/gss_tester/leveled_impl.py`
 
-      In the file `python/gss_tester/leveled_impl.py`, please make the following changes:
+      1.  In the `Lower` class, locate the `validate_invariants` method. Replace the `NotImplementedError` with an implementation that checks if the node has children or is a leaf, and then recursively validates its children.
 
-      1.  **Rename `InnerBranch` to `LowerBranch`**:
-          -   At line 21, change `class InnerBranch(Generic[T]):` to `class LowerBranch(Generic[T]):`.
+      2.  In the `LeveledGSS` class, locate the `validate_invariants` method. Replace the `NotImplementedError` with an implementation that:
+          *   If the `inner` node is an `Upper` type:
+              *   Verifies it has at least one child.
+              *   Recursively calls `validate_invariants` on all children.
+              *   Checks that if all children are `Interface` nodes, none of them share the same accumulator value.
+          *   If the `inner` node is an `Interface` type, it delegates the validation call to the `Lower` node it contains.
 
-      2.  **Rename `Branch` to `UpperBranch`**:
-          -   At line 33, change `class Branch(Generic[T, Acc]):` to `class UpperBranch(Generic[T, Acc]):`.
-
-      3.  **Update Type Hint in `LeveledGSSInner`**:
-          -   At line 46, modify the `inner` field's type hint from `Union[Leaf, InnerBranch[T]]` to `Union[Leaf, LowerBranch[T]]`.
-
-      4.  **Update Type Hint in `LeveledGSS`**:
-          -   At line 62, modify the `inner` field's type hint from `Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]` to `Union[MiddleBranch[T, Acc], UpperBranch[T, Acc], Empty]`.
-
-      ### Git Diffs
-
-      Here is the git diff to apply these changes:
+      Here are the git diffs to apply these changes:
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 3855a80..181816f 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -18,9 +18,9 @@
+      @@ -42,7 +42,14 @@
+               raise NotImplementedError
+       
+           def validate_invariants(self) -> None:
+      -        raise NotImplementedError
+      +        # Invariant: lower must either have children or be a leaf (or both)
+      +        if not self.children and not self.is_leaf:
+      +            raise InvariantViolation("Lower node must have children or be a leaf.")
+      +
+      +        # Recurse to children
+      +        for children_at_depth in self.children.values():
+      +            for child in children_at_depth.values():
+      +                child.validate_invariants()
        
        
-       @dataclass(frozen=True, eq=True)
-      -class InnerBranch(Generic[T]):
-      +class LowerBranch(Generic[T]):
-           # children: T -> depth -> LeveledGSSInner
-           children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
+       class InvariantViolation(Exception):
+      @@ -91,4 +98,34 @@
+               raise NotImplementedError
        
-       
-       @dataclass(frozen=True, eq=True)
-      @@ -30,7 +30,7 @@
-       
-       
-       @dataclass(frozen=True, eq=True)
-      -class Branch(Generic[T, Acc]):
-      +class UpperBranch(Generic[T, Acc]):
-           # children: T -> depth -> LeveledGSS
-           children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
-       
-      @@ -42,7 +42,7 @@
-       
-       @dataclass(frozen=True, eq=True)
-       class LeveledGSSInner(Generic[T]):
-      -    inner: Union[Leaf, InnerBranch[T]]
-      +    inner: Union[Leaf, LowerBranch[T]]
-       
-           @classmethod
-           def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
-      @@ -58,7 +58,7 @@
-       
-       @dataclass(frozen=True, eq=True)
-       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-      -    inner: Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]
-      +    inner: Union[MiddleBranch[T, Acc], UpperBranch[T, Acc], Empty]
-       
-           def __post_init__(self):
-               self.validate_invariants()
+           def validate_invariants(self) -> None:
+      -        raise NotImplementedError
+      +        if isinstance(self.inner, Upper):
+      +            # Invariant: upper must have at least one child.
+      +            all_children = [
+      +                child
+      +                for children_at_depth in self.inner.children.values()
+      +                for child in children_at_depth.values()
+      +            ]
+      +            if not all_children:
+      +                raise InvariantViolation("Upper node must have at least one child.")
+      +
+      +            # Recurse validation to children.
+      +            for child in all_children:
+      +                child.validate_invariants()
+      +
+      +            # Invariant: if all children are interfaces, they must not have equal accs.
+      +            all_children_are_interfaces = all(isinstance(c.inner, Interface) for c in all_children)
+      +            if all_children_are_interfaces:
+      +                accs = [c.inner.acc for c in all_children]
+      +                # Accumulators may not be hashable, so we can't use a set.
+      +                # This is O(n^2) but likely fine for tests.
+      +                if len(accs) > 1:
+      +                    for i in range(len(accs)):
+      +                        for j in range(i + 1, len(accs)):
+      +                            if accs[i] == accs[j]:
+      +                                raise InvariantViolation(
+      +                                    "Upper with all-interface children has duplicate accumulators."
+      +                                )
+      +
+      +        elif isinstance(self.inner, Interface):
+      +            # Delegate validation to the inner Lower node.
+      +            self.inner.node.validate_invariants()
 
       ```
     metadata:
@@ -1428,6 +1404,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Rename GSS branch types in leveled_impl"'
+  - user: 'Changes committed with message: "Implement invariant validation for LeveledGSS
+      and Lower nodes"'
     metadata:
 ...

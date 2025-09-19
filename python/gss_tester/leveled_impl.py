@@ -36,7 +36,14 @@ class Lower(Generic[T]):
         raise NotImplementedError
 
     def validate_invariants(self) -> None:
-        raise NotImplementedError
+        # Invariant: lower must either have children or be a leaf (or both)
+        if not self.children and not self.is_leaf:
+            raise InvariantViolation("Lower node must have children or be a leaf.")
+
+        # Recurse to children
+        for children_at_depth in self.children.values():
+            for child in children_at_depth.values():
+                child.validate_invariants()
 
 
 class InvariantViolation(Exception):
@@ -85,4 +92,34 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         raise NotImplementedError
 
     def validate_invariants(self) -> None:
-        raise NotImplementedError
+        if isinstance(self.inner, Upper):
+            # Invariant: upper must have at least one child.
+            all_children = [
+                child
+                for children_at_depth in self.inner.children.values()
+                for child in children_at_depth.values()
+            ]
+            if not all_children:
+                raise InvariantViolation("Upper node must have at least one child.")
+
+            # Recurse validation to children.
+            for child in all_children:
+                child.validate_invariants()
+
+            # Invariant: if all children are interfaces, they must not have equal accs.
+            all_children_are_interfaces = all(isinstance(c.inner, Interface) for c in all_children)
+            if all_children_are_interfaces:
+                accs = [c.inner.acc for c in all_children]
+                # Accumulators may not be hashable, so we can't use a set.
+                # This is O(n^2) but likely fine for tests.
+                if len(accs) > 1:
+                    for i in range(len(accs)):
+                        for j in range(i + 1, len(accs)):
+                            if accs[i] == accs[j]:
+                                raise InvariantViolation(
+                                    "Upper with all-interface children has duplicate accumulators."
+                                )
+
+        elif isinstance(self.inner, Interface):
+            # Delegate validation to the inner Lower node.
+            self.inner.node.validate_invariants()
