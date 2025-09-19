@@ -144,57 +144,43 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return cls(node)
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        new_pairs = [(vals + [value], acc) for vals, acc in pairs]
-        return LeveledGSS.from_stacks(new_pairs)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.push(value)
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        new_pairs = [(vals[:-1], acc) for vals, acc in pairs if vals]
-        return LeveledGSS.from_stacks(new_pairs)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.pop()
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def is_empty(self) -> bool:
         return isinstance(self.inner, Branch) and not self.inner.children
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        if value is None:
-            filtered = [(v, a) for v, a in pairs if not v]
-        else:
-            filtered = [(v, a) for v, a in pairs if v and v[-1] == value]
-        return LeveledGSS.from_stacks(filtered)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.isolate(value)
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        applied = [(vals, func(acc)) for vals, acc in pairs]
-        return LeveledGSS.from_stacks(applied)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.apply(func)
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        kept = [(v, a) for v, a in pairs if predicate(a)]
-        return LeveledGSS.from_stacks(kept)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.prune(predicate)
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        self_pairs = _enumerate_pairs_from_node(self.inner)
-        other_ref = other.to_reference_impl()
-        other_pairs = other_ref._stacks
-        all_pairs = self_pairs + other_pairs
-        return LeveledGSS.from_stacks(all_pairs)
+        ref_impl = self.to_reference_impl()
+        new_ref_impl = ref_impl.merge(other)
+        return LeveledGSS.from_stacks(new_ref_impl._stacks)
 
     def peek(self) -> Set[T]:
-        result: Set[T] = set()
-        pairs = _enumerate_pairs_from_node(self.inner)
-        for vals, _ in pairs:
-            if vals:
-                result.add(vals[-1])
-        return result
+        return self.to_reference_impl().peek()
 
     def reduce_acc(self) -> Optional[Acc]:
-        pairs = _enumerate_pairs_from_node(self.inner)
-        if not pairs:
-            return None
-        accs = [acc for _, acc in pairs]
-        return reduce(lambda a, b: a.merge(b), accs)
+        return self.to_reference_impl().reduce_acc()
 
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
         pairs = _enumerate_pairs_from_node(self.inner)
