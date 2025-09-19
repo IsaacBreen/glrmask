@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
-from functools import reduce
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple
 
 from .interface import GSS, T, Acc
 
@@ -14,7 +12,7 @@ from .interface import GSS, T, Acc
 
 @dataclass(frozen=True, eq=True)
 class Upper(Generic[T, Acc]):
-    inner: Upper[T, Acc] | Interface[T, Acc]
+    inner: UpperBranch[T, Acc] | Interface[T, Acc]
 
 
 @dataclass(frozen=True, eq=True)
@@ -75,10 +73,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 def _validate_upper(node: Upper[T, Acc]):
     """Recursively validates invariants on Upper nodes."""
-    if isinstance(node.inner, Upper):
-        # Recurse on wrapper
-        _validate_upper(node.inner)
-    elif isinstance(node.inner, UpperBranch):
+    if isinstance(node.inner, UpperBranch):
         branch = node.inner
         all_children = [
             child
