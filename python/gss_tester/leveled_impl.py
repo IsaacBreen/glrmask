@@ -14,7 +14,12 @@ from .interface import GSS, T, Acc
 
 @dataclass(frozen=True, eq=True)
 class Upper(Generic[T, Acc]):
-    children: Dict[T, Dict[int, LeveledGSS[T, Acc]]]
+    inner: Upper[T, Acc] | Interface[T, Acc]
+
+
+@dataclass(frozen=True, eq=True)
+class UpperBranch(Generic[T, Acc]):
+    children: Dict[T, Dict[int, Upper[T, Acc]]]
 
 
 @dataclass(frozen=True, eq=True)
@@ -25,10 +30,20 @@ class Interface(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
+    inner: LowerBranch[T] | Leaf
+
+
+@dataclass(frozen=True, eq=True)
+class LowerBranch(Generic[T]):
     children: Dict[T, Dict[int, Lower[T]]]
-    is_leaf: bool
+
+
+@dataclass(frozen=True, eq=True)
+class Leaf:
+    pass
 
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[Upper[T, Acc], Interface[T, Acc]]
+    inner: Upper[T, Acc]
+    empty: Optional[Acc]
