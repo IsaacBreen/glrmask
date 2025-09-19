@@ -662,7 +662,9 @@ local_system:
                   case Branch(children=children):
                       result = LeveledGSS.empty()
                       for t, by_depth in children.items():
-                          for _, child in by_depth.items():
+                          if t is EPSILON:
+                              continue
+                          for child in by_depth.values():
                               result = result.merge(child)
                       return result
 
@@ -1849,12 +1851,11 @@ local_system:
                       # This recursive call is safe as it will hit (Constant, Constant) or (Constant, Empty).
                       merged_empty_child = _merge_leveled(empty_stack_node, b2_empty_child, memo)
                       
-                      # Construct the new children map for the result.
-                      new_children = {t: d.copy() for t, d in c2.items()}
-                      if EPSILON not in new_children:
-                          new_children[EPSILON] = {}
-                      new_children[EPSILON][0] = merged_empty_child
-                      
+                      # Construct the new children map for the result, handling the EPSILON child separately.
+                      new_children = {t: d for t, d in c2.items() if t is not EPSILON}
+                      if not merged_empty_child.is_empty():
+                          new_children[EPSILON] = {0: merged_empty_child}
+
                       res = _canonicalize(LeveledGSS.internal(new_children))
                   else:
                       # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
@@ -2728,7 +2729,9 @@ messages:
                   case Branch(children=children):
                       result = LeveledGSS.empty()
                       for t, by_depth in children.items():
-                          for _, child in by_depth.items():
+                          if t is EPSILON:
+                              continue
+                          for child in by_depth.values():
                               result = result.merge(child)
                       return result
 
@@ -3082,7 +3085,7 @@ messages:
       filename: python/gss_tester/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_12-10-09
+      Test results will be saved in: gss_test_results/2025-09-19_12-11-47
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -3090,25 +3093,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-11-47/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-19_12-11-47/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-11-47/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-19_12-11-47/gss_tester.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-11-47/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-11-47/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-11-47/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -3126,15 +3129,15 @@ messages:
       --- Divergence Report ---
 
       Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
-        - First divergence at yield index 38:
-          - gss_tester.leveled_impl.LeveledGSS (L208): [[[], 3]]
-          - gss_tester.reference_impl.ReferenceGSS (L208): [[[], 2]]
+        - First divergence at yield index 75:
+          - gss_tester.leveled_impl.LeveledGSS (L245): []
+          - gss_tester.reference_impl.ReferenceGSS (L245): [[[], 9]]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_12-10-09
+      Full JSON results are in: gss_test_results/2025-09-19_12-11-47
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3153,63 +3156,75 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see your `LeveledGSS` implementation is failing the consistency check against the reference implementation. The divergence report points to an issue with how accumulator values are being calculated. I've analyzed the code and found the bug. Here are the step-by-step instructions to fix it, followed by the corresponding git diff.
+      Based on the test results, there's a divergence where the `LeveledGSS` implementation produces an empty GSS while the `ReferenceGSS` correctly produces a GSS containing a single empty stack. This points to a bug in how `LeveledGSS` handles operations that result in or involve empty stacks, most likely within the `merge` logic.
 
-      ### The Bug
+      The issue lies in the `_merge_leveled` function, specifically in the case where a `Constant` node representing a single empty stack (`Constant(Leaf, ...)` is merged with a `Branch` node. The logic for constructing the new set of children (`new_children`) is flawed. It copies all children from the `Branch` and then attempts to modify the `EPSILON` (empty stack) child. This can lead to incorrect states, especially if the `Branch` didn't originally have an `EPSILON` child.
 
-      The issue lies in the `pop` method of the `LeveledGSS` class in `python/gss_tester/leveled_impl.py`. When `pop` is called on a `Branch` node, it should process only the non-empty stacks, effectively discarding any empty stacks present in the GSS. However, the current implementation iterates over all children of the `Branch` node, including the special `EPSILON` child that represents the set of empty stacks. This causes the GSS for empty stacks to be merged into the result of the pop operation, leading to incorrect accumulator values.
-
-      The fix is to add a check to skip the `EPSILON` child within the loop.
+      Here are the step-by-step instructions to fix the bug:
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
+      1.  **Open the file `python/gss_tester/leveled_impl.py`.**
 
-      2.  **Navigate** to the `pop` method within the `LeveledGSS` class (around line 396).
+      2.  **Navigate to the `_merge_leveled` function.** This function starts around line 601.
 
-      3.  **Locate** the `case Branch(children=children):` block inside the `match` statement.
+      3.  **Locate the pattern match case for `(Constant(a1, acc1), Branch(c2))`**. This is around line 629.
 
-      4.  **Modify the loop** to ignore empty stacks. Replace the following lines:
+      4.  **Find the `if isinstance(a1.variant, Leaf):` block inside that case.** This block contains the optimization for merging a GSS that only contains an empty stack.
+
+      5.  **Replace the logic for constructing `new_children`**. The current implementation incorrectly modifies a copy of the children dictionary. We will replace it with a safer approach that rebuilds the children dictionary, correctly handling the `EPSILON` child.
+
+          Replace these lines (approximately 643-648):
           ```python
-                      for t, by_depth in children.items():
-                          for _, child in by_depth.items():
-                              result = result.merge(child)
+                      # Construct the new children map for the result.
+                      new_children = {t: d.copy() for t, d in c2.items()}
+                      if EPSILON not in new_children:
+                          new_children[EPSILON] = {}
+                      new_children[EPSILON][0] = merged_empty_child
+                      
+                      res = _canonicalize(LeveledGSS.internal(new_children))
           ```
-          with this corrected code, which skips the `EPSILON` key:
+
+          with the following corrected logic:
           ```python
-                      for t, by_depth in children.items():
-                          if t is EPSILON:
-                              continue
-                          for child in by_depth.values():
-                              result = result.merge(child)
+                      # Construct the new children map for the result.
+                      new_children = {t: d for t, d in c2.items() if t is not EPSILON}
+                      if not merged_empty_child.is_empty():
+                          new_children[EPSILON] = {0: merged_empty_child}
+                      
+                      res = _canonicalize(LeveledGSS.internal(new_children))
           ```
-          This change ensures that only children representing non-empty stacks are merged into the result of the `pop` operation.
 
-      ### Git Diff
+      This change ensures that we correctly construct the new set of children by first taking all non-empty-stack children from the original `Branch`, and then adding the newly computed merged empty-stack child if it's not empty. This avoids the subtle bugs related to dictionary copying and modification.
 
-      Here is the git patch to apply the fix.
+      ### Git Diffs
+
+      Here is the git diff for the required change.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -403,9 +403,11 @@
-                   case Branch(children=children):
-                       result = LeveledGSS.empty()
-                       for t, by_depth in children.items():
-      -                    for _, child in by_depth.items():
-      -                        result = result.merge(child)
-      +                    if t is EPSILON:
-      +                        continue
-      +                    for child in by_depth.values():
-      +                        result = result.merge(child)
-                       return result
-       
-           def is_empty(self) -> bool:
+      @@ -641,13 +641,11 @@
+                       # This recursive call is safe as it will hit (Constant, Constant) or (Constant, Empty).
+                       merged_empty_child = _merge_leveled(empty_stack_node, b2_empty_child, memo)
+                       
+      -                # Construct the new children map for the result.
+      -                new_children = {t: d.copy() for t, d in c2.items()}
+      -                if EPSILON not in new_children:
+      -                    new_children[EPSILON] = {}
+      -                new_children[EPSILON][0] = merged_empty_child
+      -                
+      +                # Construct the new children map for the result, handling the EPSILON child separately.
+      +                new_children = {t: d for t, d in c2.items() if t is not EPSILON}
+      +                if not merged_empty_child.is_empty():
+      +                    new_children[EPSILON] = {0: merged_empty_child}
+      +
+                       res = _canonicalize(LeveledGSS.internal(new_children))
+                   else:
+                       # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
 
       ```
-
-      After applying this change, your `LeveledGSS` implementation should behave consistently with the reference implementation. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -3220,7 +3235,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Exclude EPSILON child from pop operation
-      in LeveledGSS"'
+  - user: 'Changes committed with message: "Fix: Correctly merge Constant empty stack
+      with Branch in LeveledGSS"'
     metadata:
 ...

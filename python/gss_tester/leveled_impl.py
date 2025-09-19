@@ -528,12 +528,11 @@ def _merge_leveled(
                 # This recursive call is safe as it will hit (Constant, Constant) or (Constant, Empty).
                 merged_empty_child = _merge_leveled(empty_stack_node, b2_empty_child, memo)
                 
-                # Construct the new children map for the result.
-                new_children = {t: d.copy() for t, d in c2.items()}
-                if EPSILON not in new_children:
-                    new_children[EPSILON] = {}
-                new_children[EPSILON][0] = merged_empty_child
-                
+                # Construct the new children map for the result, handling the EPSILON child separately.
+                new_children = {t: d for t, d in c2.items() if t is not EPSILON}
+                if not merged_empty_child.is_empty():
+                    new_children[EPSILON] = {0: merged_empty_child}
+
                 res = _canonicalize(LeveledGSS.internal(new_children))
             else:
                 # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
