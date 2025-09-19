@@ -83,16 +83,39 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def __post_init__(self):
         self.validate_invariants()
 
+    def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
+        if not isinstance(self.inner, Upper):
+            return self
+
+        all_children = [
+            child
+            for children_at_depth in self.inner.children.values()
+            for child in children_at_depth.values()
+        ]
+
+        if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
+            return self
+
+        first_acc = all_children[0].inner.acc
+        if not all(child.inner.acc == first_acc for child in all_children[1:]):
+            return self
+
+        # Invariant violated: suck up the accumulator.
+        new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+        for top, children_at_depths in self.inner.children.items():
+            new_lower_children[top] = {}
+            for depth, child_gss in children_at_depths.items():
+                # We know child_gss.inner is an Interface
+                new_lower_children[top][depth] = child_gss.inner.node
+
+        # The new Lower node represents stacks that had a top element, so it is not a leaf.
+        new_lower = Lower(children=new_lower_children, is_leaf=False)
+        return LeveledGSS(Interface(new_lower, first_acc))
+
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
         if not stacks:
             return LeveledGSS(Upper({}))
-
-        # Check if all accumulators are the same. This is safer than using a set for unhashable accs.
-        first_acc = stacks[0][1]
-        if all(s[1] == first_acc for s in stacks[1:]):
-            list_of_stacks = [s[0] for s in stacks]
-            return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), first_acc))
 
         children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
@@ -108,7 +131,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 children[top] = {}
             children[top][length] = cls.from_stacks(group)
 
-        return LeveledGSS(Upper(children))
+        return LeveledGSS(Upper(children))._suck_up_accs()
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         if isinstance(self.inner, Interface):
