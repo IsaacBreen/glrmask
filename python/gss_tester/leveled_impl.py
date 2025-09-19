@@ -11,21 +11,9 @@ from .interface import GSS, T, Acc
 # ------------------------------
 
 @dataclass(frozen=True, eq=True)
-class UpperBranch(Generic[T, Acc]):
-    # children: T -> depth -> LeveledGSS
-    children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
-
-
-@dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: LeveledGSSInner[T]
+    child: LeveledGSSInner[T] | Leaf
     acc: Acc
-
-
-@dataclass(frozen=True, eq=True)
-class LowerBranch(Generic[T]):
-    # children: T -> depth -> LeveledGSSInner
-    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
 
 
 @dataclass(frozen=True, eq=True)
@@ -39,7 +27,7 @@ class InvariantViolation(Exception):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[UpperBranch[T, Acc], Interface[T, Acc]]
+    children: Dict[T, Dict[int, LeveledGSS[T, Acc] | Interface[T, Acc]]]
 
     def __post_init__(self):
         self.validate_invariants()
@@ -84,7 +72,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSSInner(Generic[T]):
-    inner: Union[LowerBranch[T], Leaf]
+    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
