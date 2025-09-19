@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
 from functools import reduce
+from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
 
-from .interface import GSS, T, Acc, MergeableInt
+from .interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
+
 
 # ------------------------------
 # Internal node classes
@@ -98,7 +99,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # Construction
     def __init__(self, node: _LeveledNode[T, Acc]):
         self._node = node
-        # Validate invariants in debug-oriented fashion (can be toggled off if performance becomes a concern)
         _validate_invariants_node(self._node)
 
     # ---- GSS interface ----
