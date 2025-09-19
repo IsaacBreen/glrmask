@@ -462,7 +462,7 @@ local_system:
 
 
       # ------------------------------
-      # Simple, canonical helpers based on path maps
+      # Canonical helpers: Lower <-> path map
       # ------------------------------
 
       def _make_empty_lower() -> Lower[T]:
@@ -471,37 +471,29 @@ local_system:
 
       def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
           """
-          Decode a Lower-trie into a map from stack paths (bottom->top) to accumulators.
-          Canonical form stores an accumulator at a node by having a special _AccKey child.
+          Decode a canonical Lower-trie into a map from stack paths (bottom->top) to accumulators.
+          Canonical form:
+            - Each label edge is at index 0.
+            - Accumulator at a node is encoded as a child whose label is an _AccKey(acc) and points to Leaf at index 0.
           """
-          if isinstance(node.inner, Leaf):
-              return {}
-
           result: Dict[Tuple[T, ...], Acc] = {}
 
           def visit(cur: Lower[T], prefix: List[T]) -> None:
               if isinstance(cur.inner, Leaf):
                   return
-
               children = cur.inner.children
 
-              # Collect accumulator(s) at this node (merge if multiple appear; robust to non-canonical input)
-              acc_here: Optional[Acc] = None
-              for key, idx_map in children.items():
-                  if _is_acc_key(key):
-                      # If the special child exists at this node, its key carries the accumulator.
-                      # There should be at most one in canonical form; be robust and merge.
-                      acc_here = _merge_acc(acc_here, key.acc)  # type: ignore[attr-defined]
-
-              if acc_here is not None:
-                  result[tuple(prefix)] = acc_here  # type: ignore[assignment]
+              # Accumulator at this node (at most one in canonical form)
+              for label, _ in children.items():
+                  if _is_acc_key(label):
+                      result[tuple(prefix)] = label.acc  # type: ignore[attr-defined]
+                      break
 
               # Traverse label-children
               for label, idx_map in children.items():
                   if _is_acc_key(label):
                       continue
-                  # Canonical form uses index 0; if not, just take any
-                  child = idx_map.get(0) or (next(iter(idx_map.values())) if idx_map else None)
+                  child = idx_map.get(0)
                   if child is not None:
                       prefix.append(label)  # type: ignore[arg-type]
                       visit(child, prefix)
@@ -512,9 +504,7 @@ local_system:
 
 
       def _map_merge_paths(a: Dict[Tuple[T, ...], Acc], b: Dict[Tuple[T, ...], Acc]) -> Dict[Tuple[T, ...], Acc]:
-          """
-          Merge two path->acc maps, combining accumulators for identical paths.
-          """
+          """Merge two path->acc maps, combining accumulators for identical paths."""
           if not a:
               return dict(b)
           if not b:
@@ -541,7 +531,7 @@ local_system:
 
           ACC = object()  # sentinel for per-node accumulator in the temporary dict-trie
 
-          # Build a nested dict trie first for simplicity and speed
+          # Build a nested dict trie
           root: Dict[Any, Dict] = {}
           for path, acc in paths.items():
               node = root
@@ -561,17 +551,15 @@ local_system:
                   else:
                       labels[key] = sub  # type: ignore[index]
 
-              # Recursively build children
               lb_children: Dict[Any, Dict[int, Lower[T]]] = {}
               for label, sub in labels.items():
                   child = build(sub)
-                  # Skip empty branches
+                  # Skip truly empty branches
                   if isinstance(child.inner, LowerBranch) and not child.inner.children:
                       continue
                   lb_children[label] = {0: child}
 
               if root_acc is not None:
-                  # Store accumulator at this node via a special child whose label carries the Acc.
                   lb_children[_AccKey(root_acc)] = {0: Lower(Leaf())}  # type: ignore[arg-type]
 
               return Lower(LowerBranch(children=lb_children))
@@ -609,18 +597,14 @@ local_system:
                       merged[key] = merged[key].merge(acc)
                   else:
                       merged[key] = acc
-
               lower_root = _map_to_lower(merged)
               return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Decode the trie into a canonical, sorted list of (stack, acc) pairs.
-              """
+              """Decode the trie into a canonical, sorted list of (stack, acc) pairs."""
               iface = self.inner.inner  # type: ignore[union-attr]
               assert isinstance(iface, Interface), "LeveledGSS is expected to hold an Interface at the top."
               paths = _lower_to_map(iface.node)
-
               items = [(list(k), v) for k, v in paths.items()]
               items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
               return items
@@ -661,34 +645,33 @@ local_system:
               return self._with_lower(_map_to_lower(popped))
 
           def is_empty(self) -> bool:
-              return not _lower_to_map(self._get_lower())
+              node = self._get_lower()
+              if isinstance(node.inner, LowerBranch):
+                  return not node.inner.children
+              return True
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              filtered: Dict[Tuple[T, ...], Acc] = {}
               if value is None:
-                  if () in paths:
-                      filtered[()] = paths[()]
+                  filtered = {(): acc for p, acc in paths.items() if p == ()}
               else:
-                  for p, acc in paths.items():
-                      if p and p[-1] == value:
-                          filtered[p] = acc
+                  filtered = {p: acc for p, acc in paths.items() if p and p[-1] == value}
               return self._with_lower(_map_to_lower(filtered))
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              transformed: Dict[Tuple[T, ...], Acc] = {p: func(acc) for p, acc in paths.items()}
+              transformed = {p: func(acc) for p, acc in paths.items()}
               return self._with_lower(_map_to_lower(transformed))
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              kept: Dict[Tuple[T, ...], Acc] = {p: acc for p, acc in paths.items() if predicate(acc)}
+              kept = {p: acc for p, acc in paths.items() if predicate(acc)}
               return self._with_lower(_map_to_lower(kept))
 
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
@@ -1605,7 +1588,7 @@ local_system:
 
 
       # ------------------------------
-      # Internal node classes (unchanged signatures)
+      # Internal node classes (public API - unchanged)
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
@@ -1640,10 +1623,14 @@ local_system:
 
 
       # ------------------------------
-      # Sentinel used inside Lower to store accumulator at a node (as a special child key)
+      # Internal sentinels and helpers
       # ------------------------------
 
       class _AccKey(Generic[Acc]):
+          """
+          Legacy sentinel for representing an accumulator at a node in a canonical trie
+          encoding. Kept for backward compatibility in decoders.
+          """
           __slots__ = ("acc",)
 
           def __init__(self, acc: Acc):
@@ -1652,7 +1639,7 @@ local_system:
           def __repr__(self) -> str:
               return f"<AccKey:{self.acc!r}>"
 
-          # Each instance is unique; equality by identity.
+          # Identity-based equality to keep keys unique.
           def __eq__(self, other: object) -> bool:
               return self is other
 
@@ -1664,6 +1651,31 @@ local_system:
           return isinstance(obj, _AccKey)
 
 
+      class _PathMap(Generic[T, Acc]):
+          """
+          A compact encoding of the entire path->acc map stored at the root Lower node.
+
+          We embed this object as a single key in LowerBranch.children with the value
+          being {0: Lower(Leaf())}. This makes encoding/decoding O(1) and lets all
+          operations work directly with a plain Python dict.
+          """
+          __slots__ = ("paths",)
+
+          def __init__(self, paths: Dict[Tuple[T, ...], Acc]):
+              self.paths = paths
+
+          def __repr__(self) -> str:
+              return f"<PathMap:{len(self.paths)} paths>"
+
+          def __eq__(self, other: object) -> bool:
+              # Identity equality ensures structural sharing doesn't accidentally
+              # make objects equal when maps happen to compare equal.
+              return self is other
+
+          def __hash__(self) -> int:
+              return id(self)
+
+
       def _merge_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
           if a is None:
               return b
@@ -1672,35 +1684,44 @@ local_system:
           return a.merge(b)
 
 
-      # ------------------------------
-      # Canonical helpers: Lower <-> path map
-      # ------------------------------
-
       def _make_empty_lower() -> Lower[T]:
           return Lower(LowerBranch(children={}))
 
 
       def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
           """
-          Decode a canonical Lower-trie into a map from stack paths (bottom->top) to accumulators.
-          Canonical form:
-            - Each label edge is at index 0.
-            - Accumulator at a node is encoded as a child whose label is an _AccKey(acc) and points to Leaf at index 0.
+          Decode a Lower node into a dictionary mapping stack paths (bottom->top)
+          to accumulators.
+
+          Supported encodings:
+            - Compact root encoding via _PathMap (preferred).
+            - Legacy canonical trie encoding using _AccKey(acc) children at nodes.
           """
+          # Fast path: compact root encoding
+          if isinstance(node.inner, LowerBranch):
+              children = node.inner.children
+              if len(children) == 1:
+                  (only_key, only_val) = next(iter(children.items()))
+                  if isinstance(only_key, _PathMap):
+                      # Be conservative and return a shallow copy to preserve immutability.
+                      return dict(only_key.paths)
+
+          # Fallback: decode legacy canonical trie representation
           result: Dict[Tuple[T, ...], Acc] = {}
 
           def visit(cur: Lower[T], prefix: List[T]) -> None:
               if isinstance(cur.inner, Leaf):
                   return
+
               children = cur.inner.children
 
               # Accumulator at this node (at most one in canonical form)
-              for label, _ in children.items():
+              for label in children:
                   if _is_acc_key(label):
                       result[tuple(prefix)] = label.acc  # type: ignore[attr-defined]
                       break
 
-              # Traverse label-children
+              # Traverse label-children (edges use index 0 in canonical form)
               for label, idx_map in children.items():
                   if _is_acc_key(label):
                       continue
@@ -1731,51 +1752,14 @@ local_system:
 
       def _map_to_lower(paths: Dict[Tuple[T, ...], Acc]) -> Lower[T]:
           """
-          Build a canonical Lower-trie from a path->acc map.
-          Canonicalization rules:
-            - For each node with an accumulator, add a child labeled with _AccKey(acc) -> Leaf at index 0.
-            - For each label edge, use index 0 to the child.
-            - Omit empty subtrees.
+          Encode a path->acc map into a compact Lower form using a single _PathMap
+          sentinel at the root. This makes encoding/decoding O(1).
           """
           if not paths:
               return _make_empty_lower()
-
-          ACC = object()  # sentinel for per-node accumulator in the temporary dict-trie
-
-          # Build a nested dict trie
-          root: Dict[Any, Dict] = {}
-          for path, acc in paths.items():
-              node = root
-              for label in path:
-                  node = node.setdefault(label, {})
-              prev = node.get(ACC)
-              node[ACC] = acc if prev is None else prev.merge(acc)  # type: ignore[union-attr]
-
-          # Convert nested dict trie into immutable Lower nodes
-          def build(node_dict: Dict[Any, Dict]) -> Lower[T]:
-              labels: Dict[T, Dict] = {}
-              root_acc: Optional[Acc] = None
-
-              for key, sub in node_dict.items():
-                  if key is ACC:
-                      root_acc = sub  # type: ignore[assignment]
-                  else:
-                      labels[key] = sub  # type: ignore[index]
-
-              lb_children: Dict[Any, Dict[int, Lower[T]]] = {}
-              for label, sub in labels.items():
-                  child = build(sub)
-                  # Skip truly empty branches
-                  if isinstance(child.inner, LowerBranch) and not child.inner.children:
-                      continue
-                  lb_children[label] = {0: child}
-
-              if root_acc is not None:
-                  lb_children[_AccKey(root_acc)] = {0: Lower(Leaf())}  # type: ignore[arg-type]
-
-              return Lower(LowerBranch(children=lb_children))
-
-          return build(root)
+          # We store the dict as-is; callers must treat it as immutable.
+          children: Dict[Any, Dict[int, Lower[T]]] = {_PathMap(paths): {0: Lower(Leaf())}}
+          return Lower(LowerBranch(children=children))
 
 
       def _encode_for_sort(obj: Any) -> str:
@@ -1786,7 +1770,7 @@ local_system:
 
 
       # ------------------------------
-      # Public LeveledGSS implementation
+      # Public LeveledGSS implementation (API unchanged, internals simplified)
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
@@ -1799,9 +1783,9 @@ local_system:
               """
               Build a LeveledGSS from explicit stacks.
               - Merge accumulators for identical stacks.
-              - Encode as a canonical trie (Lower) with _AccKey at nodes containing an accumulator.
+              - Store a compact map encoding internally for O(1) encode/decode.
               """
-              merged: Dict[Tuple[Any, ...], Acc] = {}
+              merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in stacks:
                   key = tuple(vals)
                   if key in merged:
@@ -1812,7 +1796,7 @@ local_system:
               return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Decode the trie into a canonical, sorted list of (stack, acc) pairs."""
+              """Decode the compact map into a canonical, sorted list of (stack, acc) pairs."""
               iface = self.inner.inner  # type: ignore[union-attr]
               assert isinstance(iface, Interface), "LeveledGSS is expected to hold an Interface at the top."
               paths = _lower_to_map(iface.node)
@@ -1835,6 +1819,7 @@ local_system:
               pushed: Dict[Tuple[T, ...], Acc] = {}
               for p, acc in paths.items():
                   new_path = p + (value,)
+                  # No duplicates expected here, but we guard for completeness.
                   if new_path in pushed:
                       pushed[new_path] = pushed[new_path].merge(acc)
                   else:
@@ -1858,8 +1843,14 @@ local_system:
           def is_empty(self) -> bool:
               node = self._get_lower()
               if isinstance(node.inner, LowerBranch):
-                  return not node.inner.children
-              return True
+                  children = node.inner.children
+                  if len(children) == 0:
+                      return True
+                  if len(children) == 1 and next(iter(children)) is not None:
+                      only_key = next(iter(children))
+                      if isinstance(only_key, _PathMap):
+                          return not bool(only_key.paths)
+              return False
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
@@ -2931,7 +2922,7 @@ messages:
 
 
       # ------------------------------
-      # Simple, canonical helpers based on path maps
+      # Canonical helpers: Lower <-> path map
       # ------------------------------
 
       def _make_empty_lower() -> Lower[T]:
@@ -2940,37 +2931,29 @@ messages:
 
       def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
           """
-          Decode a Lower-trie into a map from stack paths (bottom->top) to accumulators.
-          Canonical form stores an accumulator at a node by having a special _AccKey child.
+          Decode a canonical Lower-trie into a map from stack paths (bottom->top) to accumulators.
+          Canonical form:
+            - Each label edge is at index 0.
+            - Accumulator at a node is encoded as a child whose label is an _AccKey(acc) and points to Leaf at index 0.
           """
-          if isinstance(node.inner, Leaf):
-              return {}
-
           result: Dict[Tuple[T, ...], Acc] = {}
 
           def visit(cur: Lower[T], prefix: List[T]) -> None:
               if isinstance(cur.inner, Leaf):
                   return
-
               children = cur.inner.children
 
-              # Collect accumulator(s) at this node (merge if multiple appear; robust to non-canonical input)
-              acc_here: Optional[Acc] = None
-              for key, idx_map in children.items():
-                  if _is_acc_key(key):
-                      # If the special child exists at this node, its key carries the accumulator.
-                      # There should be at most one in canonical form; be robust and merge.
-                      acc_here = _merge_acc(acc_here, key.acc)  # type: ignore[attr-defined]
-
-              if acc_here is not None:
-                  result[tuple(prefix)] = acc_here  # type: ignore[assignment]
+              # Accumulator at this node (at most one in canonical form)
+              for label, _ in children.items():
+                  if _is_acc_key(label):
+                      result[tuple(prefix)] = label.acc  # type: ignore[attr-defined]
+                      break
 
               # Traverse label-children
               for label, idx_map in children.items():
                   if _is_acc_key(label):
                       continue
-                  # Canonical form uses index 0; if not, just take any
-                  child = idx_map.get(0) or (next(iter(idx_map.values())) if idx_map else None)
+                  child = idx_map.get(0)
                   if child is not None:
                       prefix.append(label)  # type: ignore[arg-type]
                       visit(child, prefix)
@@ -2981,9 +2964,7 @@ messages:
 
 
       def _map_merge_paths(a: Dict[Tuple[T, ...], Acc], b: Dict[Tuple[T, ...], Acc]) -> Dict[Tuple[T, ...], Acc]:
-          """
-          Merge two path->acc maps, combining accumulators for identical paths.
-          """
+          """Merge two path->acc maps, combining accumulators for identical paths."""
           if not a:
               return dict(b)
           if not b:
@@ -3010,7 +2991,7 @@ messages:
 
           ACC = object()  # sentinel for per-node accumulator in the temporary dict-trie
 
-          # Build a nested dict trie first for simplicity and speed
+          # Build a nested dict trie
           root: Dict[Any, Dict] = {}
           for path, acc in paths.items():
               node = root
@@ -3030,17 +3011,15 @@ messages:
                   else:
                       labels[key] = sub  # type: ignore[index]
 
-              # Recursively build children
               lb_children: Dict[Any, Dict[int, Lower[T]]] = {}
               for label, sub in labels.items():
                   child = build(sub)
-                  # Skip empty branches
+                  # Skip truly empty branches
                   if isinstance(child.inner, LowerBranch) and not child.inner.children:
                       continue
                   lb_children[label] = {0: child}
 
               if root_acc is not None:
-                  # Store accumulator at this node via a special child whose label carries the Acc.
                   lb_children[_AccKey(root_acc)] = {0: Lower(Leaf())}  # type: ignore[arg-type]
 
               return Lower(LowerBranch(children=lb_children))
@@ -3078,18 +3057,14 @@ messages:
                       merged[key] = merged[key].merge(acc)
                   else:
                       merged[key] = acc
-
               lower_root = _map_to_lower(merged)
               return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Decode the trie into a canonical, sorted list of (stack, acc) pairs.
-              """
+              """Decode the trie into a canonical, sorted list of (stack, acc) pairs."""
               iface = self.inner.inner  # type: ignore[union-attr]
               assert isinstance(iface, Interface), "LeveledGSS is expected to hold an Interface at the top."
               paths = _lower_to_map(iface.node)
-
               items = [(list(k), v) for k, v in paths.items()]
               items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
               return items
@@ -3130,34 +3105,33 @@ messages:
               return self._with_lower(_map_to_lower(popped))
 
           def is_empty(self) -> bool:
-              return not _lower_to_map(self._get_lower())
+              node = self._get_lower()
+              if isinstance(node.inner, LowerBranch):
+                  return not node.inner.children
+              return True
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              filtered: Dict[Tuple[T, ...], Acc] = {}
               if value is None:
-                  if () in paths:
-                      filtered[()] = paths[()]
+                  filtered = {(): acc for p, acc in paths.items() if p == ()}
               else:
-                  for p, acc in paths.items():
-                      if p and p[-1] == value:
-                          filtered[p] = acc
+                  filtered = {p: acc for p, acc in paths.items() if p and p[-1] == value}
               return self._with_lower(_map_to_lower(filtered))
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              transformed: Dict[Tuple[T, ...], Acc] = {p: func(acc) for p, acc in paths.items()}
+              transformed = {p: func(acc) for p, acc in paths.items()}
               return self._with_lower(_map_to_lower(transformed))
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
               if not paths:
                   return self._with_lower(_make_empty_lower())
-              kept: Dict[Tuple[T, ...], Acc] = {p: acc for p, acc in paths.items() if predicate(acc)}
+              kept = {p: acc for p, acc in paths.items() if predicate(acc)}
               return self._with_lower(_map_to_lower(kept))
 
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
@@ -3709,14 +3683,15 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/test_spec.py
-  - user: Make leveled_impl.py much simpler. Don't change any of the typing, ie keep
-      all the type/class definitions exactly the same. Don't add anything to the types.
-      Just simplify the implementations for the methods/functions. But make sure to
-      continue to respect the existing behaviour, especially wrt reference behaviour.
-      And don't compromise performance; performance of the simplified code should
-      be as good or better than the current performance. (Falling back to the reference
-      implementation would severely degrade performance - don't do that.) Think deeply
-      about how to do this. We want to minimal form. The real essence.
+  - user: Make leveled_impl.py much simpler. Don't change any of the public typing,
+      ie keep all the public type/class definitions exactly the same. Don't add anything
+      to the public types. Just simplify the implementations for the methods/functions.
+      Anything else can be reworked. Think outside the box. But make sure to continue
+      to respect the existing behaviour, especially wrt reference behaviour. And don't
+      compromise performance; performance of the simplified code should be as good
+      or better than the current performance. (Falling back to the reference implementation
+      would severely degrade performance - don't do that.) Think deeply about how
+      to do this. We want to minimal form. The real essence.
     metadata:
   - user: |-
       Mode instruction: For this turn, output the full, final contents of any created or modified files.
@@ -3746,7 +3721,7 @@ messages:
 
 
       # ------------------------------
-      # Internal node classes (unchanged signatures)
+      # Internal node classes (public API - unchanged)
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
@@ -3781,10 +3756,14 @@ messages:
 
 
       # ------------------------------
-      # Sentinel used inside Lower to store accumulator at a node (as a special child key)
+      # Internal sentinels and helpers
       # ------------------------------
 
       class _AccKey(Generic[Acc]):
+          """
+          Legacy sentinel for representing an accumulator at a node in a canonical trie
+          encoding. Kept for backward compatibility in decoders.
+          """
           __slots__ = ("acc",)
 
           def __init__(self, acc: Acc):
@@ -3793,7 +3772,7 @@ messages:
           def __repr__(self) -> str:
               return f"<AccKey:{self.acc!r}>"
 
-          # Each instance is unique; equality by identity.
+          # Identity-based equality to keep keys unique.
           def __eq__(self, other: object) -> bool:
               return self is other
 
@@ -3805,6 +3784,31 @@ messages:
           return isinstance(obj, _AccKey)
 
 
+      class _PathMap(Generic[T, Acc]):
+          """
+          A compact encoding of the entire path->acc map stored at the root Lower node.
+
+          We embed this object as a single key in LowerBranch.children with the value
+          being {0: Lower(Leaf())}. This makes encoding/decoding O(1) and lets all
+          operations work directly with a plain Python dict.
+          """
+          __slots__ = ("paths",)
+
+          def __init__(self, paths: Dict[Tuple[T, ...], Acc]):
+              self.paths = paths
+
+          def __repr__(self) -> str:
+              return f"<PathMap:{len(self.paths)} paths>"
+
+          def __eq__(self, other: object) -> bool:
+              # Identity equality ensures structural sharing doesn't accidentally
+              # make objects equal when maps happen to compare equal.
+              return self is other
+
+          def __hash__(self) -> int:
+              return id(self)
+
+
       def _merge_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
           if a is None:
               return b
@@ -3813,35 +3817,44 @@ messages:
           return a.merge(b)
 
 
-      # ------------------------------
-      # Canonical helpers: Lower <-> path map
-      # ------------------------------
-
       def _make_empty_lower() -> Lower[T]:
           return Lower(LowerBranch(children={}))
 
 
       def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
           """
-          Decode a canonical Lower-trie into a map from stack paths (bottom->top) to accumulators.
-          Canonical form:
-            - Each label edge is at index 0.
-            - Accumulator at a node is encoded as a child whose label is an _AccKey(acc) and points to Leaf at index 0.
+          Decode a Lower node into a dictionary mapping stack paths (bottom->top)
+          to accumulators.
+
+          Supported encodings:
+            - Compact root encoding via _PathMap (preferred).
+            - Legacy canonical trie encoding using _AccKey(acc) children at nodes.
           """
+          # Fast path: compact root encoding
+          if isinstance(node.inner, LowerBranch):
+              children = node.inner.children
+              if len(children) == 1:
+                  (only_key, only_val) = next(iter(children.items()))
+                  if isinstance(only_key, _PathMap):
+                      # Be conservative and return a shallow copy to preserve immutability.
+                      return dict(only_key.paths)
+
+          # Fallback: decode legacy canonical trie representation
           result: Dict[Tuple[T, ...], Acc] = {}
 
           def visit(cur: Lower[T], prefix: List[T]) -> None:
               if isinstance(cur.inner, Leaf):
                   return
+
               children = cur.inner.children
 
               # Accumulator at this node (at most one in canonical form)
-              for label, _ in children.items():
+              for label in children:
                   if _is_acc_key(label):
                       result[tuple(prefix)] = label.acc  # type: ignore[attr-defined]
                       break
 
-              # Traverse label-children
+              # Traverse label-children (edges use index 0 in canonical form)
               for label, idx_map in children.items():
                   if _is_acc_key(label):
                       continue
@@ -3872,51 +3885,14 @@ messages:
 
       def _map_to_lower(paths: Dict[Tuple[T, ...], Acc]) -> Lower[T]:
           """
-          Build a canonical Lower-trie from a path->acc map.
-          Canonicalization rules:
-            - For each node with an accumulator, add a child labeled with _AccKey(acc) -> Leaf at index 0.
-            - For each label edge, use index 0 to the child.
-            - Omit empty subtrees.
+          Encode a path->acc map into a compact Lower form using a single _PathMap
+          sentinel at the root. This makes encoding/decoding O(1).
           """
           if not paths:
               return _make_empty_lower()
-
-          ACC = object()  # sentinel for per-node accumulator in the temporary dict-trie
-
-          # Build a nested dict trie
-          root: Dict[Any, Dict] = {}
-          for path, acc in paths.items():
-              node = root
-              for label in path:
-                  node = node.setdefault(label, {})
-              prev = node.get(ACC)
-              node[ACC] = acc if prev is None else prev.merge(acc)  # type: ignore[union-attr]
-
-          # Convert nested dict trie into immutable Lower nodes
-          def build(node_dict: Dict[Any, Dict]) -> Lower[T]:
-              labels: Dict[T, Dict] = {}
-              root_acc: Optional[Acc] = None
-
-              for key, sub in node_dict.items():
-                  if key is ACC:
-                      root_acc = sub  # type: ignore[assignment]
-                  else:
-                      labels[key] = sub  # type: ignore[index]
-
-              lb_children: Dict[Any, Dict[int, Lower[T]]] = {}
-              for label, sub in labels.items():
-                  child = build(sub)
-                  # Skip truly empty branches
-                  if isinstance(child.inner, LowerBranch) and not child.inner.children:
-                      continue
-                  lb_children[label] = {0: child}
-
-              if root_acc is not None:
-                  lb_children[_AccKey(root_acc)] = {0: Lower(Leaf())}  # type: ignore[arg-type]
-
-              return Lower(LowerBranch(children=lb_children))
-
-          return build(root)
+          # We store the dict as-is; callers must treat it as immutable.
+          children: Dict[Any, Dict[int, Lower[T]]] = {_PathMap(paths): {0: Lower(Leaf())}}
+          return Lower(LowerBranch(children=children))
 
 
       def _encode_for_sort(obj: Any) -> str:
@@ -3927,7 +3903,7 @@ messages:
 
 
       # ------------------------------
-      # Public LeveledGSS implementation
+      # Public LeveledGSS implementation (API unchanged, internals simplified)
       # ------------------------------
 
       @dataclass(frozen=True, eq=True)
@@ -3940,9 +3916,9 @@ messages:
               """
               Build a LeveledGSS from explicit stacks.
               - Merge accumulators for identical stacks.
-              - Encode as a canonical trie (Lower) with _AccKey at nodes containing an accumulator.
+              - Store a compact map encoding internally for O(1) encode/decode.
               """
-              merged: Dict[Tuple[Any, ...], Acc] = {}
+              merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in stacks:
                   key = tuple(vals)
                   if key in merged:
@@ -3953,7 +3929,7 @@ messages:
               return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Decode the trie into a canonical, sorted list of (stack, acc) pairs."""
+              """Decode the compact map into a canonical, sorted list of (stack, acc) pairs."""
               iface = self.inner.inner  # type: ignore[union-attr]
               assert isinstance(iface, Interface), "LeveledGSS is expected to hold an Interface at the top."
               paths = _lower_to_map(iface.node)
@@ -3976,6 +3952,7 @@ messages:
               pushed: Dict[Tuple[T, ...], Acc] = {}
               for p, acc in paths.items():
                   new_path = p + (value,)
+                  # No duplicates expected here, but we guard for completeness.
                   if new_path in pushed:
                       pushed[new_path] = pushed[new_path].merge(acc)
                   else:
@@ -3999,8 +3976,14 @@ messages:
           def is_empty(self) -> bool:
               node = self._get_lower()
               if isinstance(node.inner, LowerBranch):
-                  return not node.inner.children
-              return True
+                  children = node.inner.children
+                  if len(children) == 0:
+                      return True
+                  if len(children) == 1 and next(iter(children)) is not None:
+                      only_key = next(iter(children))
+                      if isinstance(only_key, _PathMap):
+                          return not bool(only_key.paths)
+              return False
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               paths = _lower_to_map(self._get_lower())
@@ -4080,6 +4063,7 @@ messages:
                   raise AssertionError(
                       "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
                   )
+
       ```
     metadata:
   - user: |
@@ -4088,12 +4072,12 @@ messages:
       Found 1 code blocks.
       Matching against available files:
         1: python/gss_tester/test_spec.py
-        2: python/gss_tester/leveled_impl.py
-        3: python/gss_tester/fuzzer.py
+        2: python/gss_tester/__init__.py
+        3: python/gss_tester/analyzer.py
         4: python/gss_tester/interface.py
-        5: python/gss_tester/analyzer.py
+        5: python/gss_tester/fuzzer.py
         6: python/gss_tester/runner.py
-        7: python/gss_tester/__init__.py
+        7: python/gss_tester/leveled_impl.py
         8: python/gss_tester/reference_impl.py
       --- Phase 1: Processing explicit file paths in fences ---
       Assigned block to python/gss_tester/leveled_impl.py based on explicit fence path.
