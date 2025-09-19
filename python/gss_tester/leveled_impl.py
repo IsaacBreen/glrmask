@@ -67,10 +67,6 @@ class LeveledGSSInner(Generic[T]):
 
     # --- Constructors ---
     @classmethod
-    def empty(cls) -> 'LeveledGSSInner[T]':
-        return cls(None)
-
-    @classmethod
     def leaf(cls) -> 'LeveledGSSInner[T]':
         return cls(Leaf())
 
