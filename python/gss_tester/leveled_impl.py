@@ -120,13 +120,7 @@ class LeveledGSSInner(Generic[T]):
                 return LeveledGSSInner.internal({key: by_depth})
 
     def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-        if other is self:
-            return self
-        
-        s1 = {s for s in self.enumerate_stacks()}
-        s2 = {s for s in other.enumerate_stacks()}
-        res = _build_inner_from_seqs(self.__class__, s1.union(s2))
-        return cast('LeveledGSSInner[T]', res)
+        ...
 
     def peek(self) -> Set[T]:
         match self.variant:
@@ -368,15 +362,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return prune_b(self)
 
     def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-        if other is self: return self
-        if self.is_empty(): return cast(LeveledGSS[T, Acc], other)
-        if other.is_empty(): return self
-
-        d1 = _to_stack_map(self)
-        d2 = _to_stack_map(cast(LeveledGSS[T, Acc], other))
-        for k, acc2 in d2.items():
-            d1[k] = d1[k].merge(acc2) if k in d1 else acc2
-        return _build_from_stack_map(self.__class__, d1)
+        ...
 
     def peek(self) -> Set[T]:
         match self.variant:
