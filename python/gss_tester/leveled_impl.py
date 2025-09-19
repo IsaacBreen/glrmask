@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import reduce
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
 
 from .interface import GSS, T, Acc
@@ -130,7 +131,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def is_empty(self) -> bool:
-        return self.to_reference_impl().is_empty()
+        if isinstance(self.inner, Interface):
+            return False
+        # It's an Upper node. It's empty if it has no children.
+        return not self.inner.children
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
         ref_gss = self.to_reference_impl()
@@ -153,10 +157,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def peek(self) -> Set[T]:
-        return self.to_reference_impl().peek()
+        if isinstance(self.inner, Interface):
+            return set(self.inner.node.children.keys())
+        # It's an Upper node. The keys of its children are the top elements.
+        return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
-        return self.to_reference_impl().reduce_acc()
+        if isinstance(self.inner, Interface):
+            return self.inner.acc
+
+        # It's an Upper node
+        if not self.inner.children:
+            return None
+
+        child_accs = (
+            child.reduce_acc()
+            for children_at_depth in self.inner.children.values()
+            for child in children_at_depth.values()
+        )
+        valid_accs = [acc for acc in child_accs if acc is not None]
+
+        if not valid_accs:
+            return None
+
+        return reduce(lambda a, b: a.merge(b), valid_accs)
 
     def validate_invariants(self) -> None:
         if isinstance(self.inner, Upper):

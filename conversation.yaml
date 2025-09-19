@@ -439,31 +439,43 @@ local_system:
               return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.push(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.pop()
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def is_empty(self) -> bool:
-              raise NotImplementedError
+              return self.to_reference_impl().is_empty()
 
           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.isolate(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.apply(func)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.prune(predicate)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.merge(other)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def peek(self) -> Set[T]:
-              raise NotImplementedError
+              return self.to_reference_impl().peek()
 
           def reduce_acc(self) -> Optional[Acc]:
-              raise NotImplementedError
+              return self.to_reference_impl().reduce_acc()
 
           def validate_invariants(self) -> None:
               if isinstance(self.inner, Upper):
@@ -812,6 +824,7 @@ local_system:
 
       from collections import defaultdict
       from dataclasses import dataclass
+      from functools import reduce
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
 
       from .interface import GSS, T, Acc
@@ -928,7 +941,6 @@ local_system:
                       for _, child_gss in children_at_depths.items():
                           all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
                   return all_stacks
-              return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
               ref_gss = self.to_reference_impl()
@@ -941,7 +953,10 @@ local_system:
               return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def is_empty(self) -> bool:
-              return self.to_reference_impl().is_empty()
+              if isinstance(self.inner, Interface):
+                  return False
+              # It's an Upper node. It's empty if it has no children.
+              return not self.inner.children
 
           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
               ref_gss = self.to_reference_impl()
@@ -964,10 +979,30 @@ local_system:
               return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
+              if isinstance(self.inner, Interface):
+                  return set(self.inner.node.children.keys())
+              # It's an Upper node. The keys of its children are the top elements.
+              return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
+              if isinstance(self.inner, Interface):
+                  return self.inner.acc
+
+              # It's an Upper node
+              if not self.inner.children:
+                  return None
+
+              child_accs = (
+                  child.reduce_acc()
+                  for children_at_depth in self.inner.children.values()
+                  for child in children_at_depth.values()
+              )
+              valid_accs = [acc for acc in child_accs if acc is not None]
+
+              if not valid_accs:
+                  return None
+
+              return reduce(lambda a, b: a.merge(b), valid_accs)
 
           def validate_invariants(self) -> None:
               if isinstance(self.inner, Upper):
@@ -1489,31 +1524,43 @@ messages:
               return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.push(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.pop()
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def is_empty(self) -> bool:
-              raise NotImplementedError
+              return self.to_reference_impl().is_empty()
 
           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.isolate(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.apply(func)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.prune(predicate)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.merge(other)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def peek(self) -> Set[T]:
-              raise NotImplementedError
+              return self.to_reference_impl().peek()
 
           def reduce_acc(self) -> Optional[Acc]:
-              raise NotImplementedError
+              return self.to_reference_impl().reduce_acc()
 
           def validate_invariants(self) -> None:
               if isinstance(self.inner, Upper):
@@ -1551,9 +1598,11 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: Do a placeholder implementation for each of the leveled_impl.py methods
-      by just converting to a reference GSS impl, applying the method for that, and
-      converting back to a leveled GSS. (I know this is inefficient.)
+  - user: |-
+      There are a bunch of placeholder on the leveled GSS impls that just convert to reference GSS. Replace them with actual efficient impls for these:
+      - is_empty
+      - peek
+      - reduce_acc
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1572,79 +1621,149 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the placeholder methods in `leveled_impl.py`, followed by the corresponding git diff.
+      Of course. I'll replace the placeholder implementations in `LeveledGSS` with efficient ones that operate directly on the `LeveledGSS` structure. Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will edit the file `python/gss_tester/leveled_impl.py` to provide placeholder implementations for the abstract methods of the `GSS` interface in the `LeveledGSS` class.
+      First, I'll update `python/gss_tester/leveled_impl.py` to implement `is_empty`, `peek`, and `reduce_acc` efficiently.
 
-      1.  **In `python/gss_tester/leveled_impl.py`:**
-          *   I will replace the `NotImplementedError` in `push`, `pop`, `is_empty`, `isolate`, `apply`, `prune`, `merge`, `peek`, and `reduce_acc`.
-          *   Each new implementation will delegate to the `ReferenceGSS` implementation. For methods that return a new GSS state, this involves:
-              1.  Converting `self` to a `ReferenceGSS` using `self.to_reference_impl()`.
-              2.  Calling the corresponding method on the `ReferenceGSS` instance.
-              3.  Converting the resulting `ReferenceGSS` back into a `LeveledGSS` via `LeveledGSS.from_stacks(result.to_stacks())`.
-          *   For methods that return a value (like `is_empty`, `peek`, `reduce_acc`), the implementation will convert to `ReferenceGSS` and return the result of the corresponding method call directly.
+      1.  **Open the file `python/gss_tester/leveled_impl.py`**.
 
-      ### Git Diffs
+      2.  **Add an import for `reduce`**: Near the top of the file, with the other imports, add `from functools import reduce`. This will be used in the `reduce_acc` method.
 
-      Here is the git patch to apply these changes.
+          ```python
+          from __future__ import annotations
+          
+          from collections import defaultdict
+          from dataclasses import dataclass
+          from functools import reduce
+          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
+          
+          from .interface import GSS, T, Acc
+          ```
+
+      3.  **Update `is_empty`**: In the `LeveledGSS` class, replace the body of the `is_empty` method. The new implementation checks if the `inner` node is an `Upper` node with no children. An `Interface` node is never empty.
+
+          *   **From:**
+              ```python
+              def is_empty(self) -> bool:
+                  return self.to_reference_impl().is_empty()
+              ```
+          *   **To:**
+              ```python
+              def is_empty(self) -> bool:
+                  if isinstance(self.inner, Interface):
+                      return False
+                  # It's an Upper node. It's empty if it has no children.
+                  return not self.inner.children
+              ```
+
+      4.  **Update `peek`**: Replace the body of the `peek` method. The new implementation gets the top elements from the `children` dictionary keys, which are stored in both `Upper` and `Lower` (inside `Interface`) nodes.
+
+          *   **From:**
+              ```python
+              def peek(self) -> Set[T]:
+                  return self.to_reference_impl().peek()
+              ```
+          *   **To:**
+              ```python
+              def peek(self) -> Set[T]:
+                  if isinstance(self.inner, Interface):
+                      return set(self.inner.node.children.keys())
+                  # It's an Upper node. The keys of its children are the top elements.
+                  return set(self.inner.children.keys())
+              ```
+
+      5.  **Update `reduce_acc`**: Replace the body of the `reduce_acc` method. This implementation will recursively traverse the GSS structure to find all accumulators and merge them.
+
+          *   **From:**
+              ```python
+              def reduce_acc(self) -> Optional[Acc]:
+                  return self.to_reference_impl().reduce_acc()
+              ```
+          *   **To:**
+              ```python
+              def reduce_acc(self) -> Optional[Acc]:
+                  if isinstance(self.inner, Interface):
+                      return self.inner.acc
+          
+                  # It's an Upper node
+                  if not self.inner.children:
+                      return None
+          
+                  child_accs = (
+                      child.reduce_acc()
+                      for children_at_depth in self.inner.children.values()
+                      for child in children_at_depth.values()
+                  )
+                  valid_accs = [acc for acc in child_accs if acc is not None]
+          
+                  if not valid_accs:
+                      return None
+          
+                  return reduce(lambda a, b: a.merge(b), valid_accs)
+              ```
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes to `python/gss_tester/leveled_impl.py`.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 455928e..6d2146d 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -155,31 +155,39 @@
-               return []
+      @@ -2,7 +2,8 @@
        
-           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.push(value)
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       from collections import defaultdict
+       from dataclasses import dataclass
+      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
+      +from functools import reduce
+      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
        
-           def pop(self) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.pop()
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       from .interface import GSS, T, Acc
+       
+      @@ -161,7 +162,11 @@
+               return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
        
            def is_empty(self) -> bool:
-      -        raise NotImplementedError
-      +        return self.to_reference_impl().is_empty()
+      -        return self.to_reference_impl().is_empty()
+      +        if isinstance(self.inner, Interface):
+      +            return False
+      +        # It's an Upper node. It's empty if it has no children.
+      +        return not self.inner.children
        
            def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.isolate(value)
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.apply(func)
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
-       
-           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.prune(predicate)
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
-       
-           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        ref_gss = self.to_reference_impl()
-      +        new_ref_gss = ref_gss.merge(other)
-      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+               ref_gss = self.to_reference_impl()
+      @@ -182,10 +187,29 @@
+               return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
        
            def peek(self) -> Set[T]:
-      -        raise NotImplementedError
-      +        return self.to_reference_impl().peek()
+      -        return self.to_reference_impl().peek()
+      +        if isinstance(self.inner, Interface):
+      +            return set(self.inner.node.children.keys())
+      +        # It's an Upper node. The keys of its children are the top elements.
+      +        return set(self.inner.children.keys())
        
            def reduce_acc(self) -> Optional[Acc]:
-      -        raise NotImplementedError
-      +        return self.to_reference_impl().reduce_acc()
+      -        return self.to_reference_impl().reduce_acc()
+      +        if isinstance(self.inner, Interface):
+      +            return self.inner.acc
+      +
+      +        # It's an Upper node
+      +        if not self.inner.children:
+      +            return None
+      +
+      +        child_accs = (
+      +            child.reduce_acc()
+      +            for children_at_depth in self.inner.children.values()
+      +            for child in children_at_depth.values()
+      +        )
+      +        valid_accs = [acc for acc in child_accs if acc is not None]
+      +
+      +        if not valid_accs:
+      +            return None
+      +
+      +        return reduce(lambda a, b: a.merge(b), valid_accs)
        
            def validate_invariants(self) -> None:
                if isinstance(self.inner, Upper):
@@ -1660,7 +1779,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat(leveled_impl): Implement placeholder
-      methods by delegating to ReferenceGSS"'
+  - user: 'Changes committed with message: "Implement LeveledGSS.is_empty, peek, and
+      reduce_acc directly"'
     metadata:
 ...
