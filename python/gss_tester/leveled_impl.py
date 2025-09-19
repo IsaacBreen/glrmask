@@ -514,10 +514,31 @@ def _merge_leveled(
                 b2_dist = _distribute_acc(a2, acc2, dist_memo)
                 res = _merge_leveled(b1_dist, b2_dist, memo)
         
-        case (Constant(a1, acc1), Branch(_)):
-            dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-            b1_dist = _distribute_acc(a1, acc1, dist_memo)
-            res = _merge_leveled(b1_dist, b2, memo)
+        case (Constant(a1, acc1), Branch(c2)):
+            if isinstance(a1.variant, Leaf):
+                # This is the GSS representing {[]: acc1}. Merge it into the Branch.
+                empty_stack_node = b1
+                
+                # Get the part of b2 representing empty stacks.
+                b2_empty_children_by_depth = c2.get(EPSILON, {})
+                b2_empty_child = b2_empty_children_by_depth.get(0, LeveledGSS.empty())
+                
+                # Merge our empty stack node with b2's empty stack node.
+                # This recursive call is safe as it will hit (Constant, Constant) or (Constant, Empty).
+                merged_empty_child = _merge_leveled(empty_stack_node, b2_empty_child, memo)
+                
+                # Construct the new children map for the result.
+                new_children = {t: d.copy() for t, d in c2.items()}
+                if EPSILON not in new_children:
+                    new_children[EPSILON] = {}
+                new_children[EPSILON][0] = merged_empty_child
+                
+                res = _canonicalize(LeveledGSS.internal(new_children))
+            else:
+                # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
+                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+                b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                res = _merge_leveled(b1_dist, b2, memo)
 
         case (Branch(_), Constant(a2, acc2)):
             res = _merge_leveled(b2, b1, memo)
