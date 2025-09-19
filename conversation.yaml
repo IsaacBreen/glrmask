@@ -1201,7 +1201,8 @@ local_system:
           main()
     python/gss_tester/interface.py: |
       from abc import ABC, abstractmethod
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol
+      from functools import reduce
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
       import json
 
       class Mergeable(Protocol):
@@ -1276,6 +1277,17 @@ local_system:
           def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
               """Merges this GSS with another, combining accumulators for identical stacks."""
               pass
+
+          @classmethod
+          def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+              """
+              Merges multiple GSS instances into one.
+              This default implementation uses functools.reduce with the instance `merge` method.
+              """
+              # Start with an empty GSS of the target class `cls` to ensure the correct
+              # return type and to handle an empty gss_list.
+              initial = cls.from_stacks([])
+              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
 
           @abstractmethod
           def peek(self) -> Set[T]:
@@ -1605,7 +1617,44 @@ local_system:
               return self._create(new_empty_acc, new_children)
 
           def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.merge_many([self, other])
+              # Convert other to LeveledGSS if it isn't one.
+              if not isinstance(other, LeveledGSS):
+                  ref_gss = other.to_reference_impl()
+                  # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+                  stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+                  other = LeveledGSS.from_stacks(stacks_for_leveled)
+
+              # Now both are LeveledGSS.
+              if self._is_structurally_empty():
+                  return other
+              if other._is_structurally_empty():
+                  return self
+
+              gss1 = self._distribute()
+              gss2 = other._distribute()
+
+              # After distribution, they must be BRANCH kind (or EMPTY, handled above).
+              # Merge empty accumulators
+              merged_empty_acc: Optional[Acc] = None
+              if gss1._empty_acc is not None and gss2._empty_acc is not None:
+                  merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
+              elif gss1._empty_acc is not None:
+                  merged_empty_acc = gss1._empty_acc
+              else:
+                  merged_empty_acc = gss2._empty_acc
+
+              # Merge children
+              gss1_children = gss1._children or {}
+              gss2_children = gss2._children or {}
+              all_keys = gss1_children.keys() | gss2_children.keys()
+
+              merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
+              for k in all_keys:
+                  c1 = gss1_children.get(k)
+                  c2 = gss2_children.get(k)
+                  merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
+
+              return LeveledGSS._create(merged_empty_acc, merged_children)
 
           def peek(self) -> Set[T]:
               gss = self._distribute()
@@ -1639,58 +1688,6 @@ local_system:
               # We must reverse the lists to convert between them.
               stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
               return ReferenceGSS.from_stacks(stacks_for_ref)
-
-          @staticmethod
-          def merge_many(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-              # De-duplicate GSS instances based on object identity for efficiency.
-              # The order doesn't matter for merge.
-              unique_gss = {id(g): g for g in gss_list}.values()
-
-              live_gss_list = [
-                  g for g in unique_gss if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
-              ]
-              if not live_gss_list:
-                  return LeveledGSS._empty()
-              if len(live_gss_list) == 1:
-                  gss = live_gss_list[0]
-                  if isinstance(gss, LeveledGSS):
-                      return gss
-                  # It's a foreign GSS. Convert it.
-                  ref_gss = gss.to_reference_impl()
-                  # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
-                  stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
-                  return LeveledGSS.from_stacks(stacks_for_leveled)
-
-
-              dist_gss_list = []
-              for gss in live_gss_list:
-                  if isinstance(gss, LeveledGSS):
-                      dist_gss_list.append(gss._distribute())
-                  else:
-                      # Convert non-LeveledGSS types via from_stacks
-                      ref_gss = gss.to_reference_impl()
-                      # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
-                      stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
-                      dist_gss_list.append(LeveledGSS.from_stacks(stacks_for_leveled)._distribute())
-
-              merged_empty_acc: Optional[Acc] = None
-              all_children_by_key: Dict[T, List[LeveledGSS[T, Acc]]] = defaultdict(list)
-
-              for gss in dist_gss_list:
-                  if gss._kind == "BRANCH":
-                      if gss._empty_acc is not None:
-                          merged_empty_acc = (
-                              gss._empty_acc
-                              if merged_empty_acc is None
-                              else merged_empty_acc.merge(gss._empty_acc)
-                          )
-                      for k, v in cast(Dict, gss._children).items():
-                          all_children_by_key[k].append(v)
-
-              merged_children = {
-                  k: LeveledGSS.merge_many(v_list) for k, v_list in all_children_by_key.items()
-              }
-              return LeveledGSS._create(merged_empty_acc, merged_children)
 
           # -------------------------
           # Dunder methods
@@ -2123,9 +2120,9 @@ local_system:
 
           gss_isolated_10 = gss_i_merged.isolate(10)
           yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -3261,5 +3258,209 @@ messages:
   - user: Make `merge_many` a function in interface.py that has a default impl. Change
       the other impls so they don't override this, but implement just `merge` between
       two items.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to perform the requested refactoring, followed by the corresponding git diffs.
+
+      ### Step-by-step Instructions
+
+      1.  **Modify `python/gss_tester/interface.py`:**
+          *   Add `from functools import reduce` to the imports at the top of the file.
+          *   Add `Type` to the import from `typing`.
+          *   In the `GSS` abstract base class, define a new class method `merge_many`. This method will have a default implementation that uses `functools.reduce` to merge an iterable of GSS objects by repeatedly calling the `merge` instance method. This approach ensures that the final merged object is of the correct class (e.g., `LeveledGSS.merge_many(...)` returns a `LeveledGSS`).
+
+      2.  **Modify `python/gss_tester/leveled_impl.py`:**
+          *   Delete the entire `merge_many` static method from the `LeveledGSS` class. The implementation will now inherit the default `merge_many` from the `GSS` interface.
+          *   Replace the implementation of the `merge` method in `LeveledGSS`. The new version will perform an efficient, recursive two-way merge. It will:
+              *   Handle merging with non-`LeveledGSS` types by converting them first.
+              *   Distribute both `self` and `other` into their `BRANCH` representations.
+              *   Combine the `_empty_acc` accumulators.
+              *   Recursively merge the children dictionaries, making a recursive call to `merge` for any shared keys.
+
+      The calls to `LeveledGSS.merge_many` that remain in `LeveledGSS.pop` will now correctly resolve to the new, inherited class method from the `GSS` base class.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes:
+
+      ```diff
+      diff --git a/python/gss_tester/interface.py b/python/gss_tester/interface.py
+      index 111116c..157111c 100644
+      --- a/python/gss_tester/interface.py
+      +++ b/python/gss_tester/interface.py
+      @@ -1,5 +1,6 @@
+       from abc import ABC, abstractmethod
+      -from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol
+      +from functools import reduce
+      +from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
+       import json
+       
+       class Mergeable(Protocol):
+      @@ -70,6 +71,18 @@
+           def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+               """Merges this GSS with another, combining accumulators for identical stacks."""
+               pass
+      +
+      +    @classmethod
+      +    def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+      +        """
+      +        Merges multiple GSS instances into one.
+      +        This default implementation uses functools.reduce with the instance `merge` method.
+      +        """
+      +        # Start with an empty GSS of the target class `cls` to ensure the correct
+      +        # return type and to handle an empty gss_list.
+      +        initial = cls.from_stacks([])
+      +        return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+       
+           @abstractmethod
+           def peek(self) -> Set[T]:
+
+      ```
+
+      ```diff
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 2111111..2122222 100644
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -282,7 +282,44 @@
+               return self._create(new_empty_acc, new_children)
+       
+           def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
+      -        return LeveledGSS.merge_many([self, other])
+      +        # Convert other to LeveledGSS if it isn't one.
+      +        if not isinstance(other, LeveledGSS):
+      +            ref_gss = other.to_reference_impl()
+      +            # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+      +            stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+      +            other = LeveledGSS.from_stacks(stacks_for_leveled)
+      +
+      +        # Now both are LeveledGSS.
+      +        if self._is_structurally_empty():
+      +            return other
+      +        if other._is_structurally_empty():
+      +            return self
+      +
+      +        gss1 = self._distribute()
+      +        gss2 = other._distribute()
+      +
+      +        # After distribution, they must be BRANCH kind (or EMPTY, handled above).
+      +        # Merge empty accumulators
+      +        merged_empty_acc: Optional[Acc] = None
+      +        if gss1._empty_acc is not None and gss2._empty_acc is not None:
+      +            merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
+      +        elif gss1._empty_acc is not None:
+      +            merged_empty_acc = gss1._empty_acc
+      +        else:
+      +            merged_empty_acc = gss2._empty_acc
+      +
+      +        # Merge children
+      +        gss1_children = gss1._children or {}
+      +        gss2_children = gss2._children or {}
+      +        all_keys = gss1_children.keys() | gss2_children.keys()
+      +
+      +        merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
+      +        for k in all_keys:
+      +            c1 = gss1_children.get(k)
+      +            c2 = gss2_children.get(k)
+      +            merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
+      +
+      +        return LeveledGSS._create(merged_empty_acc, merged_children)
+       
+           def peek(self) -> Set[T]:
+               gss = self._distribute()
+      @@ -310,53 +347,6 @@
+               # We must reverse the lists to convert between them.
+               stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
+               return ReferenceGSS.from_stacks(stacks_for_ref)
+      -
+      -    @staticmethod
+      -    def merge_many(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
+      -        # De-duplicate GSS instances based on object identity for efficiency.
+      -        # The order doesn't matter for merge.
+      -        unique_gss = {id(g): g for g in gss_list}.values()
+      -
+      -        live_gss_list = [
+      -            g for g in unique_gss if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
+      -        ]
+      -        if not live_gss_list:
+      -            return LeveledGSS._empty()
+      -        if len(live_gss_list) == 1:
+      -            gss = live_gss_list[0]
+      -            if isinstance(gss, LeveledGSS):
+      -                return gss
+      -            # It's a foreign GSS. Convert it.
+      -            ref_gss = gss.to_reference_impl()
+      -            # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+      -            stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+      -            return LeveledGSS.from_stacks(stacks_for_leveled)
+      -
+      -
+      -        dist_gss_list = []
+      -        for gss in live_gss_list:
+      -            if isinstance(gss, LeveledGSS):
+      -                dist_gss_list.append(gss._distribute())
+      -            else:
+      -                # Convert non-LeveledGSS types via from_stacks
+      -                ref_gss = gss.to_reference_impl()
+      -                # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+      -                stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+      -                dist_gss_list.append(LeveledGSS.from_stacks(stacks_for_leveled)._distribute())
+      -
+      -        merged_empty_acc: Optional[Acc] = None
+      -        all_children_by_key: Dict[T, List[LeveledGSS[T, Acc]]] = defaultdict(list)
+      -
+      -        for gss in dist_gss_list:
+      -            if gss._kind == "BRANCH":
+      -                if gss._empty_acc is not None:
+      -                    merged_empty_acc = (
+      -                        gss._empty_acc
+      -                        if merged_empty_acc is None
+      -                        else merged_empty_acc.merge(gss._empty_acc)
+      -                    )
+      -                for k, v in cast(Dict, gss._children).items():
+      -                    all_children_by_key[k].append(v)
+      -
+      -        merged_children = {
+      -            k: LeveledGSS.merge_many(v_list) for k, v_list in all_children_by_key.items()
+      -        }
+      -        return LeveledGSS._create(merged_empty_acc, merged_children)
+       
+           # -------------------------
+           # Dunder methods
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/interface.py
+      Applying patch to 'python/gss_tester/interface.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/interface.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/leveled_impl.py
+      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "Refactor GSS merging: Implement default
+      merge_many in interface and optimize LeveledGSS.merge"'
     metadata:
 ...

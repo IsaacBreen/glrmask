@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol
+from functools import reduce
+from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
 import json
 
 class Mergeable(Protocol):
@@ -74,6 +75,17 @@ class GSS(ABC, Generic[T, Acc]):
     def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
         """Merges this GSS with another, combining accumulators for identical stacks."""
         pass
+
+    @classmethod
+    def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+        """
+        Merges multiple GSS instances into one.
+        This default implementation uses functools.reduce with the instance `merge` method.
+        """
+        # Start with an empty GSS of the target class `cls` to ensure the correct
+        # return type and to handle an empty gss_list.
+        initial = cls.from_stacks([])
+        return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
 
     @abstractmethod
     def peek(self) -> Set[T]:

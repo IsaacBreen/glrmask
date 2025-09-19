@@ -290,7 +290,44 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return self._create(new_empty_acc, new_children)
 
     def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.merge_many([self, other])
+        # Convert other to LeveledGSS if it isn't one.
+        if not isinstance(other, LeveledGSS):
+            ref_gss = other.to_reference_impl()
+            # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+            stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+            other = LeveledGSS.from_stacks(stacks_for_leveled)
+
+        # Now both are LeveledGSS.
+        if self._is_structurally_empty():
+            return other
+        if other._is_structurally_empty():
+            return self
+
+        gss1 = self._distribute()
+        gss2 = other._distribute()
+
+        # After distribution, they must be BRANCH kind (or EMPTY, handled above).
+        # Merge empty accumulators
+        merged_empty_acc: Optional[Acc] = None
+        if gss1._empty_acc is not None and gss2._empty_acc is not None:
+            merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
+        elif gss1._empty_acc is not None:
+            merged_empty_acc = gss1._empty_acc
+        else:
+            merged_empty_acc = gss2._empty_acc
+
+        # Merge children
+        gss1_children = gss1._children or {}
+        gss2_children = gss2._children or {}
+        all_keys = gss1_children.keys() | gss2_children.keys()
+
+        merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
+        for k in all_keys:
+            c1 = gss1_children.get(k)
+            c2 = gss2_children.get(k)
+            merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
+
+        return LeveledGSS._create(merged_empty_acc, merged_children)
 
     def peek(self) -> Set[T]:
         gss = self._distribute()
@@ -324,58 +361,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # We must reverse the lists to convert between them.
         stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
         return ReferenceGSS.from_stacks(stacks_for_ref)
-
-    @staticmethod
-    def merge_many(gss_list: Iterable[GSS[T, Acc]]) -> LeveledGSS[T, Acc]:
-        # De-duplicate GSS instances based on object identity for efficiency.
-        # The order doesn't matter for merge.
-        unique_gss = {id(g): g for g in gss_list}.values()
-
-        live_gss_list = [
-            g for g in unique_gss if not (isinstance(g, LeveledGSS) and g._is_structurally_empty())
-        ]
-        if not live_gss_list:
-            return LeveledGSS._empty()
-        if len(live_gss_list) == 1:
-            gss = live_gss_list[0]
-            if isinstance(gss, LeveledGSS):
-                return gss
-            # It's a foreign GSS. Convert it.
-            ref_gss = gss.to_reference_impl()
-            # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
-            stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
-            return LeveledGSS.from_stacks(stacks_for_leveled)
-
-
-        dist_gss_list = []
-        for gss in live_gss_list:
-            if isinstance(gss, LeveledGSS):
-                dist_gss_list.append(gss._distribute())
-            else:
-                # Convert non-LeveledGSS types via from_stacks
-                ref_gss = gss.to_reference_impl()
-                # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
-                stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
-                dist_gss_list.append(LeveledGSS.from_stacks(stacks_for_leveled)._distribute())
-
-        merged_empty_acc: Optional[Acc] = None
-        all_children_by_key: Dict[T, List[LeveledGSS[T, Acc]]] = defaultdict(list)
-
-        for gss in dist_gss_list:
-            if gss._kind == "BRANCH":
-                if gss._empty_acc is not None:
-                    merged_empty_acc = (
-                        gss._empty_acc
-                        if merged_empty_acc is None
-                        else merged_empty_acc.merge(gss._empty_acc)
-                    )
-                for k, v in cast(Dict, gss._children).items():
-                    all_children_by_key[k].append(v)
-
-        merged_children = {
-            k: LeveledGSS.merge_many(v_list) for k, v_list in all_children_by_key.items()
-        }
-        return LeveledGSS._create(merged_empty_acc, merged_children)
 
     # -------------------------
     # Dunder methods
