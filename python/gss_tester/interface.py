@@ -9,6 +9,19 @@ class Mergeable(Protocol):
     def merge(self, other: 'Mergeable') -> 'Mergeable':
         ...
 
+class MergeableInt(int):
+    """
+    An integer that is mergeable (for testing `Acc` typevars) and
+    returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+    """
+    def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+        return MergeableInt(super().__add__(other))
+
+    def __add__(self, other: int) -> 'MergeableInt':
+        if isinstance(other, int):
+            return MergeableInt(super().__add__(other))
+        return NotImplemented
+
 T = TypeVar('T')  # Stack item type
 Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
 

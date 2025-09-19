@@ -1,20 +1,7 @@
 import inspect
 from typing import Generator, Tuple, Any, Type
-from .interface import GSS
+from .interface import GSS, MergeableInt
 from .fuzzer import run_fuzz_test
-
-class MergeableInt(int):
-    """
-    An integer that is mergeable (for testing `Acc` typevars) and
-    returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-    """
-    def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-        return MergeableInt(super().__add__(other))
-
-    def __add__(self, other: int) -> 'MergeableInt':
-        if isinstance(other, int):
-            return MergeableInt(super().__add__(other))
-        return NotImplemented
 
 def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
     """
