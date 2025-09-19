@@ -149,7 +149,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         # Filter out any empty children, as they don't represent any stacks.
         live_children = {
-            v: c for v, c in children.items() if not c._is_structurally_empty()
+            v: c for v, c in children.items() if not c.is_empty()
         }
 
         if empty_acc is None and not live_children:
@@ -190,10 +190,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self._create(None, new_children)
         return self._empty()  # Should be unreachable
 
-    def _is_structurally_empty(self) -> bool:
-        """Checks if the GSS represents any stacks."""
-        return self._kind == "EMPTY"
-
     # -------------------------
     # GSS interface
     # -------------------------
@@ -221,7 +217,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @profile
     def push(self, value: T) -> LeveledGSS[T, Acc]:
-        if self._is_structurally_empty():
+        if self.is_empty():
             return self._empty()
         return self._create(None, {value: self})
 
@@ -240,18 +236,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS.merge_many(cast(Dict, self._children).values())
 
     def is_empty(self) -> bool:
-        if self._kind == "GROUP":
-            return self._node == _A_ROOT
-        if self._kind == "BRANCH":
-            return self._empty_acc is not None and not self._children
-        return False
+        """Checks if the GSS represents any stacks."""
+        return self._kind == "EMPTY"
 
     @profile
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         gss = self._distribute()
-        if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
-            if gss.is_empty() and value is None:
-                return gss
+        if gss._kind != "BRANCH":  # Can only be EMPTY
             return self._empty()
 
         if value is None:
@@ -316,9 +307,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             other = LeveledGSS.from_stacks(stacks_for_leveled)
 
         # Now both are LeveledGSS.
-        if self._is_structurally_empty():
+        if self.is_empty():
             return other
-        if other._is_structurally_empty():
+        if other.is_empty():
             return self
 
         gss1 = self._distribute()
@@ -379,6 +370,65 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # We must reverse the lists to convert between them.
         stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
         return ReferenceGSS.from_stacks(stacks_for_ref)
+
+    def _validate_invariants(self) -> None:
+        """
+        Recursively checks that this GSS node and all its descendants
+        adhere to the canonical representation invariants.
+        Raises AssertionError if an invariant is violated.
+        """
+        if self._kind == "BRANCH":
+            # Invariant 1: A BRANCH node should not be "suck-up-able".
+            # This would mean it's a non-canonical representation that should be a GROUP.
+            children = cast(Dict, self._children)
+            if self._empty_acc is None and children:
+
+                def get_group_parts(
+                    g: LeveledGSS[T, Acc],
+                ) -> Optional[Tuple[_A[T], Acc]]:
+                    """Helper to see if a GSS is equivalent to a simple GROUP."""
+                    if g._kind == "GROUP":
+                        return g._node, g._acc
+                    # A BRANCH representing a single empty stack is equivalent to a GROUP.
+                    if (
+                        g._kind == "BRANCH"
+                        and g._empty_acc is not None
+                        and not g._children
+                    ):
+                        return _A_ROOT, g._empty_acc
+                    return None
+
+                child_vals = list(children.values())
+                first_child_parts = get_group_parts(child_vals[0])
+
+                if first_child_parts:
+                    _, first_acc = first_child_parts
+
+                    all_match = True
+                    for c in child_vals[1:]:
+                        parts = get_group_parts(c)
+                        if not parts or parts[1] != first_acc:
+                            all_match = False
+                            break
+
+                    if all_match:
+                        raise AssertionError(
+                            "Invariant violation: non-canonical BRANCH node that should be a GROUP node. "
+                            f"Node: {self!r}"
+                        )
+
+            # Recursively validate children
+            for child in cast(Dict, self._children).values():
+                child._validate_invariants()
+
+        elif self._kind == "GROUP":
+            # Invariant 2: A GROUP node should not represent just an empty stack.
+            # That should be a BRANCH node with an _empty_acc.
+            if self._node == _A_ROOT:
+                raise AssertionError(
+                    "Invariant violation: GROUP node with _ARoot, should be a BRANCH. "
+                    f"Node: {self!r}"
+                )
 
     # -------------------------
     # Dunder methods
