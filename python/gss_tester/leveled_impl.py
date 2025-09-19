@@ -19,16 +19,16 @@ class InnerLeaf:
 
 @dataclass
 class InnerBranch(Generic[T]):
-    # children: T -> depth -> InnerNode
-    children: Dict[T, Dict[int, 'InnerNode[T]']]
+    # children: T -> depth -> _InnerNode
+    children: Dict[T, Dict[int, '_InnerNode[T]']]
 
 
-InnerNode = Union[InnerLeaf, InnerBranch[T]]
+_InnerNode = Union[InnerLeaf, InnerBranch[T]]
 
 
 @dataclass
 class WithAcc(Generic[T, Acc]):
-    node: InnerNode[T]
+    node: _InnerNode[T]
     acc: Acc
 
 
@@ -51,7 +51,7 @@ _LeveledNode = Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
 # Helpers to convert between ReferenceGSS and our leveled node representation
 # ------------------------------
 
-def _build_inner_from_sequences(seqs: List[List[T]]) -> InnerNode[T]:
+def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
     raise NotImplementedError
 
 
