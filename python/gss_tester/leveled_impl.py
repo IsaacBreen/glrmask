@@ -38,11 +38,6 @@ class Branch(Generic[T, Acc]):
 
 
 @dataclass
-class Empty:
-    pass
-
-
-@dataclass
 class LeveledGSSInner(Generic[T]):
     inner: Union[InnerLeaf, InnerBranch[T]]
 
@@ -55,14 +50,14 @@ def _build_inner_from_sequences(seqs: List[List[T]]) -> Union[InnerLeaf, InnerBr
     raise NotImplementedError
 
 
-def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc], Empty]:
+def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc]]:
     raise NotImplementedError
 
 
-def _normalize_suck_up(node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]) -> Union[WithAcc[T, Acc], Branch[T, Acc], Empty]:
+def _normalize_suck_up(node: Union[WithAcc[T, Acc], Branch[T, Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc]]:
     raise NotImplementedError
 
-def _enumerate_pairs_from_node(node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]) -> List[Tuple[List[T], Acc]]:
+def _enumerate_pairs_from_node(node: Union[WithAcc[T, Acc], Branch[T, Acc]]) -> List[Tuple[List[T], Acc]]:
     raise NotImplementedError
 
 
@@ -78,7 +73,55 @@ class InvariantViolation(Exception):
 
 def _validate_invariants_node(node: LeveledGSS[T, Acc]):
     def check(n: LeveledGSS[T, Acc]) -> None:
-        raise NotImplementedError
+        # This function validates a LeveledGSS node and recurses on its children.
+        inner = n.inner
+
+        if isinstance(inner, WithAcc):
+            # Check invariants on the inner LeveledGSSInner node.
+            def check_inner(inner_node: LeveledGSSInner[T]) -> None:
+                if isinstance(inner_node.inner, InnerBranch):
+                    # Invariant: inner branch should always have at least 1 item.
+                    if not inner_node.inner.children:
+                        raise InvariantViolation("InnerBranch has no children.")
+                    # Recurse on inner nodes
+                    for depths in inner_node.inner.children.values():
+                        for child in depths.values():
+                            check_inner(child)
+
+            check_inner(inner.node)
+
+        elif isinstance(inner, Branch):
+            if not inner.children:
+                return  # This is a valid empty GSS.
+
+            children_gss = [
+                child_gss
+                for depths in inner.children.values()
+                for child_gss in depths.values()
+            ]
+
+            # Invariant for (outer) branch: should never have a child that is itself a(n outer) branch with zero items.
+            for child in children_gss:
+                if isinstance(child.inner, Branch) and not child.inner.children:
+                    raise InvariantViolation("Branch has an empty Branch as a child.")
+
+            # Invariant for (outer) branch: if one child is WithAcc, then at least one other child must either be not WithAcc or must have Acc unequal to the first child's.
+            if len(children_gss) > 1:
+                first_child_inner = children_gss[0].inner
+                if isinstance(first_child_inner, WithAcc):
+                    first_acc = first_child_inner.acc
+                    all_children_are_withacc_with_same_acc = all(
+                        isinstance(c.inner, WithAcc) and c.inner.acc == first_acc
+                        for c in children_gss
+                    )
+                    if all_children_are_withacc_with_same_acc:
+                        raise InvariantViolation(
+                            "Branch with all WithAcc children having the same accumulator is not normalized."
+                        )
+
+            # Recurse
+            for child in children_gss:
+                check(child)
 
     check(node)
 
@@ -88,7 +131,10 @@ def _validate_invariants_node(node: LeveledGSS[T, Acc]):
 # ------------------------------
 
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
+    inner: Union[WithAcc[T, Acc], Branch[T, Acc]]
+
+    def __init__(self, inner: Union[WithAcc[T, Acc], Branch[T, Acc]]):
+        self.inner = inner
 
     # ---- GSS interface ----
 
@@ -108,7 +154,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS.from_stacks(new_pairs)
 
     def is_empty(self) -> bool:
-        return isinstance(self.inner, Empty)
+        return isinstance(self.inner, Branch) and not self.inner.children
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
         pairs = _enumerate_pairs_from_node(self.inner)
