@@ -16,7 +16,6 @@ class InnerLeaf:
     pass
 
 
-
 @dataclass(frozen=True, eq=True)
 class InnerBranch(Generic[T]):
     # children: T -> depth -> LeveledGSSInner
