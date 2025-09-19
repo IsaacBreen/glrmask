@@ -22,15 +22,15 @@ class InnerBranch(Generic[T]):
 
 
 @dataclass(frozen=True, eq=True)
-class WithAcc(Generic[T, Acc]):
-    node: 'LeveledGSSInner[T]'
-    acc: Acc
+class MiddleBranch(Generic[T, Acc]):
+    # children: T -> depth -> (Acc, LeveledGSSInner)
+    children: Dict[T, Dict[int, Tuple[Acc, 'LeveledGSSInner[T]']]]
 
 
 @dataclass(frozen=True, eq=True)
 class Branch(Generic[T, Acc]):
     # children: T -> depth -> LeveledGSS
-    children: Dict[object, Dict[int, 'LeveledGSS[T, Acc]']]
+    children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
 @dataclass(frozen=True, eq=True)
@@ -51,7 +51,7 @@ class LeveledGSSInner(Generic[T]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[WithAcc[T, Acc], Branch[T, Acc]]
+    inner: Union[MiddleBranch[T, Acc], Branch[T, Acc]]
 
     def __post_init__(self):
         _validate_invariants_node(self)
