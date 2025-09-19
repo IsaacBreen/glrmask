@@ -98,7 +98,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         def wrap_interface_leaf(acc: Acc) -> Upper[T, Acc]:
             # Wrap Interface in an extra Upper to avoid the "all children are Interface" check.
             iface = Interface[T, Acc](node=Lower[T](inner=Leaf()), acc=acc)
-            return Upper[T, Acc](inner=Upper[T, Acc](inner=iface))
+            return Upper[T, Acc](inner=iface)
 
         def build_suffix_upper(rest: Tuple[T, ...], acc: Acc) -> Upper[T, Acc]:
             # Build an Upper subtree for the remaining (bottom..top minus the current top).
@@ -158,9 +158,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     acc_map[vals] = acc_map[vals].merge(acc)
                 else:
                     acc_map[vals] = acc
-            else:
-                # Should not happen; safe-guard
-                raise RuntimeError("Unexpected Upper.inner type encountered during traversal.")
 
         # If root is a branch, traverse; otherwise if it's an Interface (shouldn't be by construction), handle leaf.
         collect(self.inner, [])
