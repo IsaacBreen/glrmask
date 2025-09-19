@@ -121,7 +121,6 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
-    @abstractmethod
     def to_reference_impl(self) -> 'GSS[T, Acc]':
         """
         Converts the GSS to its canonical ReferenceGSS representation.
