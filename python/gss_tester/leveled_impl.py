@@ -42,27 +42,6 @@ class LeveledGSSInner(Generic[T]):
 
 
 # ------------------------------
-# Helpers to convert between ReferenceGSS and our leveled node representation
-# ------------------------------
-
-def _build_inner_from_sequences(seqs: List[List[T]]) -> Union[InnerLeaf, InnerBranch[T]]:
-    raise NotImplementedError
-
-
-def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc]]:
-    raise NotImplementedError
-
-
-def _normalize_suck_up(node: Union[WithAcc[T, Acc], Branch[T, Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc]]:
-    raise NotImplementedError
-
-def _enumerate_pairs_from_node(node: Union[WithAcc[T, Acc], Branch[T, Acc]]) -> List[Tuple[List[T], Acc]]:
-    raise NotImplementedError
-
-
-
-
-# ------------------------------
 # Invariant validation
 # ------------------------------
 
@@ -133,17 +112,17 @@ def _validate_invariants_node(node: LeveledGSS[T, Acc]):
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Union[WithAcc[T, Acc], Branch[T, Acc]]
 
+    def __post_init__(self):
+        _validate_invariants_node(self)
+
     # ---- GSS interface ----
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        node = _build_leveled_from_pairs(stacks)
-        return cls(node)
+        raise NotImplementedError
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-        pairs = _enumerate_pairs_from_node(self.inner)
-        reference_impl = ReferenceGSS.from_stacks(pairs)
-        return reference_impl.to_stacks()
+        raise NotImplementedError
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
         ref_impl = self.to_reference_impl()
