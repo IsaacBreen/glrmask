@@ -427,9 +427,15 @@ local_system:
           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
           accs = {acc for _, acc in pairs}
           if len(accs) == 1:
-              only_acc = next(iter(accs))
-              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-              return WithAcc(node=inner, acc=only_acc)
+              vals_list = [vals for vals, _ in pairs]
+              has_empty = any(not v for v in vals_list)
+              has_non_empty = any(v for v in vals_list)
+
+              if not (has_empty and has_non_empty):
+                  only_acc = next(iter(accs))
+                  inner = _build_inner_from_sequences(vals_list)
+                  return WithAcc(node=inner, acc=only_acc)
+              # else: fall through to the general case which can handle mixed empty/non-empty
 
           # Otherwise, build an Internal node, partitioning by first symbol.
           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -490,6 +496,14 @@ local_system:
               if all_with_acc:
                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
                   if len(accs) == 1:
+                      # A suck-up would lose information if we need to represent both a terminal
+                      # state (from an _EPS child) and a branching state (from non-EPS children),
+                      # because the _InnerNode structure cannot do both.
+                      has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+                      has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+                      if has_eps_child and has_non_eps_child:
+                          return Branch(children=new_children)
+
                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                       the_acc = next(iter(accs))
                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
@@ -1058,11 +1072,6 @@ local_system:
       from .interface import GSS, T, Acc, MergeableInt
       from .reference_impl import ReferenceGSS
 
-      # Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
-      # This is purely internal; it never leaks out of to_reference_impl() or to_json.
-      _EPS = object()
-
-
       # ------------------------------
       # Internal node classes (mirroring the Rust-like structure)
       # ------------------------------
@@ -1076,6 +1085,7 @@ local_system:
       class InnerBranch(Generic[T]):
           # children: T -> depth -> _InnerNode
           children: Dict[T, Dict[int, '_InnerNode[T]']]
+          is_terminal: bool = False
 
 
       _InnerNode = Union[InnerLeaf, InnerBranch[T]]
@@ -1089,9 +1099,9 @@ local_system:
 
       @dataclass
       class Branch(Generic[T, Acc]):
-          # children: T_or_EPS -> depth -> _LeveledNode
-          # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
-          children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
+          # children: T -> depth -> _LeveledNode
+          children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']]
+          terminals: Optional['_LeveledNode[T, Acc]'] = None
 
 
       @dataclass
@@ -1150,7 +1160,7 @@ local_system:
               max_depth = max((len(tl) for tl in tails), default=0)
               children.setdefault(t, {})[max_depth] = child_inner
 
-          return InnerBranch(children=children)
+          return InnerBranch(children=children, is_terminal=(empty_count > 0))
 
 
       def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
@@ -1163,26 +1173,18 @@ local_system:
           accs = {acc for _, acc in pairs}
           if len(accs) == 1:
               vals_list = [vals for vals, _ in pairs]
-              has_empty = any(not v for v in vals_list)
-              has_non_empty = any(v for v in vals_list)
-
-              if not (has_empty and has_non_empty):
-                  only_acc = next(iter(accs))
-                  inner = _build_inner_from_sequences(vals_list)
-                  return WithAcc(node=inner, acc=only_acc)
-              # else: fall through to the general case which can handle mixed empty/non-empty
+              only_acc = next(iter(accs))
+              inner = _build_inner_from_sequences(vals_list)
+              return WithAcc(node=inner, acc=only_acc)
+              # Note: mixed empty/non-empty stacks are also handled here because the inner builder can represent them.
 
           # Otherwise, build an Internal node, partitioning by first symbol.
           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
-          children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+          children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']] = {}
 
           # Handle empty stacks (if any)
           empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
-          if empty_pairs:
-              # Recursively build a child node for these empty stacks.
-              child = _build_leveled_from_pairs(empty_pairs)
-              # Depth for empty is 0
-              children.setdefault(_EPS, {})[0] = child
+          terminals_node = _build_leveled_from_pairs(empty_pairs) if empty_pairs else None
 
           # Non-empty stacks
           non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
@@ -1197,7 +1199,10 @@ local_system:
               max_depth = max((len(v) for v, _ in tails_pairs), default=0)
               children.setdefault(t, {})[max_depth] = child
 
-          node: _LeveledNode[T, Acc] = Branch(children=children)
+          if not children:
+              return terminals_node if terminals_node is not None else Empty()
+
+          node: _LeveledNode[T, Acc] = Branch(children=children, terminals=terminals_node)
           return _normalize_suck_up(node)
 
 
@@ -1210,82 +1215,56 @@ local_system:
               return node
           if isinstance(node, Branch):
               # Normalize children first
-              new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+              new_children: Dict[T, Dict[int, _LeveledNode[T, Acc]]] = {}
               for key_t, depth_map in node.children.items():
                   for depth, child in depth_map.items():
                       norm = _normalize_suck_up(child)
                       new_children.setdefault(key_t, {})[depth] = norm
+              new_terminals = _normalize_suck_up(node.terminals) if node.terminals else None
 
               # Check suck-up condition: if all children are WithAcc and share the same acc
               # If there are no children, it's empty
               if not new_children:
-                  return Empty()
+                  return new_terminals if new_terminals else Empty()
 
               # Flatten list of children
-              child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
+              child_nodes_from_children: List[_LeveledNode[T, Acc]] = []
               for kt, dm in new_children.items():
-                  for d, ch in dm.items():
-                      child_list.append((kt, d, ch))
+                  child_nodes_from_children.extend(dm.values())
 
-              all_with_acc = all(isinstance(ch, WithAcc) for _, _, ch in child_list)
+              all_child_nodes = child_nodes_from_children + ([new_terminals] if new_terminals else [])
+
+              all_with_acc = all(isinstance(ch, WithAcc) for ch in all_child_nodes)
               if all_with_acc:
-                  accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
+                  accs: Set[Acc] = set(ch.acc for ch in all_child_nodes if isinstance(ch, WithAcc))
                   if len(accs) == 1:
-                      # A suck-up would lose information if we need to represent both a terminal
-                      # state (from an _EPS child) and a branching state (from non-EPS children),
-                      # because the _InnerNode structure cannot do both.
-                      has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
-                      has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
-                      if has_eps_child and has_non_eps_child:
-                          return Branch(children=new_children)
-
                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                       the_acc = next(iter(accs))
-                      # Build an A-level Internal whose children map keys to the inner nodes of the children.
-                      # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
-                      # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
-                      # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
-                      # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
-                      # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
-                      # (t, depth) pair.
                       inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
                       has_empty = False
-                      # Collect A-level children from the WithAcc children
-                      for kt, d, ch in child_list:
-                          chw = ch  # type: ignore[assignment]
-                          assert isinstance(chw, WithAcc)
-                          if kt is _EPS:
-                              # This child represents an empty sequence among the group
-                              # Representing empty within A-level is naturally done by allowing Root.
-                              # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
-                              # and other children may also add edges, we simply union them.
-                              # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
-                              # if it's Leaf, that means the empty sequence is present.
+
+                      # From children with T keys
+                      for kt, depth_map in new_children.items():
+                          for d, ch in depth_map.items():
+                              chw = ch # is WithAcc
+                              assert isinstance(chw, WithAcc)
                               if isinstance(chw.node, InnerLeaf):
-                                  has_empty = True
-                              else:
-                                  # This corresponds to "some non-empty A-level sequences that appear even though the parent
-                                  # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
-                                  # suck-ups; we include them.
-                                  for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
-                                      for dd, inn in dm.items():
-                                          inner_children.setdefault(tt, {})[dd] = inn
-                                  has_empty = True
-                          else:
-                              # Regular T key
-                              if isinstance(chw.node, InnerLeaf):
-                                  # The child being Root under a non-EPS edge means: the sequence [kt] exists.
-                                  # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
-                                  # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
-                                  key_t: T = kt  # type: ignore[assignment]
                                   depth_int = max(d - 1, 0)
-                                  inner_children.setdefault(key_t, {})[depth_int] = InnerLeaf()
-                              else:
-                                  # Merge edges
-                                  key_t: T = kt  # type: ignore[assignment]
-                                  for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
-                                      # We store the entire inner subtree under (key_t, depth-1)
-                                      inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
+                                  inner_children.setdefault(kt, {})[depth_int] = InnerLeaf()
+                              else: # InnerBranch
+                                  inner_children.setdefault(kt, {})[max(d - 1, 0)] = chw.node
+
+                      # From terminals node
+                      if new_terminals:
+                          term_w = new_terminals
+                          assert isinstance(term_w, WithAcc)
+                          if isinstance(term_w.node, InnerLeaf):
+                              has_empty = True
+                          else: # InnerBranch
+                              # Merge its children
+                              for t, dm in term_w.node.children.items():
+                                  inner_children.setdefault(t, {}).update(dm)
+                              has_empty = term_w.node.is_terminal
 
                       # If there were no non-EPS children but has_empty is True and there are no other children,
                       # then the inner is just Root.
@@ -1293,14 +1272,13 @@ local_system:
                           if has_empty:
                               inner: _InnerNode[T] = InnerLeaf()
                           else:
-                              # Should not happen (no children => handled above), but keep safe.
                               inner = InnerLeaf()
                       else:
-                          inner = InnerBranch(children=inner_children)
+                          inner = InnerBranch(children=inner_children, is_terminal=has_empty)
 
                       return WithAcc(node=inner, acc=the_acc)
 
-              return Branch(children=new_children)
+              return Branch(children=new_children, terminals=new_terminals)
 
           # Should not reach
           return node
@@ -1315,6 +1293,9 @@ local_system:
                   result.append((list(prefix), acc))
                   return
               # InnerBranch
+              if inner.is_terminal:
+                  result.append((list(prefix), acc))
+              # InnerBranch
               for t, depth_map in inner.children.items():  # type: ignore[union-attr]
                   for _, child in depth_map.items():
                       emit_from_inner(child, prefix + [t], acc)
@@ -1326,13 +1307,11 @@ local_system:
                   emit_from_inner(node_b.node, prefix, node_b.acc)
                   return
               # Branch
+              if node_b.terminals:
+                  walk(node_b.terminals, prefix)
               for key_t, depth_map in node_b.children.items():
                   for _, child in depth_map.items():
-                      if key_t is _EPS:
-                          # Empty step: do not advance prefix
-                          walk(child, prefix)
-                      else:
-                          walk(child, prefix + [key_t])  # type: ignore[list-item]
+                      walk(child, prefix + [key_t])
 
           walk(node, [])
           return _dedup_pairs(result)
@@ -1362,9 +1341,6 @@ local_system:
                   return
               if isinstance(inner, InnerBranch):
                   for t, depth_map in inner.children.items():
-                      # Keys must not be EPS at A-level
-                      if t is _EPS:
-                          raise InvariantViolation("EPS sentinel leaked into A-level inner structure.")
                       for _, child in depth_map.items():
                           check_inner(child)
 
@@ -1377,18 +1353,24 @@ local_system:
                   return True, node_b.acc
               if isinstance(node_b, Branch):
                   # Recurse, collect child accs when child is WithAcc
-                  child_accs: List[Acc] = []
-                  child_types: List[type] = []
+                  all_child_nodes: List[_LeveledNode[T, Acc]] = []
                   for kt, depth_map in node_b.children.items():
-                      for _, ch in depth_map.items():
-                          ok, acc = check(ch)
-                          if not ok:
-                              return False, None
-                          child_types.append(type(ch))
-                          if isinstance(ch, WithAcc):
-                              child_accs.append(ch.acc)
+                      all_child_nodes.extend(depth_map.values())
+                  if node_b.terminals:
+                      all_child_nodes.append(node_b.terminals)
+
+                  for ch in all_child_nodes:
+                      ok, acc = check(ch)
+                      if not ok:
+                          return False, None
+
                   # suck-up opportunity detection
-                  if child_types and all(ct is WithAcc for ct in child_types):
+                  if all_child_nodes and all(isinstance(n, WithAcc) for n in all_child_nodes):
+                      child_accs = [
+                          ch.acc
+                          for ch in all_child_nodes
+                          if isinstance(ch, WithAcc)
+                      ]
                       # All children are WithAcc; if their accs are equal, it should have been sucked up
                       if child_accs and all(a == child_accs[0] for a in child_accs):
                           raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
@@ -1965,9 +1947,15 @@ messages:
           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
           accs = {acc for _, acc in pairs}
           if len(accs) == 1:
-              only_acc = next(iter(accs))
-              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-              return WithAcc(node=inner, acc=only_acc)
+              vals_list = [vals for vals, _ in pairs]
+              has_empty = any(not v for v in vals_list)
+              has_non_empty = any(v for v in vals_list)
+
+              if not (has_empty and has_non_empty):
+                  only_acc = next(iter(accs))
+                  inner = _build_inner_from_sequences(vals_list)
+                  return WithAcc(node=inner, acc=only_acc)
+              # else: fall through to the general case which can handle mixed empty/non-empty
 
           # Otherwise, build an Internal node, partitioning by first symbol.
           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -2028,6 +2016,14 @@ messages:
               if all_with_acc:
                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
                   if len(accs) == 1:
+                      # A suck-up would lose information if we need to represent both a terminal
+                      # state (from an _EPS child) and a branching state (from non-EPS children),
+                      # because the _InnerNode structure cannot do both.
+                      has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+                      has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+                      if has_eps_child and has_non_eps_child:
+                          return Branch(children=new_children)
+
                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                       the_acc = next(iter(accs))
                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
@@ -2282,63 +2278,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: |-
-      bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_13-16-26
-      ---
-      Reference Implementation: gss_tester/reference_impl.py
-      Other Implementations: gss_tester/leveled_impl.py
-      ---
-      Starting test runs...
-
-      >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.reference_impl...
-      Running test specification...
-      Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/reference_impl.py
-
-      >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.leveled_impl...
-      Running test specification...
-      Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json
-      >>> Finished test spec for: gss_tester/leveled_impl.py
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 2 equivalence class(es) among 2 implementations.
-
-      Reference implementation: gss_tester.reference_impl.ReferenceGSS
-
-      Class 1 (1 implementation(s)) [Ref Match: ❌]
-      --------------------------------------------
-        - gss_tester.leveled_impl.LeveledGSS
-
-      Class 2 (1 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.reference_impl.ReferenceGSS
-
-
-      --- Divergence Report ---
-
-      Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
-        - First divergence at yield index 26:
-          - gss_tester.leveled_impl.LeveledGSS (L141): [[[1], 0]]
-          - gss_tester.reference_impl.ReferenceGSS (L141): [[[1], 0], [[], 0]]
-
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_13-16-26
-    metadata:
-  - user: Fix this.
+  - user: Remove `_EPS`. It serves no purpose. `InnerLeaf` represents an empty stack
+      (or, rather, the bottom node of a set, which if there's no other edges leading
+      to it means this represents the empty stack).
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2357,76 +2299,799 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you fix the bug in your Graph-Structured Stack implementation. The divergence you're seeing is due to a subtle issue in `leveled_impl.py` where empty stacks are lost during the internal tree construction and normalization process, specifically when they exist alongside non-empty stacks that share the same accumulator.
-
-      The core problem is that the internal `_InnerNode` data structure cannot simultaneously represent a terminal stack (like an empty stack) and have children (for non-empty stacks). The implementation tries to optimize by collapsing nodes, but this optimization incorrectly discards the empty stack information in these mixed scenarios.
-
-      Here are the step-by-step instructions to fix this, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to remove the `_EPS` sentinel and refactor the `LeveledGSS` implementation, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      I'll apply two changes to `python/gss_tester/leveled_impl.py` to work around the data structure's limitation.
+      #### File: `python/gss_tester/leveled_impl.py`
 
-      1.  **Update `_build_leveled_from_pairs` to avoid incorrect optimization:**
-          In `python/gss_tester/leveled_impl.py`, I will modify the function `_build_leveled_from_pairs`. The initial check that optimizes for stacks with a single unique accumulator is flawed. When it encounters both empty and non-empty stacks, it calls `_build_inner_from_sequences`, which loses the empty stacks.
+      1.  **Remove `_EPS` Sentinel**: Delete the line defining `_EPS` near the top of the file.
+          ```python
+          # Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
+          # This is purely internal; it never leaks out of to_reference_impl() or to_json.
+          _EPS = object()
+          ```
 
-          I will add logic to detect this mixed case. If both empty and non-empty stacks are present, we will bypass this optimization and proceed to the general logic that correctly handles them by creating separate branches.
+      2.  **Modify `InnerBranch` Dataclass**: Add a boolean flag `is_terminal` to `InnerBranch` to indicate if a stack can terminate at this node.
+          ```python
+          @dataclass
+          class InnerBranch(Generic[T]):
+              # children: T -> depth -> _InnerNode
+              children: Dict[T, Dict[int, '_InnerNode[T]']]
+              is_terminal: bool = False
+          ```
 
-      2.  **Update `_normalize_suck_up` to prevent information loss:**
-          The general logic path leads to the `_normalize_suck_up` function, which has a similar flaw. It attempts to "suck up" children into a single parent node if they all share the same accumulator. This process also fails to preserve empty stacks when mixed with non-empty ones.
+      3.  **Modify `Branch` Dataclass**: Change the `children` dictionary to be keyed by `T` instead of `object`, and add a new field `terminals` to hold the node for stacks that terminate at this level.
+          ```python
+          @dataclass
+          class Branch(Generic[T, Acc]):
+              # children: T -> depth -> _LeveledNode
+              children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']]
+              terminals: Optional['_LeveledNode[T, Acc]'] = None
+          ```
 
-          I will add a check within this function. If a "suck up" operation would need to merge children representing empty stacks (`_EPS` key) and non-empty stacks, the operation will be aborted for that node, preserving the existing `Branch` structure which correctly represents the state.
+      4.  **Update `_build_inner_from_sequences`**: When creating an `InnerBranch`, set the `is_terminal` flag based on whether any empty sequences were present in the input.
+          ```python
+          # In _build_inner_from_sequences
+          # ...
+          return InnerBranch(children=children, is_terminal=(empty_count > 0))
+          ```
 
-      These two changes ensure that empty stacks are no longer lost during the internal tree manipulations.
+      5.  **Update `_build_leveled_from_pairs`**:
+          *   For the case where all accumulators are the same (`len(accs) == 1`), remove the logic that prevented mixing empty and non-empty stacks. The new `InnerBranch` can handle this.
+          *   For the general case, instead of using `_EPS` as a key, separate `empty_pairs` and build a `terminals_node` from them. The `non_empty_pairs` will populate the `children` dictionary. Finally, construct a `Branch` with both. If there are no children, just return the `terminals_node`.
+
+      6.  **Update `_normalize_suck_up`**: This function requires significant changes.
+          *   When normalizing a `Branch`, also normalize its `terminals`.
+          *   If a `Branch` has no `children` after normalization, it should simplify to its `terminals` node.
+          *   The "suck-up" condition must now consider all child nodes, including the `terminals` node.
+          *   When a suck-up occurs, the logic for building the new combined `_InnerNode` must correctly handle merging nodes from `children` (which become children of the new node) and from `terminals` (which contributes to the `is_terminal` flag and potentially root-level children of the new node).
+
+      7.  **Update `_enumerate_pairs_from_node`**:
+          *   In `emit_from_inner`, check `is_terminal` on `InnerBranch` nodes to emit pairs for stacks that terminate there.
+          *   In `walk`, when traversing a `Branch`, recursively walk into `terminals` (with the same prefix) and into `children` (with an extended prefix).
+
+      8.  **Update `_validate_invariants_node`**:
+          *   In `check_inner`, remove the check for `_EPS` as it no longer exists.
+          *   In `check` for a `Branch`, extend the traversal and suck-up validation to include the `terminals` node.
+
+      These changes collectively remove the need for the `_EPS` sentinel by enriching the data structures (`InnerBranch` and `Branch`) to more directly represent terminating stacks.
 
       ### Git Diffs
 
-      Here are the git diffs for the changes.
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 102462e..a478440 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -128,11 +128,17 @@
+      @@ -8,11 +8,6 @@
+       from .interface import GSS, T, Acc, MergeableInt
+       from .reference_impl import ReferenceGSS
        
-           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
+      -# Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
+      -# This is purely internal; it never leaks out of to_reference_impl() or to_json.
+      -_EPS = object()
+      -
+      -
+       # ------------------------------
+       # Internal node classes (mirroring the Rust-like structure)
+       # ------------------------------
+      @@ -26,6 +21,7 @@
+       class InnerBranch(Generic[T]):
+           # children: T -> depth -> _InnerNode
+           children: Dict[T, Dict[int, '_InnerNode[T]']]
+      +    is_terminal: bool = False
+       
+       
+       _InnerNode = Union[InnerLeaf, InnerBranch[T]]
+      @@ -39,9 +35,9 @@
+       
+       @dataclass
+       class Branch(Generic[T, Acc]):
+      -    # children: T_or_EPS -> depth -> _LeveledNode
+      -    # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
+      -    children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
+      +    # children: T -> depth -> _LeveledNode
+      +    children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']]
+      +    terminals: Optional['_LeveledNode[T, Acc]'] = None
+       
+       
+       @dataclass
+      @@ -101,7 +97,7 @@
+               max_depth = max((len(tl) for tl in tails), default=0)
+               children.setdefault(t, {})[max_depth] = child_inner
+       
+      -    return InnerBranch(children=children)
+      +    return InnerBranch(children=children, is_terminal=(empty_count > 0))
+       
+       
+       def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
+      @@ -114,28 +110,21 @@
            accs = {acc for _, acc in pairs}
-      -    if len(accs) == 1:
-      -        only_acc = next(iter(accs))
-      -        inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-      -        return WithAcc(node=inner, acc=only_acc)
-      +    if len(accs) == 1:
-      +        vals_list = [vals for vals, _ in pairs]
-      +        has_empty = any(not v for v in vals_list)
-      +        has_non_empty = any(v for v in vals_list)
-      +
-      +        if not (has_empty and has_non_empty):
-      +            only_acc = next(iter(accs))
-      +            inner = _build_inner_from_sequences(vals_list)
-      +            return WithAcc(node=inner, acc=only_acc)
-      +        # else: fall through to the general case which can handle mixed empty/non-empty
+           if len(accs) == 1:
+               vals_list = [vals for vals, _ in pairs]
+      -        has_empty = any(not v for v in vals_list)
+      -        has_non_empty = any(v for v in vals_list)
+      -
+      -        if not (has_empty and has_non_empty):
+      -            only_acc = next(iter(accs))
+      -            inner = _build_inner_from_sequences(vals_list)
+      -            return WithAcc(node=inner, acc=only_acc)
+      -        # else: fall through to the general case which can handle mixed empty/non-empty
+      +        only_acc = next(iter(accs))
+      +        inner = _build_inner_from_sequences(vals_list)
+      +        return WithAcc(node=inner, acc=only_acc)
        
            # Otherwise, build an Internal node, partitioning by first symbol.
-           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
-      @@ -193,6 +199,14 @@
-               if all_with_acc:
-                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
-                   if len(accs) == 1:
-      +                # A suck-up would lose information if we need to represent both a terminal
-      +                # state (from an _EPS child) and a branching state (from non-EPS children),
-      +                # because the _InnerNode structure cannot do both.
-      +                has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
-      +                has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
-      +                if has_eps_child and has_non_eps_child:
-      +                    return Branch(children=new_children)
+      -    # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+      -    children: Dict[object, Dict[int, '_LeveledNode[T, Acc]]] = {}
+      +    children: Dict[T, Dict[int, '_LeveledNode[T, Acc]]] = {}
+       
+           # Handle empty stacks (if any)
+           empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+      -    if empty_pairs:
+      -        # Recursively build a child node for these empty stacks.
+      -        child = _build_leveled_from_pairs(empty_pairs)
+      -        # Depth for empty is 0
+      -        children.setdefault(_EPS, {})[0] = child
+      +    terminals_node = _build_leveled_from_pairs(empty_pairs) if empty_pairs else None
+       
+           # Non-empty stacks
+           non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
+      @@ -150,7 +139,10 @@
+               max_depth = max((len(v) for v, _ in tails_pairs), default=0)
+               children.setdefault(t, {})[max_depth] = child
+       
+      -    node: _LeveledNode[T, Acc] = Branch(children=children)
+      +    if not children:
+      +        return terminals_node if terminals_node is not None else Empty()
       +
+      +    node: _LeveledNode[T, Acc] = Branch(children=children, terminals=terminals_node)
+           return _normalize_suck_up(node)
+       
+       
+      @@ -164,74 +156,66 @@
+               return node
+           if isinstance(node, Branch):
+               # Normalize children first
+      -        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+      +        new_children: Dict[T, Dict[int, _LeveledNode[T, Acc]]] = {}
+               for key_t, depth_map in node.children.items():
+                   for depth, child in depth_map.items():
+                       norm = _normalize_suck_up(child)
+                       new_children.setdefault(key_t, {})[depth] = norm
+      +        new_terminals = _normalize_suck_up(node.terminals) if node.terminals else None
+       
+               # Check suck-up condition: if all children are WithAcc and share the same acc
+               # If there are no children, it's empty
+               if not new_children:
+      -            return Empty()
+      +            return new_terminals if new_terminals else Empty()
+       
+               # Flatten list of children
+      -        child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
+      +        child_nodes_from_children: List[_LeveledNode[T, Acc]] = []
+               for kt, dm in new_children.items():
+      -            for d, ch in dm.items():
+      -                child_list.append((kt, d, ch))
+      -
+      -        all_with_acc = all(isinstance(ch, WithAcc) for _, _, ch in child_list)
+      +            child_nodes_from_children.extend(dm.values())
+      +
+      +        all_child_nodes = child_nodes_from_children + ([new_terminals] if new_terminals else [])
+      +
+      +        all_with_acc = all(isinstance(ch, WithAcc) for ch in all_child_nodes)
+               if all_with_acc:
+      -            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
+      +            accs: Set[Acc] = set(ch.acc for ch in all_child_nodes if isinstance(ch, WithAcc))
+                   if len(accs) == 1:
+      -                # A suck-up would lose information if we need to represent both a terminal
+      -                # state (from an _EPS child) and a branching state (from non-EPS children),
+      -                # because the _InnerNode structure cannot do both.
+      -                has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+      -                has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+      -                if has_eps_child and has_non_eps_child:
+      -                    return Branch(children=new_children)
+      -
                        # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                        the_acc = next(iter(accs))
-                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
+      -                # Build an A-level Internal whose children map keys to the inner nodes of the children.
+      -                # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
+      -                # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
+      -                # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
+      -                # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
+      -                # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
+      -                # (t, depth) pair.
+                       inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+                       has_empty = False
+      -                # Collect A-level children from the WithAcc children
+      -                for kt, d, ch in child_list:
+      -                    chw = ch  # type: ignore[assignment]
+      -                    assert isinstance(chw, WithAcc)
+      -                    if kt is _EPS:
+      -                        # This child represents an empty sequence among the group
+      -                        # Representing empty within A-level is naturally done by allowing Root.
+      -                        # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
+      -                        # and other children may also add edges, we simply union them.
+      -                        # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
+      -                        # if it's Leaf, that means the empty sequence is present.
+      -                        if isinstance(chw.node, InnerLeaf):
+      -                            has_empty = True
+      -                        else:
+      -                            # This corresponds to "some non-empty A-level sequences that appear even though the parent
+      -                            # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
+      -                            # suck-ups; we include them.
+      -                            for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
+      -                                for dd, inn in dm.items():
+      -                                    inner_children.setdefault(tt, {})[dd] = inn
+      -                            has_empty = True
+      +
+      +                # From children with T keys
+      +                for kt, depth_map in new_children.items():
+      +                    for d, ch in depth_map.items():
+      +                        chw = ch # is WithAcc
+      +                        assert isinstance(chw, WithAcc)
+      +                        if isinstance(chw.node, InnerLeaf):
+      +                            depth_int = max(d - 1, 0)
+      +                            inner_children.setdefault(kt, {})[depth_int] = InnerLeaf()
+      +                        else: # InnerBranch
+      +                            inner_children.setdefault(kt, {})[max(d - 1, 0)] = chw.node
+      +
+      +                # From terminals node
+      +                if new_terminals:
+      +                    term_w = new_terminals
+      +                    assert isinstance(term_w, WithAcc)
+      +                    if isinstance(term_w.node, InnerLeaf):
+      +                        has_empty = True
+      +                    else: # InnerBranch
+      +                        # Merge its children
+      +                        for t, dm in term_w.node.children.items():
+      +                            inner_children.setdefault(t, {}).update(dm)
+      +                        has_empty = term_w.node.is_terminal
+      +
+      +                # If there were no non-EPS children but has_empty is True and there are no other children,
+      +                # then the inner is just Root.
+      +                if not inner_children:
+      +                    if has_empty:
+      +                        inner: _InnerNode[T] = InnerLeaf()
+                           else:
+      -                        # Regular T key
+      -                        if isinstance(chw.node, InnerLeaf):
+      -                            # The child being Root under a non-EPS edge means: the sequence [kt] exists.
+      -                            # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
+      -                            # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
+      -                            key_t: T = kt  # type: ignore[assignment]
+      -                            depth_int = max(d - 1, 0)
+      -                            inner_children.setdefault(key_t, {})[depth_int] = InnerLeaf()
+      -                        else:
+      -                            # Merge edges
+      -                            key_t: T = kt  # type: ignore[assignment]
+      -                            for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
+      -                                # We store the entire inner subtree under (key_t, depth-1)
+      -                                inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
+      -
+      -                # If there were no non-EPS children but has_empty is True and there are no other children,
+      -                # then the inner is just Root.
+      -                if not inner_children:
+      -                    if has_empty:
+      -                        inner: _InnerNode[T] = InnerLeaf()
+      -                    else:
+      -                        # Should not happen (no children => handled above), but keep safe.
+                               inner = InnerLeaf()
+                       else:
+      -                    inner = InnerBranch(children=inner_children)
+      +                    inner = InnerBranch(children=inner_children, is_terminal=has_empty)
+       
+                       return WithAcc(node=inner, acc=the_acc)
+       
+      -        return Branch(children=new_children)
+      +        return Branch(children=new_children, terminals=new_terminals)
+       
+           # Should not reach
+           return node
+      @@ -245,6 +229,9 @@
+               if isinstance(inner, InnerLeaf):
+                   result.append((list(prefix), acc))
+                   return
+      +        # InnerBranch
+      +        if inner.is_terminal:
+      +            result.append((list(prefix), acc))
+               # InnerBranch
+               for t, depth_map in inner.children.items():  # type: ignore[union-attr]
+                   for _, child in depth_map.items():
+      @@ -258,13 +245,11 @@
+                   emit_from_inner(node_b.node, prefix, node_b.acc)
+                   return
+               # Branch
+      +        if node_b.terminals:
+      +            walk(node_b.terminals, prefix)
+               for key_t, depth_map in node_b.children.items():
+                   for _, child in depth_map.items():
+      -                if key_t is _EPS:
+      -                    # Empty step: do not advance prefix
+      -                    walk(child, prefix)
+      -                else:
+      -                    walk(child, prefix + [key_t])  # type: ignore[list-item]
+      +                walk(child, prefix + [key_t])
+       
+           walk(node, [])
+           return _dedup_pairs(result)
+      @@ -293,9 +278,6 @@
+                   return
+               if isinstance(inner, InnerBranch):
+                   for t, depth_map in inner.children.items():
+      -                # Keys must not be EPS at A-level
+      -                if t is _EPS:
+      -                    raise InvariantViolation("EPS sentinel leaked into A-level inner structure.")
+                       for _, child in depth_map.items():
+                           check_inner(child)
+       
+      @@ -308,18 +290,24 @@
+                   return True, node_b.acc
+               if isinstance(node_b, Branch):
+                   # Recurse, collect child accs when child is WithAcc
+      -            child_accs: List[Acc] = []
+      -            child_types: List[type] = []
+      +            all_child_nodes: List[_LeveledNode[T, Acc]] = []
+                   for kt, depth_map in node_b.children.items():
+      -                for _, ch in depth_map.items():
+      -                    ok, acc = check(ch)
+      -                    if not ok:
+      -                        return False, None
+      -                    child_types.append(type(ch))
+      -                    if isinstance(ch, WithAcc):
+      -                        child_accs.append(ch.acc)
+      +                all_child_nodes.extend(depth_map.values())
+      +            if node_b.terminals:
+      +                all_child_nodes.append(node_b.terminals)
+      +
+      +            for ch in all_child_nodes:
+      +                ok, acc = check(ch)
+      +                if not ok:
+      +                    return False, None
+      +
+                   # suck-up opportunity detection
+      -            if child_types and all(ct is WithAcc for ct in child_types):
+      +            if all_child_nodes and all(isinstance(n, WithAcc) for n in all_child_nodes):
+      +                child_accs = [
+      +                    ch.acc
+      +                    for ch in all_child_nodes
+      +                    if isinstance(ch, WithAcc)
+      +                ]
+                       # All children are WithAcc; if their accs are equal, it should have been sucked up
+                       if child_accs and all(a == child_accs[0] for a in child_accs):
+                           raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
 
       ```
+    metadata:
+  - user: |-
+      Failed Hunk:
 
-      Applying these changes should resolve the inconsistency between your `LeveledGSS` and `ReferenceGSS` implementations. Let me know if you have any other questions
+      ```diff
+      @@ -114,28 +110,21 @@
+           accs = {acc for _, acc in pairs}
+           if len(accs) == 1:
+               vals_list = [vals for vals, _ in pairs]
+      -        has_empty = any(not v for v in vals_list)
+      -        has_non_empty = any(v for v in vals_list)
+      -
+      -        if not (has_empty and has_non_empty):
+      -            only_acc = next(iter(accs))
+      -            inner = _build_inner_from_sequences(vals_list)
+      -            return WithAcc(node=inner, acc=only_acc)
+      -        # else: fall through to the general case which can handle mixed empty/non-empty
+      +        only_acc = next(iter(accs))
+      +        inner = _build_inner_from_sequences(vals_list)
+      +        return WithAcc(node=inner, acc=only_acc)
+       
+           # Otherwise, build an Internal node, partitioning by first symbol.
+      -    # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+      -    children: Dict[object, Dict[int, '_LeveledNode[T, Acc]]] = {}
+      +    children: Dict[T, Dict[int, '_LeveledNode[T, Acc]]] = {}
+       
+           # Handle empty stacks (if any)
+           empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+      -    if empty_pairs:
+      -        # Recursively build a child node for these empty stacks.
+      -        child = _build_leveled_from_pairs(empty_pairs)
+      -        # Depth for empty is 0
+      -        children.setdefault(_EPS, {})[0] = child
+      +    terminals_node = _build_leveled_from_pairs(empty_pairs) if empty_pairs else None
+       
+           # Non-empty stacks
+           non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+          accs = {acc for _, acc in pairs}
+          if len(accs) == 1:
+              vals_list = [vals for vals, _ in pairs]
+              has_empty = any(not v for v in vals_list)
+              has_non_empty = any(v for v in vals_list)
+
+              if not (has_empty and has_non_empty):
+                  only_acc = next(iter(accs))
+                  inner = _build_inner_from_sequences(vals_list)
+                  return WithAcc(node=inner, acc=only_acc)
+              # else: fall through to the general case which can handle mixed empty/non-empty
+
+          # Otherwise, build an Internal node, partitioning by first symbol.
+          # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+          children: Dict[object, Dict[int, '_LeveledNode[T, Acc]]] = {}
+
+          # Handle empty stacks (if any)
+          empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+          if empty_pairs:
+              # Recursively build a child node for these empty stacks.
+              child = _build_leveled_from_pairs(empty_pairs)
+              # Depth for empty is 0
+              children.setdefault(_EPS, {})[0] = child
+
+          # Non-empty stacks
+          non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
+      ```
+
+      Nearest Match in `python/gss_tester/leveled_impl.py` (found at line 108 with 96.15% similarity, shown with padding):
+
+      ```python
+
+          if not pairs:
+              return Empty()
+
+          # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
+          accs = {acc for _, acc in pairs}
+          if len(accs) == 1:
+              vals_list = [vals for vals, _ in pairs]
+              has_empty = any(not v for v in vals_list)
+              has_non_empty = any(v for v in vals_list)
+
+              if not (has_empty and has_non_empty):
+                  only_acc = next(iter(accs))
+                  inner = _build_inner_from_sequences(vals_list)
+                  return WithAcc(node=inner, acc=only_acc)
+              # else: fall through to the general case which can handle mixed empty/non-empty
+
+          # Otherwise, build an Internal node, partitioning by first symbol.
+          # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+          children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+
+          # Handle empty stacks (if any)
+          empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+          if empty_pairs:
+              # Recursively build a child node for these empty stacks.
+              child = _build_leveled_from_pairs(empty_pairs)
+              # Depth for empty is 0
+              children.setdefault(_EPS, {})[0] = child
+
+          # Non-empty stacks
+          non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
+          by_first: Dict[T, List[Tuple[List[T], Acc]]] = {}
+          for vals, acc in non_empty_pairs:
+              by_first.setdefault(vals[0], []).append((vals[1:], acc))
+
+          for t, tails_pairs in by_first.items():
+      ```
+
+      The git diff hunk above failed to apply to the file `python/gss_tester/leveled_impl.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 102462e..a478440 100644
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -8,11 +8,6 @@
+       from .interface import GSS, T, Acc, MergeableInt
+       from .reference_impl import ReferenceGSS
+       
+      -# Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
+      -# This is purely internal; it never leaks out of to_reference_impl() or to_json.
+      -_EPS = object()
+      -
+      -
+       # ------------------------------
+       # Internal node classes (mirroring the Rust-like structure)
+       # ------------------------------
+      @@ -26,6 +21,7 @@
+       class InnerBranch(Generic[T]):
+           # children: T -> depth -> _InnerNode
+           children: Dict[T, Dict[int, '_InnerNode[T]']]
+      +    is_terminal: bool = False
+       
+       
+       _InnerNode = Union[InnerLeaf, InnerBranch[T]]
+      @@ -39,9 +35,9 @@
+       
+       @dataclass
+       class Branch(Generic[T, Acc]):
+      -    # children: T_or_EPS -> depth -> _LeveledNode
+      -    # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
+      -    children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
+      +    # children: T -> depth -> _LeveledNode
+      +    children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']]
+      +    terminals: Optional['_LeveledNode[T, Acc]'] = None
+       
+       
+       @dataclass
+      @@ -101,7 +97,7 @@
+               max_depth = max((len(tl) for tl in tails), default=0)
+               children.setdefault(t, {})[max_depth] = child_inner
+       
+      -    return InnerBranch(children=children)
+      +    return InnerBranch(children=children, is_terminal=(empty_count > 0))
+       
+       
+       def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
+      @@
+      -    # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
+      -    accs = {acc for _, acc in pairs}
+      -    if len(accs) == 1:
+      -        vals_list = [vals for vals, _ in pairs]
+      -        has_empty = any(not v for v in vals_list)
+      -        has_non_empty = any(v for v in vals_list)
+      -
+      -        if not (has_empty and has_non_empty):
+      -            only_acc = next(iter(accs))
+      -            inner = _build_inner_from_sequences(vals_list)
+      -            return WithAcc(node=inner, acc=only_acc)
+      -        # else: fall through to the general case which can handle mixed empty/non-empty
+      +    # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
+      +    accs = {acc for _, acc in pairs}
+      +    if len(accs) == 1:
+      +        vals_list = [vals for vals, _ in pairs]
+      +        only_acc = next(iter(accs))
+      +        inner = _build_inner_from_sequences(vals_list)
+      +        return WithAcc(node=inner, acc=only_acc)
+      +        # Note: mixed empty/non-empty stacks are also handled here because the inner builder can represent them.
+       
+      -    # Otherwise, build an Internal node, partitioning by first symbol.
+      -    # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+      -    children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+      -
+      -    # Handle empty stacks (if any)
+      -    empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+      -    if empty_pairs:
+      -        # Recursively build a child node for these empty stacks.
+      -        child = _build_leveled_from_pairs(empty_pairs)
+      -        # Depth for empty is 0
+      -        children.setdefault(_EPS, {})[0] = child
+      +    # Otherwise, build an Internal node, partitioning by first symbol.
+      +    # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+      +    children: Dict[T, Dict[int, '_LeveledNode[T, Acc]']] = {}
+      +
+      +    # Handle empty stacks (if any)
+      +    empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
+      +    terminals_node = _build_leveled_from_pairs(empty_pairs) if empty_pairs else None
+      @@ -150,7 +139,10 @@
+               max_depth = max((len(v) for v, _ in tails_pairs), default=0)
+               children.setdefault(t, {})[max_depth] = child
+       
+      -    node: _LeveledNode[T, Acc] = Branch(children=children)
+      +    if not children:
+      +        return terminals_node if terminals_node is not None else Empty()
+      +
+      +    node: _LeveledNode[T, Acc] = Branch(children=children, terminals=terminals_node)
+           return _normalize_suck_up(node)
+       
+       
+      @@ -164,74 +156,66 @@
+               return node
+           if isinstance(node, Branch):
+               # Normalize children first
+      -        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+      +        new_children: Dict[T, Dict[int, _LeveledNode[T, Acc]]] = {}
+               for key_t, depth_map in node.children.items():
+                   for depth, child in depth_map.items():
+                       norm = _normalize_suck_up(child)
+                       new_children.setdefault(key_t, {})[depth] = norm
+      +        new_terminals = _normalize_suck_up(node.terminals) if node.terminals else None
+       
+               # Check suck-up condition: if all children are WithAcc and share the same acc
+               # If there are no children, it's empty
+               if not new_children:
+      -            return Empty()
+      +            return new_terminals if new_terminals else Empty()
+       
+               # Flatten list of children
+      -        child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
+      +        child_nodes_from_children: List[_LeveledNode[T, Acc]] = []
+               for kt, dm in new_children.items():
+      -            for d, ch in dm.items():
+      -                child_list.append((kt, d, ch))
+      -
+      -        all_with_acc = all(isinstance(ch, WithAcc) for _, _, ch in child_list)
+      +            child_nodes_from_children.extend(dm.values())
+      +
+      +        all_child_nodes = child_nodes_from_children + ([new_terminals] if new_terminals else [])
+      +
+      +        all_with_acc = all(isinstance(ch, WithAcc) for ch in all_child_nodes)
+               if all_with_acc:
+      -            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
+      +            accs: Set[Acc] = set(ch.acc for ch in all_child_nodes if isinstance(ch, WithAcc))
+                   if len(accs) == 1:
+      -                # A suck-up would lose information if we need to represent both a terminal
+      -                # state (from an _EPS child) and a branching state (from non-EPS children),
+      -                # because the _InnerNode structure cannot do both.
+      -                has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+      -                has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+      -                if has_eps_child and has_non_eps_child:
+      -                    return Branch(children=new_children)
+      -
+                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
+                       the_acc = next(iter(accs))
+      -                # Build an A-level Internal whose children map keys to the inner nodes of the children.
+      -                # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
+      -                # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
+      -                # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
+      -                # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
+      -                # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
+      -                # (t, depth) pair.
+                       inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+                       has_empty = False
+      -                # Collect A-level children from the WithAcc children
+      -                for kt, d, ch in child_list:
+      -                    chw = ch  # type: ignore[assignment]
+      -                    assert isinstance(chw, WithAcc)
+      -                    if kt is _EPS:
+      -                        # This child represents an empty sequence among the group
+      -                        # Representing empty within A-level is naturally done by allowing Root.
+      -                        # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
+      -                        # and other children may also add edges, we simply union them.
+      -                        # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
+      -                        # if it's Leaf, that means the empty sequence is present.
+      -                        if isinstance(chw.node, InnerLeaf):
+      -                            has_empty = True
+      -                        else:
+      -                            # This corresponds to "some non-empty A-level sequences that appear even though the parent
+      -                            # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
+      -                            # suck-ups; we include them.
+      -                            for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
+      -                                for dd, inn in dm.items():
+      -                                    inner_children.setdefault(tt, {})[dd] = inn
+      -                            has_empty = True
+      +
+      +                # From children with T keys
+      +                for kt, depth_map in new_children.items():
+      +                    for d, ch in depth_map.items():
+      +                        chw = ch # is WithAcc
+      +                        assert isinstance(chw, WithAcc)
+      +                        if isinstance(chw.node, InnerLeaf):
+      +                            depth_int = max(d - 1, 0)
+      +                            inner_children.setdefault(kt, {})[depth_int] = InnerLeaf()
+      +                        else: # InnerBranch
+      +                            inner_children.setdefault(kt, {})[max(d - 1, 0)] = chw.node
+      +
+      +                # From terminals node
+      +                if new_terminals:
+      +                    term_w = new_terminals
+      +                    assert isinstance(term_w, WithAcc)
+      +                    if isinstance(term_w.node, InnerLeaf):
+      +                        has_empty = True
+      +                    else: # InnerBranch
+      +                        # Merge its children
+      +                        for t, dm in term_w.node.children.items():
+      +                            inner_children.setdefault(t, {}).update(dm)
+      +                        has_empty = term_w.node.is_terminal
+      +
+      +                # If there were no non-EPS children but has_empty is True and there are no other children,
+      +                # then the inner is just Root.
+      +                if not inner_children:
+      +                    if has_empty:
+      +                        inner: _InnerNode[T] = InnerLeaf()
+                           else:
+      -                        # Regular T key
+      -                        if isinstance(chw.node, InnerLeaf):
+      -                            # The child being Root under a non-EPS edge means: the sequence [kt] exists.
+      -                            # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
+      -                            # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
+      -                            key_t: T = kt  # type: ignore[assignment]
+      -                            depth_int = max(d - 1, 0)
+      -                            inner_children.setdefault(key_t, {})[depth_int] = InnerLeaf()
+      -                        else:
+      -                            # Merge edges
+      -                            key_t: T = kt  # type: ignore[assignment]
+      -                            for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
+      -                                # We store the entire inner subtree under (key_t, depth-1)
+      -                                inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
+      -
+      -                # If there were no non-EPS children but has_empty is True and there are no other children,
+      -                # then the inner is just Root.
+      -                if not inner_children:
+      -                    if has_empty:
+      -                        inner: _InnerNode[T] = InnerLeaf()
+      -                    else:
+      -                        # Should not happen (no children => handled above), but keep safe.
+                               inner = InnerLeaf()
+                       else:
+      -                    inner = InnerBranch(children=inner_children)
+      +                    inner = InnerBranch(children=inner_children, is_terminal=has_empty)
+       
+                       return WithAcc(node=inner, acc=the_acc)
+       
+      -        return Branch(children=new_children)
+      +        return Branch(children=new_children, terminals=new_terminals)
+       
+           # Should not reach
+           return node
+      @@ -245,6 +229,9 @@
+               if isinstance(inner, InnerLeaf):
+                   result.append((list(prefix), acc))
+                   return
+      +        # InnerBranch
+      +        if inner.is_terminal:
+      +            result.append((list(prefix), acc))
+               # InnerBranch
+               for t, depth_map in inner.children.items():  # type: ignore[union-attr]
+                   for _, child in depth_map.items():
+      @@ -258,13 +245,11 @@
+                   emit_from_inner(node_b.node, prefix, node_b.acc)
+                   return
+               # Branch
+      +        if node_b.terminals:
+      +            walk(node_b.terminals, prefix)
+               for key_t, depth_map in node_b.children.items():
+                   for _, child in depth_map.items():
+      -                if key_t is _EPS:
+      -                    # Empty step: do not advance prefix
+      -                    walk(child, prefix)
+      -                else:
+      -                    walk(child, prefix + [key_t])  # type: ignore[list-item]
+      +                walk(child, prefix + [key_t])
+       
+           walk(node, [])
+           return _dedup_pairs(result)
+      @@ -293,9 +278,6 @@
+                   return
+               if isinstance(inner, InnerBranch):
+                   for t, depth_map in inner.children.items():
+      -                # Keys must not be EPS at A-level
+      -                if t is _EPS:
+      -                    raise InvariantViolation("EPS sentinel leaked into A-level inner structure.")
+                       for _, child in depth_map.items():
+                           check_inner(child)
+       
+      @@ -308,18 +290,24 @@
+                   return True, node_b.acc
+               if isinstance(node_b, Branch):
+                   # Recurse, collect child accs when child is WithAcc
+      -            child_accs: List[Acc] = []
+      -            child_types: List[type] = []
+      +            all_child_nodes: List[_LeveledNode[T, Acc]] = []
+                   for kt, depth_map in node_b.children.items():
+      -                for _, ch in depth_map.items():
+      -                    ok, acc = check(ch)
+      -                    if not ok:
+      -                        return False, None
+      -                    child_types.append(type(ch))
+      -                    if isinstance(ch, WithAcc):
+      -                        child_accs.append(ch.acc)
+      +                all_child_nodes.extend(depth_map.values())
+      +            if node_b.terminals:
+      +                all_child_nodes.append(node_b.terminals)
+      +
+      +            for ch in all_child_nodes:
+      +                ok, acc = check(ch)
+      +                if not ok:
+      +                    return False, None
+      +
+                   # suck-up opportunity detection
+      -            if child_types and all(ct is WithAcc for ct in child_types):
+      +            if all_child_nodes and all(isinstance(n, WithAcc) for n in all_child_nodes):
+      +                child_accs = [
+      +                    ch.acc
+      +                    for ch in all_child_nodes
+      +                    if isinstance(ch, WithAcc)
+      +                ]
+                       # All children are WithAcc; if their accs are equal, it should have been sucked up
+                       if child_accs and all(a == child_accs[0] for a in child_accs):
+                           raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
+
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -2437,7 +3102,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix(LeveledGSS): Prevent loss of empty
-      stacks during tree construction and suck-up"'
+  - user: 'Changes committed with message: "Refactor LeveledGSS: Remove _EPS sentinel
+      and introduce terminals/is_terminal fields"'
     metadata:
 ...
