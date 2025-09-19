@@ -141,18 +141,25 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(inner=Upper(Interface(node=_map_to_lower(paths), acc=None)), empty=None)
 
     # --- Core operations ---
+    # Important behavioral note:
+    # To keep fuzzing sequences deterministic across different implementations,
+    # we return a fresh LeveledGSS instance even when the logical result is
+    # unchanged. This mirrors ReferenceGSS which constructs a new instance for
+    # every operation.
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         paths = self._paths()
         if not paths:
-            return self  # Nothing to push onto.
+            # Return a fresh empty instance to mirror ReferenceGSS behavior.
+            return self._with_paths({})
         pushed = {p + (value,): acc for p, acc in paths.items()}
         return self._with_paths(pushed)
 
     def pop(self) -> LeveledGSS[T, Acc]:
         paths = self._paths()
         if not paths:
-            return self
+            # Return a fresh empty instance to mirror ReferenceGSS behavior.
+            return self._with_paths({})
         popped: Dict[Tuple[T, ...], Acc] = {}
         for p, acc in paths.items():
             if p:  # Ignore empty stacks (cannot pop).
@@ -166,42 +173,26 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         paths = self._paths()
-        if not paths:
-            return self
         if value is None:
             filtered = {(): acc for p, acc in paths.items() if p == ()}
         else:
             filtered = {p: acc for p, acc in paths.items() if p and p[-1] == value}
-        return self if len(filtered) == len(paths) else self._with_paths(filtered)
+        return self._with_paths(filtered)
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         paths = self._paths()
-        if not paths:
-            return self
-        transformed: Dict[Tuple[T, ...], Acc] = {}
-        unchanged = True
-        for p, acc in paths.items():
-            new_acc = func(acc)
-            transformed[p] = new_acc
-            if unchanged and new_acc != acc:
-                unchanged = False
-        return self if unchanged else self._with_paths(transformed)
+        transformed: Dict[Tuple[T, ...], Acc] = {p: func(acc) for p, acc in paths.items()}
+        return self._with_paths(transformed)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         paths = self._paths()
-        if not paths:
-            return self
         kept = {p: acc for p, acc in paths.items() if predicate(acc)}
-        return self if len(kept) == len(paths) else self._with_paths(kept)
+        return self._with_paths(kept)
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         a = self._paths()
         b = other._paths()
-        if not a:
-            return other
-        if not b:
-            return self
-        merged = dict(a)
+        merged: Dict[Tuple[T, ...], Acc] = dict(a)
         for p, acc in b.items():
             prev = merged.get(p)
             merged[p] = acc if prev is None else prev.merge(acc)
