@@ -39,8 +39,6 @@ class ReferenceGSS(GSS[T, Acc]):
         # This ensures the GSS is always in a canonical form.
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in self._stacks:
-            if not vals:
-                continue
             key = tuple(vals)
             if key in merged:
                 merged[key] = merged[key].merge(acc)
@@ -67,12 +65,14 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks. Empty stacks are discarded.
+        # Pop from all non-empty stacks. Empty stacks are preserved.
         # If multiple stacks become identical, they are merged by the constructor.
         new_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
             if vals:
                 new_stacks.append((vals[:-1], acc))
+            else:
+                new_stacks.append((vals, acc))
         return ReferenceGSS(new_stacks)
 
     def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
