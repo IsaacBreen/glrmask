@@ -43,53 +43,51 @@ class Leaf:
 
 
 # ------------------------------
-# Minimal internal representation
+# Compact internal representation
 # ------------------------------
-# We store the entire mapping {tuple[T, ...] -> Acc} in the root Lower node.
-# To keep the public types unchanged and the structure compact, we encode the
-# map inside a single-entry LowerBranch whose only key is a private _MapBox
-# object holding the mapping. Values are unused placeholders.
+# We represent the entire GSS as a single mapping:
+#   paths: Dict[Tuple[T, ...], Acc]
+# where each key is a full stack (bottom->top) and the value is the merged
+# accumulator for that exact stack.
+#
+# To keep the public node types intact yet store this compact mapping, the
+# root Lower node holds a single-entry LowerBranch whose only key is a private
+# _MapBox(paths) object. Values are unused placeholders.
+#
+# All operations are simple transformations of this mapping with appropriate
+# accumulator merging, yielding a new LeveledGSS instance.
 
 class _MapBox(Generic[T, Acc]):
     __slots__ = ("paths",)
 
     def __init__(self, paths: Dict[Tuple[T, ...], Acc]):
-        # Treat as immutable externally; operations always create fresh dicts.
-        self.paths = paths
+        self.paths = paths  # Consumers must not mutate.
 
     def __repr__(self) -> str:
-        return f"<MapBox:{len(self.paths)} path(s)>"
-
-
-def _empty_lower() -> Lower[T]:
-    return Lower(Leaf())
-
-
-def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
-    """
-    Decode a Lower node into its path->acc map.
-
-    Representation:
-    - Empty: Lower(Leaf()) -> {}
-    - Non-empty: Lower(LowerBranch(children={_MapBox(paths): {}}))
-    Any deviation returns {} (shouldn't occur).
-    """
-    inner = node.inner
-    if isinstance(inner, Leaf):
-        return {}
-    if not inner.children or len(inner.children) != 1:
-        return {}
-    (only_key, _) = next(iter(inner.children.items()))
-    if isinstance(only_key, _MapBox):
-        # Return reference; callers should not mutate.
-        return only_key.paths
-    return {}
+        return f"<MapBox:{len(self.paths)}>"
 
 
 def _map_to_lower(paths: Dict[Tuple[T, ...], Acc]) -> Lower[T]:
     if not paths:
-        return _empty_lower()
+        return Lower(Leaf())
     return Lower(LowerBranch(children={_MapBox(paths): {}}))
+
+
+def _lower_to_map(node: Lower[T]) -> Dict[Tuple[T, ...], Acc]:
+    inner = node.inner
+    if isinstance(inner, Leaf):
+        return {}
+    if len(inner.children) != 1:
+        return {}
+    (only_key, _placeholder) = next(iter(inner.children.items()))
+    return only_key.paths if isinstance(only_key, _MapBox) else {}
+
+
+def _encode_for_sort(obj: Any) -> str:
+    try:
+        return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+    except Exception:
+        return repr(obj)
 
 
 def _merge_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
@@ -100,31 +98,8 @@ def _merge_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
     return a.merge(b)
 
 
-def _merge_path_maps(a: Dict[Tuple[T, ...], Acc], b: Dict[Tuple[T, ...], Acc]) -> Dict[Tuple[T, ...], Acc]:
-    if not a:
-        return dict(b)
-    if not b:
-        return dict(a)
-    out = dict(a)
-    for path, acc in b.items():
-        prev = out.get(path)
-        out[path] = acc if prev is None else prev.merge(acc)  # type: ignore[union-attr]
-    return out
-
-
-def _encode_for_sort(obj: Any) -> str:
-    """
-    Deterministic encoding for sorting mixed JSON-serializable values.
-    Falls back to repr() if json.dumps fails.
-    """
-    try:
-        return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-    except Exception:
-        return repr(obj)
-
-
 # ------------------------------
-# Public LeveledGSS implementation (API unchanged)
+# Public LeveledGSS implementation
 # ------------------------------
 
 @dataclass(frozen=True, eq=True)
@@ -136,27 +111,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-        """
-        Build a LeveledGSS from explicit stacks.
-        - Merge accumulators for identical stacks.
-        - Store a compact map encoding at the root Lower node.
-        """
+        # Merge accumulators for identical stacks into a canonical path->acc map.
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in stacks:
             key = tuple(vals)
             prev = merged.get(key)
             merged[key] = acc if prev is None else prev.merge(acc)
-        lower_root = _map_to_lower(merged)
-        return LeveledGSS(inner=Upper(Interface(node=lower_root, acc=None)), empty=None)
+        return LeveledGSS(inner=Upper(Interface(node=_map_to_lower(merged), acc=None)), empty=None)
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-        """
-        Decode to a canonical, deterministic list of (stack, acc) pairs:
-        - One entry per distinct stack (accumulators merged).
-        - Sorted for stability across runs.
-        """
-        iface = self._iface()
-        paths = _lower_to_map(iface.node)
+        # Deterministic, canonical list of (stack, acc) pairs.
+        paths = self._paths()
         items = [(list(k), v) for k, v in paths.items()]
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
         return items
@@ -165,13 +130,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def _iface(self) -> Interface[T, Acc]:
         inner = self.inner.inner
-        assert isinstance(inner, Interface), "LeveledGSS must hold an Interface at the top."
+        assert isinstance(inner, Interface), "Top-level must be an Interface node."
         return inner
 
     def _paths(self) -> Dict[Tuple[T, ...], Acc]:
         return _lower_to_map(self._iface().node)
 
     def _with_paths(self, paths: Dict[Tuple[T, ...], Acc]) -> LeveledGSS[T, Acc]:
+        # Keep the public shape intact; Interface.acc is unused placeholder.
         return LeveledGSS(inner=Upper(Interface(node=_map_to_lower(paths), acc=None)), empty=None)
 
     # --- Core operations ---
@@ -179,21 +145,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         paths = self._paths()
         if not paths:
-            return self  # No stacks to push onto; remains empty.
+            return self  # Nothing to push onto.
         pushed = {p + (value,): acc for p, acc in paths.items()}
         return self._with_paths(pushed)
 
     def pop(self) -> LeveledGSS[T, Acc]:
         paths = self._paths()
         if not paths:
-            return self  # Already empty.
+            return self
         popped: Dict[Tuple[T, ...], Acc] = {}
         for p, acc in paths.items():
-            if p:
-                key = p[:-1]
-                prev = popped.get(key)
-                popped[key] = acc if prev is None else prev.merge(acc)
-        # If all stacks were empty, this becomes an empty GSS.
+            if p:  # Ignore empty stacks (cannot pop).
+                q = p[:-1]
+                prev = popped.get(q)
+                popped[q] = acc if prev is None else prev.merge(acc)
         return self._with_paths(popped)
 
     def is_empty(self) -> bool:
@@ -207,9 +172,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             filtered = {(): acc for p, acc in paths.items() if p == ()}
         else:
             filtered = {p: acc for p, acc in paths.items() if p and p[-1] == value}
-        if len(filtered) == len(paths):
-            return self
-        return self._with_paths(filtered)
+        return self if len(filtered) == len(paths) else self._with_paths(filtered)
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         paths = self._paths()
@@ -222,34 +185,31 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             transformed[p] = new_acc
             if unchanged and new_acc != acc:
                 unchanged = False
-        if unchanged:
-            return self
-        return self._with_paths(transformed)
+        return self if unchanged else self._with_paths(transformed)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         paths = self._paths()
         if not paths:
             return self
         kept = {p: acc for p, acc in paths.items() if predicate(acc)}
-        if len(kept) == len(paths):
-            return self
-        return self._with_paths(kept)
+        return self if len(kept) == len(paths) else self._with_paths(kept)
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        map_a = self._paths()
-        map_b = other._paths()
-        if not map_a:
+        a = self._paths()
+        b = other._paths()
+        if not a:
             return other
-        if not map_b:
+        if not b:
             return self
-        merged = _merge_path_maps(map_a, map_b)
+        merged = dict(a)
+        for p, acc in b.items():
+            prev = merged.get(p)
+            merged[p] = acc if prev is None else prev.merge(acc)
         return self._with_paths(merged)
 
     def peek(self) -> Set[T]:
         paths = self._paths()
-        if not paths:
-            return set()
-        return {p[-1] for p in paths.keys() if p}
+        return {p[-1] for p in paths.keys() if p} if paths else set()
 
     def reduce_acc(self) -> Optional[Acc]:
         paths = self._paths()
@@ -266,25 +226,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 # ------------------------------
 
 def _validate_upper(node: Upper[T, Acc]):
-    """
-    Recursively walk Upper nodes (no-op for Interfaces).
-    This implementation always uses a single Interface at the top.
-    """
+    # In this compact representation, Upper always contains a single Interface.
+    # Keep traversal minimal to respect the original public API.
     if isinstance(node.inner, UpperBranch):
         for children_by_val in node.inner.children.values():
             for child in children_by_val.values():
                 _validate_upper(child)
-    # If Interface: nothing to check.
+    # Interface case: nothing to validate structurally.
 
 
 def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-    """
-    Checks internal invariants of the LeveledGSS structure.
-    Raises AssertionError if an invariant is violated.
-    """
     _validate_upper(gss.inner)
 
-    # Invariant from original: If inner is an Interface and empty exists, their accs must differ.
+    # Preserve the original invariant about Interface.acc and the optional empty field.
     if isinstance(gss.inner.inner, Interface) and gss.empty is not None:
         if gss.inner.inner.acc == gss.empty:
             raise AssertionError(
