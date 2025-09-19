@@ -118,7 +118,7 @@ class LeveledGSS(GSS[T, Acc]):
             # Keep only the branch corresponding to `value`
             child_gss = self._branches_dict.get(value)
             if child_gss:
-                return child_gss
+                return LeveledGSS(frozenset([(value, child_gss)]))
             else:
                 return EMPTY_GSS
 

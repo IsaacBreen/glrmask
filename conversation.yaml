@@ -451,7 +451,7 @@ local_system:
               non_empty_stacks = [(s, acc) for s, acc in stacks if s]
               grouped_by_head: Dict[T, List[Tuple[List[T], Acc]]] = {}
               for stack, acc in non_empty_stacks:
-                  head, tail = stack[0], stack[1:]
+                  head, tail = stack[-1], stack[:-1]
                   if head not in grouped_by_head:
                       grouped_by_head[head] = []
                   grouped_by_head[head].append((tail, acc))
@@ -480,9 +480,15 @@ local_system:
               if not self._branches:
                   return self  # Only contains an empty stack or is empty
 
-              # The new GSS is the merge of all children, keeping the current empty_acc.
+              # The new GSS is the merge of all children, plus the current empty stack.
               merged_children = self.merge_many(self._branches_dict.values())
-              return merged_children._with_empty_acc(self._empty_acc)
+
+              if self._empty_acc is None:
+                  return merged_children
+
+              # Create a GSS representing only the current empty stack and merge it.
+              empty_gss_part = LeveledGSS(_empty_acc=self._empty_acc)
+              return merged_children.merge(empty_gss_part)
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               if value is None:
@@ -593,7 +599,7 @@ local_system:
                   stacks.append((prefix, self._empty_acc))
 
               for key, child_gss in self._branches_dict.items():
-                  stacks.extend(child_gss._to_stacks_recursive(prefix + [key]))
+                  stacks.extend(child_gss._to_stacks_recursive([key] + prefix))
 
               return stacks
 
@@ -684,12 +690,15 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are discarded.
+              # Pop from all non-empty stacks. Empty stacks are preserved.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
                       new_stacks.append((vals[:-1], acc))
+                  else:
+                      # Preserve empty stacks
+                      new_stacks.append((vals, acc))
               return ReferenceGSS(new_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
@@ -1583,7 +1592,7 @@ local_system:
                   # Keep only the branch corresponding to `value`
                   child_gss = self._branches_dict.get(value)
                   if child_gss:
-                      return child_gss
+                      return LeveledGSS(frozenset([(value, child_gss)]))
                   else:
                       return EMPTY_GSS
 
@@ -2688,7 +2697,7 @@ messages:
               non_empty_stacks = [(s, acc) for s, acc in stacks if s]
               grouped_by_head: Dict[T, List[Tuple[List[T], Acc]]] = {}
               for stack, acc in non_empty_stacks:
-                  head, tail = stack[0], stack[1:]
+                  head, tail = stack[-1], stack[:-1]
                   if head not in grouped_by_head:
                       grouped_by_head[head] = []
                   grouped_by_head[head].append((tail, acc))
@@ -2717,9 +2726,15 @@ messages:
               if not self._branches:
                   return self  # Only contains an empty stack or is empty
 
-              # The new GSS is the merge of all children, keeping the current empty_acc.
+              # The new GSS is the merge of all children, plus the current empty stack.
               merged_children = self.merge_many(self._branches_dict.values())
-              return merged_children._with_empty_acc(self._empty_acc)
+
+              if self._empty_acc is None:
+                  return merged_children
+
+              # Create a GSS representing only the current empty stack and merge it.
+              empty_gss_part = LeveledGSS(_empty_acc=self._empty_acc)
+              return merged_children.merge(empty_gss_part)
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               if value is None:
@@ -2830,7 +2845,7 @@ messages:
                   stacks.append((prefix, self._empty_acc))
 
               for key, child_gss in self._branches_dict.items():
-                  stacks.extend(child_gss._to_stacks_recursive(prefix + [key]))
+                  stacks.extend(child_gss._to_stacks_recursive([key] + prefix))
 
               return stacks
 
@@ -2926,12 +2941,15 @@ messages:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are discarded.
+              # Pop from all non-empty stacks. Empty stacks are preserved.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
                       new_stacks.append((vals[:-1], acc))
+                  else:
+                      # Preserve empty stacks
+                      new_stacks.append((vals, acc))
               return ReferenceGSS(new_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
@@ -3350,7 +3368,7 @@ messages:
       filename: python/gss_tester/test_spec.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_12-23-57
+      Test results will be saved in: gss_test_results/2025-09-19_12-25-59
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -3358,25 +3376,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-23-57/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-25-59/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-23-57/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-19_12-25-59/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-23-57/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-25-59/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-23-57/gss_tester.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-19_12-25-59/gss_tester.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-23-57/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-23-57/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-23-57/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-25-59/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-25-59/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-25-59/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -3394,15 +3412,15 @@ messages:
       --- Divergence Report ---
 
       Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
-        - First divergence at yield index 2:
-          - gss_tester.leveled_impl.LeveledGSS (L32): [[[20, 10], 0]]
-          - gss_tester.reference_impl.ReferenceGSS (L32): [[[10, 20], 0]]
+        - First divergence at yield index 3:
+          - gss_tester.leveled_impl.LeveledGSS (L35): [[[], 0]]
+          - gss_tester.reference_impl.ReferenceGSS (L35): [[[10], 0]]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_12-23-57
+      Full JSON results are in: gss_test_results/2025-09-19_12-25-59
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3421,180 +3439,80 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I've analyzed the test results and identified inconsistencies between the `LeveledGSS` and `ReferenceGSS` implementations. The divergence stems from different conventions for representing a stack as a list, as well as bugs in how `pop` operations handle empty stacks.
+      Hello! As an AI assistant, I can help you debug the inconsistency between your `LeveledGSS` and `ReferenceGSS` implementations. The test framework has correctly identified a behavioral divergence. Here are the step-by-step instructions to fix the bug, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions to fix the issues and bring both implementations into alignment with the test specification.
+      ### Analysis and Fix
 
-      ### Step-by-step Instructions
+      The divergence occurs during `Test 1` in `test_spec.py`, specifically on the line:
+      `gss_popped_20 = gss1.isolate(20).pop()`
 
-      #### 1. Fix `LeveledGSS` Implementation (`python/gss_tester/leveled_impl.py`)
+      At this point, `gss1` contains a single stack `[10, 20]`.
+      1.  `isolate(20)` should filter the GSS to keep only stacks with `20` at the top. The result should still be a GSS with the stack `[10, 20]`.
+      2.  `.pop()` should then remove the top element, `20`, resulting in a GSS with the stack `[10]`.
 
-      The `LeveledGSS` implementation has an inverted notion of a stack's "top" compared to the reference implementation. It also has a bug in its `pop` logic.
+      The `ReferenceGSS` correctly produces a state representing `[[[10], 0]]`. However, `LeveledGSS` produces `[[[], 0]]`, indicating that both `10` and `20` were popped.
 
-      1.  **File:** `python/gss_tester/leveled_impl.py`
-      2.  **Method:** `from_stacks`
-          *   Locate this line:
-              ```python
-              head, tail = stack[0], stack[1:]
-              ```
-          *   Change it to use the end of the list as the top of the stack:
-              ```python
-              head, tail = stack[-1], stack[:-1]
-              ```
-      3.  **Method:** `pop`
-          *   The current implementation incorrectly handles accumulators for stacks that become empty. Replace the entire `pop` method with the following corrected version, which properly merges accumulators from popped stacks with any pre-existing empty stack:
-              ```python
-              def pop(self) -> LeveledGSS[T, Acc]:
-                  # Popping removes the top level of all non-empty stacks. This is
-                  # equivalent to merging all the child GSSs. The empty stack is preserved.
-                  if not self._branches:
-                      return self  # Only contains an empty stack or is empty
-          
-                  # The new GSS is the merge of all children, plus the current empty stack.
-                  merged_children = self.merge_many(self._branches_dict.values())
-          
-                  if self._empty_acc is None:
-                      return merged_children
-          
-                  # Create a GSS representing only the current empty stack and merge it.
-                  empty_gss_part = LeveledGSS(_empty_acc=self._empty_acc)
-                  return merged_children.merge(empty_gss_part)
-              ```
-      4.  **Method:** `_to_stacks_recursive`
-          *   To ensure stacks are reconstructed in the correct `[bottom, ..., top]` order, find this line:
-              ```python
-              stacks.extend(child_gss._to_stacks_recursive(prefix + [key]))
-              ```
-          *   Change it to prepend the key to the prefix:
-              ```python
-              stacks.extend(child_gss._to_stacks_recursive([key] + prefix))
-              ```
+      The bug lies in the `LeveledGSS.isolate` method. Instead of returning a new GSS containing only the filtered branch, it returns the *child* of that branch. This effectively performs a `pop` operation in addition to isolating, which is incorrect.
 
-      #### 2. Fix `ReferenceGSS` Implementation (`python/gss_tester/reference_impl.py`)
+      ### Step-by-Step Instructions
 
-      The `ReferenceGSS` implementation incorrectly discards existing empty stacks during a `pop` operation, contrary to its own documentation and the test specification.
+      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
 
-      1.  **File:** `python/gss_tester/reference_impl.py`
-      2.  **Method:** `pop`
-          *   The implementation is missing logic to preserve empty stacks. Modify the method to include this logic.
-          *   Replace the existing `pop` method:
-              ```python
-              def pop(self) -> 'ReferenceGSS[T, Acc]':
-                  # Pop from all non-empty stacks. Empty stacks are discarded.
-                  # If multiple stacks become identical, they are merged by the constructor.
-                  new_stacks: List[Tuple[List[T], Acc]] = []
-                  for vals, acc in self._stacks:
-                      if vals:
-                          new_stacks.append((vals[:-1], acc))
-                  return ReferenceGSS(new_stacks)
-              ```
-          *   With this corrected version:
-              ```python
-              def pop(self) -> 'ReferenceGSS[T, Acc]':
-                  # Pop from all non-empty stacks. Empty stacks are preserved.
-                  # If multiple stacks become identical, they are merged by the constructor.
-                  new_stacks: List[Tuple[List[T], Acc]] = []
-                  for vals, acc in self._stacks:
-                      if vals:
-                          new_stacks.append((vals[:-1], acc))
-                      else:
-                          # Preserve empty stacks
-                          new_stacks.append((vals, acc))
-                  return ReferenceGSS(new_stacks)
-              ```
+      2.  **Navigate to the `isolate` method**, which is around line 134.
 
-      ### Git Diffs
+      3.  **Locate the incorrect return statement.** Inside the `else` block for when `value` is not `None`, you will find this code:
 
-      Here are the changes in `git diff` format for you to apply.
+          ```python
+                  child_gss = self._branches_dict.get(value)
+                  if child_gss:
+                      return child_gss
+                  else:
+                      return EMPTY_GSS
+          ```
+
+      4.  **Correct the logic.** The line `return child_gss` is wrong. It should wrap the `child_gss` in a new `LeveledGSS` to preserve the top-of-stack `value` that was used for isolation. Modify the line to create a new `LeveledGSS` containing only the desired branch:
+
+          ```python
+                  child_gss = self._branches_dict.get(value)
+                  if child_gss:
+                      return LeveledGSS(frozenset([(value, child_gss)]))
+                  else:
+                      return EMPTY_GSS
+          ```
+
+      This change ensures that `isolate` only filters the GSS without modifying the stacks, aligning its behavior with the specification and the reference implementation.
+
+      ### Git Diff
+
+      Here is the git patch to apply the fix.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 4554238..01b2f43 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -74,7 +74,7 @@
-               non_empty_stacks = [(s, acc) for s, acc in stacks if s]
-               grouped_by_head: Dict[T, List[Tuple[List[T], Acc]]] = {}
-               for stack, acc in non_empty_stacks:
-      -            head, tail = stack[0], stack[1:]
-      +            head, tail = stack[-1], stack[:-1]
-                   if head not in grouped_by_head:
-                       grouped_by_head[head] = []
-                   grouped_by_head[head].append((tail, acc))
-      @@ -96,14 +96,20 @@
-                   return EMPTY_GSS
-               return LeveledGSS(frozenset([(value, self)]))
+      @@ -143,7 +143,7 @@
+                   # Keep only the branch corresponding to `value`
+                   child_gss = self._branches_dict.get(value)
+                   if child_gss:
+      -                return child_gss
+      +                return LeveledGSS(frozenset([(value, child_gss)]))
+                   else:
+                       return EMPTY_GSS
        
-           def pop(self) -> LeveledGSS[T, Acc]:
-               # Popping removes the top level of all non-empty stacks. This is
-               # equivalent to merging all the child GSSs. The empty stack is preserved.
-               if not self._branches:
-                   return self  # Only contains an empty stack or is empty
-       
-      -        # The new GSS is the merge of all children, keeping the current empty_acc.
-      +        # The new GSS is the merge of all children, plus the current empty stack.
-               merged_children = self.merge_many(self._branches_dict.values())
-      -        return merged_children._with_empty_acc(self._empty_acc)
-      +
-      +        if self._empty_acc is None:
-      +            return merged_children
-      +
-      +        # Create a GSS representing only the current empty stack and merge it.
-      +        empty_gss_part = LeveledGSS(_empty_acc=self._empty_acc)
-      +        return merged_children.merge(empty_gss_part)
-       
-           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-               if value is None:
-      @@ -216,7 +222,7 @@
-                   stacks.append((prefix, self._empty_acc))
-       
-               for key, child_gss in self._branches_dict.items():
-      -            stacks.extend(child_gss._to_stacks_recursive(prefix + [key]))
-      +            stacks.extend(child_gss._to_stacks_recursive([key] + prefix))
-       
-               return stacks
-       
-
-      ``````diff
-      diff --git a/python/gss_tester/reference_impl.py b/python/gss_tester/reference_impl.py
-      --- a/python/gss_tester/reference_impl.py
-      +++ b/python/gss_tester/reference_impl.py
-      @@ -73,12 +73,15 @@
-               return ReferenceGSS(new_stacks)
-       
-           def pop(self) -> 'ReferenceGSS[T, Acc]':
-      -        # Pop from all non-empty stacks. Empty stacks are discarded.
-      +        # Pop from all non-empty stacks. Empty stacks are preserved.
-               # If multiple stacks become identical, they are merged by the constructor.
-               new_stacks: List[Tuple[List[T], Acc]] = []
-               for vals, acc in self._stacks:
-                   if vals:
-                       new_stacks.append((vals[:-1], acc))
-      +            else:
-      +                # Preserve empty stacks
-      +                new_stacks.append((vals, acc))
-               return ReferenceGSS(new_stacks)
-       
-           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
 
       ```
-
-      After applying these patches, both implementations should behave consistently and correctly according to the test suite. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/gss_tester/leveled_impl.py
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/reference_impl.py
-      Applying patch to 'python/gss_tester/reference_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/reference_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix LeveledGSS and ReferenceGSS stack
-      representation and pop logic"'
+  - user: 'Changes committed with message: "Fix: Correct LeveledGSS.isolate to return
+      a new GSS instance"'
     metadata:
 ...
