@@ -16,38 +16,38 @@ _EPS = object()
 # ------------------------------
 
 @dataclass
-class _InnerRoot(Generic[T]):
+class InnerLeaf:
     pass
 
 
 @dataclass
-class _InnerInternal(Generic[T]):
+class InnerBranch(Generic[T]):
     # children: T -> depth -> _InnerNode
     children: Dict[T, Dict[int, '_InnerNode[T]']]
 
 
-_InnerNode = Union[_InnerRoot[T], _InnerInternal[T]]
+_InnerNode = Union[InnerLeaf, InnerBranch[T]]
 
 
 @dataclass
-class _WithAcc(Generic[T, Acc]):
+class WithAcc(Generic[T, Acc]):
     node: _InnerNode[T]
     acc: Acc
 
 
 @dataclass
-class _Internal(Generic[T, Acc]):
+class Branch(Generic[T, Acc]):
     # children: T_or_EPS -> depth -> _LeveledNode
     # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
     children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
 
 
 @dataclass
-class _Empty:
+class Empty:
     pass
 
 
-_LeveledNode = Union[_WithAcc[T, Acc], _Internal[T, Acc], _Empty]
+_LeveledNode = Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
 
 
 # ------------------------------
@@ -79,15 +79,15 @@ def _pairs_from_ref(ref: ReferenceGSS[T, Acc]) -> List[Tuple[List[T], Acc]]:
 def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
     # Build the A-level inner tree (no accumulators at this level)
     if not seqs:
-        return _InnerRoot()
+        return InnerLeaf()
 
     # Partition by whether sequence is empty
     non_empty = [s for s in seqs if s]
     empty_count = len(seqs) - len(non_empty)
 
     if not non_empty:
-        # Only empty sequences present -> Root
-        return _InnerRoot()
+        # Only empty sequences present -> Leaf
+        return InnerLeaf()
 
     # Group by first token
     group: Dict[T, List[List[T]]] = {}
@@ -103,21 +103,21 @@ def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
         max_depth = max((len(tl) for tl in tails), default=0)
         children.setdefault(t, {})[max_depth] = child_inner
 
-    return _InnerInternal(children=children)
+    return InnerBranch(children=children)
 
 
 def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
     pairs = _dedup_pairs(pairs)
 
     if not pairs:
-        return _Empty()
+        return Empty()
 
     # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
     accs = {acc for _, acc in pairs}
     if len(accs) == 1:
         only_acc = next(iter(accs))
         inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-        return _WithAcc(node=inner, acc=only_acc)
+        return WithAcc(node=inner, acc=only_acc)
 
     # Otherwise, build an Internal node, partitioning by first symbol.
     # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -144,18 +144,18 @@ def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[
         max_depth = max((len(v) for v, _ in tails_pairs), default=0)
         children.setdefault(t, {})[max_depth] = child
 
-    node: _LeveledNode[T, Acc] = _Internal(children=children)
+    node: _LeveledNode[T, Acc] = Branch(children=children)
     return _normalize_suck_up(node)
 
 
 def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
     # Bottom-up normalization: recursively transform children first.
-    if isinstance(node, _Empty):
+    if isinstance(node, Empty):
         return node
-    if isinstance(node, _WithAcc):
+    if isinstance(node, WithAcc):
         # Its inner is a pure A-level tree; no accs inside; nothing to do.
         return node
-    if isinstance(node, _Internal):
+    if isinstance(node, Branch):
         # Normalize children first
         new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
         for key_t, depth_map in node.children.items():
@@ -166,7 +166,7 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
         # Check suck-up condition: if all children are WithAcc and share the same acc
         # If there are no children, it's empty
         if not new_children:
-            return _Empty()
+            return Empty()
 
         # Flatten list of children
         child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
@@ -174,9 +174,9 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
             for d, ch in dm.items():
                 child_list.append((kt, d, ch))
 
-        all_with_acc = all(isinstance(ch, _WithAcc) for _, _, ch in child_list)
+        all_with_acc = all(isinstance(ch, WithAcc) for _, _, ch in child_list)
         if all_with_acc:
-            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, _WithAcc))
+            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
             if len(accs) == 1:
                 # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                 the_acc = next(iter(accs))
@@ -192,15 +192,15 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
                 # Collect A-level children from the WithAcc children
                 for kt, d, ch in child_list:
                     chw = ch  # type: ignore[assignment]
-                    assert isinstance(chw, _WithAcc)
+                    assert isinstance(chw, WithAcc)
                     if kt is _EPS:
                         # This child represents an empty sequence among the group
                         # Representing empty within A-level is naturally done by allowing Root.
                         # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
                         # and other children may also add edges, we simply union them.
                         # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
-                        # if it's Root, that means the empty sequence is present.
-                        if isinstance(chw.node, _InnerRoot):
+                        # if it's Leaf, that means the empty sequence is present.
+                        if isinstance(chw.node, InnerLeaf):
                             has_empty = True
                         else:
                             # This corresponds to "some non-empty A-level sequences that appear even though the parent
@@ -212,13 +212,13 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
                             has_empty = True
                     else:
                         # Regular T key
-                        if isinstance(chw.node, _InnerRoot):
+                        if isinstance(chw.node, InnerLeaf):
                             # The child being Root under a non-EPS edge means: the sequence [kt] exists.
                             # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
                             # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
                             key_t: T = kt  # type: ignore[assignment]
                             depth_int = max(d - 1, 0)
-                            inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
+                            inner_children.setdefault(key_t, {})[depth_int] = InnerLeaf()
                         else:
                             # Merge edges
                             key_t: T = kt  # type: ignore[assignment]
@@ -230,16 +230,16 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
                 # then the inner is just Root.
                 if not inner_children:
                     if has_empty:
-                        inner: _InnerNode[T] = _InnerRoot()
+                        inner: _InnerNode[T] = InnerLeaf()
                     else:
                         # Should not happen (no children => handled above), but keep safe.
-                        inner = _InnerRoot()
+                        inner = InnerLeaf()
                 else:
-                    inner = _InnerInternal(children=inner_children)
+                    inner = InnerBranch(children=inner_children)
 
-                return _WithAcc(node=inner, acc=the_acc)
+                return WithAcc(node=inner, acc=the_acc)
 
-        return _Internal(children=new_children)
+        return Branch(children=new_children)
 
     # Should not reach
     return node
@@ -250,21 +250,21 @@ def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T]
     result: List[Tuple[List[T], Acc]] = []
 
     def emit_from_inner(inner: _InnerNode[T], prefix: List[T], acc: Acc):
-        if isinstance(inner, _InnerRoot):
+        if isinstance(inner, InnerLeaf):
             result.append((list(prefix), acc))
             return
-        # _InnerInternal
+        # InnerBranch
         for t, depth_map in inner.children.items():  # type: ignore[union-attr]
             for _, child in depth_map.items():
                 emit_from_inner(child, prefix + [t], acc)
 
     def walk(node_b: _LeveledNode[T, Acc], prefix: List[T]):
-        if isinstance(node_b, _Empty):
+        if isinstance(node_b, Empty):
             return
-        if isinstance(node_b, _WithAcc):
+        if isinstance(node_b, WithAcc):
             emit_from_inner(node_b.node, prefix, node_b.acc)
             return
-        # _Internal
+        # Branch
         for key_t, depth_map in node_b.children.items():
             for _, child in depth_map.items():
                 if key_t is _EPS:
@@ -287,19 +287,19 @@ class InvariantViolation(Exception):
 
 def _validate_invariants_node(node: _LeveledNode[T, Acc]):
     # Ensure that:
-    # 1) Acc only exists at _WithAcc nodes.
+    # 1) Acc only exists at WithAcc nodes.
     # 2) _Inner nodes never contain any acc; only structure.
-    # 3) "Suck up" has been applied whenever possible: for any _Internal node,
-    #    if all children are _WithAcc and share the same acc, we should not leave it as _Internal.
-    # 4) If a _WithAcc node has an _InnerInternal child whose children are identical (structurally),
+    # 3) "Suck up" has been applied whenever possible: for any Branch node,
+    #    if all children are WithAcc and share the same acc, we should not leave it as Branch.
+    # 4) If a WithAcc node has an InnerBranch child whose children are identical (structurally),
     #    that's fine; but _WithAcc's descendants should have no another acc (by construction).
     #
     # We traverse and check these constraints; for #3 we just detect a violation opportunity.
 
     def check_inner(inner: _InnerNode[T]):
-        if isinstance(inner, _InnerRoot):
+        if isinstance(inner, InnerLeaf):
             return
-        if isinstance(inner, _InnerInternal):
+        if isinstance(inner, InnerBranch):
             for t, depth_map in inner.children.items():
                 # Keys must not be EPS at A-level
                 if t is _EPS:
@@ -308,13 +308,13 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
                     check_inner(child)
 
     def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
-        if isinstance(node_b, _Empty):
+        if isinstance(node_b, Empty):
             return True, None
-        if isinstance(node_b, _WithAcc):
+        if isinstance(node_b, WithAcc):
             # Its inner must be pure structure
             check_inner(node_b.node)
             return True, node_b.acc
-        if isinstance(node_b, _Internal):
+        if isinstance(node_b, Branch):
             # Recurse, collect child accs when child is WithAcc
             child_accs: List[Acc] = []
             child_types: List[type] = []
@@ -324,13 +324,13 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
                     if not ok:
                         return False, None
                     child_types.append(type(ch))
-                    if isinstance(ch, _WithAcc):
+                    if isinstance(ch, WithAcc):
                         child_accs.append(ch.acc)
             # suck-up opportunity detection
-            if child_types and all(ct is _WithAcc for ct in child_types):
+            if child_types and all(ct is WithAcc for ct in child_types):
                 # All children are WithAcc; if their accs are equal, it should have been sucked up
                 if child_accs and all(a == child_accs[0] for a in child_accs):
-                    raise InvariantViolation("Suck-up opportunity not applied: Internal with uniform WithAcc children.")
+                    raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
             return True, None
         return True, None
 
