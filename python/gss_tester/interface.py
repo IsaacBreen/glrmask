@@ -46,7 +46,7 @@ class GSS(ABC, Generic[T, Acc]):
 
     @abstractmethod
     def is_empty(self) -> bool:
-        """Checks if the GSS contains only the initial empty stack."""
+        """Checks if the GSS contains no active stacks."""
         pass
 
     @abstractmethod

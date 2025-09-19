@@ -29,7 +29,7 @@ class ReferenceGSS(GSS[T, Acc]):
                               if there are no active stacks.
     - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
                                    identical stacks using `merge_func`.
-    - is_empty(): True iff there is exactly one active stack and it is the empty stack (i.e., []).
+    - is_empty(): True iff there are no active stacks.
     """
 
     _stacks: List[Tuple[List[T], Acc]]
@@ -157,8 +157,8 @@ class ReferenceGSS(GSS[T, Acc]):
         return f"{self.__class__.__name__}(_stacks={items!r})"
 
     def is_empty(self) -> bool:
-        # True iff there is exactly one active stack and that stack is empty.
-        return len(self._stacks) == 1 and len(self._stacks[0][0]) == 0
+        # True iff there are no active stacks.
+        return not self._stacks
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ReferenceGSS):
