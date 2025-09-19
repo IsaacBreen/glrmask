@@ -13,7 +13,7 @@ from .interface import GSS, T, Acc
 
 @dataclass(frozen=True, eq=True)
 class Upper(Generic[T, Acc]):
-    inner: 'UpperBranch[T, Acc]' | 'Interface[T, Acc]'
+    inner: UpperBranch[T, Acc] | Interface[T, Acc]
 
 
 @dataclass(frozen=True, eq=True)
@@ -23,13 +23,13 @@ class UpperBranch(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: 'Lower[T]'
+    node: Lower[T]
     acc: Acc | None  # We store None for the top-level interface acc as placeholder.
 
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
-    inner: 'LowerBranch[T]' | 'Leaf'
+    inner: LowerBranch[T] | Leaf
 
 
 @dataclass(frozen=True, eq=True)
@@ -67,7 +67,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     empty: Optional[Acc]
 
     @classmethod
-    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
         """
         Build a LeveledGSS from explicit stacks.
         Implementation strategy:
@@ -188,7 +188,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
         return items
 
-    def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+    def push(self, value: T) -> LeveledGSS[T, Acc]:
         stacks = self.to_stacks()
         if not stacks:
             # No active stacks, pushing yields no stacks.
@@ -196,7 +196,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         new_stacks = [(vals + [value], acc) for vals, acc in stacks]
         return LeveledGSS.from_stacks(new_stacks)
 
-    def pop(self) -> 'LeveledGSS[T, Acc]':
+    def pop(self) -> LeveledGSS[T, Acc]:
         stacks = self.to_stacks()
         if not stacks:
             return LeveledGSS.from_stacks([])
@@ -209,7 +209,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def is_empty(self) -> bool:
         return len(self.to_stacks()) == 0
 
-    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         stacks = self.to_stacks()
         if value is None:
             filtered = [(vals, acc) for vals, acc in stacks if not vals]
@@ -217,17 +217,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             filtered = [(vals, acc) for vals, acc in stacks if vals and vals[-1] == value]
         return LeveledGSS.from_stacks(filtered)
 
-    def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         stacks = self.to_stacks()
         transformed = [(list(vals), func(acc)) for vals, acc in stacks]
         return LeveledGSS.from_stacks(transformed)
 
-    def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+    def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         stacks = self.to_stacks()
         kept = [(list(vals), acc) for vals, acc in stacks if predicate(acc)]
         return LeveledGSS.from_stacks(kept)
 
-    def merge(self, other: 'LeveledGSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
+    def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         stacks_a = self.to_stacks()
         stacks_b = other.to_stacks()
         combined: Dict[Tuple[Any, ...], Acc] = {}
