@@ -22,6 +22,20 @@ class Interface(Generic[T, Acc]):
     acc: Acc
 
 
+@dataclass(frozen=True, eq=True)
+class LeveledGSSInner(Generic[T]):
+    # children: T -> depth -> LeveledGSSInner
+    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
+    is_leaf: bool
+
+    @classmethod
+    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+        raise NotImplementedError
+
+    def to_stacks(self) -> List[List[T]]:
+        raise NotImplementedError
+
+
 class InvariantViolation(Exception):
     pass
 
@@ -68,18 +82,4 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         raise NotImplementedError
 
     def validate_invariants(self) -> None:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True, eq=True)
-class LeveledGSSInner(Generic[T]):
-    # children: T -> depth -> LeveledGSSInner
-    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
-    is_leaf: bool
-
-    @classmethod
-    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
-        raise NotImplementedError
-
-    def to_stacks(self) -> List[List[T]]:
         raise NotImplementedError
