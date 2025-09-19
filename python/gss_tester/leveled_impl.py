@@ -229,8 +229,8 @@ EMPTY_GSS = LeveledGSS()
 # an empty instance. This is a common optimization for immutable objects.
 _original_new = LeveledGSS.__new__
 
-def _new_gss_new(cls, branches=frozenset(), empty_acc=None):
-    if not branches and empty_acc is None:
+def _new_gss_new(cls, _branches=frozenset(), _empty_acc=None):
+    if not _branches and _empty_acc is None:
         return EMPTY_GSS
     # Mypy has trouble with dynamically changing __new__
     return _original_new(cls)
