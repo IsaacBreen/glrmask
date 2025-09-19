@@ -33,21 +33,9 @@ class Leaf:
     pass
 
 
-@dataclass(frozen=True, eq=True)
-class LeveledGSSInner(Generic[T]):
-    inner: Union[LowerBranch[T], Leaf]
+class InvariantViolation(Exception):
+    pass
 
-    @classmethod
-    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
-        raise NotImplementedError
-
-    def to_stacks(self) -> List[List[T]]:
-        raise NotImplementedError
-
-
-# ------------------------------
-# Public LeveledGSS implementation
-# ------------------------------
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
@@ -106,5 +94,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         raise NotImplementedError
 
 
-class InvariantViolation(Exception):
-    pass
+@dataclass(frozen=True, eq=True)
+class LeveledGSSInner(Generic[T]):
+    inner: Union[LowerBranch[T], Leaf]
+
+    @classmethod
+    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+        raise NotImplementedError
+
+    def to_stacks(self) -> List[List[T]]:
+        raise NotImplementedError
