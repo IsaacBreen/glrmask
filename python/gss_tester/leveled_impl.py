@@ -68,7 +68,7 @@ class LeveledGSS(GSS[T, Acc]):
         non_empty_stacks = [(s, acc) for s, acc in stacks if s]
         grouped_by_head: Dict[T, List[Tuple[List[T], Acc]]] = {}
         for stack, acc in non_empty_stacks:
-            head, tail = stack[0], stack[1:]
+            head, tail = stack[-1], stack[:-1]
             if head not in grouped_by_head:
                 grouped_by_head[head] = []
             grouped_by_head[head].append((tail, acc))
@@ -97,9 +97,15 @@ class LeveledGSS(GSS[T, Acc]):
         if not self._branches:
             return self  # Only contains an empty stack or is empty
 
-        # The new GSS is the merge of all children, keeping the current empty_acc.
+        # The new GSS is the merge of all children, plus the current empty stack.
         merged_children = self.merge_many(self._branches_dict.values())
-        return merged_children._with_empty_acc(self._empty_acc)
+
+        if self._empty_acc is None:
+            return merged_children
+
+        # Create a GSS representing only the current empty stack and merge it.
+        empty_gss_part = LeveledGSS(_empty_acc=self._empty_acc)
+        return merged_children.merge(empty_gss_part)
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         if value is None:
@@ -210,7 +216,7 @@ class LeveledGSS(GSS[T, Acc]):
             stacks.append((prefix, self._empty_acc))
 
         for key, child_gss in self._branches_dict.items():
-            stacks.extend(child_gss._to_stacks_recursive(prefix + [key]))
+            stacks.extend(child_gss._to_stacks_recursive([key] + prefix))
 
         return stacks
 
