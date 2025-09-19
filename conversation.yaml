@@ -427,15 +427,9 @@ local_system:
           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
           accs = {acc for _, acc in pairs}
           if len(accs) == 1:
-              vals_list = [vals for vals, _ in pairs]
-              has_empty = any(not v for v in vals_list)
-              has_non_empty = any(v for v in vals_list)
-
-              if not (has_empty and has_non_empty):
-                  only_acc = next(iter(accs))
-                  inner = _build_inner_from_sequences(vals_list)
-                  return WithAcc(node=inner, acc=only_acc)
-              # else: fall through to the general case which can handle mixed empty/non-empty
+              only_acc = next(iter(accs))
+              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
+              return WithAcc(node=inner, acc=only_acc)
 
           # Otherwise, build an Internal node, partitioning by first symbol.
           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -496,14 +490,6 @@ local_system:
               if all_with_acc:
                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
                   if len(accs) == 1:
-                      # A suck-up would lose information if we need to represent both a terminal
-                      # state (from an _EPS child) and a branching state (from non-EPS children),
-                      # because the _InnerNode structure cannot do both.
-                      has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
-                      has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
-                      if has_eps_child and has_non_eps_child:
-                          return Branch(children=new_children)
-
                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                       the_acc = next(iter(accs))
                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
@@ -1403,16 +1389,9 @@ local_system:
                               child_accs.append(ch.acc)
                   # suck-up opportunity detection
                   if child_types and all(ct is WithAcc for ct in child_types):
-                      # All children are WithAcc; if their accs are equal, it should have been sucked up.
+                      # All children are WithAcc; if their accs are equal, it should have been sucked up
                       if child_accs and all(a == child_accs[0] for a in child_accs):
-                          # Exception: suck-up is intentionally skipped if there's a mix of EPS and non-EPS children,
-                          # because the InnerNode structure cannot represent a node that is both terminal and has branches.
-                          # The invariant check must also skip this case.
-                          has_eps_child = any(kt is _EPS for kt in node_b.children)
-                          has_non_eps_child = any(kt is not _EPS for kt in node_b.children)
-
-                          if not (has_eps_child and has_non_eps_child):
-                              raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
+                          raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
                   return True, None
               return True, None
 
@@ -1986,15 +1965,9 @@ messages:
           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
           accs = {acc for _, acc in pairs}
           if len(accs) == 1:
-              vals_list = [vals for vals, _ in pairs]
-              has_empty = any(not v for v in vals_list)
-              has_non_empty = any(v for v in vals_list)
-
-              if not (has_empty and has_non_empty):
-                  only_acc = next(iter(accs))
-                  inner = _build_inner_from_sequences(vals_list)
-                  return WithAcc(node=inner, acc=only_acc)
-              # else: fall through to the general case which can handle mixed empty/non-empty
+              only_acc = next(iter(accs))
+              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
+              return WithAcc(node=inner, acc=only_acc)
 
           # Otherwise, build an Internal node, partitioning by first symbol.
           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -2055,14 +2028,6 @@ messages:
               if all_with_acc:
                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
                   if len(accs) == 1:
-                      # A suck-up would lose information if we need to represent both a terminal
-                      # state (from an _EPS child) and a branching state (from non-EPS children),
-                      # because the _InnerNode structure cannot do both.
-                      has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
-                      has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
-                      if has_eps_child and has_non_eps_child:
-                          return Branch(children=new_children)
-
                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                       the_acc = next(iter(accs))
                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
@@ -2319,7 +2284,7 @@ messages:
       filename: python/gss_tester/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_13-25-56
+      Test results will be saved in: gss_test_results/2025-09-19_13-16-26
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -2327,66 +2292,51 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_13-25-56/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_13-25-56/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_13-25-56/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/runner.py", line 56, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/runner.py", line 37, in main
-          for state, line_no in run_test_spec(gss_class):
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/test_spec.py", line 140, in run_test_spec
-          gss_pn_pop2 = gss_pn_merged.popn(2)
-                        ^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/interface.py", line 57, in popn
-          gss = gss.pop()
-                ^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 388, in pop
-          return LeveledGSS.from_stacks(new_pairs)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 378, in from_stacks
-          return cls(node)
-                 ^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 371, in __init__
-          _validate_invariants_node(self._node)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 347, in _validate_invariants_node
-          ok, _ = check(node)
-                  ^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 343, in check
-          raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-      gss_tester.leveled_impl.InvariantViolation: Suck-up opportunity not applied: Branch with uniform WithAcc children.
-
-      >>> Test for gss_tester/leveled_impl.py failed with exit code 1. Skipping.
+      Successfully ran 149 checks.
+      Results saved to gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json
+      >>> Finished test spec for: gss_tester/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_13-25-56/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_13-25-56/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-19_13-16-26/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_13-16-26/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
-      Found 1 equivalence class(es) among 1 implementations.
+      Found 2 equivalence class(es) among 2 implementations.
 
       Reference implementation: gss_tester.reference_impl.ReferenceGSS
 
-      Class 1 (1 implementation(s)) [Ref Match: ✅]
+      Class 1 (1 implementation(s)) [Ref Match: ❌]
+      --------------------------------------------
+        - gss_tester.leveled_impl.LeveledGSS
+
+      Class 2 (1 implementation(s)) [Ref Match: ✅]
       --------------------------------------------
         - gss_tester.reference_impl.ReferenceGSS
 
+
+      --- Divergence Report ---
+
+      Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
+        - First divergence at yield index 26:
+          - gss_tester.leveled_impl.LeveledGSS (L141): [[[1], 0]]
+          - gss_tester.reference_impl.ReferenceGSS (L141): [[[1], 0], [[], 0]]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_13-25-56
+      Full JSON results are in: gss_test_results/2025-09-19_13-16-26
     metadata:
   - user: Fix this.
     metadata:
@@ -2407,85 +2357,76 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the test failure, it appears there's an inconsistency between the normalization logic in `_normalize_suck_up` and the invariant checks in `_validate_invariants_node` within `python/gss_tester/leveled_impl.py`.
+      Hello! As an AI assistant, I'd be happy to help you fix the bug in your Graph-Structured Stack implementation. The divergence you're seeing is due to a subtle issue in `leveled_impl.py` where empty stacks are lost during the internal tree construction and normalization process, specifically when they exist alongside non-empty stacks that share the same accumulator.
 
-      The `_normalize_suck_up` function correctly avoids merging nodes (the "suck-up" operation) in a specific scenario: when a `Branch` node has children corresponding to both empty stacks (`_EPS`) and non-empty stacks, and all children have the same accumulator. This avoidance is necessary because the internal `_InnerNode` structure cannot simultaneously represent a terminal state (for the empty stack) and branching states.
+      The core problem is that the internal `_InnerNode` data structure cannot simultaneously represent a terminal stack (like an empty stack) and have children (for non-empty stacks). The implementation tries to optimize by collapsing nodes, but this optimization incorrectly discards the empty stack information in these mixed scenarios.
 
-      However, the `_validate_invariants_node` function, which checks for correctness, was not aware of this exception. It flagged this valid state as an error, causing the test to fail.
-
-      The fix is to update the invariant check to recognize this specific case as valid, thereby aligning it with the normalization logic.
-
-      Here are the step-by-step instructions to apply the fix:
+      Here are the step-by-step instructions to fix this, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
+      I'll apply two changes to `python/gss_tester/leveled_impl.py` to work around the data structure's limitation.
 
-      2.  **Navigate to the `_validate_invariants_node` function.** Inside this function, locate the nested function named `check`.
+      1.  **Update `_build_leveled_from_pairs` to avoid incorrect optimization:**
+          In `python/gss_tester/leveled_impl.py`, I will modify the function `_build_leveled_from_pairs`. The initial check that optimizes for stacks with a single unique accumulator is flawed. When it encounters both empty and non-empty stacks, it calls `_build_inner_from_sequences`, which loses the empty stacks.
 
-      3.  **Find the logic for `Branch` nodes.** Inside the `check` function, find the `if isinstance(node_b, Branch):` block.
+          I will add logic to detect this mixed case. If both empty and non-empty stacks are present, we will bypass this optimization and proceed to the general logic that correctly handles them by creating separate branches.
 
-      4.  **Modify the "suck-up opportunity detection" logic.** Towards the end of that block, you will find a section that checks if a "suck-up" should have occurred. You need to replace this logic.
+      2.  **Update `_normalize_suck_up` to prevent information loss:**
+          The general logic path leads to the `_normalize_suck_up` function, which has a similar flaw. It attempts to "suck up" children into a single parent node if they all share the same accumulator. This process also fails to preserve empty stacks when mixed with non-empty ones.
 
-          Replace the following code block:
-          ```python
-                      # suck-up opportunity detection
-                      if child_types and all(ct is WithAcc for ct in child_types):
-                          # All children are WithAcc; if their accs are equal, it should have been sucked up
-                          if child_accs and all(a == child_accs[0] for a in child_accs):
-                              raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-          ```
+          I will add a check within this function. If a "suck up" operation would need to merge children representing empty stacks (`_EPS` key) and non-empty stacks, the operation will be aborted for that node, preserving the existing `Branch` structure which correctly represents the state.
 
-          with this new, more precise logic:
-          ```python
-                      # suck-up opportunity detection
-                      if child_types and all(ct is WithAcc for ct in child_types):
-                          # All children are WithAcc; if their accs are equal, it should have been sucked up.
-                          if child_accs and all(a == child_accs[0] for a in child_accs):
-                              # Exception: suck-up is intentionally skipped if there's a mix of EPS and non-EPS children,
-                              # because the InnerNode structure cannot represent a node that is both terminal and has branches.
-                              # The invariant check must also skip this case.
-                              has_eps_child = any(kt is _EPS for kt in node_b.children)
-                              has_non_eps_child = any(kt is not _EPS for kt in node_b.children)
-          
-                              if not (has_eps_child and has_non_eps_child):
-                                  raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-          ```
+      These two changes ensure that empty stacks are no longer lost during the internal tree manipulations.
 
-      This change ensures the invariant checker correctly ignores the specific case where the suck-up operation is intentionally skipped, resolving the error.
+      ### Git Diffs
 
-      ### Git Diff
-
-      Here is the git diff for the change:
+      Here are the git diffs for the changes.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 455c65a..27a1f59 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -336,10 +336,17 @@
-                           child_types.append(type(ch))
-                           if isinstance(ch, WithAcc):
-                               child_accs.append(ch.acc)
-                   # suck-up opportunity detection
-                   if child_types and all(ct is WithAcc for ct in child_types):
-      -                # All children are WithAcc; if their accs are equal, it should have been sucked up
-      +                # All children are WithAcc; if their accs are equal, it should have been sucked up.
-                       if child_accs and all(a == child_accs[0] for a in child_accs):
-      -                    raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-      +                    # Exception: suck-up is intentionally skipped if there's a mix of EPS and non-EPS children,
-      +                    # because the InnerNode structure cannot represent a node that is both terminal and has branches.
-      +                    # The invariant check must also skip this case.
-      +                    has_eps_child = any(kt is _EPS for kt in node_b.children)
-      +                    has_non_eps_child = any(kt is not _EPS for kt in node_b.children)
-      +
-      +                    if not (has_eps_child and has_non_eps_child):
-      +                        raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-                   return True, None
-               return True, None
+      @@ -128,11 +128,17 @@
        
+           # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
+           accs = {acc for _, acc in pairs}
+      -    if len(accs) == 1:
+      -        only_acc = next(iter(accs))
+      -        inner = _build_inner_from_sequences([vals for vals, _ in pairs])
+      -        return WithAcc(node=inner, acc=only_acc)
+      +    if len(accs) == 1:
+      +        vals_list = [vals for vals, _ in pairs]
+      +        has_empty = any(not v for v in vals_list)
+      +        has_non_empty = any(v for v in vals_list)
+      +
+      +        if not (has_empty and has_non_empty):
+      +            only_acc = next(iter(accs))
+      +            inner = _build_inner_from_sequences(vals_list)
+      +            return WithAcc(node=inner, acc=only_acc)
+      +        # else: fall through to the general case which can handle mixed empty/non-empty
+       
+           # Otherwise, build an Internal node, partitioning by first symbol.
+           # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
+      @@ -193,6 +199,14 @@
+               if all_with_acc:
+                   accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
+                   if len(accs) == 1:
+      +                # A suck-up would lose information if we need to represent both a terminal
+      +                # state (from an _EPS child) and a branching state (from non-EPS children),
+      +                # because the _InnerNode structure cannot do both.
+      +                has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+      +                has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+      +                if has_eps_child and has_non_eps_child:
+      +                    return Branch(children=new_children)
+      +
+                       # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
+                       the_acc = next(iter(accs))
+                       # Build an A-level Internal whose children map keys to the inner nodes of the children.
 
       ```
+
+      Applying these changes should resolve the inconsistency between your `LeveledGSS` and `ReferenceGSS` implementations. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -2496,7 +2437,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Adjust invariant check for Branch
-      node suck-up rule with mixed children"'
+  - user: 'Changes committed with message: "Fix(LeveledGSS): Prevent loss of empty
+      stacks during tree construction and suck-up"'
     metadata:
 ...
