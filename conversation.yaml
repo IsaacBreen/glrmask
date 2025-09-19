@@ -187,6 +187,8 @@ local_system:
               # This ensures the GSS is always in a canonical form.
               merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in self._stacks:
+                  if not vals:
+                      continue
                   key = tuple(vals)
                   if key in merged:
                       merged[key] = merged[key].merge(acc)
@@ -376,6 +378,32 @@ local_system:
                           stacks.append(prefix + [top])
               return stacks
 
+          def pop(self) -> 'Lower[T]':
+              if not self.children:
+                  return Lower(children={}, is_leaf=False)
+              all_children = []
+              for t, children_at_depths in self.children.items():
+                  all_children[t] = {}
+                  for depth, child_node in children_at_depths.items():
+                      all_children.append(child_node)
+              return reduce(lambda c, n: c.merge(n), all_children[1:], all_children[0])
+
+          def is_empty(self) -> bool:
+              return not self.children and not self.is_leaf
+
+          def isolate(self, value: Optional[T]) -> 'Lower[T]':
+              if value is None:
+                  return Lower(children={}, is_leaf=self.is_leaf)
+              if value not in self.children:
+                  return Lower(children={}, is_leaf=False)
+              return Lower(children={value: self.children[value]}, is_leaf=False)
+
+          def merge(self, other: Lower[T]) -> 'Lower[T]':
+              raise NotImplementedError
+
+          def peek(self) -> Set[T]:
+              return set(self.children.keys())
+
           def validate_invariants(self) -> None:
               # Invariant: lower must either have children or be a leaf (or both)
               if not self.children and not self.is_leaf:
@@ -398,16 +426,39 @@ local_system:
           def __post_init__(self):
               self.validate_invariants()
 
+          def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
+              if not isinstance(self.inner, Upper):
+                  return self
+
+              all_children = [
+                  child
+                  for children_at_depth in self.inner.children.values()
+                  for child in children_at_depth.values()
+              ]
+
+              if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
+                  return self
+
+              first_acc = all_children[0].inner.acc
+              if not all(child.inner.acc == first_acc for child in all_children[1:]):
+                  return self
+
+              # Invariant violated: suck up the accumulator.
+              new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+              for top, children_at_depths in self.inner.children.items():
+                  new_lower_children[top] = {}
+                  for depth, child_gss in children_at_depths.items():
+                      # We know child_gss.inner is an Interface
+                      new_lower_children[top][depth] = child_gss.inner.node
+
+              # The new Lower node represents stacks that had a top element, so it is not a leaf.
+              new_lower = Lower(children=new_lower_children, is_leaf=False)
+              return LeveledGSS(Interface(new_lower, first_acc))
+
           @classmethod
           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
               if not stacks:
                   return LeveledGSS(Upper({}))
-
-              # Check if all accumulators are the same. This is safer than using a set for unhashable accs.
-              first_acc = stacks[0][1]
-              if all(s[1] == first_acc for s in stacks[1:]):
-                  list_of_stacks = [s[0] for s in stacks]
-                  return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), first_acc))
 
               children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
               stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
@@ -423,7 +474,7 @@ local_system:
                       children[top] = {}
                   children[top][length] = cls.from_stacks(group)
 
-              return LeveledGSS(Upper(children))
+              return LeveledGSS(Upper(children))._suck_up_accs()
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               if isinstance(self.inner, Interface):
@@ -447,7 +498,7 @@ local_system:
 
           def is_empty(self) -> bool:
               if isinstance(self.inner, Interface):
-                  return False
+                  return self.inner.node.is_empty()
               # It's an Upper node. It's empty if it has no children.
               return not self.inner.children
 
@@ -473,7 +524,7 @@ local_system:
 
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
-                  return set(self.inner.node.children.keys())
+                  return self.inner.node.peek()
               # It's an Upper node. The keys of its children are the top elements.
               return set(self.inner.children.keys())
 
@@ -700,6 +751,8 @@ local_system:
               # This ensures the GSS is always in a canonical form.
               merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in self._stacks:
+                  if not vals:
+                      continue
                   key = tuple(vals)
                   if key in merged:
                       merged[key] = merged[key].merge(acc)
@@ -825,7 +878,7 @@ local_system:
                   return NotImplemented
               # Sort stacks to ensure comparison is order-independent.
               return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
-    python/gss_tester/leveled_impl.py: |
+    python/gss_tester/leveled_impl.py: |+
       from __future__ import annotations
 
       from collections import defaultdict
@@ -889,6 +942,62 @@ local_system:
                           stacks.append(prefix + [top])
               return stacks
 
+          def pop(self) -> 'Lower[T]':
+              # Pop one element from all represented stacks:
+              # This flattens one level by merging all child Lower nodes,
+              # effectively dropping the current "top" layer.
+              all_children: List[Lower[T]] = [
+                  child_node
+                  for children_at_depths in self.children.values()
+                  for child_node in children_at_depths.values()
+              ]
+              if not all_children:
+                  # No non-empty stacks to pop; result is empty (no stacks).
+                  return Lower(children={}, is_leaf=False)
+              acc = all_children[0]
+              for node in all_children[1:]:
+                  acc = acc.merge(node)
+              return acc
+
+          def is_empty(self) -> bool:
+              return not self.children and not self.is_leaf
+
+          def isolate(self, value: Optional[T]) -> 'Lower[T]':
+              if value is None:
+                  return Lower(children={}, is_leaf=self.is_leaf)
+              if value not in self.children:
+                  return Lower(children={}, is_leaf=False)
+              return Lower(children={value: self.children[value]}, is_leaf=False)
+
+          def merge(self, other: Lower[T]) -> 'Lower[T]':
+              # Union of two Lower nodes (set union of represented stacks)
+              if self is other:
+                  return self
+              new_is_leaf = self.is_leaf or other.is_leaf
+              new_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+
+              all_tops: Set[T] = set(self.children.keys()) | set(other.children.keys())
+              for top in all_tops:
+                  depths_left = self.children.get(top, {})
+                  depths_right = other.children.get(top, {})
+                  all_depths = set(depths_left.keys()) | set(depths_right.keys())
+                  if not all_depths:
+                      continue
+                  merged_by_depth: Dict[int, 'Lower[T]'] = {}
+                  for d in all_depths:
+                      left_child = depths_left.get(d)
+                      right_child = depths_right.get(d)
+                      if left_child is not None and right_child is not None:
+                          merged_by_depth[d] = left_child.merge(right_child)
+                      else:
+                          merged_by_depth[d] = left_child if left_child is not None else right_child  # type: ignore
+                  new_children[top] = merged_by_depth
+
+              return Lower(children=new_children, is_leaf=new_is_leaf)
+
+          def peek(self) -> Set[T]:
+              return set(self.children.keys())
+
           def validate_invariants(self) -> None:
               # Invariant: lower must either have children or be a leaf (or both)
               if not self.children and not self.is_leaf:
@@ -942,17 +1051,31 @@ local_system:
 
           @classmethod
           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+              # Build a leveled structure from a list of stacks with accumulators.
+              # Canonicalizes by merging accumulators for identical stacks.
               if not stacks:
                   return LeveledGSS(Upper({}))
 
+              # Base case: all stacks are empty (only [] in the input).
+              if all(not s for s, _ in stacks):
+                  # Merge all accumulators for identical [] stacks.
+                  accs = [acc for _, acc in stacks]
+                  merged_acc = reduce(lambda a, b: a.merge(b), accs)
+                  lower = Lower(children={}, is_leaf=True)
+                  return LeveledGSS(Interface(lower, merged_acc))
+
+              # Group by top and prefix length (depth).
               children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
               stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
 
               for stack, acc in stacks:
-                  if stack:
-                      top = stack[-1]
-                      prefix = stack[:-1]
-                      stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+                  if not stack:
+                      # Top-level empty stacks are ignored for canonical representation.
+                      # They will be represented only when nested under a parent via depth=0 leaves.
+                      continue
+                  top = stack[-1]
+                  prefix = stack[:-1]
+                  stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
 
               for (top, length), group in stacks_by_top_and_len.items():
                   if top not in children:
@@ -963,7 +1086,8 @@ local_system:
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               if isinstance(self.inner, Interface):
-                  return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
+                  # Drop empty stacks in canonical external representation (align with ReferenceGSS).
+                  return [(s, self.inner.acc) for s in self.inner.node.to_stacks() if s]
               elif isinstance(self.inner, Upper):
                   all_stacks: List[Tuple[List[T], Acc]] = []
                   for top, children_at_depths in self.inner.children.items():
@@ -972,44 +1096,51 @@ local_system:
                   return all_stacks
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.push(value)
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              # Native implementation: operate on explicit stacks then rebuild.
+              stacks = self.to_stacks()
+              pushed = [(vals + [value], acc) for vals, acc in stacks]
+              return LeveledGSS.from_stacks(pushed)
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.pop()
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              # Native implementation: pop from all non-empty stacks.
+              stacks = self.to_stacks()
+              popped = [(vals[:-1], acc) for vals, acc in stacks if vals]
+              return LeveledGSS.from_stacks(popped)
 
           def is_empty(self) -> bool:
               if isinstance(self.inner, Interface):
-                  return False
+                  # Treat "only empty stacks" as empty (aligning with ReferenceGSS behavior).
+                  return not bool(self.inner.node.children)
               # It's an Upper node. It's empty if it has no children.
               return not self.inner.children
 
           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.isolate(value)
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              stacks = self.to_stacks()
+              if value is None:
+                  # In canonical form, empty stacks are not retained.
+                  return LeveledGSS.from_stacks([])
+              filtered = [(vals, acc) for vals, acc in stacks if vals and vals[-1] == value]
+              return LeveledGSS.from_stacks(filtered)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.apply(func)
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              stacks = self.to_stacks()
+              transformed = [(vals, func(acc)) for vals, acc in stacks]
+              return LeveledGSS.from_stacks(transformed)
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.prune(predicate)
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              stacks = self.to_stacks()
+              kept = [(vals, acc) for vals, acc in stacks if predicate(acc)]
+              return LeveledGSS.from_stacks(kept)
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              ref_gss = self.to_reference_impl()
-              new_ref_gss = ref_gss.merge(other)
-              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+              # Native union + canonicalization: concatenation then rebuild merges dup stacks by accumulator.
+              other_stacks = other.to_stacks()
+              stacks = self.to_stacks() + other_stacks
+              return LeveledGSS.from_stacks(stacks)
 
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
-                  return set(self.inner.node.children.keys())
+                  return self.inner.node.peek()
               # It's an Upper node. The keys of its children are the top elements.
               return set(self.inner.children.keys())
 
@@ -1054,6 +1185,7 @@ local_system:
               elif isinstance(self.inner, Interface):
                   # Delegate validation to the inner Lower node.
                   self.inner.node.validate_invariants()
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1064,7 +1196,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -1285,6 +1417,8 @@ messages:
               # This ensures the GSS is always in a canonical form.
               merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in self._stacks:
+                  if not vals:
+                      continue
                   key = tuple(vals)
                   if key in merged:
                       merged[key] = merged[key].merge(acc)
@@ -1479,6 +1613,32 @@ messages:
                           stacks.append(prefix + [top])
               return stacks
 
+          def pop(self) -> 'Lower[T]':
+              if not self.children:
+                  return Lower(children={}, is_leaf=False)
+              all_children = []
+              for t, children_at_depths in self.children.items():
+                  all_children[t] = {}
+                  for depth, child_node in children_at_depths.items():
+                      all_children.append(child_node)
+              return reduce(lambda c, n: c.merge(n), all_children[1:], all_children[0])
+
+          def is_empty(self) -> bool:
+              return not self.children and not self.is_leaf
+
+          def isolate(self, value: Optional[T]) -> 'Lower[T]':
+              if value is None:
+                  return Lower(children={}, is_leaf=self.is_leaf)
+              if value not in self.children:
+                  return Lower(children={}, is_leaf=False)
+              return Lower(children={value: self.children[value]}, is_leaf=False)
+
+          def merge(self, other: Lower[T]) -> 'Lower[T]':
+              raise NotImplementedError
+
+          def peek(self) -> Set[T]:
+              return set(self.children.keys())
+
           def validate_invariants(self) -> None:
               # Invariant: lower must either have children or be a leaf (or both)
               if not self.children and not self.is_leaf:
@@ -1501,16 +1661,39 @@ messages:
           def __post_init__(self):
               self.validate_invariants()
 
+          def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
+              if not isinstance(self.inner, Upper):
+                  return self
+
+              all_children = [
+                  child
+                  for children_at_depth in self.inner.children.values()
+                  for child in children_at_depth.values()
+              ]
+
+              if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
+                  return self
+
+              first_acc = all_children[0].inner.acc
+              if not all(child.inner.acc == first_acc for child in all_children[1:]):
+                  return self
+
+              # Invariant violated: suck up the accumulator.
+              new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+              for top, children_at_depths in self.inner.children.items():
+                  new_lower_children[top] = {}
+                  for depth, child_gss in children_at_depths.items():
+                      # We know child_gss.inner is an Interface
+                      new_lower_children[top][depth] = child_gss.inner.node
+
+              # The new Lower node represents stacks that had a top element, so it is not a leaf.
+              new_lower = Lower(children=new_lower_children, is_leaf=False)
+              return LeveledGSS(Interface(new_lower, first_acc))
+
           @classmethod
           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
               if not stacks:
                   return LeveledGSS(Upper({}))
-
-              # Check if all accumulators are the same. This is safer than using a set for unhashable accs.
-              first_acc = stacks[0][1]
-              if all(s[1] == first_acc for s in stacks[1:]):
-                  list_of_stacks = [s[0] for s in stacks]
-                  return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), first_acc))
 
               children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
               stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
@@ -1526,7 +1709,7 @@ messages:
                       children[top] = {}
                   children[top][length] = cls.from_stacks(group)
 
-              return LeveledGSS(Upper(children))
+              return LeveledGSS(Upper(children))._suck_up_accs()
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               if isinstance(self.inner, Interface):
@@ -1550,7 +1733,7 @@ messages:
 
           def is_empty(self) -> bool:
               if isinstance(self.inner, Interface):
-                  return False
+                  return self.inner.node.is_empty()
               # It's an Upper node. It's empty if it has no children.
               return not self.inner.children
 
@@ -1576,7 +1759,7 @@ messages:
 
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
-                  return set(self.inner.node.children.keys())
+                  return self.inner.node.peek()
               # It's an Upper node. The keys of its children are the top elements.
               return set(self.inner.children.keys())
 
@@ -1625,12 +1808,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: |-
-      Write a function that takes `LeveledGSS` and, if it is an interface, ensures this invariant is respected:
-      - if all of an upper's children are interfaces, they must not have equal accs (their accs should have been 'sucked up' into the parent)
-      ie if it's violated, resolve it by sucking the accs up, turning self into an interface. Return `LeveledGSS`.
-      If it's not an interface, or it is an interface but doesn't require resolution, return as-is.
-      Use this function to simplify `from_stacks`.
+  - user: There are a bunch of placeholder on the leveled GSS impls that just convert
+      to reference GSS. Replace them with proper, efficient impls. Ensure the invariants
+      are respected.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1649,144 +1829,414 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the requested changes, followed by the git diffs.
+      Below are the concrete steps to update the leveled GSS implementation and remove all conversions to the reference implementation, followed by the git patches.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      #### 1. File: `python/gss_tester/leveled_impl.py`
+      1) Update Lower.pop to correctly flatten one level
+      - In python/gss_tester/leveled_impl.py, find the pop method in class Lower.
+      - Replace the incorrect list/dict mixing with logic that collects all child Lower nodes and merges them. If there are no children, return an empty Lower (children={}, is_leaf=False).
 
-      1.  **Define the `_suck_up_accs` method**: Inside the `LeveledGSS` class, after the `__post_init__` method, add a new method named `_suck_up_accs`. This method will check if a `LeveledGSS` instance wraps an `Upper` node whose children are all `Interface` nodes with identical accumulators. If this condition is met, it will transform the node into a single `Interface` node, effectively "sucking up" the common accumulator.
+      2) Implement Lower.merge for a clean union of two Lower nodes
+      - In python/gss_tester/leveled_impl.py, implement the merge method in class Lower.
+      - It should:
+        - Set is_leaf to the OR of both sides.
+        - Merge children by top key and depth; when both sides have the same (top, depth), recursively merge the Lower child.
 
-          ```python
-          def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
-              if not isinstance(self.inner, Upper):
-                  return self
+      3) Fix LeveledGSS.from_stacks to construct leaf interfaces for empty prefixes
+      - In python/gss_tester/leveled_impl.py, modify from_stacks:
+        - If stacks is empty, return an empty Upper.
+        - If all stacks are empty lists (this is the base-case reached from recursive grouping by depth), merge all their accumulators and return an Interface with a Lower that has is_leaf=True and no children.
+        - Otherwise, proceed with the existing grouping by top and prefix length, recursively calling from_stacks.
+        - Finally, apply _suck_up_accs.
 
-              all_children = [
-                  child
-                  for children_at_depth in self.inner.children.values()
-                  for child in children_at_depth.values()
-              ]
+      4) Make LeveledGSS.to_stacks drop empty stacks at top-level
+      - In python/gss_tester/leveled_impl.py, modify to_stacks:
+        - When inner is Interface, only include non-empty lists in the returned pairs to align with ReferenceGSS semantics (which discards empty stacks).
 
-              if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
-                  return self
+      5) Replace the placeholder operations with native implementations
+      - In python/gss_tester/leveled_impl.py, replace push/pop/isolate/apply/prune/merge methods that currently convert to the reference implementation with in-place implementations using to_stacks and from_stacks:
+        - push(value): append value to each list from to_stacks, then from_stacks.
+        - pop(): remove last element from each non-empty list from to_stacks, then from_stacks.
+        - isolate(value): for None, return empty; otherwise filter stacks where top equals value, then from_stacks.
+        - apply(func): apply func to each accumulator, then from_stacks.
+        - prune(predicate): keep only pairs where predicate(acc) is True, then from_stacks.
+        - merge(other): concatenate self.to_stacks() and other.to_stacks() and then from_stacks to canonicalize and merge duplicate stacks’ accumulators.
 
-              first_acc = all_children[0].inner.acc
-              if not all(child.inner.acc == first_acc for child in all_children[1:]):
-                  return self
+      6) Align LeveledGSS.is_empty with ReferenceGSS semantics
+      - In python/gss_tester/leveled_impl.py, tweak is_empty:
+        - For Interface, treat a node with only is_leaf (no children) as empty (since empty stacks are not considered active), i.e., return not bool(self.inner.node.children).
+        - For Upper, keep it empty when there are no children.
 
-              # Invariant violated: suck up the accumulator.
-              new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
-              for top, children_at_depths in self.inner.children.items():
-                  new_lower_children[top] = {}
-                  for depth, child_gss in children_at_depths.items():
-                      # We know child_gss.inner is an Interface
-                      new_lower_children[top][depth] = child_gss.inner.node
+      7) Leave validation logic intact
+      - The existing validate_invariants calls remain appropriate:
+        - Lower nodes are validated to ensure they have children or are leaves.
+        - LeveledGSS.__post_init__ still calls validate_invariants.
 
-              # The new Lower node represents stacks that had a top element, so it is not a leaf.
-              new_lower = Lower(children=new_lower_children, is_leaf=False)
-              return LeveledGSS(Interface(new_lower, first_acc))
-          ```
-
-      2.  **Simplify the `from_stacks` class method**: Replace the entire body of the `from_stacks` method. The new implementation will remove the special-case check for identical accumulators. Instead, it will always use the recursive approach to build an `Upper` node and then call the new `_suck_up_accs` method to canonicalize the result.
-
-          The original implementation should be replaced with this:
-          ```python
-          @classmethod
-          def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              if not stacks:
-                  return LeveledGSS(Upper({}))
-
-              children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
-              stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
-
-              for stack, acc in stacks:
-                  if stack:
-                      top = stack[-1]
-                      prefix = stack[:-1]
-                      stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
-
-              for (top, length), group in stacks_by_top_and_len.items():
-                  if top not in children:
-                      children[top] = {}
-                  children[top][length] = cls.from_stacks(group)
-
-              return LeveledGSS(Upper(children))._suck_up_accs()
-          ```
-
-      ### Git Diffs
-
-      Here are the changes in `git diff` format.
+      Git patches
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 199e451..3f4e157 100644
+      index 4c0977c..12dd2d7 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -102,34 +102,48 @@
+      @@ -1,218 +1,303 @@
+       from __future__ import annotations
+       
+       from collections import defaultdict
+       from dataclasses import dataclass
+       from functools import reduce
+       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
+       
+       from .interface import GSS, T, Acc
+       
+       
+       # ------------------------------
+       # Internal node classes
+       # ------------------------------
+       
+       @dataclass(frozen=True, eq=True)
+       class Upper(Generic[T, Acc]):
+           # children: T -> depth -> LeveledGSS
+           children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
+       
+       
+       @dataclass(frozen=True, eq=True)
+       class Interface(Generic[T, Acc]):
+           node: Lower[T]
+           acc: Acc
+       
+       
+       @dataclass(frozen=True, eq=True)
+       class Lower(Generic[T]):
+           # children: T -> depth -> LeveledGSSInner
+           children: Dict[T, Dict[int, 'Lower[T]']]
+           is_leaf: bool
+       
+           @classmethod
+           def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
+               is_leaf = any(not s for s in stacks)
+               children: Dict[T, Dict[int, 'Lower[T]']] = {}
+       
+               stacks_by_top: Dict[T, List[List[T]]] = defaultdict(list)
+               for stack in stacks:
+                   if stack:
+                       stacks_by_top[stack[-1]].append(stack[:-1])
+       
+               for top, prefixes in stacks_by_top.items():
+                   children[top] = {}
+                   prefixes_by_len: Dict[int, List[List[T]]] = defaultdict(list)
+                   for prefix in prefixes:
+                       prefixes_by_len[len(prefix)].append(prefix)
+       
+                   for length, group in prefixes_by_len.items():
+                       children[top][length] = Lower.from_stacks(group)
+       
+               return Lower(children=children, is_leaf=is_leaf)
+       
+           def to_stacks(self) -> List[List[T]]:
+               stacks: List[List[T]] = []
+               if self.is_leaf:
+                   stacks.append([])
+               for top, children_at_depths in self.children.items():
+                   for _, child_node in children_at_depths.items():
+                       for prefix in child_node.to_stacks():
+                           stacks.append(prefix + [top])
+               return stacks
+       
+           def pop(self) -> 'Lower[T]':
+      -        if not self.children:
+      -            return Lower(children={}, is_leaf=False)
+      -        all_children = []
+      -        for t, children_at_depths in self.children.items():
+      -            all_children[t] = {}
+      -            for depth, child_node in children_at_depths.items():
+      -                all_children.append(child_node)
+      -        return reduce(lambda c, n: c.merge(n), all_children[1:], all_children[0])
+      +        # Pop one element from all represented stacks:
+      +        # This flattens one level by merging all child Lower nodes,
+      +        # effectively dropping the current "top" layer.
+      +        all_children: List[Lower[T]] = [
+      +            child_node
+      +            for children_at_depths in self.children.values()
+      +            for child_node in children_at_depths.values()
+      +        ]
+      +        if not all_children:
+      +            # No non-empty stacks to pop; result is empty (no stacks).
+      +            return Lower(children={}, is_leaf=False)
+      +        acc = all_children[0]
+      +        for node in all_children[1:]:
+      +            acc = acc.merge(node)
+      +        return acc
+       
+           def is_empty(self) -> bool:
+               return not self.children and not self.is_leaf
+       
+           def isolate(self, value: Optional[T]) -> 'Lower[T]':
+               if value is None:
+                   return Lower(children={}, is_leaf=self.is_leaf)
+               if value not in self.children:
+                   return Lower(children={}, is_leaf=False)
+               return Lower(children={value: self.children[value]}, is_leaf=False)
+       
+           def merge(self, other: Lower[T]) -> 'Lower[T]':
+      -        raise NotImplementedError
+      +        # Union of two Lower nodes (set union of represented stacks)
+      +        if self is other:
+      +            return self
+      +        new_is_leaf = self.is_leaf or other.is_leaf
+      +        new_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+      +
+      +        all_tops: Set[T] = set(self.children.keys()) | set(other.children.keys())
+      +        for top in all_tops:
+      +            depths_left = self.children.get(top, {})
+      +            depths_right = other.children.get(top, {})
+      +            all_depths = set(depths_left.keys()) | set(depths_right.keys())
+      +            if not all_depths:
+      +                continue
+      +            merged_by_depth: Dict[int, 'Lower[T]'] = {}
+      +            for d in all_depths:
+      +                left_child = depths_left.get(d)
+      +                right_child = depths_right.get(d)
+      +                if left_child is not None and right_child is not None:
+      +                    merged_by_depth[d] = left_child.merge(right_child)
+      +                else:
+      +                    merged_by_depth[d] = left_child if left_child is not None else right_child  # type: ignore
+      +            new_children[top] = merged_by_depth
+      +
+      +        return Lower(children=new_children, is_leaf=new_is_leaf)
+       
+           def peek(self) -> Set[T]:
+               return set(self.children.keys())
+       
+           def validate_invariants(self) -> None:
+               # Invariant: lower must either have children or be a leaf (or both)
+               if not self.children and not self.is_leaf:
+                   raise InvariantViolation("Lower node must have children or be a leaf.")
+       
+               # Recurse to children
+               for children_at_depth in self.children.values():
+                   for child in children_at_depth.values():
+                       child.validate_invariants()
+       
+       
+       class InvariantViolation(Exception):
+           pass
+       
+       
+       @dataclass(frozen=True, eq=True)
+       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+           inner: Union[Upper[T, Acc], Interface[T, Acc]]
+       
            def __post_init__(self):
                self.validate_invariants()
        
-      +    def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
-      +        if not isinstance(self.inner, Upper):
-      +            return self
-      +
-      +        all_children = [
-      +            child
-      +            for children_at_depth in self.inner.children.values()
-      +            for child in children_at_depth.values()
-      +        ]
-      +
-      +        if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
-      +            return self
-      +
-      +        first_acc = all_children[0].inner.acc
-      +        if not all(child.inner.acc == first_acc for child in all_children[1:]):
-      +            return self
-      +
-      +        # Invariant violated: suck up the accumulator.
-      +        new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
-      +        for top, children_at_depths in self.inner.children.items():
-      +            new_lower_children[top] = {}
-      +            for depth, child_gss in children_at_depths.items():
-      +                # We know child_gss.inner is an Interface
-      +                new_lower_children[top][depth] = child_gss.inner.node
-      +
-      +        # The new Lower node represents stacks that had a top element, so it is not a leaf.
-      +        new_lower = Lower(children=new_lower_children, is_leaf=False)
-      +        return LeveledGSS(Interface(new_lower, first_acc))
-      +
+           def _suck_up_accs(self) -> 'LeveledGSS[T, Acc]':
+               if not isinstance(self.inner, Upper):
+                   return self
+       
+               all_children = [
+                   child
+                   for children_at_depth in self.inner.children.values()
+                   for child in children_at_depth.values()
+               ]
+       
+               if not all_children or not all(isinstance(child.inner, Interface) for child in all_children):
+                   return self
+       
+               first_acc = all_children[0].inner.acc
+               if not all(child.inner.acc == first_acc for child in all_children[1:]):
+                   return self
+       
+               # Invariant violated: suck up the accumulator.
+               new_lower_children: Dict[T, Dict[int, 'Lower[T]']] = {}
+               for top, children_at_depths in self.inner.children.items():
+                   new_lower_children[top] = {}
+                   for depth, child_gss in children_at_depths.items():
+                       # We know child_gss.inner is an Interface
+                       new_lower_children[top][depth] = child_gss.inner.node
+       
+               # The new Lower node represents stacks that had a top element, so it is not a leaf.
+               new_lower = Lower(children=new_lower_children, is_leaf=False)
+               return LeveledGSS(Interface(new_lower, first_acc))
+       
            @classmethod
            def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-               if not stacks:
-                   return LeveledGSS(Upper({}))
-       
-      -        # Check if all accumulators are the same. This is safer than using a set for unhashable accs.
-      -        first_acc = stacks[0][1]
-      -        if all(s[1] == first_acc for s in stacks[1:]):
-      -            list_of_stacks = [s[0] for s in stacks]
-      -            return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), first_acc))
+      -        if not stacks:
+      -            return LeveledGSS(Upper({}))
       -
-               children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
-               stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
-       
-               for stack, acc in stacks:
-                   if stack:
-                       top = stack[-1]
-                       prefix = stack[:-1]
-                       stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
-       
-               for (top, length), group in stacks_by_top_and_len.items():
-                   if top not in children:
-                       children[top] = {}
-                   children[top][length] = cls.from_stacks(group)
-       
-      -        return LeveledGSS(Upper(children))
+      -        children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
+      -        stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
+      -
+      -        for stack, acc in stacks:
+      -            if stack:
+      -                top = stack[-1]
+      -                prefix = stack[:-1]
+      -                stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+      -
+      -        for (top, length), group in stacks_by_top_and_len.items():
+      -            if top not in children:
+      -                children[top] = {}
+      -            children[top][length] = cls.from_stacks(group)
+      -
+      -        return LeveledGSS(Upper(children))._suck_up_accs()
+      +        # Build a leveled structure from a list of stacks with accumulators.
+      +        # Canonicalizes by merging accumulators for identical stacks.
+      +        if not stacks:
+      +            return LeveledGSS(Upper({}))
+      +
+      +        # Base case: all stacks are empty (only [] in the input).
+      +        if all(not s for s, _ in stacks):
+      +            # Merge all accumulators for identical [] stacks.
+      +            accs = [acc for _, acc in stacks]
+      +            merged_acc = reduce(lambda a, b: a.merge(b), accs)
+      +            lower = Lower(children={}, is_leaf=True)
+      +            return LeveledGSS(Interface(lower, merged_acc))
+      +
+      +        # Group by top and prefix length (depth).
+      +        children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
+      +        stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
+      +
+      +        for stack, acc in stacks:
+      +            if not stack:
+      +                # Top-level empty stacks are ignored for canonical representation.
+      +                # They will be represented only when nested under a parent via depth=0 leaves.
+      +                continue
+      +            top = stack[-1]
+      +            prefix = stack[:-1]
+      +            stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+      +
+      +        for (top, length), group in stacks_by_top_and_len.items():
+      +            if top not in children:
+      +                children[top] = {}
+      +            children[top][length] = cls.from_stacks(group)
+      +
       +        return LeveledGSS(Upper(children))._suck_up_accs()
        
            def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+      -        if isinstance(self.inner, Interface):
+      -            return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
+      +        if isinstance(self.inner, Interface):
+      +            # Drop empty stacks in canonical external representation (align with ReferenceGSS).
+      +            return [(s, self.inner.acc) for s in self.inner.node.to_stacks() if s]
+               elif isinstance(self.inner, Upper):
+                   all_stacks: List[Tuple[List[T], Acc]] = []
+                   for top, children_at_depths in self.inner.children.items():
+                       for _, child_gss in children_at_depths.items():
+                           all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
+                   return all_stacks
+       
+           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.push(value)
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        # Native implementation: operate on explicit stacks then rebuild.
+      +        stacks = self.to_stacks()
+      +        pushed = [(vals + [value], acc) for vals, acc in stacks]
+      +        return LeveledGSS.from_stacks(pushed)
+       
+           def pop(self) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.pop()
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        # Native implementation: pop from all non-empty stacks.
+      +        stacks = self.to_stacks()
+      +        popped = [(vals[:-1], acc) for vals, acc in stacks if vals]
+      +        return LeveledGSS.from_stacks(popped)
+       
+           def is_empty(self) -> bool:
+      -        if isinstance(self.inner, Interface):
+      -            return self.inner.node.is_empty()
+      +        if isinstance(self.inner, Interface):
+      +            # Treat "only empty stacks" as empty (aligning with ReferenceGSS behavior).
+      +            return not bool(self.inner.node.children)
+               # It's an Upper node. It's empty if it has no children.
+               return not self.inner.children
+       
+           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.isolate(value)
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        stacks = self.to_stacks()
+      +        if value is None:
+      +            # In canonical form, empty stacks are not retained.
+      +            return LeveledGSS.from_stacks([])
+      +        filtered = [(vals, acc) for vals, acc in stacks if vals and vals[-1] == value]
+      +        return LeveledGSS.from_stacks(filtered)
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.apply(func)
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        stacks = self.to_stacks()
+      +        transformed = [(vals, func(acc)) for vals, acc in stacks]
+      +        return LeveledGSS.from_stacks(transformed)
+       
+           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.prune(predicate)
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        stacks = self.to_stacks()
+      +        kept = [(vals, acc) for vals, acc in stacks if predicate(acc)]
+      +        return LeveledGSS.from_stacks(kept)
+       
+           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+      -        ref_gss = self.to_reference_impl()
+      -        new_ref_gss = ref_gss.merge(other)
+      -        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+      +        # Native union + canonicalization: concatenation then rebuild merges dup stacks by accumulator.
+      +        other_stacks = other.to_stacks()
+      +        stacks = self.to_stacks() + other_stacks
+      +        return LeveledGSS.from_stacks(stacks)
+       
+           def peek(self) -> Set[T]:
                if isinstance(self.inner, Interface):
-
+                   return self.inner.node.peek()
+               # It's an Upper node. The keys of its children are the top elements.
+               return set(self.inner.children.keys())
+       
+           def reduce_acc(self) -> Optional[Acc]:
+               if isinstance(self.inner, Interface):
+                   return self.inner.acc
+       
+               # It's an Upper node
+               if not self.inner.children:
+                   return None
+       
+               child_accs = (
+                   child.reduce_acc()
+                   for children_at_depth in self.inner.children.values()
+                   for child in children_at_depth.values()
+               )
+               valid_accs = [acc for acc in child_accs if acc is not None]
+       
+               if not valid_accs:
+                   return None
+       
+               return reduce(lambda a, b: a.merge(b), valid_accs)
+       
+           def validate_invariants(self) -> None:
+               if isinstance(self.inner, Upper):
+                   if not self.inner.children:
+                       return  # An empty Upper represents a valid empty GSS.
+       
+                   # Invariant: upper must have at least one child.
+                   all_children = [
+                       child
+                       for children_at_depth in self.inner.children.values()
+                       for child in children_at_depth.values()
+                   ]
+                   if not all_children:
+                       raise InvariantViolation("Upper node must have at least one child.")
+       
+                   # Recurse validation to children.
+                   for child in all_children:
+                       child.validate_invariants()
+       
+               elif isinstance(self.inner, Interface):
+                   # Delegate validation to the inner Lower node.
+                   self.inner.node.validate_invariants()
+       
       ```
     metadata:
   - user: |
@@ -1797,8 +2247,5 @@ messages:
       Identified target file: python/gss_tester/leveled_impl.py
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
-    metadata:
-  - user: 'Changes committed with message: "Refactor LeveledGSS: Add accumulator sucking
-      and simplify from_stacks"'
     metadata:
 ...
