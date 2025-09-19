@@ -1,918 +1,9 @@
 local_system:
   attached_files:
     - python/gss_tester/leveled_impl.py
-    - python/aug25/models/precompute3_model_pure_python.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/gss_tester/leveled_impl.py: |
-      from __future__ import annotations
-
-      from abc import ABC, abstractmethod
-      from collections import defaultdict
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import (
-          Any,
-          Callable,
-          Dict,
-          Generic,
-          Iterable,
-          List,
-          Optional,
-          Set,
-          Tuple,
-          Type,
-          cast,
-      )
-
-      from .interface import GSS, Acc, T
-      from .reference_impl import ReferenceGSS
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-      # ------------------------------
-      # Structural Trie (_A nodes)
-      #
-      # These nodes represent the shared structure of stacks as a prefix tree (trie).
-      # They are immutable and behave as value types. They do not contain accumulators.
-      # ------------------------------
-
-
-      @dataclass(frozen=True, eq=True)
-      class _A(ABC, Generic[T]):
-          """Abstract base class for a structural stack node (prefix trie)."""
-
-          __slots__ = ()
-
-          @abstractmethod
-          def _iter_stacks(self) -> Iterable[List[T]]:
-              """Iterates through the stack lists represented by this structural node."""
-              ...
-
-
-      @dataclass(frozen=True, eq=True)
-      class _ARoot(_A[T]):
-          """Represents the end of a stack path (the empty stack suffix)."""
-
-          __slots__ = ()
-
-          def _iter_stacks(self) -> Iterable[List[T]]:
-              yield []
-
-
-      _A_ROOT: _ARoot = _ARoot()
-
-
-      @dataclass(frozen=True, eq=True)
-      class _AInternal(_A[T], Generic[T]):
-          """Represents an internal node in the prefix trie, with children."""
-
-          # Children are stored as a sorted tuple to ensure hashability and canonical form.
-          _children: Tuple[Tuple[T, _A[T]], ...]
-          __slots__ = ("_children",)
-
-          @classmethod
-          def from_dict(cls, children: Dict[T, _A[T]]) -> _A[T]:
-              """Creates a structural node from a dictionary of children."""
-              if not children:
-                  return _A_ROOT
-              # Sort items by key for a canonical representation.
-              sorted_items = tuple(sorted(children.items()))
-              return cls(sorted_items)
-
-          def get_children(self) -> Dict[T, _A[T]]:
-              return dict(self._children)
-
-          def _iter_stacks(self) -> Iterable[List[T]]:
-              for value, child_node in self._children:
-                  for stack_suffix in child_node._iter_stacks():
-                      yield [value] + stack_suffix
-
-
-      # ------------------------------
-      # LeveledGSS implementation
-      # ------------------------------
-
-
-      @dataclass(eq=False, frozen=True)
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation using a recursive, "leveled" representation.
-
-          This class is a union of three variants, identified by `_kind`:
-          1. EMPTY: Represents a GSS with no active stacks.
-          2. GROUP: A "sucked-up" state where multiple stack structures (`_A` node)
-             share a single, common accumulator. This is a compact leaf in the GSS tree.
-          3. BRANCH: A "distributed" state representing a fork in the GSS. It holds
-             an optional accumulator for the empty stack and a dictionary mapping
-             stack prefixes (`T`) to sub-GSS instances.
-
-          A canonical factory `_create` ensures that the most compact representation
-          (GROUP) is used whenever possible by applying the "suck-up" logic automatically.
-          """
-
-          _kind: str
-          # GROUP payload
-          _node: Optional[_A[T]] = None
-          _acc: Optional[Acc] = None
-          # BRANCH payload
-          _empty_acc: Optional[Acc] = None
-          _children: Optional[Dict[T, LeveledGSS[T, Acc]]] = None
-
-          # -------------------------
-          # Construction and Canonicalization
-          # -------------------------
-
-          @classmethod
-          def _empty(cls) -> LeveledGSS[T, Acc]:
-              return cls(_kind="EMPTY")
-
-          @classmethod
-          def _group(cls, node: _A[T], acc: Acc) -> LeveledGSS[T, Acc]:
-              return cls(_kind="GROUP", _node=node, _acc=acc)
-
-          @classmethod
-          def _branch(
-              cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
-          ) -> LeveledGSS[T, Acc]:
-              return cls(_kind="BRANCH", _empty_acc=empty_acc, _children=children)
-
-          # -------------------------
-
-          @classmethod
-          @profile
-          def _create(
-              cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
-          ) -> LeveledGSS[T, Acc]:
-              """
-              Canonical factory for LeveledGSS. This is the sole entry point for
-              creating instances, ensuring invariants are maintained.
-              """
-              # Filter out any empty children, as they don't represent any stacks.
-              live_children = {
-                  v: c for v, c in children.items() if not c._is_structurally_empty()
-              }
-
-              if empty_acc is None and not live_children:
-                  return cls._empty()
-
-              # "Suck-up" logic: If there's no empty stack accumulator and all children
-              # are GROUP nodes with the same accumulator, merge them into a single GROUP.
-              can_suck_up = empty_acc is None and live_children
-              if can_suck_up:
-                  child_vals = list(live_children.values())
-                  first_child = child_vals[0]
-                  if first_child._kind == "GROUP":
-                      first_acc = first_child._acc
-                      if all(
-                          c._kind == "GROUP" and c._acc == first_acc for c in child_vals[1:]
-                      ):
-                          new_a_children = {
-                              v: cast(_A[T], c._node) for v, c in live_children.items()
-                          }
-                          new_a_node = _AInternal.from_dict(new_a_children)
-                          return cls._group(new_a_node, first_acc)
-
-              return cls._branch(empty_acc, live_children)
-
-          @profile
-          def _distribute(self) -> LeveledGSS[T, Acc]:
-              """Converts a GROUP node into its equivalent BRANCH representation."""
-              if self._kind != "GROUP":
-                  return self
-
-              node, acc = cast(_A[T], self._node), cast(Acc, self._acc)
-              if isinstance(node, _ARoot):
-                  return self._create(acc, {})
-              if isinstance(node, _AInternal):
-                  new_children = {
-                      v: self._group(c, acc) for v, c in node.get_children().items()
-                  }
-                  return self._create(None, new_children)
-              return self._empty()  # Should be unreachable
-
-          def _is_structurally_empty(self) -> bool:
-              """Checks if the GSS represents any stacks."""
-              return self._kind == "EMPTY"
-
-          # -------------------------
-          # GSS interface
-          # -------------------------
-
-          @classmethod
-          def from_stacks(
-              cls: Type[LeveledGSS], stacks: List[Tuple[List[T], Acc]]
-          ) -> LeveledGSS[T, Acc]:
-              if not stacks:
-                  return cls._empty()
-
-              empty_acc: Optional[Acc] = None
-              by_prefix: Dict[T, List[Tuple[List[T], Acc]]] = defaultdict(list)
-
-              for stack, acc in stacks:
-                  if not stack:
-                      empty_acc = acc if empty_acc is None else empty_acc.merge(acc)
-                  else:
-                      by_prefix[stack[0]].append((stack[1:], acc))
-
-              children = {
-                  prefix: cls.from_stacks(s_list) for prefix, s_list in by_prefix.items()
-              }
-              return cls._create(empty_acc, children)
-
-          @profile
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              if self._is_structurally_empty():
-                  return self._empty()
-              return self._create(None, {value: self})
-
-          @profile
-          def pop(self) -> LeveledGSS[T, Acc]:
-              if self._kind == "EMPTY":
-                  return self
-              if self._kind == "GROUP":
-                  node = cast(_A[T], self._node)
-                  if isinstance(node, _ARoot):  # Popping the empty stack
-                      return self._empty()
-                  # Distribute and merge the children
-                  distributed = self._distribute()
-                  return LeveledGSS.merge_many(cast(Dict, distributed._children).values())
-              # BRANCH
-              return LeveledGSS.merge_many(cast(Dict, self._children).values())
-
-          def is_empty(self) -> bool:
-              if self._kind == "GROUP":
-                  return self._node == _A_ROOT
-              if self._kind == "BRANCH":
-                  return self._empty_acc is not None and not self._children
-              return False
-
-          @profile
-          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              gss = self._distribute()
-              if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
-                  if gss.is_empty() and value is None:
-                      return gss
-                  return self._empty()
-
-              if value is None:
-                  return self._create(gss._empty_acc, {})
-              else:
-                  child = cast(Dict, gss._children).get(value)
-                  if child is None:
-                      return self._empty()
-                  return self._create(None, {value: child})
-
-          @profile
-          def apply(
-              self, func: Callable[[Acc], Acc], *, _memo: Optional[Dict[int, Any]] = None
-          ) -> LeveledGSS[T, Acc]:
-              if _memo is None:
-                  _memo = {}
-              if id(self) in _memo:
-                  return _memo[id(self)]
-
-              if self._kind == "EMPTY":
-                  result = self
-              elif self._kind == "GROUP":
-                  result = self._group(cast(_A[T], self._node), func(cast(Acc, self._acc)))
-              else:  # BRANCH
-                  new_empty_acc = (
-                      func(self._empty_acc) if self._empty_acc is not None else None
-                  )
-                  new_children = {
-                      v: c.apply(func, _memo=_memo)
-                      for v, c in cast(Dict, self._children).items()
-                  }
-                  result = self._create(new_empty_acc, new_children)
-
-              _memo[id(self)] = result
-              return result
-
-          @profile
-          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              if self._kind == "EMPTY":
-                  return self
-              if self._kind == "GROUP":
-                  return self if predicate(cast(Acc, self._acc)) else self._empty()
-
-              # BRANCH
-              new_empty_acc = (
-                  self._empty_acc
-                  if self._empty_acc is not None and predicate(self._empty_acc)
-                  else None
-              )
-              new_children = {
-                  v: c.prune(predicate) for v, c in cast(Dict, self._children).items()
-              }
-              return self._create(new_empty_acc, new_children)
-
-          @profile
-          def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              # Convert other to LeveledGSS if it isn't one.
-              if not isinstance(other, LeveledGSS):
-                  ref_gss = other.to_reference_impl()
-                  # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
-                  stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
-                  other = LeveledGSS.from_stacks(stacks_for_leveled)
-
-              # Now both are LeveledGSS.
-              if self._is_structurally_empty():
-                  return other
-              if other._is_structurally_empty():
-                  return self
-
-              gss1 = self._distribute()
-              gss2 = other._distribute()
-
-              # After distribution, they must be BRANCH kind (or EMPTY, handled above).
-              # Merge empty accumulators
-              merged_empty_acc: Optional[Acc] = None
-              if gss1._empty_acc is not None and gss2._empty_acc is not None:
-                  merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
-              elif gss1._empty_acc is not None:
-                  merged_empty_acc = gss1._empty_acc
-              else:
-                  merged_empty_acc = gss2._empty_acc
-
-              # Merge children
-              gss1_children = gss1._children or {}
-              gss2_children = gss2._children or {}
-              all_keys = gss1_children.keys() | gss2_children.keys()
-
-              merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
-              for k in all_keys:
-                  c1 = gss1_children.get(k)
-                  c2 = gss2_children.get(k)
-                  merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
-
-              return LeveledGSS._create(merged_empty_acc, merged_children)
-
-          def peek(self) -> Set[T]:
-              gss = self._distribute()
-              if gss._kind == "BRANCH":
-                  return set(cast(Dict, gss._children).keys())
-              return set()
-
-          def _iter_stacks(self) -> Iterable[Tuple[List[T], Acc]]:
-              if self._kind == "EMPTY":
-                  return
-              if self._kind == "GROUP":
-                  acc = cast(Acc, self._acc)
-                  for stack_list in cast(_A[T], self._node)._iter_stacks():
-                      yield stack_list, acc
-              else:  # BRANCH
-                  if self._empty_acc is not None:
-                      yield [], self._empty_acc
-                  for value, child_gss in cast(Dict, self._children).items():
-                      for stack_suffix, acc in child_gss._iter_stacks():
-                          yield [value] + stack_suffix, acc
-
-          def reduce_acc(self) -> Optional[Acc]:
-              accs = [acc for _, acc in self._iter_stacks()]
-              if not accs:
-                  return None
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def to_reference_impl(self) -> ReferenceGSS[T, Acc]:
-              # LeveledGSS internal representation is top-at-head for stack lists.
-              # ReferenceGSS representation is top-at-tail.
-              # We must reverse the lists to convert between them.
-              stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
-              return ReferenceGSS.from_stacks(stacks_for_ref)
-
-          # -------------------------
-          # Dunder methods
-          # -------------------------
-
-          def __eq__(self, other: object) -> bool:
-              if self is other:
-                  return True
-              if isinstance(other, LeveledGSS):
-                  # Fast path for two canonical LeveledGSS instances
-                  return (
-                      self._kind == other._kind
-                      and self._node == other._node
-                      and self._acc == other._acc
-                      and self._empty_acc == other._empty_acc
-                      and self._children == other._children
-                  )
-              if isinstance(other, GSS):
-                  return self.to_reference_impl() == other.to_reference_impl()
-              return NotImplemented
-
-          def __repr__(self) -> str:
-              if self._kind == "EMPTY":
-                  return "LeveledGSS(EMPTY)"
-              if self._kind == "GROUP":
-                  stacks = sorted(list(cast(_A[T], self._node)._iter_stacks()))
-                  return f"LeveledGSS(GROUP stacks={stacks!r}, acc={self._acc!r})"
-              # BRANCH
-              parts = []
-              if self._empty_acc is not None:
-                  parts.append(f"[]: {self._empty_acc!r}")
-              # Sort for deterministic output
-              sorted_children = sorted(cast(Dict, self._children).items())
-              for v, c in sorted_children:
-                  parts.append(f"{v!r}: {c!r}")
-              return f"LeveledGSS(BRANCH {{{', '.join(parts)}}})"
-    python/aug25/models/precompute3_model_pure_python.py: |
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.leveled_impl import LeveledGSS as GSS
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
-
-          def __hash__(self):
-              return hash(self.terminals_union)
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
-
-
-      def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-          merged_acc = gss.reduce_acc()
-          if merged_acc is None:
-              return ffi.HybridL2Bitset.all()
-          return merged_acc.terminals_union.complement()
-
-
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
-              self.tokenizer_initial_state: Optional[int] = None
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
-
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv = bs_from_json(dumps(llm_bv_json))
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv = bs_from_json(dumps(state_bv_json))
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              model.possible_matches_cache = constraint.possible_matches()
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  allowed_terminals_l2 = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
-                      if not matched_bv.is_subset(allowed_for_state):
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_l2 = acc.terminals_union
-                  new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_l2.get_l2_bitset(old_sid)
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  new_l2 = ffi.HybridL2Bitset.all()
-                  for new_sid, bv in new_bvs.items():
-                      new_l2.insert_l2_bitset(new_sid, bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_l2 = acc.terminals_union
-                  new_l2 = current_l2.union(current_l2)  # clone
-                  curr_bv = current_l2.get_l2_bitset(state_id)
-                  if curr_bv.contains(terminal_id):
-                      to_remove = ffi.Bitset.from_indices([terminal_id])
-                      new_bv = curr_bv.difference(to_remove)
-                      new_l2.insert_l2_bitset(state_id, new_bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, ffi.Bitset] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-
-          @profile
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-              """
-              state_map = self.state
-              all_ones_mask = self.all_internal_llm_tokens_bitset
-              final_mask = ffi.Bitset.zeros()
-
-              values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = {}
-              depth_heap: List[int] = []
-
-              heappush = heapq.heappush
-              heappop = heapq.heappop
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-              arena = self.arena
-              is_end = self.is_end
-
-              # Seed
-              for sid, gss in state_map.items():
-                  new_mask = all_ones_mask
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      existing_gss, existing_mask = existing
-                      merged_gss = existing_gss.merge(gss)
-                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = (gss, new_mask)
-
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
-
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
-
-              # Main loop
-              while True:
-                  node_indices: Optional[set[int]] = None
-                  current_depth = -1
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
-
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          continue
-
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          continue
-                      gss_node, llm_mask = item
-
-                      # End-node handling
-                      if is_end(node_idx):
-                          forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
-                          possible_matches = self.possible_matches_cache
-
-                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
-                              if disallowed_bv.is_empty():
-                                  continue
-                              end = min(end, self.tokenizer.max_state())
-                              for tsid in range(start, end + 1):
-                                  possible_matches_for_state = possible_matches.get(tsid)
-                                  if not possible_matches_for_state:
-                                      continue
-                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                      terminal_id = int(terminal_id_str)
-                                      if disallowed_bv.contains(terminal_id):
-                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
-
-                          gss_active_tokens = all_ones_mask
-                          glr_active_tokens = llm_mask.intersection(gss_active_tokens)
-                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                          if not final_allowed_tokens.is_empty():
-                              final_mask = final_mask.union(final_allowed_tokens)
-
-                      if llm_mask.is_empty():
-                          stopped.add(node_idx)
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
-                          popped = gss_node.popn(pop)
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              matched: List[GSS] = []
-                              if not state_bv.is_empty():
-                                  for sid_val in popped.peek():
-                                      if state_bv.contains(sid_val):
-                                          matched.append(popped.isolate(sid_val))
-                              if not matched:
-                                  continue
-
-                              child_gss_node = GSS.merge_many(matched)
-                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                              d = int(dest_idx)
-                              existing = values.get(d)
-                              if existing is not None:
-                                  existing_gss, existing_mask = existing
-                                  merged_gss = existing_gss.merge(child_gss_node)
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (merged_gss, combined_mask)
-                              else:
-                                  values[d] = (child_gss_node, child_llm_mask)
-
-                              enqueue(max_depth[d], d)
-
-              # Convert internal mask back to original IDs
-              original_mask = ffi.Bitset.zeros()
-              for internal_id in final_mask.to_indices():
-                  if internal_id in self.internal_to_original_map:
-                      original_mask.insert(self.internal_to_original_map[internal_id])
-              return RangeSet.from_ranges(original_mask.to_ranges())
-  prev_file_contents:
     python/gss_tester/leveled_impl.py: |
       from __future__ import annotations
 
@@ -1389,18 +480,30 @@ local_system:
               for v, c in sorted_children:
                   parts.append(f"{v!r}: {c!r}")
               return f"LeveledGSS(BRANCH {{{', '.join(parts)}}})"
-    python/aug25/models/precompute3_model_pure_python.py: |
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union
-      from dataclasses import dataclass, field
+  prev_file_contents:
+    python/gss_tester/leveled_impl.py: |
+      from __future__ import annotations
 
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.leveled_impl import LeveledGSS as GSS
+      from abc import ABC, abstractmethod
+      from collections import defaultdict
+      from dataclasses import dataclass
+      from functools import reduce
+      from typing import (
+          Any,
+          Callable,
+          Dict,
+          Generic,
+          Iterable,
+          List,
+          Optional,
+          Set,
+          Tuple,
+          Type,
+          cast,
+      )
 
+      from .interface import GSS, Acc, T
+      from .reference_impl import ReferenceGSS
 
       # Add a dummy profiler for when not running under kernprof
       try:
@@ -1410,474 +513,467 @@ local_system:
           # If not running under kernprof, create a dummy decorator.
           def profile(func): return func
 
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
+      # ------------------------------
+      # Structural Trie (_A nodes)
+      #
+      # These nodes represent the shared structure of stacks as a prefix tree (trie).
+      # They are immutable and behave as value types. They do not contain accumulators.
+      # ------------------------------
 
 
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
+      @dataclass(frozen=True, eq=True)
+      class _A(ABC, Generic[T]):
+          """Abstract base class for a structural stack node (prefix trie)."""
+
+          __slots__ = ()
+
+          @abstractmethod
+          def _iter_stacks(self) -> Iterable[List[T]]:
+              """Iterates through the stack lists represented by this structural node."""
+              ...
 
 
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
+      @dataclass(frozen=True, eq=True)
+      class _ARoot(_A[T]):
+          """Represents the end of a stack path (the empty stack suffix)."""
+
+          __slots__ = ()
+
+          def _iter_stacks(self) -> Iterable[List[T]]:
+              yield []
 
 
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
+      _A_ROOT: _ARoot = _ARoot()
 
 
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
+      @dataclass(frozen=True, eq=True)
+      class _AInternal(_A[T], Generic[T]):
+          """Represents an internal node in the prefix trie, with children."""
 
-          def __hash__(self):
-              return hash(self.terminals_union)
+          # Children are stored as a sorted tuple to ensure hashability and canonical form.
+          _children: Tuple[Tuple[T, _A[T]], ...]
+          __slots__ = ("_children",)
 
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
+          @classmethod
+          def from_dict(cls, children: Dict[T, _A[T]]) -> _A[T]:
+              """Creates a structural node from a dictionary of children."""
+              if not children:
+                  return _A_ROOT
+              # Sort items by key for a canonical representation.
+              sorted_items = tuple(sorted(children.items()))
+              return cls(sorted_items)
+
+          def get_children(self) -> Dict[T, _A[T]]:
+              return dict(self._children)
+
+          def _iter_stacks(self) -> Iterable[List[T]]:
+              for value, child_node in self._children:
+                  for stack_suffix in child_node._iter_stacks():
+                      yield [value] + stack_suffix
 
 
-      def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-          merged_acc = gss.reduce_acc()
-          if merged_acc is None:
-              return ffi.HybridL2Bitset.all()
-          return merged_acc.terminals_union.complement()
+      # ------------------------------
+      # LeveledGSS implementation
+      # ------------------------------
 
 
-      class Model(GraphProvider):
+      @dataclass(eq=False, frozen=True)
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
           """
-          Precomputed trie model (third-generation), simplified and concise.
+          A GSS implementation using a recursive, "leveled" representation.
+
+          This class is a union of three variants, identified by `_kind`:
+          1. EMPTY: Represents a GSS with no active stacks.
+          2. GROUP: A "sucked-up" state where multiple stack structures (`_A` node)
+             share a single, common accumulator. This is a compact leaf in the GSS tree.
+          3. BRANCH: A "distributed" state representing a fork in the GSS. It holds
+             an optional accumulator for the empty stack and a dictionary mapping
+             stack prefixes (`T`) to sub-GSS instances.
+
+          A canonical factory `_create` ensures that the most compact representation
+          (GROUP) is used whenever possible by applying the "suck-up" logic automatically.
           """
 
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
-              self.tokenizer_initial_state: Optional[int] = None
+          _kind: str
+          # GROUP payload
+          _node: Optional[_A[T]] = None
+          _acc: Optional[Acc] = None
+          # BRANCH payload
+          _empty_acc: Optional[Acc] = None
+          _children: Optional[Dict[T, LeveledGSS[T, Acc]]] = None
 
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
+          # -------------------------
+          # Construction and Canonicalization
+          # -------------------------
 
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+          @classmethod
+          def _empty(cls) -> LeveledGSS[T, Acc]:
+              return cls(_kind="EMPTY")
 
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
+          @classmethod
+          def _group(cls, node: _A[T], acc: Acc) -> LeveledGSS[T, Acc]:
+              return cls(_kind="GROUP", _node=node, _acc=acc)
 
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv = bs_from_json(dumps(llm_bv_json))
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv = bs_from_json(dumps(state_bv_json))
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
+          @classmethod
+          def _branch(
+              cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+          ) -> LeveledGSS[T, Acc]:
+              return cls(_kind="BRANCH", _empty_acc=empty_acc, _children=children)
 
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
+          # -------------------------
 
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              model.possible_matches_cache = constraint.possible_matches()
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-              return model
-
+          @classmethod
           @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  allowed_terminals_l2 = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
-                      if not matched_bv.is_subset(allowed_for_state):
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_l2 = acc.terminals_union
-                  new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_l2.get_l2_bitset(old_sid)
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  new_l2 = ffi.HybridL2Bitset.all()
-                  for new_sid, bv in new_bvs.items():
-                      new_l2.insert_l2_bitset(new_sid, bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_l2 = acc.terminals_union
-                  new_l2 = current_l2.union(current_l2)  # clone
-                  curr_bv = current_l2.get_l2_bitset(state_id)
-                  if curr_bv.contains(terminal_id):
-                      to_remove = ffi.Bitset.from_indices([terminal_id])
-                      new_bv = curr_bv.difference(to_remove)
-                      new_l2.insert_l2_bitset(state_id, new_bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
+          def _create(
+              cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+          ) -> LeveledGSS[T, Acc]:
               """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Canonical factory for LeveledGSS. This is the sole entry point for
+              creating instances, ensuring invariants are maintained.
               """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, ffi.Bitset] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
+              # Filter out any empty children, as they don't represent any stacks.
+              live_children = {
+                  v: c for v, c in children.items() if not c.is_empty()
               }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
-              self.state = merged_states
+              if empty_acc is None and not live_children:
+                  return cls._empty()
 
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
+              # "Suck-up" logic: If there's no empty stack accumulator and all children
+              # are GROUP nodes with the same accumulator, merge them into a single GROUP.
+              can_suck_up = empty_acc is None and live_children
+              if can_suck_up:
+                  child_vals = list(live_children.values())
+                  first_child = child_vals[0]
+                  if first_child._kind == "GROUP":
+                      first_acc = first_child._acc
+                      if all(
+                          c._kind == "GROUP" and c._acc == first_acc for c in child_vals[1:]
+                      ):
+                          new_a_children = {
+                              v: cast(_A[T], c._node) for v, c in live_children.items()
+                          }
+                          new_a_node = _AInternal.from_dict(new_a_children)
+                          return cls._group(new_a_node, first_acc)
 
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
+              return cls._branch(empty_acc, live_children)
 
           @profile
-          def get_mask(self) -> RangeSet:
+          def _distribute(self) -> LeveledGSS[T, Acc]:
+              """Converts a GROUP node into its equivalent BRANCH representation."""
+              if self._kind != "GROUP":
+                  return self
+
+              node, acc = cast(_A[T], self._node), cast(Acc, self._acc)
+              if isinstance(node, _ARoot):
+                  return self._create(acc, {})
+              if isinstance(node, _AInternal):
+                  new_children = {
+                      v: self._group(c, acc) for v, c in node.get_children().items()
+                  }
+                  return self._create(None, new_children)
+              return self._empty()  # Should be unreachable
+
+          # -------------------------
+          # GSS interface
+          # -------------------------
+
+          @classmethod
+          def from_stacks(
+              cls: Type[LeveledGSS], stacks: List[Tuple[List[T], Acc]]
+          ) -> LeveledGSS[T, Acc]:
+              if not stacks:
+                  return cls._empty()
+
+              empty_acc: Optional[Acc] = None
+              by_prefix: Dict[T, List[Tuple[List[T], Acc]]] = defaultdict(list)
+
+              for stack, acc in stacks:
+                  if not stack:
+                      empty_acc = acc if empty_acc is None else empty_acc.merge(acc)
+                  else:
+                      by_prefix[stack[0]].append((stack[1:], acc))
+
+              children = {
+                  prefix: cls.from_stacks(s_list) for prefix, s_list in by_prefix.items()
+              }
+              return cls._create(empty_acc, children)
+
+          @profile
+          def push(self, value: T) -> LeveledGSS[T, Acc]:
+              if self.is_empty():
+                  return self._empty()
+              return self._create(None, {value: self})
+
+          @profile
+          def pop(self) -> LeveledGSS[T, Acc]:
+              if self._kind == "EMPTY":
+                  return self
+              if self._kind == "GROUP":
+                  node = cast(_A[T], self._node)
+                  if isinstance(node, _ARoot):  # Popping the empty stack
+                      return self._empty()
+                  # Distribute and merge the children
+                  distributed = self._distribute()
+                  return LeveledGSS.merge_many(cast(Dict, distributed._children).values())
+              # BRANCH
+              return LeveledGSS.merge_many(cast(Dict, self._children).values())
+
+          def is_empty(self) -> bool:
+              """Checks if the GSS represents any stacks."""
+              return self._kind == "EMPTY"
+
+          @profile
+          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+              gss = self._distribute()
+              if gss._kind != "BRANCH":  # Can only be EMPTY
+                  return self._empty()
+
+              if value is None:
+                  return self._create(gss._empty_acc, {})
+              else:
+                  child = cast(Dict, gss._children).get(value)
+                  if child is None:
+                      return self._empty()
+                  return self._create(None, {value: child})
+
+          @profile
+          def apply(
+              self, func: Callable[[Acc], Acc], *, _memo: Optional[Dict[int, Any]] = None
+          ) -> LeveledGSS[T, Acc]:
+              if _memo is None:
+                  _memo = {}
+              if id(self) in _memo:
+                  return _memo[id(self)]
+
+              if self._kind == "EMPTY":
+                  result = self
+              elif self._kind == "GROUP":
+                  new_acc = func(cast(Acc, self._acc))
+                  if new_acc is self._acc:
+                      result = self
+                  else:
+                      result = self._group(cast(_A[T], self._node), new_acc)
+              else:  # BRANCH
+                  new_empty_acc = (
+                      func(self._empty_acc) if self._empty_acc is not None else None
+                  )
+                  empty_acc_changed = new_empty_acc is not self._empty_acc
+
+                  children = cast(Dict, self._children)
+                  new_children = {}
+                  children_changed = False
+                  for v, c in children.items():
+                      new_c = c.apply(func, _memo=_memo)
+                      if new_c is not c:
+                          children_changed = True
+                      new_children[v] = new_c
+
+                  if not empty_acc_changed and not children_changed:
+                      result = self
+                  else:
+                      result = self._create(new_empty_acc, new_children)
+
+              _memo[id(self)] = result
+              return result
+
+          @profile
+          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+              if self._kind == "EMPTY":
+                  return self
+              if self._kind == "GROUP":
+                  return self if predicate(cast(Acc, self._acc)) else self._empty()
+
+              # BRANCH
+              new_empty_acc = (
+                  self._empty_acc
+                  if self._empty_acc is not None and predicate(self._empty_acc)
+                  else None
+              )
+              empty_acc_changed = new_empty_acc is not self._empty_acc
+
+              children = cast(Dict, self._children)
+              new_children = {}
+              children_changed = False
+              for v, c in children.items():
+                  new_c = c.prune(predicate)
+                  if new_c is not c:
+                      children_changed = True
+                  new_children[v] = new_c
+
+              if not empty_acc_changed and not children_changed:
+                  return self
+
+              return self._create(new_empty_acc, new_children)
+
+          @profile
+          def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
+              # Convert other to LeveledGSS if it isn't one.
+              if not isinstance(other, LeveledGSS):
+                  ref_gss = other.to_reference_impl()
+                  # ref_gss._stacks has top-at-tail. LeveledGSS.from_stacks expects top-at-head.
+                  stacks_for_leveled = [(s[::-1], acc) for s, acc in ref_gss._stacks]
+                  other = LeveledGSS.from_stacks(stacks_for_leveled)
+
+              # Now both are LeveledGSS.
+              if self.is_empty():
+                  return other
+              if other.is_empty():
+                  return self
+
+              gss1 = self._distribute()
+              gss2 = other._distribute()
+
+              # After distribution, they must be BRANCH kind (or EMPTY, handled above).
+              # Merge empty accumulators
+              merged_empty_acc: Optional[Acc] = None
+              if gss1._empty_acc is not None and gss2._empty_acc is not None:
+                  merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
+              elif gss1._empty_acc is not None:
+                  merged_empty_acc = gss1._empty_acc
+              else:
+                  merged_empty_acc = gss2._empty_acc
+
+              # Merge children
+              gss1_children = gss1._children or {}
+              gss2_children = gss2._children or {}
+              all_keys = gss1_children.keys() | gss2_children.keys()
+
+              merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
+              for k in all_keys:
+                  c1 = gss1_children.get(k)
+                  c2 = gss2_children.get(k)
+                  merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
+
+              return LeveledGSS._create(merged_empty_acc, merged_children)
+
+          def peek(self) -> Set[T]:
+              gss = self._distribute()
+              if gss._kind == "BRANCH":
+                  return set(cast(Dict, gss._children).keys())
+              return set()
+
+          def _iter_stacks(self) -> Iterable[Tuple[List[T], Acc]]:
+              if self._kind == "EMPTY":
+                  return
+              if self._kind == "GROUP":
+                  acc = cast(Acc, self._acc)
+                  for stack_list in cast(_A[T], self._node)._iter_stacks():
+                      yield stack_list, acc
+              else:  # BRANCH
+                  if self._empty_acc is not None:
+                      yield [], self._empty_acc
+                  for value, child_gss in cast(Dict, self._children).items():
+                      for stack_suffix, acc in child_gss._iter_stacks():
+                          yield [value] + stack_suffix, acc
+
+          def reduce_acc(self) -> Optional[Acc]:
+              accs = [acc for _, acc in self._iter_stacks()]
+              if not accs:
+                  return None
+              return reduce(lambda a, b: a.merge(b), accs)
+
+          def to_reference_impl(self) -> ReferenceGSS[T, Acc]:
+              # LeveledGSS internal representation is top-at-head for stack lists.
+              # ReferenceGSS representation is top-at-tail.
+              # We must reverse the lists to convert between them.
+              stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
+              return ReferenceGSS.from_stacks(stacks_for_ref)
+
+          def _validate_invariants(self) -> None:
               """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+              Recursively checks that this GSS node and all its descendants
+              adhere to the canonical representation invariants.
+              Raises AssertionError if an invariant is violated.
               """
-              state_map = self.state
-              all_ones_mask = self.all_internal_llm_tokens_bitset
-              final_mask = ffi.Bitset.zeros()
+              if self._kind == "BRANCH":
+                  # Invariant 1: A BRANCH node should not be "suck-up-able".
+                  # This would mean it's a non-canonical representation that should be a GROUP.
+                  children = cast(Dict, self._children)
+                  if self._empty_acc is None and children:
 
-              values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = {}
-              depth_heap: List[int] = []
+                      def get_group_parts(
+                          g: LeveledGSS[T, Acc],
+                      ) -> Optional[Tuple[_A[T], Acc]]:
+                          """Helper to see if a GSS is equivalent to a simple GROUP."""
+                          if g._kind == "GROUP":
+                              return g._node, g._acc
+                          # A BRANCH representing a single empty stack is equivalent to a GROUP.
+                          if (
+                              g._kind == "BRANCH"
+                              and g._empty_acc is not None
+                              and not g._children
+                          ):
+                              return _A_ROOT, g._empty_acc
+                          return None
 
-              heappush = heapq.heappush
-              heappop = heapq.heappop
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-              arena = self.arena
-              is_end = self.is_end
+                      child_vals = list(children.values())
+                      first_child_parts = get_group_parts(child_vals[0])
 
-              # Seed
-              for sid, gss in state_map.items():
-                  new_mask = all_ones_mask
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
+                      if first_child_parts:
+                          _, first_acc = first_child_parts
 
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      existing_gss, existing_mask = existing
-                      merged_gss = existing_gss.merge(gss)
-                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = (gss, new_mask)
+                          all_match = True
+                          for c in child_vals[1:]:
+                              parts = get_group_parts(c)
+                              if not parts or parts[1] != first_acc:
+                                  all_match = False
+                                  break
 
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
+                          if all_match:
+                              raise AssertionError(
+                                  "Invariant violation: non-canonical BRANCH node that should be a GROUP node. "
+                                  f"Node: {self!r}"
+                              )
 
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
+                  # Recursively validate children
+                  for child in cast(Dict, self._children).values():
+                      child._validate_invariants()
 
-              # Main loop
-              while True:
-                  node_indices: Optional[set[int]] = None
-                  current_depth = -1
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
+              elif self._kind == "GROUP":
+                  # Invariant 2: A GROUP node should not represent just an empty stack.
+                  # That should be a BRANCH node with an _empty_acc.
+                  if self._node == _A_ROOT:
+                      raise AssertionError(
+                          "Invariant violation: GROUP node with _ARoot, should be a BRANCH. "
+                          f"Node: {self!r}"
+                      )
 
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          continue
+          # -------------------------
+          # Dunder methods
+          # -------------------------
 
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          continue
-                      gss_node, llm_mask = item
+          def __eq__(self, other: object) -> bool:
+              if self is other:
+                  return True
+              if isinstance(other, LeveledGSS):
+                  # Fast path for two canonical LeveledGSS instances
+                  return (
+                      self._kind == other._kind
+                      and self._node == other._node
+                      and self._acc == other._acc
+                      and self._empty_acc == other._empty_acc
+                      and self._children == other._children
+                  )
+              if isinstance(other, GSS):
+                  return self.to_reference_impl() == other.to_reference_impl()
+              return NotImplemented
 
-                      # End-node handling
-                      if is_end(node_idx):
-                          forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
-                          possible_matches = self.possible_matches_cache
-
-                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
-                              if disallowed_bv.is_empty():
-                                  continue
-                              end = min(end, self.tokenizer.max_state())
-                              for tsid in range(start, end + 1):
-                                  possible_matches_for_state = possible_matches.get(tsid)
-                                  if not possible_matches_for_state:
-                                      continue
-                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                      terminal_id = int(terminal_id_str)
-                                      if disallowed_bv.contains(terminal_id):
-                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
-
-                          gss_active_tokens = all_ones_mask
-                          glr_active_tokens = llm_mask.intersection(gss_active_tokens)
-                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                          if not final_allowed_tokens.is_empty():
-                              final_mask = final_mask.union(final_allowed_tokens)
-
-                      if llm_mask.is_empty():
-                          stopped.add(node_idx)
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
-                          popped = gss_node.popn(pop)
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              matched: List[GSS] = []
-                              if not state_bv.is_empty():
-                                  for sid_val in popped.peek():
-                                      if state_bv.contains(sid_val):
-                                          matched.append(popped.isolate(sid_val))
-                              if not matched:
-                                  continue
-
-                              child_gss_node = GSS.merge_many(matched)
-                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                              d = int(dest_idx)
-                              existing = values.get(d)
-                              if existing is not None:
-                                  existing_gss, existing_mask = existing
-                                  merged_gss = existing_gss.merge(child_gss_node)
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (merged_gss, combined_mask)
-                              else:
-                                  values[d] = (child_gss_node, child_llm_mask)
-
-                              enqueue(max_depth[d], d)
-
-              # Convert internal mask back to original IDs
-              original_mask = ffi.Bitset.zeros()
-              for internal_id in final_mask.to_indices():
-                  if internal_id in self.internal_to_original_map:
-                      original_mask.insert(self.internal_to_original_map[internal_id])
-              return RangeSet.from_ranges(original_mask.to_ranges())
+          def __repr__(self) -> str:
+              if self._kind == "EMPTY":
+                  return "LeveledGSS(EMPTY)"
+              if self._kind == "GROUP":
+                  stacks = sorted(list(cast(_A[T], self._node)._iter_stacks()))
+                  return f"LeveledGSS(GROUP stacks={stacks!r}, acc={self._acc!r})"
+              # BRANCH
+              parts = []
+              if self._empty_acc is not None:
+                  parts.append(f"[]: {self._empty_acc!r}")
+              # Sort for deterministic output
+              sorted_children = sorted(cast(Dict, self._children).items())
+              for v, c in sorted_children:
+                  parts.append(f"{v!r}: {c!r}")
+              return f"LeveledGSS(BRANCH {{{', '.join(parts)}}})"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1888,7 +984,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -2075,7 +1171,7 @@ messages:
               """
               # Filter out any empty children, as they don't represent any stacks.
               live_children = {
-                  v: c for v, c in children.items() if not c._is_structurally_empty()
+                  v: c for v, c in children.items() if not c.is_empty()
               }
 
               if empty_acc is None and not live_children:
@@ -2116,10 +1212,6 @@ messages:
                   return self._create(None, new_children)
               return self._empty()  # Should be unreachable
 
-          def _is_structurally_empty(self) -> bool:
-              """Checks if the GSS represents any stacks."""
-              return self._kind == "EMPTY"
-
           # -------------------------
           # GSS interface
           # -------------------------
@@ -2147,7 +1239,7 @@ messages:
 
           @profile
           def push(self, value: T) -> LeveledGSS[T, Acc]:
-              if self._is_structurally_empty():
+              if self.is_empty():
                   return self._empty()
               return self._create(None, {value: self})
 
@@ -2165,19 +1257,22 @@ messages:
               # BRANCH
               return LeveledGSS.merge_many(cast(Dict, self._children).values())
 
+          @profile
+          def popn(self, n: int) -> LeveledGSS[T, Acc]:
+              """Pops n times."""
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
           def is_empty(self) -> bool:
-              if self._kind == "GROUP":
-                  return self._node == _A_ROOT
-              if self._kind == "BRANCH":
-                  return self._empty_acc is not None and not self._children
-              return False
+              """Checks if the GSS represents any stacks."""
+              return self._kind == "EMPTY"
 
           @profile
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
               gss = self._distribute()
-              if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
-                  if gss.is_empty() and value is None:
-                      return gss
+              if gss._kind != "BRANCH":  # Can only be EMPTY
                   return self._empty()
 
               if value is None:
@@ -2242,9 +1337,9 @@ messages:
                   other = LeveledGSS.from_stacks(stacks_for_leveled)
 
               # Now both are LeveledGSS.
-              if self._is_structurally_empty():
+              if self.is_empty():
                   return other
-              if other._is_structurally_empty():
+              if other.is_empty():
                   return self
 
               gss1 = self._distribute()
@@ -2306,6 +1401,65 @@ messages:
               stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
               return ReferenceGSS.from_stacks(stacks_for_ref)
 
+          def _validate_invariants(self) -> None:
+              """
+              Recursively checks that this GSS node and all its descendants
+              adhere to the canonical representation invariants.
+              Raises AssertionError if an invariant is violated.
+              """
+              if self._kind == "BRANCH":
+                  # Invariant 1: A BRANCH node should not be "suck-up-able".
+                  # This would mean it's a non-canonical representation that should be a GROUP.
+                  children = cast(Dict, self._children)
+                  if self._empty_acc is None and children:
+
+                      def get_group_parts(
+                          g: LeveledGSS[T, Acc],
+                      ) -> Optional[Tuple[_A[T], Acc]]:
+                          """Helper to see if a GSS is equivalent to a simple GROUP."""
+                          if g._kind == "GROUP":
+                              return g._node, g._acc
+                          # A BRANCH representing a single empty stack is equivalent to a GROUP.
+                          if (
+                              g._kind == "BRANCH"
+                              and g._empty_acc is not None
+                              and not g._children
+                          ):
+                              return _A_ROOT, g._empty_acc
+                          return None
+
+                      child_vals = list(children.values())
+                      first_child_parts = get_group_parts(child_vals[0])
+
+                      if first_child_parts:
+                          _, first_acc = first_child_parts
+
+                          all_match = True
+                          for c in child_vals[1:]:
+                              parts = get_group_parts(c)
+                              if not parts or parts[1] != first_acc:
+                                  all_match = False
+                                  break
+
+                          if all_match:
+                              raise AssertionError(
+                                  "Invariant violation: non-canonical BRANCH node that should be a GROUP node. "
+                                  f"Node: {self!r}"
+                              )
+
+                  # Recursively validate children
+                  for child in cast(Dict, self._children).values():
+                      child._validate_invariants()
+
+              elif self._kind == "GROUP":
+                  # Invariant 2: A GROUP node should not represent just an empty stack.
+                  # That should be a BRANCH node with an _empty_acc.
+                  if self._node == _A_ROOT:
+                      raise AssertionError(
+                          "Invariant violation: GROUP node with _ARoot, should be a BRANCH. "
+                          f"Node: {self!r}"
+                      )
+
           # -------------------------
           # Dunder methods
           # -------------------------
@@ -2345,574 +1499,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python.py'
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.leveled_impl import LeveledGSS as GSS
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: ffi.HybridL2Bitset
-
-          def __hash__(self):
-              return hash(self.terminals_union)
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
-
-
-      def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-          merged_acc = gss.reduce_acc()
-          if merged_acc is None:
-              return ffi.HybridL2Bitset.all()
-          return merged_acc.terminals_union.complement()
-
-
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
-              self.tokenizer_initial_state: Optional[int] = None
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
-
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv = bs_from_json(dumps(llm_bv_json))
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv = bs_from_json(dumps(state_bv_json))
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              model.possible_matches_cache = constraint.possible_matches()
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  allowed_terminals_l2 = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
-                      if not matched_bv.is_subset(allowed_for_state):
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_l2 = acc.terminals_union
-                  new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_l2.get_l2_bitset(old_sid)
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  new_l2 = ffi.HybridL2Bitset.all()
-                  for new_sid, bv in new_bvs.items():
-                      new_l2.insert_l2_bitset(new_sid, bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_l2 = acc.terminals_union
-                  new_l2 = current_l2.union(current_l2)  # clone
-                  curr_bv = current_l2.get_l2_bitset(state_id)
-                  if curr_bv.contains(terminal_id):
-                      to_remove = ffi.Bitset.from_indices([terminal_id])
-                      new_bv = curr_bv.difference(to_remove)
-                      new_l2.insert_l2_bitset(state_id, new_bv)
-                  return PyAcc(terminals_union=new_l2)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, ffi.Bitset] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  terminals = ffi.Bitset.zeros()
-                  for terminal_id, _ in matches:
-                      terminals.insert(terminal_id)
-                  terminals_map[tokenizer_sid] = terminals
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-
-          @profile
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-              """
-              state_map = self.state
-              all_ones_mask = self.all_internal_llm_tokens_bitset
-              final_mask = ffi.Bitset.zeros()
-
-              values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = {}
-              depth_heap: List[int] = []
-
-              heappush = heapq.heappush
-              heappop = heapq.heappop
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-              arena = self.arena
-              is_end = self.is_end
-
-              # Seed
-              for sid, gss in state_map.items():
-                  new_mask = all_ones_mask
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      existing_gss, existing_mask = existing
-                      merged_gss = existing_gss.merge(gss)
-                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-                  else:
-                      values[root_idx] = (gss, new_mask)
-
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
-
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
-
-              # Main loop
-              while True:
-                  node_indices: Optional[set[int]] = None
-                  current_depth = -1
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
-
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          continue
-
-                      item = values.pop(node_idx, None)
-                      if item is None:
-                          continue
-                      gss_node, llm_mask = item
-
-                      # End-node handling
-                      if is_end(node_idx):
-                          forbidden_llm_tokens = ffi.Bitset.zeros()
-                          disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
-                          possible_matches = self.possible_matches_cache
-
-                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
-                              if disallowed_bv.is_empty():
-                                  continue
-                              end = min(end, self.tokenizer.max_state())
-                              for tsid in range(start, end + 1):
-                                  possible_matches_for_state = possible_matches.get(tsid)
-                                  if not possible_matches_for_state:
-                                      continue
-                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                      terminal_id = int(terminal_id_str)
-                                      if disallowed_bv.contains(terminal_id):
-                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
-
-                          gss_active_tokens = all_ones_mask
-                          glr_active_tokens = llm_mask.intersection(gss_active_tokens)
-                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                          if not final_allowed_tokens.is_empty():
-                              final_mask = final_mask.union(final_allowed_tokens)
-
-                      if llm_mask.is_empty():
-                          stopped.add(node_idx)
-                          continue
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
-                          popped = gss_node.popn(pop)
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              matched: List[GSS] = []
-                              if not state_bv.is_empty():
-                                  for sid_val in popped.peek():
-                                      if state_bv.contains(sid_val):
-                                          matched.append(popped.isolate(sid_val))
-                              if not matched:
-                                  continue
-
-                              child_gss_node = GSS.merge_many(matched)
-                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                              d = int(dest_idx)
-                              existing = values.get(d)
-                              if existing is not None:
-                                  existing_gss, existing_mask = existing
-                                  merged_gss = existing_gss.merge(child_gss_node)
-                                  combined_mask = existing_mask.union(child_llm_mask)
-                                  values[d] = (merged_gss, combined_mask)
-                              else:
-                                  values[d] = (child_gss_node, child_llm_mask)
-
-                              enqueue(max_depth[d], d)
-
-              # Convert internal mask back to original IDs
-              original_mask = ffi.Bitset.zeros()
-              for internal_id in final_mask.to_indices():
-                  if internal_id in self.internal_to_original_map:
-                      original_mask.insert(self.internal_to_original_map[internal_id])
-              return RangeSet.from_ranges(original_mask.to_ranges())
-
-      ```
-    metadata:
-      filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: |-
-      Here was my original prompt for creating the GSS code:
-
-      > Create a new implementation of GSS.
-      > 
-      > This impl should be a graph. Edges will carry T. But also max depth.
-      > a map from a parent to its children could be a map T -> max depth -> node
-      > This should reduce unnecessary merges in some cases. e.g. imagine we have these stacks (same acc - doesn't matter):
-      > - [1,2,3,4]
-      > - [1,2,4]
-      > Could be this
-      > A <-1- B <-2- C <-3- D <-4- E
-      > C <-4- E
-      > this'd be an efficient representation. But it requires us to have 2 edges to different nodes on E with T=4. So we'd be required to merge more eagerly.
-      > having max depth solves this.
-      > 
-      > I want Accs in this implementation to existing only at one 'level', if that makes sense.
-      > ie either all of a node's children have Accs, or none of them do. And if the parent has an acc then none of its children do.
-      > And it should be maintained such that if all the children's accs are equal, the accs are sucked up into the parent. ie they aren't at the children any more.
-      > So, if the children of a node have accs, then there must be at least one inequality between them.
-      > 
-      > We can enforce that Accs can only exist at one level by defining different types of node: type A that can be either root or an internal node that maps to other type As, and type B that can either contain type A and an Acc OR that maps to other type Bs. 'Contain' here means just contains one - wraps. Maps means contains a node map.
-      > If we were working in Rust, these'd both be enums.
-      > 
-      > Oh except that type B can also be a variant that represents 'empty' or having 'no stacks'. Having 'no stack' is different from having 'an empty stack'.
-      > 
-      > When I say accs only exist at one 'level', I don't mean they necessarily exist all at the same depth. But rather that if we drew the GSS on a page top to bottom, and drew a dot where each acc exists, then drew a line through the accs, the line would go up and down but would always go right, or left, on the page. ie each x-value in the line has exactly one y-value. (But not that it'd be a straight line.)
-      > 
-      > These are just the invariants I want. How you achieve them is up to you. Do it as elegantly as possible.
-      > 
-      > It should behave equivalently to reference_impl.py (with the caveat that reduce_acc is only guaranteed to output the same value between impls as long as the reduce closure is order-independent.)
-
-      The main type we deal with should be `LeveledGSS`. But this itself should be a union of three variants: containing A and Acc, mapping to other Bs, or being empty. And A should also be a union of variants: one that represents being a root node, one for an internal node that maps to other type As.
-
-      The 'suck up' logic, in terms of types A and B etc, means this:
-      - Suppose we have a node of type B of the variant that that maps to other nodes of type B.
-      - Suppose all of those children are nodes of type B of the other variant -- the one that that contains a node of type A and an Acc.
-      - Suppose the Accs in these children are all equal.
-      - Then we can suck up the Acc into the parent.
-      - The parent becomes a node (still of type B) of the variant that contains a node of type A and Acc.
-      - The Acc it contains is the one on the children.
-      - The node of type A it contains is a new node of the type A variant that maps to other type A nodes.
-      - Its children are each of the type A nodes inside the type B children of the original parent. They carry the same Ts.
-      ie we go from a type B node pointing to other type B nodes, to a type B node containing a type A node (and an Acc) that points to other type A nodes. And those child type A nodes are all those type B nodes that the original parent pointed to.
-
-      It's crucial to use memoization in `apply` to ensure that shared nodes remain shared.
-
-
-      Here's the node types in Rust, to show you what I mean:
-
-      ```rust
-      use std::collections::HashMap;
-      use std::rc::Rc;
-
-      #[derive(Debug, Clone)]
-      pub enum LeveledGSS<T, Acc> {
-          WithAcc {
-              node: LeveledGSSInner<T>,
-              acc: Acc,
-          },
-          Internal(HashMap<T, HashMap<usize, Rc<LeveledGSS<T, Acc>>>>),
-          Empty,
-      }
-
-      #[derive(Debug, Clone)]
-      pub enum LeveledGSSInner<T> {
-          Root,
-          Internal(HashMap<T, HashMap<usize, Rc<LeveledGSSInner<T>>>>),
-      }
-      ```
-    metadata:
-  - user: Write a function that validates the invariants I've specified for the GSS.
-      In particular, we need to ensure that Acc is always 'sucked up' when it can
-      be.
+  - user: '`prune` and `apply` should not unnecessarily create new nodes. Shared nodes
+      are the cornerstone of performance in this code. If we go around creating multiple
+      equal nodes at different places in memory, it hurts performance greatly.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2931,176 +1520,95 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the validation function and fix some related issues in your GSS implementation, followed by the git diff.
+      Of course. To improve performance by avoiding unnecessary node creation in `apply` and `prune`, we'll modify them to return the existing node if the operation results in no changes. This leverages structural sharing and is key to the performance of this kind of immutable data structure.
+
+      Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will make the following changes to `python/gss_tester/leveled_impl.py`:
+      #### File: `python/gss_tester/leveled_impl.py`
 
-      1.  **Fix `is_empty()` method**: The existing `is_empty()` method incorrectly checks if the GSS contains only the empty stack, whereas the calling code in `precompute3_model_pure_python.py` expects it to check if the GSS contains *any* stacks at all.
-          *   I will delete the current `is_empty()` method.
-          *   I will find the method `_is_structurally_empty()`, which does the correct check, and rename it to `is_empty()`, making it public.
-          *   I will update all internal calls (`_create`, `push`, `merge`) from `_is_structurally_empty()` to the new public `is_empty()`.
+      1.  **Optimize the `apply` method:**
+          *   In the `elif self._kind == "GROUP":` block, we will first compute the new accumulator. If it is identical to the old one, we will return `self` immediately, avoiding the creation of a new `LeveledGSS` node.
+          *   In the `else: # BRANCH` block, we will replace the dictionary comprehension. We'll iterate over the children, calling `apply` recursively and tracking if any of the children or the `_empty_acc` have changed. If no changes occurred, we'll return `self`. Otherwise, we will call `_create` to construct a new node.
 
-      2.  **Update `isolate()` method**: This method was the only internal user of the old, incorrect `is_empty()` logic. I will rewrite it to be simpler and correct without that dependency.
+      2.  **Optimize the `prune` method:**
+          *   In the `BRANCH` block, we will apply a similar optimization as in `apply`. We will check if `_empty_acc` is pruned or if any children are changed by the recursive `prune` call. If there are no changes, we return `self`. If there are changes, we proceed with `_create` to build a new, pruned GSS.
 
-      3.  **Add `popn()` method**: The model code in `precompute3_model_pure_python.py` calls `gss.popn(n)` to pop multiple items from the stack. This method is missing from `LeveledGSS`. I will add it. It will simply call `pop()` `n` times.
+      These changes ensure that we only allocate new nodes when the structure or accumulator values actually change.
 
-      4.  **Add `_validate_invariants()` method**: As you requested, I will add a new method `_validate_invariants` to the `LeveledGSS` class. This method will recursively traverse the GSS structure and check for two key invariants of the canonical form:
-          *   It ensures that a `BRANCH` node could not have been represented more compactly as a `GROUP` node (the "suck-up" rule). This check is sophisticated enough to identify non-canonical forms that the current `_create` method fails to prevent.
-          *   It ensures that a `GROUP` node is not used to represent a single empty stack, as the canonical form for that is a `BRANCH` node with an `_empty_acc`.
+      ### Git Diff
 
-      No changes are needed for `python/aug25/models/precompute3_model_pure_python.py` as it already assumes these fixes are in place.
-
-      ### Git Diffs
-
-      Here is the git diff for the changes to `python/gss_tester/leveled_impl.py`.
+      Here is the git diff to apply these changes:
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 455f5f4..c698188 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -157,7 +157,7 @@
-               """
-               # Filter out any empty children, as they don't represent any stacks.
-               live_children = {
-      -            v: c for v, c in children.items() if not c._is_structurally_empty()
-      +            v: c for v, c in children.items() if not c.is_empty()
-               }
-       
-               if empty_acc is None and not live_children:
-      @@ -196,10 +196,6 @@
-                   return self._create(None, new_children)
-               return self._empty()  # Should be unreachable
-       
-      -    def _is_structurally_empty(self) -> bool:
-      -        """Checks if the GSS represents any stacks."""
-      -        return self._kind == "EMPTY"
-      -
-           # -------------------------
-           # GSS interface
-           # -------------------------
-      @@ -225,7 +221,7 @@
-       
-           @profile
-           def push(self, value: T) -> LeveledGSS[T, Acc]:
-      -        if self._is_structurally_empty():
-      +        if self.is_empty():
-                   return self._empty()
-               return self._create(None, {value: self})
-       
-      @@ -241,22 +237,25 @@
-               # BRANCH
-               return LeveledGSS.merge_many(cast(Dict, self._children).values())
-       
-      +    @profile
-      +    def popn(self, n: int) -> LeveledGSS[T, Acc]:
-      +        """Pops n times."""
-      +        gss = self
-      +        for _ in range(n):
-      +            gss = gss.pop()
-      +        return gss
+      @@ -291,18 +291,29 @@
+               if self._kind == "EMPTY":
+                   result = self
+               elif self._kind == "GROUP":
+      -            result = self._group(cast(_A[T], self._node), func(cast(Acc, self._acc)))
+      +            new_acc = func(cast(Acc, self._acc))
+      +            if new_acc is self._acc:
+      +                result = self
+      +            else:
+      +                result = self._group(cast(_A[T], self._node), new_acc)
+               else:  # BRANCH
+                   new_empty_acc = (
+                       func(self._empty_acc) if self._empty_acc is not None else None
+                   )
+      -            new_children = {
+      -                v: c.apply(func, _memo=_memo)
+      -                for v, c in cast(Dict, self._children).items()
+      -            }
+      -            result = self._create(new_empty_acc, new_children)
+      +            empty_acc_changed = new_empty_acc is not self._empty_acc
       +
-           def is_empty(self) -> bool:
-      -        if self._kind == "GROUP":
-      -            return self._node == _A_ROOT
-      -        if self._kind == "BRANCH":
-      -            return self._empty_acc is not None and not self._children
-      -        return False
-      +        """Checks if the GSS represents any stacks."""
-      +        return self._kind == "EMPTY"
-       
-           @profile
-           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-               gss = self._distribute()
-      -        if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
-      -            if gss.is_empty() and value is None:
-      -                return gss
-      +        if gss._kind != "BRANCH":  # Can only be EMPTY
-                   return self._empty()
-       
-               if value is None:
-                   return self._create(gss._empty_acc, {})
-               else:
-                   child = cast(Dict, gss._children).get(value)
-      @@ -310,9 +309,9 @@
-                   other = LeveledGSS.from_stacks(stacks_for_leveled)
-       
-               # Now both are LeveledGSS.
-      -        if self._is_structurally_empty():
-      +        if self.is_empty():
-                   return other
-      -        if other._is_structurally_empty():
-      +        if other.is_empty():
-                   return self
-       
-               gss1 = self._distribute()
-      @@ -369,6 +368,61 @@
-               # We must reverse the lists to convert between them.
-               stacks_for_ref = [(s[::-1], acc) for s, acc in self._iter_stacks()]
-               return ReferenceGSS.from_stacks(stacks_for_ref)
-      +
-      +    def _validate_invariants(self) -> None:
-      +        """
-      +        Recursively checks that this GSS node and all its descendants
-      +        adhere to the canonical representation invariants.
-      +        Raises AssertionError if an invariant is violated.
-      +        """
-      +        if self._kind == "BRANCH":
-      +            # Invariant 1: A BRANCH node should not be "suck-up-able".
-      +            # This would mean it's a non-canonical representation that should be a GROUP.
       +            children = cast(Dict, self._children)
-      +            if self._empty_acc is None and children:
+      +            new_children = {}
+      +            children_changed = False
+      +            for v, c in children.items():
+      +                new_c = c.apply(func, _memo=_memo)
+      +                if new_c is not c:
+      +                    children_changed = True
+      +                new_children[v] = new_c
       +
-      +                def get_group_parts(
-      +                    g: LeveledGSS[T, Acc],
-      +                ) -> Optional[Tuple[_A[T], Acc]]:
-      +                    """Helper to see if a GSS is equivalent to a simple GROUP."""
-      +                    if g._kind == "GROUP":
-      +                        return g._node, g._acc
-      +                    # A BRANCH representing a single empty stack is equivalent to a GROUP.
-      +                    if (
-      +                        g._kind == "BRANCH"
-      +                        and g._empty_acc is not None
-      +                        and not g._children
-      +                    ):
-      +                        return _A_ROOT, g._empty_acc
-      +                    return None
-      +
-      +                child_vals = list(children.values())
-      +                first_child_parts = get_group_parts(child_vals[0])
-      +
-      +                if first_child_parts:
-      +                    _, first_acc = first_child_parts
-      +
-      +                    all_match = True
-      +                    for c in child_vals[1:]:
-      +                        parts = get_group_parts(c)
-      +                        if not parts or parts[1] != first_acc:
-      +                            all_match = False
-      +                            break
-      +
-      +                    if all_match:
-      +                        raise AssertionError(
-      +                            "Invariant violation: non-canonical BRANCH node that should be a GROUP node. "
-      +                            f"Node: {self!r}"
-      +                        )
-      +
-      +            # Recursively validate children
-      +            for child in cast(Dict, self._children).values():
-      +                child._validate_invariants()
-      +
-      +        elif self._kind == "GROUP":
-      +            # Invariant 2: A GROUP node should not represent just an empty stack.
-      +            # That should be a BRANCH node with an _empty_acc.
-      +            if self._node == _A_ROOT:
-      +                raise AssertionError(
-      +                    "Invariant violation: GROUP node with _ARoot, should be a BRANCH. "
-      +                    f"Node: {self!r}"
-      +                )
+      +            if not empty_acc_changed and not children_changed:
+      +                result = self
+      +            else:
+      +                result = self._create(new_empty_acc, new_children)
        
-           # -------------------------
-           # Dunder methods
+               _memo[id(self)] = result
+               return result
+      @@ -317,11 +328,23 @@
+                   if self._empty_acc is not None and predicate(self._empty_acc)
+                   else None
+               )
+      -        new_children = {
+      -            v: c.prune(predicate) for v, c in cast(Dict, self._children).items()
+      -        }
+      -        return self._create(new_empty_acc, new_children)
+      +        empty_acc_changed = new_empty_acc is not self._empty_acc
+      +
+      +        children = cast(Dict, self._children)
+      +        new_children = {}
+      +        children_changed = False
+      +        for v, c in children.items():
+      +            new_c = c.prune(predicate)
+      +            if new_c is not c:
+      +                children_changed = True
+      +            new_children[v] = new_c
+      +
+      +        if not empty_acc_changed and not children_changed:
+      +            return self
+      +
+      +        return self._create(new_empty_acc, new_children)
+       
+           @profile
+           def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
 
       ```
     metadata:
@@ -3113,7 +1621,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor GSS: Add invariant validation,
-      fix is_empty, and add popn"'
+  - user: 'Changes committed with message: "Refactor: Optimize apply/prune for structural
+      sharing and remove popn"'
     metadata:
 ...

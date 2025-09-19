@@ -265,16 +265,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if self._kind == "EMPTY":
             result = self
         elif self._kind == "GROUP":
-            result = self._group(cast(_A[T], self._node), func(cast(Acc, self._acc)))
+            new_acc = func(cast(Acc, self._acc))
+            if new_acc is self._acc:
+                result = self
+            else:
+                result = self._group(cast(_A[T], self._node), new_acc)
         else:  # BRANCH
             new_empty_acc = (
                 func(self._empty_acc) if self._empty_acc is not None else None
             )
-            new_children = {
-                v: c.apply(func, _memo=_memo)
-                for v, c in cast(Dict, self._children).items()
-            }
-            result = self._create(new_empty_acc, new_children)
+            empty_acc_changed = new_empty_acc is not self._empty_acc
+
+            children = cast(Dict, self._children)
+            new_children = {}
+            children_changed = False
+            for v, c in children.items():
+                new_c = c.apply(func, _memo=_memo)
+                if new_c is not c:
+                    children_changed = True
+                new_children[v] = new_c
+
+            if not empty_acc_changed and not children_changed:
+                result = self
+            else:
+                result = self._create(new_empty_acc, new_children)
 
         _memo[id(self)] = result
         return result
@@ -292,9 +306,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if self._empty_acc is not None and predicate(self._empty_acc)
             else None
         )
-        new_children = {
-            v: c.prune(predicate) for v, c in cast(Dict, self._children).items()
-        }
+        empty_acc_changed = new_empty_acc is not self._empty_acc
+
+        children = cast(Dict, self._children)
+        new_children = {}
+        children_changed = False
+        for v, c in children.items():
+            new_c = c.prune(predicate)
+            if new_c is not c:
+                children_changed = True
+            new_children[v] = new_c
+
+        if not empty_acc_changed and not children_changed:
+            return self
+
         return self._create(new_empty_acc, new_children)
 
     @profile
