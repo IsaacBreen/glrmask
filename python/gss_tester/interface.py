@@ -50,7 +50,8 @@ class GSS(ABC, Generic[T, Acc]):
     @abstractmethod
     def pop(self) -> 'GSS[T, Acc]':
         """
-        For all active stacks, creates new stacks by removing the top value.
+        For all active stacks with more than one element, creates new stacks
+        by removing the top value. Stacks that become empty are discarded.
         Returns a new GSS state containing the popped stacks.
         """
         pass
@@ -71,10 +72,9 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
-    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+    def isolate(self, value: T) -> 'GSS[T, Acc]':
         """
         Keeps only the stacks that have `value` at the top.
-        If `value` is None, it keeps only the empty stacks.
         Returns a new GSS state containing only these stacks.
         """
         pass
