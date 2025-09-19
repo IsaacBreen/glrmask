@@ -34,6 +34,11 @@ class Branch(Generic[T, Acc]):
 
 
 @dataclass(frozen=True, eq=True)
+class Empty:
+    pass
+
+
+@dataclass(frozen=True, eq=True)
 class LeveledGSSInner(Generic[T]):
     inner: Union[InnerLeaf, InnerBranch[T]]
 
@@ -51,7 +56,7 @@ class LeveledGSSInner(Generic[T]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[MiddleBranch[T, Acc], Branch[T, Acc]]
+    inner: Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]
 
     def __post_init__(self):
         self.validate_invariants()
