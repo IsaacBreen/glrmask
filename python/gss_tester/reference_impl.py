@@ -39,6 +39,9 @@ class ReferenceGSS(GSS[T, Acc]):
         # This ensures the GSS is always in a canonical form.
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in self._stacks:
+            # Remove empty stacks
+            if not vals:
+                continue
             key = tuple(vals)
             if key in merged:
                 merged[key] = merged[key].merge(acc)
