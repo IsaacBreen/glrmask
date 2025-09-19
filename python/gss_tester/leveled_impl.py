@@ -114,31 +114,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        # --------------------------------------------------------------------
-        # New handling for the case where *all* stacks are empty.
-        # --------------------------------------------------------------
-        # In this situation the GSS must still carry the accumulator(s) of the
-        # empty stack(s).  The original implementation returned an empty Upper
-        # node, which the analyzer interpreted as an empty GSS.  We now build
-        # an Interface node that contains a leaf Lower (representing the empty
-        # stack) together with the merged accumulator.
-        #
-        # Example: after popping two merged stacks `[100, 101]` and `[100, 102]`
-        # we obtain a single stack `[100]`.  The recursion in `from_stacks`
-        # reaches a point where the remaining prefixes are `[]`.  The code
-        # below ensures that those empty‑prefix cases are represented correctly.
-        # --------------------------------------------------------------------
-        if all(not s for s, _ in stacks):
-            # Merge all accumulators of the empty stacks.
-            # `reduce` needs an initial value; we can safely take the first
-            # accumulator because `stacks` is non‑empty here.
-            merged_acc: Acc = reduce(lambda a, b: a.merge(b),
-                                    (acc for _, acc in stacks),
-                                    stacks[0][1])
-            # A leaf Lower node represents the empty stack.
-            leaf_lower = Lower(children={}, is_leaf=True)
-            return LeveledGSS(Interface(leaf_lower, merged_acc))
-
         if not stacks:
             return LeveledGSS(Upper({}))
 
