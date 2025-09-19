@@ -105,9 +105,9 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         return self.internal({value: {new_depth: self}})
 
     def pop(self) -> 'LeveledGSSInner[T]':
+        if self.is_empty():
+            return self
         match self.variant:
-            case None:
-                return self
             case Leaf():
                 return self.empty()
             case BranchInner(children):
@@ -123,9 +123,9 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         return self.variant is None
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSSInner[T]':
+        if self.is_empty():
+            return self
         match self.variant:
-            case None:
-                return self
             case Leaf():
                 return self if value is None else self.empty()
             case BranchInner(children):
@@ -156,8 +156,10 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         return _build_inner_from_seqs(self.__class__, s1.union(s2))
 
     def peek(self) -> Set[T]:
+        if self.is_empty():
+            return set()
         match self.variant:
-            case None | Leaf():
+            case Leaf():
                 return set()
             case BranchInner(children):
                 return {cast(T, t) for t in children.keys() if t is not EPSILON}
@@ -171,17 +173,19 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     # --- LeveledA specific helpers ---
     def has_epsilon(self) -> bool:
+        if self.is_empty():
+            return False
         match self.variant:
             case Leaf():
                 return True
             case BranchInner(children):
                 return EPSILON in children
-            case _:
-                return False
 
     def max_depth(self) -> int:
+        if self.is_empty():
+            return 0
         match self.variant:
-            case None | Leaf():
+            case Leaf():
                 return 0
             case BranchInner(children):
                 max_d = 0
@@ -191,9 +195,9 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
                 return max_d
 
     def enumerate_stacks(self) -> Iterator[Tuple[T, ...]]:
+        if self.is_empty():
+            return
         match self.variant:
-            case None:
-                return
             case Leaf():
                 yield tuple()
             case BranchInner(children):
@@ -240,8 +244,10 @@ def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T
     return cls.internal(children)
 
 def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
+    if a.is_empty():
+        return
     match a.variant:
-        case None | Leaf():
+        case Leaf():
             return
         case BranchInner(children):
             for t, by_depth in children.items():
