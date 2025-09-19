@@ -226,11 +226,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # Keep only edges for the requested top value (or EPSILON for empty)
             key = EPSILON if value is None else value
             by_depth = v.children.get(key, {})
-            # Union all children under this key
-            result = LeveledGSS.empty()
-            for _, child in by_depth.items():
-                result = result.merge(child)
-            return result
+            if not by_depth:
+                return LeveledGSS.empty()
+            # Rebuild an Internal node with only the matching children
+            return LeveledGSS.internal({key: by_depth})
 
         # WithAcc: keep only paths in A whose top element equals `value`
         w = cast(WithAcc[T, Acc], v)
@@ -246,12 +245,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledGSS.empty()
 
         # value is not None
-        # Build new Internal node with edges only for 'value'
-        children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = {}
-        for (t, d, a_child) in _iter_a_edges(a):
-            if t == value:
-                children.setdefault(value, {})[d] = LeveledGSS.with_acc(a_child, acc)
-        return _canonicalize_b(LeveledGSS.internal(children))
+        if isinstance(a, Root):  # No non-empty stacks
+            return LeveledGSS.empty()
+
+        # Filter A-layer edges
+        a_children = a.children.get(value, {})
+        if not a_children:
+            return LeveledGSS.empty()
+
+        new_a_node = _normalize_a(InternalInner({value: a_children}))
+        return LeveledGSS.with_acc(new_a_node, acc)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
         """
