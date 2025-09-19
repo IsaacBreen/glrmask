@@ -182,12 +182,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         node, acc = cast(_A[T], self._node), cast(Acc, self._acc)
         if isinstance(node, _ARoot):
-            return self._branch(acc, {})
+            return self._create(acc, {})
         if isinstance(node, _AInternal):
             new_children = {
                 v: self._group(c, acc) for v, c in node.get_children().items()
             }
-            return self._branch(None, new_children)
+            return self._create(None, new_children)
         return self._empty()  # Should be unreachable
 
     # -------------------------
