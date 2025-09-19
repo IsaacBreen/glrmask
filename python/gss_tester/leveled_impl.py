@@ -11,28 +11,31 @@ from .interface import GSS, T, Acc
 # ------------------------------
 
 @dataclass(frozen=True, eq=True)
-class UpperBranch(Generic[T, Acc]):
+class Upper(Generic[T, Acc]):
     # children: T -> depth -> LeveledGSS
     children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: LeveledGSSInner[T]
+    node: Lower[T]
     acc: Acc
 
 
 @dataclass(frozen=True, eq=True)
-class LeveledGSSInner(Generic[T]):
+class Lower(Generic[T]):
     # children: T -> depth -> LeveledGSSInner
-    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
+    children: Dict[T, Dict[int, 'Lower[T]']]
     is_leaf: bool
 
     @classmethod
-    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+    def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
         raise NotImplementedError
 
     def to_stacks(self) -> List[List[T]]:
+        raise NotImplementedError
+
+    def validate_invariants(self) -> None:
         raise NotImplementedError
 
 
@@ -42,7 +45,7 @@ class InvariantViolation(Exception):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[UpperBranch[T, Acc], Interface[T, Acc]]
+    inner: Union[Upper[T, Acc], Interface[T, Acc]]
 
     def __post_init__(self):
         self.validate_invariants()
