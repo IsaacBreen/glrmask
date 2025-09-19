@@ -61,6 +61,30 @@ class Lower(Generic[T]):
                     stacks.append(prefix + [top])
         return stacks
 
+    def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def pop(self) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def is_empty(self) -> bool:
+        raise NotImplementedError
+
+    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+        raise NotImplementedError
+
+    def peek(self) -> Set[T]:
+        raise NotImplementedError
+
     def validate_invariants(self) -> None:
         # Invariant: lower must either have children or be a leaf (or both)
         if not self.children and not self.is_leaf:
