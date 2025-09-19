@@ -37,6 +37,13 @@ class Branch(Generic[T, Acc]):
 class LeveledGSSInner(Generic[T]):
     inner: Union[InnerLeaf, InnerBranch[T]]
 
+    @classmethod
+    def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
+        raise NotImplementedError
+
+    def to_stacks(self) -> List[List[T]]:
+        raise NotImplementedError
+
 
 # ------------------------------
 # Public LeveledGSS implementation
