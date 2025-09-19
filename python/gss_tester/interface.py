@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from functools import reduce
-from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
-import json
+from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+
 
 class Mergeable(Protocol):
     """Protocol for accumulator types that can be merged."""

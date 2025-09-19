@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
 
 from .interface import GSS, T, Acc
-from .reference_impl import ReferenceGSS
 
 
 # ------------------------------

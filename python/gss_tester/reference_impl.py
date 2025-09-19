@@ -1,7 +1,7 @@
-from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
-from functools import reduce
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
+from functools import reduce
+from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
 
 from .interface import GSS, T, Acc
 
