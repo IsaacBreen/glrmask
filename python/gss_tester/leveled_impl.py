@@ -11,12 +11,12 @@ from .interface import GSS, T, Acc
 # ------------------------------
 
 @dataclass(frozen=True, eq=True)
-class InnerLeaf:
+class Leaf:
     pass
 
 
 @dataclass(frozen=True, eq=True)
-class InnerBranch(Generic[T]):
+class LowerBranch(Generic[T]):
     # children: T -> depth -> LeveledGSSInner
     children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
 
@@ -28,7 +28,7 @@ class MiddleBranch(Generic[T, Acc]):
 
 
 @dataclass(frozen=True, eq=True)
-class Branch(Generic[T, Acc]):
+class UpperBranch(Generic[T, Acc]):
     # children: T -> depth -> LeveledGSS
     children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']]
 
@@ -40,7 +40,7 @@ class Empty:
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSSInner(Generic[T]):
-    inner: Union[InnerLeaf, InnerBranch[T]]
+    inner: Union[Leaf, LowerBranch[T]]
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
@@ -56,7 +56,7 @@ class LeveledGSSInner(Generic[T]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Union[MiddleBranch[T, Acc], Branch[T, Acc], Empty]
+    inner: Union[MiddleBranch[T, Acc], UpperBranch[T, Acc], Empty]
 
     def __post_init__(self):
         self.validate_invariants()
