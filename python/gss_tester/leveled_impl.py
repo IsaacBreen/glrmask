@@ -28,16 +28,14 @@ class Interface(Generic[T, Acc]):
 class Lower(Generic[T]):
     # children: T -> depth -> LeveledGSSInner
     children: Dict[T, Dict[int, 'Lower[T]']]
-    is_leaf: bool
 
     @classmethod
     def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
-        is_leaf = any(not s for s in stacks)
         children: Dict[T, Dict[int, 'Lower[T]']] = {}
 
         stacks_by_top: Dict[T, List[List[T]]] = defaultdict(list)
         for stack in stacks:
-            if stack:
+            if stack: # Explicitly ignore empty stacks
                 stacks_by_top[stack[-1]].append(stack[:-1])
 
         for top, prefixes in stacks_by_top.items():
@@ -49,12 +47,10 @@ class Lower(Generic[T]):
             for length, group in prefixes_by_len.items():
                 children[top][length] = Lower.from_stacks(group)
 
-        return Lower(children=children, is_leaf=is_leaf)
+        return Lower(children=children)
 
     def to_stacks(self) -> List[List[T]]:
         stacks: List[List[T]] = []
-        if self.is_leaf:
-            stacks.append([])
         for top, children_at_depths in self.children.items():
             for _, child_node in children_at_depths.items():
                 for prefix in child_node.to_stacks():
@@ -62,8 +58,8 @@ class Lower(Generic[T]):
         return stacks
 
     def pop(self) -> 'Lower[T]':
-        if not self.children:
-            return Lower(children={}, is_leaf=False)
+        if not self.children: # Cannot pop from an empty set of stacks
+            return Lower(children={})
         all_children = []
         for t, children_at_depths in self.children.items():
             all_children[t] = {}
@@ -72,14 +68,14 @@ class Lower(Generic[T]):
         return reduce(lambda c, n: c.merge(n), all_children[1:], all_children[0])
 
     def is_empty(self) -> bool:
-        return not self.children and not self.is_leaf
+        return not self.children
 
     def isolate(self, value: Optional[T]) -> 'Lower[T]':
         if value is None:
-            return Lower(children={}, is_leaf=self.is_leaf)
+            return Lower(children={})
         if value not in self.children:
-            return Lower(children={}, is_leaf=False)
-        return Lower(children={value: self.children[value]}, is_leaf=False)
+            return Lower(children={})
+        return Lower(children={value: self.children[value]})
 
     def merge(self, other: Lower[T]) -> 'Lower[T]':
         raise NotImplementedError
@@ -88,10 +84,6 @@ class Lower(Generic[T]):
         return set(self.children.keys())
 
     def validate_invariants(self) -> None:
-        # Invariant: lower must either have children or be a leaf (or both)
-        if not self.children and not self.is_leaf:
-            raise InvariantViolation("Lower node must have children or be a leaf.")
-
         # Recurse to children
         for children_at_depth in self.children.values():
             for child in children_at_depth.values():
@@ -135,7 +127,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_lower_children[top][depth] = child_gss.inner.node
 
         # The new Lower node represents stacks that had a top element, so it is not a leaf.
-        new_lower = Lower(children=new_lower_children, is_leaf=False)
+        new_lower = Lower(children=new_lower_children)
         return LeveledGSS(Interface(new_lower, first_acc))
 
     @classmethod
@@ -147,7 +139,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
 
         for stack, acc in stacks:
-            if stack:
+            if stack: # Do not allow empty stacks
                 top = stack[-1]
                 prefix = stack[:-1]
                 stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
