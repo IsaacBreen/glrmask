@@ -14,7 +14,7 @@ from .interface import GSS, T, Acc
 
 @dataclass(frozen=True, eq=True)
 class Upper(Generic[T, Acc]):
-    inner: 'UpperBranch[T, Acc]' | 'Interface[T, Acc]'
+    inner: UpperBranch[T, Acc] | Interface[T, Acc]
 
 
 @dataclass(frozen=True, eq=True)
@@ -24,18 +24,18 @@ class UpperBranch(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: 'Lower[T]'
+    node: Lower[T]
     acc: Acc
 
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
-    inner: 'LowerBranch[T]' | 'Leaf'
+    inner: LowerBranch[T] | Leaf
 
 
 @dataclass(frozen=True, eq=True)
 class LowerBranch(Generic[T]):
-    children: Dict[T, Dict[int, 'Lower[T]']]
+    children: Dict[T, Dict[int, Lower[T]]]
 
 
 @dataclass(frozen=True, eq=True)
