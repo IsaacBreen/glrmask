@@ -1,6 +1,7 @@
 import inspect
 from typing import Generator, Tuple, Any, Type
 from .interface import GSS
+from .fuzzer import run_fuzz_test
 
 class MergeableInt(int):
     """
@@ -247,3 +248,11 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
 
     gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
     yield from _yield_state(gss_empty_pruned)
+
+    # --- Test 16: Fuzz tests ---
+    # Run a short, seeded fuzz test to catch more complex interactions.
+    # The seed ensures the test is deterministic.
+    fuzz_seed = 42
+    fuzz_steps = 100
+    for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+        yield from _yield_state(gss_state)
