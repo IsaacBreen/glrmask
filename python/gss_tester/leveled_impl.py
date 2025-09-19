@@ -117,16 +117,7 @@ class InvariantViolation(Exception):
 
 
 def _validate_invariants_node(node: _LeveledNode[T, Acc]):
-    # Ensure that:
-    # 1) Acc only exists at WithAcc nodes.
-    # 2) _Inner nodes never contain any acc; only structure.
-    # 3) "Suck up" has been applied whenever possible: for any Branch node,
-    #    if all children are WithAcc and share the same acc, we should not leave it as Branch.
-    # 4) If a WithAcc node has an InnerBranch child whose children are identical (structurally),
-    #    that's fine; but _WithAcc's descendants should have no another acc (by construction).
-    #
-    # We traverse and check these constraints; for #3 we just detect a violation opportunity.
-
+    # Ensure that "Suck up" has been applied whenever possible: for any Branch node, if all children are WithAcc and share the same acc, we should not leave it as Branch.
     def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
         if isinstance(node_b, Empty):
             return True, None
@@ -150,7 +141,6 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
                 if child_accs and all(a == child_accs[0] for a in child_accs):
                     raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
             return True, None
-        return True, None
 
     ok, _ = check(node)
     if not ok:
