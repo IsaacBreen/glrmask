@@ -118,7 +118,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 for _, child_gss in children_at_depths.items():
                     all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
             return all_stacks
-        return []
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
         ref_gss = self.to_reference_impl()
