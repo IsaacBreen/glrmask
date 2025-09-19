@@ -509,9 +509,8 @@ def _merge_leveled(
                 merged_a = a1.merge(a2)
                 res = LeveledGSS.with_acc(merged_a, acc1)
             else:
-                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                b1_dist = _distribute_acc(a1, acc1, dist_memo)
-                b2_dist = _distribute_acc(a2, acc2, dist_memo)
+                b1_dist = _distribute_acc(a1, acc1, {})
+                b2_dist = _distribute_acc(a2, acc2, {})
                 res = _merge_leveled(b1_dist, b2_dist, memo)
         
         case (Constant(a1, acc1), Branch(c2)):
@@ -536,8 +535,7 @@ def _merge_leveled(
                 res = _canonicalize(LeveledGSS.internal(new_children))
             else:
                 # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
-                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                b1_dist = _distribute_acc(a1, acc1, {})
                 res = _merge_leveled(b1_dist, b2, memo)
 
         case (Branch(_), Constant(a2, acc2)):
