@@ -117,13 +117,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if not stacks:
             return LeveledGSS(Upper({}))
 
-        # Handle the case where all stacks are empty
-        if all(not stack for stack, _ in stacks):
-            merged_acc = reduce(lambda a, b: a.merge(b), [acc for _, acc in stacks])
-            empty_lower = Lower(children={}, is_leaf=True)
-            return LeveledGSS(Interface(empty_lower, merged_acc))
-
-
         children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
 
