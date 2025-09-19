@@ -1,11 +1,247 @@
 local_system:
   attached_files:
+    - python/gss_tester/__init__.py
+    - python/gss_tester/analyzer.py
+    - python/gss_tester/fuzzer.py
     - python/gss_tester/interface.py
-    - python/gss_tester/reference_impl.py
     - python/gss_tester/leveled_impl.py
+    - python/gss_tester/reference_impl.py
+    - python/gss_tester/runner.py
+    - python/gss_tester/test_spec.py
   conversation_file:
   compile_command:
   initial_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/fuzzer.py: |
+      import random
+      from typing import Generator, Any, Type, List, Callable
+
+      from .interface import GSS, MergeableInt
+
+
+      def run_fuzz_test(
+          gss_class: Type[GSS],
+          seed: int,
+          num_steps: int,
+          max_gss_states: int = 10,
+          value_pool: List[Any] = None
+      ) -> Generator[GSS, None, None]:
+          """
+          Runs a randomized sequence of GSS operations to find inconsistencies.
+          Yields the new GSS state after each operation.
+          """
+          if value_pool is None:
+              value_pool = list(range(20)) + ['a', 'b', 'c']
+
+          rng = random.Random(seed)
+          gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
+          yield gss_states[0]
+
+          for _ in range(num_steps):
+              if not gss_states:
+                  # All states were pruned or became empty, start over.
+                  gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
+                  yield gss_states[0]
+                  if len(gss_states) >= max_gss_states:
+                      continue
+
+              # Choose an operation
+              can_merge = len(gss_states) >= 2
+              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+              if can_merge:
+                  operations.append('merge')
+              
+              op_choice = rng.choice(operations)
+
+              # Select GSS state(s) to operate on
+              source_gss = rng.choice(gss_states)
+              
+              new_gss: GSS
+
+              try:
+                  if op_choice == 'push':
+                      value = rng.choice(value_pool)
+                      new_gss = source_gss.push(value)
+
+                  elif op_choice == 'pop':
+                      new_gss = source_gss.pop()
+
+                  elif op_choice == 'popn':
+                      n = rng.randint(0, 4)
+                      new_gss = source_gss.popn(n)
+
+                  elif op_choice == 'isolate':
+                      # 20% chance of isolating empty stack
+                      if rng.random() < 0.2:
+                          value = None
+                      else:
+                          value = rng.choice(value_pool)
+                      new_gss = source_gss.isolate(value)
+
+                  elif op_choice == 'apply':
+                      amount = rng.randint(1, 10)
+                      # Use a default argument in the lambda to capture the value of `amount`
+                      func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
+                      new_gss = source_gss.apply(func)
+
+                  elif op_choice == 'prune':
+                      threshold = rng.randint(0, 20)
+                      # Use a default argument in the lambda to capture the value of `threshold`
+                      predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                      new_gss = source_gss.prune(predicate)
+
+                  elif op_choice == 'merge' and can_merge:
+                      other_gss = rng.choice([g for g in gss_states if g is not source_gss])
+                      new_gss = source_gss.merge(other_gss)
+                  
+                  else: # Should not happen
+                      continue
+
+                  yield new_gss
+
+                  # Add the new state to our pool, but avoid adding empty or duplicate states
+                  if new_gss is not source_gss and not new_gss.is_empty():
+                      gss_states.append(new_gss)
+
+                  # Prune the list of GSS states to keep it manageable
+                  if len(gss_states) > max_gss_states:
+                      gss_states = rng.sample(gss_states, max_gss_states)
+
+              except Exception:
+                  # Some operations might fail on some implementations if invariants are broken.
+                  # We'll just skip the step and continue fuzzing.
+                  continue
     python/gss_tester/interface.py: |
       from abc import ABC, abstractmethod
       from functools import reduce
@@ -144,6 +380,7 @@ local_system:
           def __repr__(self) -> str:
               """Provides an unambiguous string representation of the GSS."""
               return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
+    python/gss_tester/leveled_impl.py: ''
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
@@ -313,6 +550,679 @@ local_system:
                   return NotImplemented
               # Sort stacks to ensure comparison is order-independent.
               return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS, MergeableInt
+      from .fuzzer import run_fuzz_test
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: MergeableInt(0)
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_a.merge(gss_b)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = merged1.merge(gss_c)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = s2.merge(s3)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = s7.merge(s8)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_d.merge(gss_empty)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
+          gss_to_prune = gss_e.merge(gss_f)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = s_branch1.merge(s_branch2)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
+          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
+          s_merged2 = s_branch3.merge(s_branch4)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
+          gss_pn_merged = gss_pn1.merge(gss_pn2)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
+          gss_i_merged = gss_i1.merge(gss_i2)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+
+          # --- Test 11: reduce_acc and peek ---
+          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
+          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
+          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
+          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
+          yield from _yield_state(gss_rp_merged)
+
+          # peek() should return {2, 3}
+          peek_result = gss_rp_merged.peek()
+          # reduce_acc() should be 3 + 4 + 5 = 12
+          reduce_result = gss_rp_merged.reduce_acc()
+          
+          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
+          # This is a bit of a hack, but it allows us to check for consistency.
+          # A GSS with a single empty stack and the peek result as the accumulator.
+          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
+          yield from _yield_state(gss_peek_check)
+
+          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
+          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
+          yield from _yield_state(gss_reduce_check)
+
+          # Test on empty GSS
+          gss_rp_empty = gss_class.from_stacks([])
+          yield from _yield_state(gss_rp_empty)
+          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
+          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
+          yield from _yield_state(gss_reduce_empty_check)
+
+
+          # --- Test 12: merge_many ---
+          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
+          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
+          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
+          
+          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
+          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
+          yield from _yield_state(gss_merged_many)
+
+          # --- Test 13: Pop from GSS containing an empty stack ---
+          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
+          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
+          gss_pe_merged = gss_pe1.merge(gss_pe2)
+          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
+
+          gss_pe_popped = gss_pe_merged.pop()
+          # pop should only affect non-empty stacks.
+          # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
+          yield from _yield_state(gss_pe_popped)
+
+          # --- Test 14: String values and popn(0) ---
+          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
+          yield from _yield_state(gss_s1)
+
+          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
+          yield from _yield_state(gss_s_pop0)
+
+          gss_s_pop1 = gss_s1.popn(1)
+          yield from _yield_state(gss_s_pop1)
+
+          # --- Test 15: Operations on Empty GSS ---
+          gss_empty_start = gss_class.from_stacks([])
+          yield from _yield_state(gss_empty_start)
+
+          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
+          yield from _yield_state(gss_empty_pushed)
+
+          gss_empty_popped = gss_empty_start.pop() # Should still be empty
+          yield from _yield_state(gss_empty_popped)
+
+          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
+          yield from _yield_state(gss_empty_isolated)
+
+          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
+          yield from _yield_state(gss_empty_applied)
+
+          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
+          yield from _yield_state(gss_empty_pruned)
+
+          # --- Test 16: Fuzz tests ---
+          # Run a short, seeded fuzz test to catch more complex interactions.
+          # The seed ensures the test is deterministic.
+          fuzz_seed = 42
+          fuzz_steps = 100
+          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+              yield from _yield_state(gss_state)
+  prev_file_contents:
+    python/gss_tester/__init__.py: |
+      # This file makes 'gss_tester' a Python package.
+    python/gss_tester/analyzer.py: |
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/fuzzer.py: |
+      import random
+      from typing import Generator, Any, Type, List, Callable
+
+      from .interface import GSS, MergeableInt
+
+
+      def run_fuzz_test(
+          gss_class: Type[GSS],
+          seed: int,
+          num_steps: int,
+          max_gss_states: int = 10,
+          value_pool: List[Any] = None
+      ) -> Generator[GSS, None, None]:
+          """
+          Runs a randomized sequence of GSS operations to find inconsistencies.
+          Yields the new GSS state after each operation.
+          """
+          if value_pool is None:
+              value_pool = list(range(20)) + ['a', 'b', 'c']
+
+          rng = random.Random(seed)
+          gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
+          yield gss_states[0]
+
+          for _ in range(num_steps):
+              if not gss_states:
+                  # All states were pruned or became empty, start over.
+                  gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
+                  yield gss_states[0]
+                  if len(gss_states) >= max_gss_states:
+                      continue
+
+              # Choose an operation
+              can_merge = len(gss_states) >= 2
+              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+              if can_merge:
+                  operations.append('merge')
+              
+              op_choice = rng.choice(operations)
+
+              # Select GSS state(s) to operate on
+              source_gss = rng.choice(gss_states)
+              
+              new_gss: GSS
+
+              try:
+                  if op_choice == 'push':
+                      value = rng.choice(value_pool)
+                      new_gss = source_gss.push(value)
+
+                  elif op_choice == 'pop':
+                      new_gss = source_gss.pop()
+
+                  elif op_choice == 'popn':
+                      n = rng.randint(0, 4)
+                      new_gss = source_gss.popn(n)
+
+                  elif op_choice == 'isolate':
+                      # 20% chance of isolating empty stack
+                      if rng.random() < 0.2:
+                          value = None
+                      else:
+                          value = rng.choice(value_pool)
+                      new_gss = source_gss.isolate(value)
+
+                  elif op_choice == 'apply':
+                      amount = rng.randint(1, 10)
+                      # Use a default argument in the lambda to capture the value of `amount`
+                      func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
+                      new_gss = source_gss.apply(func)
+
+                  elif op_choice == 'prune':
+                      threshold = rng.randint(0, 20)
+                      # Use a default argument in the lambda to capture the value of `threshold`
+                      predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                      new_gss = source_gss.prune(predicate)
+
+                  elif op_choice == 'merge' and can_merge:
+                      other_gss = rng.choice([g for g in gss_states if g is not source_gss])
+                      new_gss = source_gss.merge(other_gss)
+                  
+                  else: # Should not happen
+                      continue
+
+                  yield new_gss
+
+                  # Add the new state to our pool, but avoid adding empty or duplicate states
+                  if new_gss is not source_gss and not new_gss.is_empty():
+                      gss_states.append(new_gss)
+
+                  # Prune the list of GSS states to keep it manageable
+                  if len(gss_states) > max_gss_states:
+                      gss_states = rng.sample(gss_states, max_gss_states)
+
+              except Exception:
+                  # Some operations might fail on some implementations if invariants are broken.
+                  # We'll just skip the step and continue fuzzing.
+                  continue
+    python/gss_tester/interface.py: |
+      from abc import ABC, abstractmethod
+      from functools import reduce
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
+      import json
+
+      class Mergeable(Protocol):
+          """Protocol for accumulator types that can be merged."""
+          @abstractmethod
+          def merge(self, other: 'Mergeable') -> 'Mergeable':
+              ...
+
+      class MergeableInt(int):
+          """
+          An integer that is mergeable (for testing `Acc` typevars) and
+          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+          """
+          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+              return MergeableInt(super().__add__(other))
+
+          def __add__(self, other: int) -> 'MergeableInt':
+              if isinstance(other, int):
+                  return MergeableInt(super().__add__(other))
+              return NotImplemented
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def push(self, value: T) -> 'GSS[T, Acc]':
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self, n: int) -> 'GSS[T, Acc]':
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains no active stacks."""
+              pass
+
+          @abstractmethod
+          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+              """
+              Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+              """Merges this GSS with another, combining accumulators for identical stacks."""
+              pass
+
+          @classmethod
+          def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
+              """
+              Merges multiple GSS instances into one.
+              This default implementation uses functools.reduce with the instance `merge` method.
+              """
+              # Start with an empty GSS of the target class `cls` to ensure the correct
+              # return type and to handle an empty gss_list.
+              initial = cls.from_stacks([])
+              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def reduce_acc(self) -> Optional[Acc]:
+              """
+              Merges the accumulators of all active stacks into a single optional value.
+              Returns None if there are no active stacks.
+              """
+              pass
+
+          @abstractmethod
+          def to_reference_impl(self) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              pass
+
+          def to_json_serializable(self) -> Any:
+              """Returns a JSON-serializable representation of the GSS state for comparison."""
+              # to_reference_impl is expected to return a ReferenceGSS instance.
+              ref_impl = self.to_reference_impl()
+              # We can now call the ReferenceGSS's specific implementation.
+              return ref_impl.to_json_serializable()
+
+          def __str__(self) -> str:
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
     python/gss_tester/leveled_impl.py: |
       from __future__ import annotations
 
@@ -769,145 +1679,6 @@ local_system:
 
           def __str__(self) -> str:
               return f"LeveledGSS({self._ref.to_json_serializable()})"
-  prev_file_contents:
-    python/gss_tester/interface.py: |
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
-      import json
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def push(self, value: T) -> 'GSS[T, Acc]':
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self, n: int) -> 'GSS[T, Acc]':
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type['GSS[T, Acc]'], gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.from_stacks([])
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          @abstractmethod
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              pass
-
-          def to_json_serializable(self) -> Any:
-              """Returns a JSON-serializable representation of the GSS state for comparison."""
-              # to_reference_impl is expected to return a ReferenceGSS instance.
-              ref_impl = self.to_reference_impl()
-              # We can now call the ReferenceGSS's specific implementation.
-              return ref_impl.to_json_serializable()
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_json_serializable()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_json_serializable()!r})"
     python/gss_tester/reference_impl.py: |
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
       from functools import reduce
@@ -1077,974 +1848,309 @@ local_system:
                   return NotImplemented
               # Sort stacks to ensure comparison is order-independent.
               return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
-    python/gss_tester/leveled_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
-
-      from .interface import GSS, T, Acc
-      from .reference_impl import ReferenceGSS
-
-      # Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
-      # This is purely internal; it never leaks out of to_reference_impl() or to_json.
-      _EPS = object()
-
-
-      # ------------------------------
-      # Internal node classes (mirroring the Rust-like structure)
-      # ------------------------------
-
-      @dataclass
-      class _InnerRoot(Generic[T]):
-          pass
-
-
-      @dataclass
-      class _InnerInternal(Generic[T]):
-          # children: T -> depth -> _InnerNode
-          children: Dict[T, Dict[int, '_InnerNode[T]']]
-
-
-      _InnerNode = Union[_InnerRoot[T], _InnerInternal[T]]
-
-
-      @dataclass
-      class _WithAcc(Generic[T, Acc]):
-          node: _InnerNode[T]
-          acc: Acc
-
-
-      @dataclass
-      class _Internal(Generic[T, Acc]):
-          # children: T_or_EPS -> depth -> _LeveledNode
-          # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
-          children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
-
-
-      @dataclass
-      class _Empty:
-          pass
-
-
-      _LeveledNode = Union[_WithAcc[T, Acc], _Internal[T, Acc], _Empty]
-
-
-      # ------------------------------
-      # Helpers to convert between ReferenceGSS and our leveled node representation
-      # ------------------------------
-
-      def _merge_acc(a: Acc, b: Acc) -> Acc:
-          # Acc is Mergeable by protocol; use merge to combine
-          return a.merge(b)  # type: ignore[attr-defined]
-
-
-      def _dedup_pairs(pairs: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
-          # Merge duplicate stacks by merging accumulators
-          merged: Dict[Tuple[T, ...], Acc] = {}
-          for vals, acc in pairs:
-              key = tuple(vals)
-              if key in merged:
-                  merged[key] = _merge_acc(merged[key], acc)
-              else:
-                  merged[key] = acc
-          return [(list(k), v) for k, v in merged.items()]
-
-
-      def _pairs_from_ref(ref: ReferenceGSS[T, Acc]) -> List[Tuple[List[T], Acc]]:
-          # The ReferenceGSS stores canonical stacks in _stacks already merged
-          return [(list(vals), acc) for (vals, acc) in ref._stacks]  # type: ignore[attr-defined]
-
-
-      def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
-          # Build the A-level inner tree (no accumulators at this level)
-          if not seqs:
-              return _InnerRoot()
-
-          # Partition by whether sequence is empty
-          non_empty = [s for s in seqs if s]
-          empty_count = len(seqs) - len(non_empty)
-
-          if not non_empty:
-              # Only empty sequences present -> Root
-              return _InnerRoot()
-
-          # Group by first token
-          group: Dict[T, List[List[T]]] = {}
-          for s in non_empty:
-              t = s[0]
-              tail = s[1:]
-              group.setdefault(t, []).append(tail)
-
-          children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          for t, tails in group.items():
-              child_inner = _build_inner_from_sequences(tails)
-              # We set "depth" to the maximum length remaining (for determinism and a form of "max depth")
-              max_depth = max((len(tl) for tl in tails), default=0)
-              children.setdefault(t, {})[max_depth] = child_inner
-
-          return _InnerInternal(children=children)
-
-
-      def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
-          pairs = _dedup_pairs(pairs)
-
-          if not pairs:
-              return _Empty()
-
-          # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
-          accs = {acc for _, acc in pairs}
-          if len(accs) == 1:
-              only_acc = next(iter(accs))
-              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-              return _WithAcc(node=inner, acc=only_acc)
-
-          # Otherwise, build an Internal node, partitioning by first symbol.
-          # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
-          children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-
-          # Handle empty pairs (if any)
-          empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
-          if empty_pairs:
-              # Recursively build a child node for these empty stacks.
-              child = _build_leveled_from_pairs(empty_pairs)
-              # Depth for empty is 0
-              children.setdefault(_EPS, {})[0] = child
-
-          # Non-empty stacks
-          non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
-          by_first: Dict[T, List[Tuple[List[T], Acc]]] = {}
-          for vals, acc in non_empty_pairs:
-              by_first.setdefault(vals[0], []).append((vals[1:], acc))
-
-          for t, tails_pairs in by_first.items():
-              # Recursively build subtree for all stacks with first token == t
-              child = _build_leveled_from_pairs(tails_pairs)
-              # The "depth" we attach can be the maximum length (remaining) among those tails
-              max_depth = max((len(v) for v, _ in tails_pairs), default=0)
-              children.setdefault(t, {})[max_depth] = child
-
-          node: _LeveledNode[T, Acc] = _Internal(children=children)
-          return _normalize_suck_up(node)
-
-
-      def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
-          # Bottom-up normalization: recursively transform children first.
-          if isinstance(node, _Empty):
-              return node
-          if isinstance(node, _WithAcc):
-              # Its inner is a pure A-level tree; no accs inside; nothing to do.
-              return node
-          if isinstance(node, _Internal):
-              # Normalize children first
-              new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-              for key_t, depth_map in node.children.items():
-                  for depth, child in depth_map.items():
-                      norm = _normalize_suck_up(child)
-                      new_children.setdefault(key_t, {})[depth] = norm
-
-              # Check suck-up condition: if all children are WithAcc and share the same acc
-              # If there are no children, it's empty
-              if not new_children:
-                  return _Empty()
-
-              # Flatten list of children
-              child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
-              for kt, dm in new_children.items():
-                  for d, ch in dm.items():
-                      child_list.append((kt, d, ch))
-
-              all_with_acc = all(isinstance(ch, _WithAcc) for _, _, ch in child_list)
-              if all_with_acc:
-                  accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, _WithAcc))
-                  if len(accs) == 1:
-                      # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
-                      the_acc = next(iter(accs))
-                      # Build an A-level Internal whose children map keys to the inner nodes of the children.
-                      # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
-                      inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-                      has_empty = False
-                      # Collect A-level children from the WithAcc children
-                      for kt, d, ch in child_list:
-                          chw = ch  # type: ignore[assignment]
-                          assert isinstance(chw, _WithAcc)
-                          if kt is _EPS:
-                              if isinstance(chw.node, _InnerRoot):
-                                  has_empty = True
-                              else:
-                                  for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
-                                      for dd, inn in dm.items():
-                                          inner_children.setdefault(tt, {})[dd] = inn
-                                  has_empty = True
-                          else:
-                              if isinstance(chw.node, _InnerRoot):
-                                  key_t: T = kt  # type: ignore[assignment]
-                                  depth_int = max(d - 1, 0)
-                                  inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
-                              else:
-                                  key_t: T = kt  # type: ignore[assignment]
-                                  for dd, inn in ((max(d - 1, 0), chw.node),):
-                                      inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
-
-                      if not inner_children:
-                          if has_empty:
-                              inner: _InnerNode[T] = _InnerRoot()
-                          else:
-                              inner = _InnerRoot()
-                      else:
-                          inner = _InnerInternal(children=inner_children)
-
-                      return _WithAcc(node=inner, acc=the_acc)
-
-              return _Internal(children=new_children)
-
-          # Should not reach
-          return node
-
-
-      def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T], Acc]]:
-          # Enumerate (stack, acc) pairs represented by the leveled node
-          result: List[Tuple[List[T], Acc]] = []
-
-          def emit_from_inner(inner: _InnerNode[T], prefix: List[T], acc: Acc):
-              if isinstance(inner, _InnerRoot):
-                  result.append((list(prefix), acc))
-                  return
-              # _InnerInternal
-              for t, depth_map in inner.children.items():  # type: ignore[union-attr]
-                  for _, child in depth_map.items():
-                      emit_from_inner(child, prefix + [t], acc)
-
-          def walk(node_b: _LeveledNode[T, Acc], prefix: List[T]):
-              if isinstance(node_b, _Empty):
-                  return
-              if isinstance(node_b, _WithAcc):
-                  emit_from_inner(node_b.node, prefix, node_b.acc)
-                  return
-              # _Internal
-              for key_t, depth_map in node_b.children.items():
-                  for _, child in depth_map.items():
-                      if key_t is _EPS:
-                          # Empty step: do not advance prefix
-                          walk(child, prefix)
-                      else:
-                          walk(child, prefix + [key_t])  # type: ignore[list-item]
-
-          walk(node, [])
-          return _dedup_pairs(result)
-
-
-      # ------------------------------
-      # Invariant validation
-      # ------------------------------
-
-      class InvariantViolation(Exception):
-          pass
-
-
-      def _validate_invariants_node(node: _LeveledNode[T, Acc]):
-          # Ensure that:
-          # 1) Acc only exists at _WithAcc nodes.
-          # 2) _Inner nodes never contain any acc; only structure.
-          # 3) "Suck up" has been applied whenever possible: for any _Internal node,
-          #    if all children are _WithAcc and share the same acc, we should not leave it as _Internal.
-          # 4) If a _WithAcc node has an _InnerInternal child whose children are identical (structurally),
-          #    that's fine; but _WithAcc's descendants should have no another acc (by construction).
-          #
-          # We traverse and check these constraints; for #3 we just detect a violation opportunity.
-
-          def check_inner(inner: _InnerNode[T]):
-              if isinstance(inner, _InnerRoot):
-                  return
-              if isinstance(inner, _InnerInternal):
-                  for t, depth_map in inner.children.items():
-                      # Keys must not be EPS at A-level
-                      if t is _EPS:
-                          raise InvariantViolation("EPS sentinel leaked into A-level inner structure.")
-                      for _, child in depth_map.items():
-                          check_inner(child)
-
-          def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
-              if isinstance(node_b, _Empty):
-                  return True, None
-              if isinstance(node_b, _WithAcc):
-                  # Its inner must be pure structure
-                  check_inner(node_b.node)
-                  return True, node_b.acc
-              if isinstance(node_b, _Internal):
-                  # Recurse, collect child accs when child is WithAcc
-                  child_accs: List[Acc] = []
-                  child_types: List[type] = []
-                  for kt, depth_map in node_b.children.items():
-                      for _, ch in depth_map.items():
-                          ok, acc = check(ch)
-                          if not ok:
-                              return False, None
-                          child_types.append(type(ch))
-                          if isinstance(ch, _WithAcc):
-                              child_accs.append(ch.acc)
-                  # suck-up opportunity detection
-                  if child_types and all(ct is _WithAcc for ct in child_types):
-                      # All children are WithAcc; if their accs are equal, it should have been sucked up
-                      if child_accs and all(a == child_accs[0] for a in child_accs):
-                          raise InvariantViolation("Suck-up opportunity not applied: Internal with uniform WithAcc children.")
-                  return True, None
-              return True, None
-
-          ok, _ = check(node)
-          if not ok:
-              raise InvariantViolation("Invariant validation failed for unknown reason.")
-
-
-      # ------------------------------
-      # Utility helpers for transformations
-      # ------------------------------
-
-      def _acc_opt_merge(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
-          if a is None:
-              return b
-          if b is None:
-              return a
-          return _merge_acc(a, b)
-
-
-      def _acc_merge_n(acc: Acc, n: int) -> Optional[Acc]:
-          # Efficiently compute acc merged with itself n times (n >= 0).
-          # Returns None if n == 0, otherwise the merged result.
-          if n <= 0:
-              return None
-          # Exponentiation by squaring pattern for monoid addition via merge
-          result: Optional[Acc] = None
-          base: Acc = acc
-          k = n
-          while k > 0:
-              if k & 1:
-                  result = base if result is None else _merge_acc(result, base)
-              base = _merge_acc(base, base)
-              k >>= 1
-          return result
-
-
-      # Inner A-level transforms and queries with memoization
-
-      def _inner_push(node: _InnerNode[T], value: T, cache: Dict[int, _InnerNode[T]]) -> _InnerNode[T]:
-          key = (id(node), id(value))
-          if key in cache:  # type: ignore[dict-item]
-              return cache[key]  # type: ignore[index]
-
-          if isinstance(node, _InnerRoot):
-              res: _InnerNode[T] = _InnerInternal(children={value: {0: _InnerRoot()}})
-          else:
-              new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-              for t, dm in node.children.items():
-                  for d, ch in dm.items():
-                      pushed = _inner_push(ch, value, cache)
-                      new_children.setdefault(t, {})[d] = pushed
-              res = _InnerInternal(children=new_children)
-
-          cache[key] = res  # type: ignore[index]
-          return res
-
-
-      def _inner_count(node: _InnerNode[T], cache: Dict[int, int]) -> int:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          if isinstance(node, _InnerRoot):
-              cache[iid] = 1
-              return 1
-          total = 0
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  total += _inner_count(ch, cache)
-          cache[iid] = total
-          return total
-
-
-      def _inner_pop(node: _InnerNode[T], cache: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[Optional[_InnerNode[T]], int]:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          if isinstance(node, _InnerRoot):
-              res = (None, 0)
-              cache[iid] = res
-              return res
-
-          # node is _InnerInternal
-          new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          empties_from_len1 = 0  # number of sequences of length exactly 1
-          for t, dm in node.children.items():
-              # dm: depth -> child
-              # For each child:
-              # - if child is Root: contributes one empty on pop
-              # - else recurse, add child_new to new_children, and add child_empties times Root to new_children[t]
-              #   (this represents sequences reduced to length 1 after pop)
-              # We do not accumulate child_empties into empties_from_len1 since those are now non-empty [t]
-              # after pop; empties_from_len1 only counts direct [t] sequences.
-              # Also, we carry depth keys but they are not semantically significant; we can reuse existing d when available or 0.
-              add_idx = 0
-              for d, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      empties_from_len1 += 1
-                  else:
-                      ch_new, ch_empties = _inner_pop(ch, cache)
-                      if ch_new is not None:
-                          new_children.setdefault(t, {})[d] = ch_new
-                      # Add ch_empties many Root edges under t
-                      for _ in range(ch_empties):
-                          new_children.setdefault(t, {})[add_idx] = _InnerRoot()
-                          add_idx += 1
-
-          if not new_children:
-              res = (None, empties_from_len1)
-          else:
-              res = (_InnerInternal(children=new_children), empties_from_len1)
-          cache[iid] = res
-          return res
-
-
-      def _inner_last_tokens(node: _InnerNode[T], cache: Dict[int, Set[T]]) -> Set[T]:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          tokens: Set[T] = set()
-          if isinstance(node, _InnerRoot):
-              cache[iid] = tokens
-              return tokens
-          # look for edges t -> Root
-          for t, dm in node.children.items():
-              for _, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      tokens.add(t)
-          cache[iid] = tokens
-          return tokens
-
-
-      def _inner_filter_last(node: _InnerNode[T], value: T, cache: Dict[Tuple[int, int], Optional[_InnerNode[T]]]) -> Optional[_InnerNode[T]]:
-          key = (id(node), id(value))
-          if key in cache:
-              return cache[key]
-          if isinstance(node, _InnerRoot):
-              cache[key] = None
-              return None
-          # Keep only edges t == value that lead directly to Root.
-          kept: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          idx = 0
-          for t, dm in node.children.items():
-              if t != value:
-                  continue
-              for _, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      kept.setdefault(t, {})[idx] = _InnerRoot()
-                      idx += 1
-          res = None if not kept else _InnerInternal(children=kept)
-          cache[key] = res
-          return res
-
-
-      def _inner_plus(a: _InnerNode[T], b: _InnerNode[T], cache: Dict[Tuple[int, int], _InnerNode[T]]) -> _InnerNode[T]:
+    python/gss_tester/runner.py: |
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+    python/gss_tester/test_spec.py: |
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS, MergeableInt
+      from .fuzzer import run_fuzz_test
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
           """
-          Multiset union of two inner trees: sequence multiplicities add.
-          This is used to merge two _WithAcc with the same acc without losing multiplicities.
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
           """
-          key = (id(a), id(b))
-          if key in cache:
-              return cache[key]
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: MergeableInt(0)
 
-          if isinstance(a, _InnerRoot) and isinstance(b, _InnerRoot):
-              # Two empties: still a single empty sequence; multiplicity is represented at the WithAcc level
-              # by having two WithAccs; but since we use a single WithAcc for same-acc merge, we must not lose
-              # multiplicity. However inner cannot express multiple empties, so we leave Root here and rely
-              # on acc merge at higher level when appropriate (for identical WithAcc we will wrap via EPS if needed).
-              res: _InnerNode[T] = _InnerRoot()
-              cache[key] = res
-              return res
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
 
-          if isinstance(a, _InnerRoot) and isinstance(b, _InnerInternal):
-              # Union: keep b's structure and also preserve the empty. Representing empty already exists via Root.
-              # Root presence is already a Root component; since b is not Root, we need to keep both: we can
-              # convert to Internal with the same children as b; Root remains implicit via separate WithAcc path.
-              # Here, we return an Internal with children = b.children; the Root presence cannot be encoded here,
-              # but the presence of Root in 'a' is not representable without losing structure; it's fine because
-              # the WithAcc using this inner will still include empty via separate handling if required by caller.
-              res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in b.children.items()))
-              cache[key] = res
-              return res
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
 
-          if isinstance(a, _InnerInternal) and isinstance(b, _InnerRoot):
-              res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in a.children.items()))
-              cache[key] = res
-              return res
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
 
-          # Both are Internal: merge child maps key-wise, concatenating multiplicities (depth entries)
-          assert isinstance(a, _InnerInternal) and isinstance(b, _InnerInternal)
-          merged_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          # First add all from a
-          for t, dm in a.children.items():
-              for d, ch in dm.items():
-                  merged_children.setdefault(t, {})[d] = ch
-          # Then add from b; use fresh depth indices to avoid overwriting
-          for t, dm in b.children.items():
-              next_idx = 0 if t not in merged_children else (max(merged_children[t].keys(), default=-1) + 1)
-              for _, ch in dm.items():
-                  merged_children.setdefault(t, {})[next_idx] = ch
-                  next_idx += 1
-          res = _InnerInternal(children=merged_children)
-          cache[key] = res
-          return res
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
 
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
 
-      # ------------------------------
-      # Traversal-based operations on leveled nodes
-      # ------------------------------
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
 
-      def _has_any(node: _LeveledNode[T, Acc], memo: Dict[int, bool]) -> bool:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = False
-              return False
-          if isinstance(node, _WithAcc):
-              # Any WithAcc always yields at least one sequence (inner Root yields empty)
-              memo[nid] = True
-              return True
-          # _Internal
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  if _has_any(ch, memo):
-                      memo[nid] = True
-                      return True
-          memo[nid] = False
-          return False
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_a.merge(gss_b)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = merged1.merge(gss_c)
+          yield from _yield_state(merged2)
 
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
 
-      def _push_node(node: _LeveledNode[T, Acc], value: T,
-                     memo_node: Dict[int, _LeveledNode[T, Acc]],
-                     memo_inner: Dict[int, _InnerNode[T]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-          if isinstance(node, _Empty):
-              memo_node[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              new_inner = _inner_push(node.node, value, memo_inner)
-              res: _LeveledNode[T, Acc] = _WithAcc(node=new_inner, acc=node.acc)
-              memo_node[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  pushed = _push_node(ch, value, memo_node, memo_inner)
-                  new_children.setdefault(kt, {})[d] = pushed
-          res = _normalize_suck_up(_Internal(children=new_children))
-          memo_node[nid] = res
-          return res
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
 
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = s2.merge(s3)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = s7.merge(s8)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_d.merge(gss_empty)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
 
-      def _empty_accumulate(node: _LeveledNode[T, Acc],
-                            memo: Dict[int, Optional[Acc]]) -> Optional[Acc]:
-          """
-          Compute merged accumulator for all empty stacks represented by this node.
-          Empty stacks are those reachable from root by taking only EPS edges to a WithAcc whose inner is Root.
-          Multiplicity is honored via multiple EPS paths and duplicate entries.
-          """
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = None
-              return None
-          if isinstance(node, _WithAcc):
-              if isinstance(node.node, _InnerRoot):
-                  memo[nid] = node.acc
-                  return node.acc
-              memo[nid] = None
-              return None
-          # _Internal
-          acc_total: Optional[Acc] = None
-          eps_map = node.children.get(_EPS, {})
-          for _, ch in eps_map.items():
-              acc_total = _acc_opt_merge(acc_total, _empty_accumulate(ch, memo))
-          memo[nid] = acc_total
-          return acc_total
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
+          gss_to_prune = gss_e.merge(gss_f)
+          yield from _yield_state(gss_to_prune)
 
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
 
-      def _pop_node(node: _LeveledNode[T, Acc],
-                    memo_node: Dict[int, Tuple[_LeveledNode[T, Acc], Optional[Acc]]],
-                    memo_inner: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[_LeveledNode[T, Acc], Optional[Acc]]:
-          """
-          Pop removes the last token from all non-empty sequences.
-          Returns:
-            - new leveled node representing all sequences after pop that remain non-empty
-            - aggregated accumulator for the empty stack produced by popping length-1 sequences anywhere
-          """
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
 
-          if isinstance(node, _Empty):
-              res = (_Empty(), None)
-              memo_node[nid] = res
-              return res
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = s_branch1.merge(s_branch2)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
 
-          if isinstance(node, _WithAcc):
-              inner_new, empties_len1 = _inner_pop(node.node, memo_inner)
-              # Non-empty results become a WithAcc if inner_new exists
-              if inner_new is None:
-                  nonempty_node: _LeveledNode[T, Acc] = _Empty()
-              else:
-                  nonempty_node = _WithAcc(node=inner_new, acc=node.acc)
-              # Empty accumulators come from sequences of length 1 in this WithAcc
-              empty_acc = _acc_merge_n(node.acc, empties_len1)
-              res = (nonempty_node, empty_acc)
-              memo_node[nid] = res
-              return res
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
 
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          empty_total: Optional[Acc] = None
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
 
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  ch_new, ch_empty = _pop_node(ch, memo_node, memo_inner)
-                  if kt is _EPS:
-                      # Propagate popped non-empty under EPS, and collect empties to top-level empty_total
-                      if not isinstance(ch_new, _Empty):
-                          new_children.setdefault(_EPS, {})[d] = ch_new
-                      empty_total = _acc_opt_merge(empty_total, ch_empty)
-                  else:
-                      # For token edges: prepend token to the popped non-empty results
-                      if not isinstance(ch_new, _Empty):
-                          new_children.setdefault(kt, {})[d] = ch_new
-                      # empty sequences from child become [kt]
-                      if ch_empty is not None:
-                          # Represent [kt] as a direct WithAcc(inner=Root, acc=ch_empty) under kt
-                          # Use a fresh depth index to avoid clobbering
-                          next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
-                          new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=ch_empty)
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
+          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
+          s_merged2 = s_branch3.merge(s_branch4)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
 
-          nonempty_res = _Internal(children=new_children) if new_children else _Empty()
-          res = (_normalize_suck_up(nonempty_res), empty_total)
-          memo_node[nid] = res
-          return res
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
+          gss_pn_merged = gss_pn1.merge(gss_pn2)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
+          gss_i_merged = gss_i1.merge(gss_i2)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+
+          # --- Test 11: reduce_acc and peek ---
+          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
+          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
+          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
+          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
+          yield from _yield_state(gss_rp_merged)
+
+          # peek() should return {2, 3}
+          peek_result = gss_rp_merged.peek()
+          # reduce_acc() should be 3 + 4 + 5 = 12
+          reduce_result = gss_rp_merged.reduce_acc()
+          
+          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
+          # This is a bit of a hack, but it allows us to check for consistency.
+          # A GSS with a single empty stack and the peek result as the accumulator.
+          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
+          yield from _yield_state(gss_peek_check)
+
+          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
+          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
+          yield from _yield_state(gss_reduce_check)
+
+          # Test on empty GSS
+          gss_rp_empty = gss_class.from_stacks([])
+          yield from _yield_state(gss_rp_empty)
+          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
+          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
+          yield from _yield_state(gss_reduce_empty_check)
 
 
-      def _isolate_by_last(node: _LeveledNode[T, Acc], value: Optional[T],
-                           memo_node: Dict[Tuple[int, Optional[int]], _LeveledNode[T, Acc]],
-                           memo_empty: Dict[int, Optional[Acc]]) -> _LeveledNode[T, Acc]:
-          """
-          Keep only stacks whose last token equals `value`. If value is None, keep only empty stacks.
-          """
-          key = (id(node), None if value is None else id(value))
-          if key in memo_node:
-              return memo_node[key]
+          # --- Test 12: merge_many ---
+          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
+          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
+          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
+          
+          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
+          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
+          yield from _yield_state(gss_merged_many)
 
-          if isinstance(node, _Empty):
-              memo_node[key] = node
-              return node
+          # --- Test 13: Pop from GSS containing an empty stack ---
+          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
+          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
+          gss_pe_merged = gss_pe1.merge(gss_pe2)
+          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
 
-          if value is None:
-              # Keep only empty stacks
-              if isinstance(node, _WithAcc):
-                  res = _WithAcc(node=_InnerRoot(), acc=node.acc) if isinstance(node.node, _InnerRoot) else _Empty()
-                  memo_node[key] = res
-                  return res
-              # _Internal: accumulate empties through EPS
-              eacc = _empty_accumulate(node, memo_empty)
-              if eacc is None:
-                  memo_node[key] = _Empty()
-                  return _Empty()
-              res = _WithAcc(node=_InnerRoot(), acc=eacc)
-              memo_node[key] = res
-              return res
+          gss_pe_popped = gss_pe_merged.pop()
+          # pop should only affect non-empty stacks.
+          # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
+          yield from _yield_state(gss_pe_popped)
 
-          # value is not None
-          if isinstance(node, _WithAcc):
-              # Within WithAcc, last token equals `value` iff edge value -> Root exists directly
-              inner_res = _inner_filter_last(node.node, value, {})
-              res2: _LeveledNode[T, Acc] = _WithAcc(node=inner_res, acc=node.acc) if inner_res is not None else _Empty()
-              memo_node[key] = res2
-              return res2
+          # --- Test 14: String values and popn(0) ---
+          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
+          yield from _yield_state(gss_s1)
 
-          # _Internal: compose from children
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          # First, EPS branch: last token deeper
-          eps_map = node.children.get(_EPS, {})
-          for d, ch in eps_map.items():
-              ch_kept = _isolate_by_last(ch, value, memo_node, memo_empty)
-              if not isinstance(ch_kept, _Empty):
-                  new_children.setdefault(_EPS, {})[d] = ch_kept
+          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
+          yield from _yield_state(gss_s_pop0)
 
-          # For each token t:
-          for kt, dm in node.children.items():
-              if kt is _EPS:
-                  continue
-              for d, ch in dm.items():
-                  # Deep matches: sequences whose last token equals `value` deeper in child
-                  deep = _isolate_by_last(ch, value, memo_node, memo_empty)
-                  if not isinstance(deep, _Empty):
-                      new_children.setdefault(kt, {})[d] = deep
-                  # Immediate match: last token equals `value` at this step requires kt == value and child empties
-                  if kt == value:
-                      eacc = _empty_accumulate(ch, memo_empty)
-                      if eacc is not None:
-                          next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
-                          new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=eacc)
+          gss_s_pop1 = gss_s1.popn(1)
+          yield from _yield_state(gss_s_pop1)
 
-          res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
-          memo_node[key] = res
-          return res
+          # --- Test 15: Operations on Empty GSS ---
+          gss_empty_start = gss_class.from_stacks([])
+          yield from _yield_state(gss_empty_start)
 
+          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
+          yield from _yield_state(gss_empty_pushed)
 
-      def _apply_node(node: _LeveledNode[T, Acc],
-                      func: Callable[[Acc], Acc],
-                      memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              new_acc = func(node.acc)
-              # Keep the same inner structure; only acc changes
-              res: _LeveledNode[T, Acc] = _WithAcc(node=node.node, acc=new_acc)
-              memo[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  new_children.setdefault(kt, {})[d] = _apply_node(ch, func, memo)
-          res = _normalize_suck_up(_Internal(children=new_children))
-          memo[nid] = res
-          return res
+          gss_empty_popped = gss_empty_start.pop() # Should still be empty
+          yield from _yield_state(gss_empty_popped)
 
+          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
+          yield from _yield_state(gss_empty_isolated)
 
-      def _prune_node(node: _LeveledNode[T, Acc],
-                      pred: Callable[[Acc], bool],
-                      memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              res: _LeveledNode[T, Acc] = node if pred(node.acc) else _Empty()
-              memo[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  pruned = _prune_node(ch, pred, memo)
-                  if not isinstance(pruned, _Empty):
-                      new_children.setdefault(kt, {})[d] = pruned
-          res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
-          memo[nid] = res
-          return res
+          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
+          yield from _yield_state(gss_empty_applied)
 
+          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
+          yield from _yield_state(gss_empty_pruned)
 
-      def _reduce_node(node: _LeveledNode[T, Acc],
-                       memo_node: Dict[int, Optional[Acc]],
-                       memo_inner_count: Dict[int, int]) -> Optional[Acc]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-          if isinstance(node, _Empty):
-              memo_node[nid] = None
-              return None
-          if isinstance(node, _WithAcc):
-              count = _inner_count(node.node, memo_inner_count)
-              total = _acc_merge_n(node.acc, count)
-              memo_node[nid] = total
-              return total
-          # _Internal
-          total: Optional[Acc] = None
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  total = _acc_opt_merge(total, _reduce_node(ch, memo_node, memo_inner_count))
-          memo_node[nid] = total
-          return total
-
-
-      def _peek_node(node: _LeveledNode[T, Acc],
-                     memo_node: Dict[int, Set[T]],
-                     memo_inner_last: Dict[int, Set[T]],
-                     memo_empty: Dict[int, Optional[Acc]]) -> Set[T]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-
-          if isinstance(node, _Empty):
-              memo_node[nid] = set()
-              return set()
-
-          if isinstance(node, _WithAcc):
-              res = _inner_last_tokens(node.node, memo_inner_last)
-              memo_node[nid] = set(res)
-              return set(res)
-
-          # _Internal
-          res_set: Set[T] = set()
-          # EPS: last token deeper
-          eps_map = node.children.get(_EPS, {})
-          for _, ch in eps_map.items():
-              res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
-          # T children:
-          for kt, dm in node.children.items():
-              if kt is _EPS:
-                  continue
-              # For [kt] to be a last token at this level, child must have an empty path
-              for _, ch in dm.items():
-                  # If child has an empty, then kt is a last token possibility
-                  if _empty_accumulate(ch, memo_empty) is not None:
-                      res_set.add(kt)  # type: ignore[arg-type]
-                  # Also include last tokens deeper in child
-                  res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
-          memo_node[nid] = res_set
-          return res_set
-
-
-      def _merge_nodes(a: _LeveledNode[T, Acc], b: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
-          """
-          Merge two leveled nodes efficiently, preserving sharing. This merging
-          does NOT require enumerating pairs. It preserves multiplicities and
-          ensures invariants by applying suck-up only where safe.
-
-          Special cases:
-          - If both are _WithAcc and have equal acc (==), combine into a single _WithAcc
-            with inner being multiset union (_inner_plus) to preserve multiplicities.
-          - Otherwise, represent the union by an _Internal with a single _EPS branch
-            having two children (a and b). This preserves duplicates and sharing.
-          """
-          # Quick paths
-          if isinstance(a, _Empty):
-              return b
-          if isinstance(b, _Empty):
-              return a
-          if a is b:
-              # Represent duplication as two EPS entries to preserve multiplicity
-              return _Internal(children={_EPS: {0: a, 1: b}})
-
-          if isinstance(a, _WithAcc) and isinstance(b, _WithAcc):
-              same_acc: bool
-              try:
-                  same_acc = (a.acc == b.acc)  # type: ignore[operator]
-              except Exception:
-                  same_acc = (a.acc is b.acc)
-              if same_acc:
-                  inner = _inner_plus(a.node, b.node, {})
-                  return _WithAcc(node=inner, acc=a.acc)
-              # Different acc: cannot combine uniformly without losing per-path differences
-              return _Internal(children={_EPS: {0: a, 1: b}})
-
-          # Generic union with EPS child collecting both
-          return _Internal(children={_EPS: {0: a, 1: b}})
-
-
-      # ------------------------------
-      # Public LeveledGSS implementation
-      # ------------------------------
-
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A leveled, graph-structured stack implementation with node sharing.
-
-          Key points:
-          - Operations traverse and transform the leveled DAG directly; no conversion to explicit stacks.
-          - Sharing is preserved via pointer-identity memoization.
-          - apply/prune use memoization to avoid rebuilding unchanged subtrees.
-          - merge avoids structural copying and uses EPS-union and inner multiset union when relevant.
-          - Invariants are validated after construction; normalization ("suck-up") is applied in local transforms.
-          """
-
-          # Construction
-          def __init__(self, node: _LeveledNode[T, Acc]):
-              self._node = node
-              # Validate invariants; if they fail, rebuild canonically from enumeration as a last resort
-              try:
-                  _validate_invariants_node(self._node)
-              except InvariantViolation:
-                  rebuilt = _build_leveled_from_pairs(_enumerate_pairs_from_node(self._node))
-                  _validate_invariants_node(rebuilt)
-                  self._node = rebuilt
-
-          # ---- GSS interface ----
-
-          @classmethod
-          def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              node = _build_leveled_from_pairs(stacks)
-              return cls(node)
-
-          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              new_node = _push_node(self._node, value, {}, {})
-              return LeveledGSS(new_node)
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              nonempty_node, empty_acc = _pop_node(self._node, {}, {})
-              if empty_acc is None:
-                  return LeveledGSS(nonempty_node)
-              # Include the resulting empty stacks
-              empty_node: _LeveledNode[T, Acc] = _WithAcc(node=_InnerRoot(), acc=empty_acc)
-              merged = _merge_nodes(nonempty_node, empty_node)
-              # Suck-up may be safe here if applicable
-              merged = _normalize_suck_up(merged)
-              return LeveledGSS(merged)
-
-          def is_empty(self) -> bool:
-              return not _has_any(self._node, {})
-
-          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              new_node = _isolate_by_last(self._node, value, {}, {})
-              return LeveledGSS(new_node)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              new_node = _apply_node(self._node, func, {})
-              return LeveledGSS(new_node)
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              new_node = _prune_node(self._node, predicate, {})
-              return LeveledGSS(new_node)
-
-          def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              # Convert other's representation to LeveledGSS if needed
-              if isinstance(other, LeveledGSS):
-                  other_node = other._node
-              else:
-                  # We only use ReferenceGSS conversion here to obtain a leveled node once, not per operation
-                  other_ref = other.to_reference_impl()
-                  other_node = _build_leveled_from_pairs(_pairs_from_ref(other_ref))
-              merged = _merge_nodes(self._node, other_node)
-              # Apply normalization; this will not lose multiplicity in handled cases (see _merge_nodes logic)
-              merged = _normalize_suck_up(merged)
-              return LeveledGSS(merged)
-
-          def peek(self) -> Set[T]:
-              return _peek_node(self._node, {}, {}, {})
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return _reduce_node(self._node, {}, {})
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              # Enumerate to canonical ReferenceGSS (gold standard for comparisons/JSON)
-              pairs = _enumerate_pairs_from_node(self._node)
-              return ReferenceGSS.from_stacks(pairs)
-
-          # Expose a validator for debugging
-          def validate_invariants(self) -> None:
-              _validate_invariants_node(self._node)
-
-          # Optional: convenience for debugging
-          def __repr__(self) -> str:
-              return f"LeveledGSS(node={self._node!r})"
-
-          def __str__(self) -> str:
-              return f"LeveledGSS({self.to_reference_impl().to_json_serializable()})"
+          # --- Test 16: Fuzz tests ---
+          # Run a short, seeded fuzz test to catch more complex interactions.
+          # The seed ensures the test is deterministic.
+          fuzz_seed = 42
+          fuzz_steps = 100
+          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+              yield from _yield_state(gss_state)
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: simple
@@ -2089,6 +2195,252 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```python 'python/gss_tester/__init__.py'
+      # This file makes 'gss_tester' a Python package.
+
+      ```
+    metadata:
+      filename: python/gss_tester/__init__.py
+  - user: |-
+      ```python 'python/gss_tester/analyzer.py'
+      import argparse
+      import json
+      from pathlib import Path
+      from typing import List, Dict, Any, Tuple
+      import itertools
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None):
+          all_results: Dict[str, List[Dict[str, Any]]] = {}
+          implementations: List[str] = []
+
+          for file_path in result_files:
+              try:
+                  data = json.loads(file_path.read_text())
+                  impl_name = data["implementation"]
+                  all_results[impl_name] = data["results"]
+                  implementations.append(impl_name)
+              except (json.JSONDecodeError, KeyError) as e:
+                  print(f"Warning: Skipping invalid result file {file_path}: {e}")
+
+
+          if not implementations:
+              print("No valid result files found to analyze.")
+              return
+
+          # --- Equivalence Partitioning ---
+          # A signature is a tuple of all yielded states and their line numbers.
+          Signature = Tuple[Tuple[int, str], ...]
+
+          def get_signature(results: List[Dict[str, Any]]) -> Signature:
+              # Serialize state to a string to make it hashable and canonical.
+              return tuple(
+                  (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
+              )
+
+          partitions: Dict[Signature, List[str]] = {}
+          for impl_name, results in all_results.items():
+              sig = get_signature(results)
+              if sig not in partitions:
+                  partitions[sig] = []
+              partitions[sig].append(impl_name)
+
+          print("--- Consistency Analysis ---")
+          print(f"Found {len(partitions)} equivalence class(es) among {len(implementations)} implementations.\n")
+
+          # --- Reference Comparison ---
+          ref_sig: Signature = None
+          ref_impl_name: str = None
+          if reference_file:
+              try:
+                  ref_data = json.loads(reference_file.read_text())
+                  ref_impl_name = ref_data["implementation"]
+                  ref_sig = get_signature(ref_data["results"])
+                  print(f"Reference implementation: {ref_impl_name}\n")
+              except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                  print(f"Warning: Could not load reference file {reference_file}: {e}")
+
+
+          # --- Display Partitions ---
+          sorted_partitions = sorted(partitions.items(), key=lambda item: len(item[1]), reverse=True)
+          for i, (sig, impls) in enumerate(sorted_partitions):
+              header = f"Class {i+1} ({len(impls)} implementation(s))"
+              if ref_sig:
+                  match_icon = "✅" if sig == ref_sig else "❌"
+                  header += f" [Ref Match: {match_icon}]"
+              
+              print(header)
+              print("-" * len(header))
+              for impl in sorted(impls):
+                  print(f"  - {impl}")
+              print()
+
+          # --- Detailed Divergence Report ---
+          if len(partitions) > 1:
+              print("\n--- Divergence Report ---")
+              # Compare every pair of partitions
+              for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                  impl_name1 = sorted(impls1)[0]
+                  impl_name2 = sorted(impls2)[0]
+                  print(f"\nComparing '{impl_name1}' with '{impl_name2}':")
+                  
+                  results1 = all_results[impl_name1]
+                  results2 = all_results[impl_name2]
+                  
+                  max_len = max(len(results1), len(results2))
+                  for i in range(max_len):
+                      res1 = results1[i] if i < len(results1) else None
+                      res2 = results2[i] if i < len(results2) else None
+
+                      sig_item1 = (res1['line'], json.dumps(res1['state'], sort_keys=True)) if res1 else None
+                      sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+
+                      if sig_item1 != sig_item2:
+                          print(f"  - First divergence at yield index {i}:")
+                          if res1:
+                              print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+                          else:
+                              print(f"    - {impl_name1}: No yield at this index.")
+                          
+                          if res2:
+                              print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
+                          else:
+                              print(f"    - {impl_name2}: No yield at this index.")
+                          break # Show only the first divergence for this pair
+
+      def main():
+          parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+          parser.add_argument(
+              "result_files",
+              nargs='+',
+              type=Path,
+              help="Paths to result JSON files."
+          )
+          parser.add_argument(
+              "-r", "--reference",
+              type=Path,
+              default=None,
+              help="Path to a reference result file for comparison."
+          )
+          args = parser.parse_args()
+
+          valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+          if not valid_files:
+              print("Error: No valid result files found.")
+              return
+
+          analyze_results(valid_files, args.reference)
+
+      if __name__ == "__main__":
+          main()
+
+      ```
+    metadata:
+      filename: python/gss_tester/analyzer.py
+  - user: |-
+      ```python 'python/gss_tester/fuzzer.py'
+      import random
+      from typing import Generator, Any, Type, List, Callable
+
+      from .interface import GSS, MergeableInt
+
+
+      def run_fuzz_test(
+          gss_class: Type[GSS],
+          seed: int,
+          num_steps: int,
+          max_gss_states: int = 10,
+          value_pool: List[Any] = None
+      ) -> Generator[GSS, None, None]:
+          """
+          Runs a randomized sequence of GSS operations to find inconsistencies.
+          Yields the new GSS state after each operation.
+          """
+          if value_pool is None:
+              value_pool = list(range(20)) + ['a', 'b', 'c']
+
+          rng = random.Random(seed)
+          gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
+          yield gss_states[0]
+
+          for _ in range(num_steps):
+              if not gss_states:
+                  # All states were pruned or became empty, start over.
+                  gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
+                  yield gss_states[0]
+                  if len(gss_states) >= max_gss_states:
+                      continue
+
+              # Choose an operation
+              can_merge = len(gss_states) >= 2
+              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+              if can_merge:
+                  operations.append('merge')
+              
+              op_choice = rng.choice(operations)
+
+              # Select GSS state(s) to operate on
+              source_gss = rng.choice(gss_states)
+              
+              new_gss: GSS
+
+              try:
+                  if op_choice == 'push':
+                      value = rng.choice(value_pool)
+                      new_gss = source_gss.push(value)
+
+                  elif op_choice == 'pop':
+                      new_gss = source_gss.pop()
+
+                  elif op_choice == 'popn':
+                      n = rng.randint(0, 4)
+                      new_gss = source_gss.popn(n)
+
+                  elif op_choice == 'isolate':
+                      # 20% chance of isolating empty stack
+                      if rng.random() < 0.2:
+                          value = None
+                      else:
+                          value = rng.choice(value_pool)
+                      new_gss = source_gss.isolate(value)
+
+                  elif op_choice == 'apply':
+                      amount = rng.randint(1, 10)
+                      # Use a default argument in the lambda to capture the value of `amount`
+                      func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
+                      new_gss = source_gss.apply(func)
+
+                  elif op_choice == 'prune':
+                      threshold = rng.randint(0, 20)
+                      # Use a default argument in the lambda to capture the value of `threshold`
+                      predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                      new_gss = source_gss.prune(predicate)
+
+                  elif op_choice == 'merge' and can_merge:
+                      other_gss = rng.choice([g for g in gss_states if g is not source_gss])
+                      new_gss = source_gss.merge(other_gss)
+                  
+                  else: # Should not happen
+                      continue
+
+                  yield new_gss
+
+                  # Add the new state to our pool, but avoid adding empty or duplicate states
+                  if new_gss is not source_gss and not new_gss.is_empty():
+                      gss_states.append(new_gss)
+
+                  # Prune the list of GSS states to keep it manageable
+                  if len(gss_states) > max_gss_states:
+                      gss_states = rng.sample(gss_states, max_gss_states)
+
+              except Exception:
+                  # Some operations might fail on some implementations if invariants are broken.
+                  # We'll just skip the step and continue fuzzing.
+                  continue
+
+      ```
+    metadata:
+      filename: python/gss_tester/fuzzer.py
   - user: |-
       ```python 'python/gss_tester/interface.py'
       from abc import ABC, abstractmethod
@@ -2232,6 +2584,12 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/interface.py
+  - user: |-
+      ```python 'python/gss_tester/leveled_impl.py'
+
+      ```
+    metadata:
+      filename: python/gss_tester/leveled_impl.py
   - user: |-
       ```python 'python/gss_tester/reference_impl.py'
       from typing import List, Tuple, Callable, Set, Iterable, Any, Type, Optional, Dict
@@ -2407,7 +2765,475 @@ messages:
     metadata:
       filename: python/gss_tester/reference_impl.py
   - user: |-
-      ```python 'python/gss_tester/leveled_impl.py'
+      ```python 'python/gss_tester/runner.py'
+      import argparse
+      import importlib
+      import json
+      from pathlib import Path
+      import sys
+
+      from .test_spec import run_test_spec
+
+      def main():
+          parser = argparse.ArgumentParser(description="Run GSS test specification against an implementation.")
+          parser.add_argument(
+              "implementation_module",
+              help="The Python module containing the GSS implementation (e.g., 'gss_tester.reference_impl')."
+          )
+          parser.add_argument(
+              "implementation_class",
+              help="The name of the GSS class within the module (e.g., 'ReferenceGSS')."
+          )
+          parser.add_argument(
+              "-o", "--output",
+              type=Path,
+              required=True,
+              help="Path to the output JSON file for the results."
+          )
+          args = parser.parse_args()
+
+          try:
+              print(f"Importing {args.implementation_class} from {args.implementation_module}...")
+              module = importlib.import_module(args.implementation_module)
+              gss_class = getattr(module, args.implementation_class)
+          except (ImportError, AttributeError) as e:
+              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Running test specification...")
+          results = []
+          for state, line_no in run_test_spec(gss_class):
+              results.append({
+                  "line": line_no,
+                  "state": state
+              })
+
+          output_data = {
+              "implementation": f"{args.implementation_module}.{args.implementation_class}",
+              "results": results
+          }
+
+          args.output.parent.mkdir(parents=True, exist_ok=True)
+          with open(args.output, 'w') as f:
+              json.dump(output_data, f, indent=2)
+
+          print(f"Successfully ran {len(results)} checks.")
+          print(f"Results saved to {args.output}")
+
+      if __name__ == "__main__":
+          main()
+
+      ```
+    metadata:
+      filename: python/gss_tester/runner.py
+  - user: |-
+      ```python 'python/gss_tester/test_spec.py'
+      import inspect
+      from typing import Generator, Tuple, Any, Type
+      from .interface import GSS, MergeableInt
+      from .fuzzer import run_fuzz_test
+
+      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
+          """
+          A generator that defines a sequence of GSS operations and yields states at
+          various points for consistency checking.
+
+          Yields:
+              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
+          """
+          
+          # For this test, the accumulator is an integer and stack items are integers.
+          acc_factory = lambda: MergeableInt(0)
+
+          def _yield_state(gss_state: GSS):
+              """Helper to yield the state and the caller's line number."""
+              caller_frame = inspect.currentframe().f_back
+              line_no = caller_frame.f_lineno
+              yield (gss_state.to_json_serializable(), line_no)
+
+          # --- Test 1: Basic push/pop ---
+          gss1 = gss_class.from_stacks([([], acc_factory())])
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(10)
+          yield from _yield_state(gss1)
+
+          gss1 = gss1.push(20)
+          yield from _yield_state(gss1)
+
+          gss_popped_20 = gss1.isolate(20).pop()
+          yield from _yield_state(gss_popped_20)
+
+          gss_popped_10 = gss_popped_20.isolate(10).pop()
+          yield from _yield_state(gss_popped_10)
+
+          # --- Test 2: Forking and Merging ---
+          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
+          
+          merged1 = gss_a.merge(gss_b)
+          yield from _yield_state(merged1)
+          
+          # Merge a stack that already exists to test accumulator merging
+          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
+          merged2 = merged1.merge(gss_c)
+          yield from _yield_state(merged2)
+
+          # --- Test 3: Apply accumulator function ---
+          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
+          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
+          yield from _yield_state(gss_to_apply)
+
+          # --- Test 4: Pop with no match ---
+          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
+          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
+          yield from _yield_state(gss_after_failed_pop)
+
+          # --- Test 5: Complex sequence (diamond pattern) ---
+          s0 = gss_class.from_stacks([([], acc_factory())])
+          s1 = s0.push(1)
+          s2 = s1.push(2)
+          s3 = s1.push(3)
+          s4 = s2.merge(s3)
+          yield from _yield_state(s4)
+          
+          s5 = s4.push(4)
+          yield from _yield_state(s5)
+          
+          s6 = s5.isolate(4).pop()
+          yield from _yield_state(s6) # should be same as s4
+          
+          s7 = s6.isolate(2).pop()
+          s8 = s6.isolate(3).pop()
+          yield from _yield_state(s7)
+          yield from _yield_state(s8)
+          
+          s9 = s7.merge(s8)
+          yield from _yield_state(s9) # should be same as s1
+          
+          # --- Test 6: Merging empty GSS ---
+          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
+          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
+          yield from _yield_state(gss_empty)
+          
+          merged_with_empty = gss_d.merge(gss_empty)
+          yield from _yield_state(merged_with_empty) # should be same as gss_d
+
+          # --- Test 7: Pruning ---
+          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
+          gss_to_prune = gss_e.merge(gss_f)
+          yield from _yield_state(gss_to_prune)
+
+          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
+          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+
+          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
+          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+
+          # --- Test 8: Pop operations on merged stacks ---
+          # Case 8a: Pop to a common parent, should result in one stack.
+          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
+          s_branch1 = s_base.push(101)
+          s_branch2 = s_base.push(102)
+          s_merged = s_branch1.merge(s_branch2)
+          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+
+          s_popped = s_merged.pop()
+          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+
+          # Case 8b: Push after a pop that should have merged.
+          # This further highlights the divergence from the duplicate stacks.
+          s_pushed_after_pop = s_popped.push(103)
+          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+
+          # Case 8c: Pop to a common parent with different accumulators.
+          # This exposes a bug in FastGSS which loses accumulator information on pop.
+          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
+          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
+          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
+          s_merged2 = s_branch3.merge(s_branch4)
+          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+
+          s_popped2 = s_merged2.pop()
+          # Should have two stacks: [200] acc 7, and [200] acc 8
+          yield from _yield_state(s_popped2)
+
+          # --- Test 9: popn ---
+          # Case 9a: popn less than stack depth
+          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
+          gss_pn_merged = gss_pn1.merge(gss_pn2)
+          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+
+          gss_pn_pop2 = gss_pn_merged.popn(2)
+          yield from _yield_state(gss_pn_pop2) # has [1] and []
+
+          # Case 9b: popn more than stack depth
+
+          gss_pn_pop4 = gss_pn_merged.popn(4)
+          yield from _yield_state(gss_pn_pop4) # has []
+
+          # --- Test 10: Isolate empty stacks ---
+          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
+          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
+          gss_i_merged = gss_i1.merge(gss_i2)
+          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+          gss_isolated_empty = gss_i_merged.isolate(None)
+          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+
+          gss_isolated_10 = gss_i_merged.isolate(10)
+          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+
+          # --- Test 11: reduce_acc and peek ---
+          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
+          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
+          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
+          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
+          yield from _yield_state(gss_rp_merged)
+
+          # peek() should return {2, 3}
+          peek_result = gss_rp_merged.peek()
+          # reduce_acc() should be 3 + 4 + 5 = 12
+          reduce_result = gss_rp_merged.reduce_acc()
+          
+          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
+          # This is a bit of a hack, but it allows us to check for consistency.
+          # A GSS with a single empty stack and the peek result as the accumulator.
+          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
+          yield from _yield_state(gss_peek_check)
+
+          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
+          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
+          yield from _yield_state(gss_reduce_check)
+
+          # Test on empty GSS
+          gss_rp_empty = gss_class.from_stacks([])
+          yield from _yield_state(gss_rp_empty)
+          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
+          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
+          yield from _yield_state(gss_reduce_empty_check)
+
+
+          # --- Test 12: merge_many ---
+          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
+          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
+          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
+          
+          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
+          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
+          yield from _yield_state(gss_merged_many)
+
+          # --- Test 13: Pop from GSS containing an empty stack ---
+          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
+          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
+          gss_pe_merged = gss_pe1.merge(gss_pe2)
+          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
+
+          gss_pe_popped = gss_pe_merged.pop()
+          # pop should only affect non-empty stacks.
+          # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
+          yield from _yield_state(gss_pe_popped)
+
+          # --- Test 14: String values and popn(0) ---
+          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
+          yield from _yield_state(gss_s1)
+
+          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
+          yield from _yield_state(gss_s_pop0)
+
+          gss_s_pop1 = gss_s1.popn(1)
+          yield from _yield_state(gss_s_pop1)
+
+          # --- Test 15: Operations on Empty GSS ---
+          gss_empty_start = gss_class.from_stacks([])
+          yield from _yield_state(gss_empty_start)
+
+          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
+          yield from _yield_state(gss_empty_pushed)
+
+          gss_empty_popped = gss_empty_start.pop() # Should still be empty
+          yield from _yield_state(gss_empty_popped)
+
+          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
+          yield from _yield_state(gss_empty_isolated)
+
+          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
+          yield from _yield_state(gss_empty_applied)
+
+          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
+          yield from _yield_state(gss_empty_pruned)
+
+          # --- Test 16: Fuzz tests ---
+          # Run a short, seeded fuzz test to catch more complex interactions.
+          # The seed ensures the test is deterministic.
+          fuzz_seed = 42
+          fuzz_steps = 100
+          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+              yield from _yield_state(gss_state)
+
+      ```
+    metadata:
+      filename: python/gss_tester/test_spec.py
+  - user: |-
+      Here was my original prompt for creating the GSS interface:
+
+      A GSS is this
+      - From stacks takes List[Tuple[List[T], Acc]] and returns Self.
+      - Push takes Self and T and returns Self.
+      - Pop takes Self and returns Self. It simply pops one from each stack. Empty stacks are discarded.
+      - There's also a function apply that mutates all the Accs independently. It takes a closure.
+      - And there'll have to be a function merge that takes an iterable of Selfs and a closure for merging two Accs returns Self.
+      - reduce_acc takes a closure that takes two accs and returns one acc, and returns an optional acc. This one's guaranteed to output the same value between impls as long as the reduce closure is order-independent.
+      - Peek takes Self and returns a set of Ts, the top values across stacks.
+      - Merge takes two Selfs and a closure that merges two Accs.
+      - `is_empty` takes Self and returns bool, true if there are no stacks (but false if there's an empty stack).
+      - isolate takes Self and Optional[T] and keeps only those stacks that have T on top, or empty stacks if T is None.
+
+      reference_impl.py will be a crude but gold-standard-for-correctness implementation that simply stores `List[Tuple[List[T], Acc]]` and does all operations using 'brute force'.
+
+      Bonus (many of these can be defined using a default impl on the interface):
+      - init_empty calls from_stacks([])
+      - push_many takes list[tuple[Self, T]] and returns Self. It loops over the entries, pushes T to each Self, then gathers all the Selfs into one Self and returns it. If empty, returns init_empty.
+      - merge_many takes many Selfs and a closure. If empty, returns init_empty.
+      - popn just pops n times
+      - to_reference_impl converts to reference implementation
+      - to_json_serializable converts to reference impl and then calls to_json_serializable on that (overridden for to_json_serializable)
+      - `__str__` and `__repr__`: `return f"{self.__class__.__name__}({self.to_json_serializable()})"`
+      - `__eq__` should be overridden, and should generally be false if different types. Should be tailored to each impl.
+
+
+
+      Here was my original prompt for creating the leveled GSS code:
+
+      > Create a new implementation of GSS.
+      > 
+      > This impl should be a graph. Edges will carry T. But also max depth.
+      > a map from a parent to its children could be a map T -> max depth -> node
+      > This should reduce unnecessary merges in some cases. e.g. imagine we have these stacks (same acc - doesn't matter):
+      > - [1,2,3,4]
+      > - [1,2,4]
+      > Could be this
+      > A <-1- B <-2- C <-3- D <-4- E
+      > C <-4- E
+      > this'd be an efficient representation. But it requires us to have 2 edges to different nodes on E with T=4. So we'd be required to merge more eagerly.
+      > having max depth solves this.
+      > 
+      > I want Accs in this implementation to existing only at one 'level', if that makes sense.
+      > ie either all of a node's children have Accs, or none of them do. And if the parent has an acc then none of its children do.
+      > And it should be maintained such that if all the children's accs are equal, the accs are sucked up into the parent. ie they aren't at the children any more.
+      > So, if the children of a node have accs, then there must be at least one inequality between them.
+      > 
+      > We can enforce that Accs can only exist at one level by defining different types of node: type A that can be either root or an internal node that maps to other type As, and type B that can either contain type A and an Acc OR that maps to other type Bs. 'Contain' here means just contains one - wraps. Maps means contains a node map.
+      > If we were working in Rust, these'd both be enums.
+      > 
+      > Oh except that type B can also be a variant that represents 'empty' or having 'no stacks'. Having 'no stack' is different from having 'an empty stack'.
+      > 
+      > When I say accs only exist at one 'level', I don't mean they necessarily exist all at the same depth. But rather that if we drew the GSS on a page top to bottom, and drew a dot where each acc exists, then drew a line through the accs, the line would go up and down but would always go right, or left, on the page. ie each x-value in the line has exactly one y-value. (But not that it'd be a straight line.)
+      > 
+      > These are just the invariants I want. How you achieve them is up to you. Do it as elegantly as possible.
+      > 
+      > It should behave equivalently to reference_impl.py (with the caveat that reduce_acc is only guaranteed to output the same value between impls as long as the reduce closure is order-independent.)
+
+      The main type we deal with should be `LeveledGSS`. But this itself should be a union of three variants: containing A and Acc, mapping to other Bs, or being empty. And A should also be a union of variants: one that represents being a root node, one for an internal node that maps to other type As.
+
+      The 'suck up' logic, in terms of types A and B etc, means this:
+      - Suppose we have a node of type B of the variant that that maps to other nodes of type B.
+      - Suppose all of those children are nodes of type B of the other variant -- the one that that contains a node of type A and an Acc.
+      - Suppose the Accs in these children are all equal.
+      - Then we can suck up the Acc into the parent.
+      - The parent becomes a node (still of type B) of the variant that contains a node of type A and Acc.
+      - The Acc it contains is the one on the children.
+      - The node of type A it contains is a new node of the type A variant that maps to other type A nodes.
+      - Its children are each of the type A nodes inside the type B children of the original parent. They carry the same Ts.
+      ie we go from a type B node pointing to other type B nodes, to a type B node containing a type A node (and an Acc) that points to other type A nodes. And those child type A nodes are all those type B nodes that the original parent pointed to.
+
+      It's crucial to use memoization in `apply` to ensure that shared nodes remain shared.
+
+
+      Here's the node types in Rust I want to basically mirror:
+
+      ```rust
+      use std::collections::HashMap;
+      use std::rc::Rc;
+
+      #[derive(Debug, Clone)]
+      pub enum LeveledGSS<T, Acc> {
+          WithAcc {
+              node: LeveledGSSInner<T>,
+              acc: Acc,
+          },
+          Internal(HashMap<T, HashMap<usize, Rc<LeveledGSS<T, Acc>>>>),
+          Empty,
+      }
+
+      #[derive(Debug, Clone)]
+      pub enum LeveledGSSInner<T> {
+          Root,
+          InternalInner(HashMap<T, HashMap<usize, Rc<LeveledGSSInner<T>>>>),
+      }
+      ```
+
+
+      Write a function that validates the invariants I've specified for the GSS. In particular, we need to ensure that Acc is always 'sucked up' when it can be.
+
+      `prune` and `apply` should not unnecessarily create new nodes. Shared nodes are the cornerstone of performance in this code. If we go around creating multiple equal nodes at different places in memory, it hurts performance greatly.
+
+      Note that in leveled_impl Acc should only ever exist at the type B node variant that contains a (single) type A node and an Acc. It should never exist in a type A node, nor should it exist in either of the other type B variants: the empty variant and the variant that maps to other type B nodes.
+
+
+      Try to mimic the Rust type structure closely in Python, something like this:
+      ```python
+      from __future__ import annotations
+
+      @dataclass(frozen=True, eq=True)
+      class LeveledGSS[T, Acc](GSS[T, Acc]):
+          inner: Branch[T, Acc] | WithAcc[T, Acc] | Empty
+      @dataclass(frozen=True, eq=True)
+      class Branch[T, Acc]:
+          children: dict[T, dict[T, LeveledGSS[T, Acc]]]
+      @dataclass(frozen=True, eq=True)
+      class WithAcc[T, Acc]:
+          node: LeveledGSSInner[T]
+          acc: Acc
+      @dataclass(frozen=True, eq=True)
+      class Empty:
+          pass
+
+      @dataclass(frozen=True, eq=True)
+      class LeveledGSSInner[T]:
+          inner: BranchInner[T] | Leaf
+      @dataclass(frozen=True, eq=True)
+      class BranchInner[T]:
+          children: dict[T, dict[T, BranchInner[T]]]
+      @dataclass(frozen=True, eq=True)
+      class Leaf:
+          pass
+      ```
+      Here, `LeveledGSSInner` isn't actually a GSS, but it has some methods that are similar. For instance, it has `pop` and `Optional[Self]` which both return `Optional[Self]`. If they return None, it indicates to the outer GSS that the inner is to be removed, and this subtree is to be pruned, and if it the root gets pruned then `LeveledGSS` becomes Empty.
+    metadata:
+  - user: Implement `leveled_impl.py`.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, output the full, final contents of any created or modified files.
+                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
+                    ```python "path/to/your_file.py"
+                    ... full code ...
+                    ```
+                  - Do not include placeholders; the code must be complete and immediately usable.
+                  - Do NOT output git diffs in this mode.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: simple
+      phase: default
+  - assistant: |-
+      ```python "python/gss_tester/leveled_impl.py"
       from __future__ import annotations
 
       from dataclasses import dataclass
@@ -2863,1011 +3689,6 @@ messages:
 
           def __str__(self) -> str:
               return f"LeveledGSS({self._ref.to_json_serializable()})"
-
-      ```
-    metadata:
-      filename: python/gss_tester/leveled_impl.py
-  - user: |-
-      Consider `leveled_impl.py`.
-      A bunch of these methods are implemented really inefficiently. The whole point of the GSS is performance. And the cornerstone of good GSS performance is node sharing. Anything that breaks node sharing is bad.
-      Obviously when we conver the entire GSS into stack, acc pairs, that's really bad for performance. So we must fix these.
-      But also we need to be careful implementing the efficient, traversal-based versions of methods.
-      We need to ensure that shared nodes remain shared wherever possible.
-      We need to use memoization in `apply` and `prune`.
-      We need to check for identicality in `merge` via `is`.
-      We need to ensure invariants are respected.
-
-      I'm very happy with the typing here. That matches my intention.
-      It's basically just the *implementation* of some of the methods that needs to be improved.
-      For example, `pop` is clearly very inefficient.
-
-      In fact, `LeveledGSS` itself stores `ReferenceGSS`. This is wrong. `LeveledGSS` should not store it or use it, except in `to_reference_impl`.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      ```python "python/gss_tester/leveled_impl.py"
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
-
-      from .interface import GSS, T, Acc
-      from .reference_impl import ReferenceGSS
-
-      # Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
-      # This is purely internal; it never leaks out of to_reference_impl() or to_json.
-      _EPS = object()
-
-
-      # ------------------------------
-      # Internal node classes (mirroring the Rust-like structure)
-      # ------------------------------
-
-      @dataclass
-      class _InnerRoot(Generic[T]):
-          pass
-
-
-      @dataclass
-      class _InnerInternal(Generic[T]):
-          # children: T -> depth -> _InnerNode
-          children: Dict[T, Dict[int, '_InnerNode[T]']]
-
-
-      _InnerNode = Union[_InnerRoot[T], _InnerInternal[T]]
-
-
-      @dataclass
-      class _WithAcc(Generic[T, Acc]):
-          node: _InnerNode[T]
-          acc: Acc
-
-
-      @dataclass
-      class _Internal(Generic[T, Acc]):
-          # children: T_or_EPS -> depth -> _LeveledNode
-          # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
-          children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
-
-
-      @dataclass
-      class _Empty:
-          pass
-
-
-      _LeveledNode = Union[_WithAcc[T, Acc], _Internal[T, Acc], _Empty]
-
-
-      # ------------------------------
-      # Helpers to convert between ReferenceGSS and our leveled node representation
-      # ------------------------------
-
-      def _merge_acc(a: Acc, b: Acc) -> Acc:
-          # Acc is Mergeable by protocol; use merge to combine
-          return a.merge(b)  # type: ignore[attr-defined]
-
-
-      def _dedup_pairs(pairs: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
-          # Merge duplicate stacks by merging accumulators
-          merged: Dict[Tuple[T, ...], Acc] = {}
-          for vals, acc in pairs:
-              key = tuple(vals)
-              if key in merged:
-                  merged[key] = _merge_acc(merged[key], acc)
-              else:
-                  merged[key] = acc
-          return [(list(k), v) for k, v in merged.items()]
-
-
-      def _pairs_from_ref(ref: ReferenceGSS[T, Acc]) -> List[Tuple[List[T], Acc]]:
-          # The ReferenceGSS stores canonical stacks in _stacks already merged
-          return [(list(vals), acc) for (vals, acc) in ref._stacks]  # type: ignore[attr-defined]
-
-
-      def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
-          # Build the A-level inner tree (no accumulators at this level)
-          if not seqs:
-              return _InnerRoot()
-
-          # Partition by whether sequence is empty
-          non_empty = [s for s in seqs if s]
-          empty_count = len(seqs) - len(non_empty)
-
-          if not non_empty:
-              # Only empty sequences present -> Root
-              return _InnerRoot()
-
-          # Group by first token
-          group: Dict[T, List[List[T]]] = {}
-          for s in non_empty:
-              t = s[0]
-              tail = s[1:]
-              group.setdefault(t, []).append(tail)
-
-          children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          for t, tails in group.items():
-              child_inner = _build_inner_from_sequences(tails)
-              # We set "depth" to the maximum length remaining (for determinism and a form of "max depth")
-              max_depth = max((len(tl) for tl in tails), default=0)
-              children.setdefault(t, {})[max_depth] = child_inner
-
-          return _InnerInternal(children=children)
-
-
-      def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
-          pairs = _dedup_pairs(pairs)
-
-          if not pairs:
-              return _Empty()
-
-          # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
-          accs = {acc for _, acc in pairs}
-          if len(accs) == 1:
-              only_acc = next(iter(accs))
-              inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-              return _WithAcc(node=inner, acc=only_acc)
-
-          # Otherwise, build an Internal node, partitioning by first symbol.
-          # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
-          children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-
-          # Handle empty pairs (if any)
-          empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
-          if empty_pairs:
-              # Recursively build a child node for these empty stacks.
-              child = _build_leveled_from_pairs(empty_pairs)
-              # Depth for empty is 0
-              children.setdefault(_EPS, {})[0] = child
-
-          # Non-empty stacks
-          non_empty_pairs = [(vals, acc) for vals, acc in pairs if vals]
-          by_first: Dict[T, List[Tuple[List[T], Acc]]] = {}
-          for vals, acc in non_empty_pairs:
-              by_first.setdefault(vals[0], []).append((vals[1:], acc))
-
-          for t, tails_pairs in by_first.items():
-              # Recursively build subtree for all stacks with first token == t
-              child = _build_leveled_from_pairs(tails_pairs)
-              # The "depth" we attach can be the maximum length (remaining) among those tails
-              max_depth = max((len(v) for v, _ in tails_pairs), default=0)
-              children.setdefault(t, {})[max_depth] = child
-
-          node: _LeveledNode[T, Acc] = _Internal(children=children)
-          return _normalize_suck_up(node)
-
-
-      def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
-          # Bottom-up normalization: recursively transform children first.
-          if isinstance(node, _Empty):
-              return node
-          if isinstance(node, _WithAcc):
-              # Its inner is a pure A-level tree; no accs inside; nothing to do.
-              return node
-          if isinstance(node, _Internal):
-              # Normalize children first
-              new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-              for key_t, depth_map in node.children.items():
-                  for depth, child in depth_map.items():
-                      norm = _normalize_suck_up(child)
-                      new_children.setdefault(key_t, {})[depth] = norm
-
-              # Check suck-up condition: if all children are WithAcc and share the same acc
-              # If there are no children, it's empty
-              if not new_children:
-                  return _Empty()
-
-              # Flatten list of children
-              child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
-              for kt, dm in new_children.items():
-                  for d, ch in dm.items():
-                      child_list.append((kt, d, ch))
-
-              all_with_acc = all(isinstance(ch, _WithAcc) for _, _, ch in child_list)
-              if all_with_acc:
-                  accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, _WithAcc))
-                  if len(accs) == 1:
-                      # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
-                      the_acc = next(iter(accs))
-                      # Build an A-level Internal whose children map keys to the inner nodes of the children.
-                      # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
-                      inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-                      has_empty = False
-                      # Collect A-level children from the WithAcc children
-                      for kt, d, ch in child_list:
-                          chw = ch  # type: ignore[assignment]
-                          assert isinstance(chw, _WithAcc)
-                          if kt is _EPS:
-                              if isinstance(chw.node, _InnerRoot):
-                                  has_empty = True
-                              else:
-                                  for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
-                                      for dd, inn in dm.items():
-                                          inner_children.setdefault(tt, {})[dd] = inn
-                                  has_empty = True
-                          else:
-                              if isinstance(chw.node, _InnerRoot):
-                                  key_t: T = kt  # type: ignore[assignment]
-                                  depth_int = max(d - 1, 0)
-                                  inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
-                              else:
-                                  key_t: T = kt  # type: ignore[assignment]
-                                  for dd, inn in ((max(d - 1, 0), chw.node),):
-                                      inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
-
-                      if not inner_children:
-                          if has_empty:
-                              inner: _InnerNode[T] = _InnerRoot()
-                          else:
-                              inner = _InnerRoot()
-                      else:
-                          inner = _InnerInternal(children=inner_children)
-
-                      return _WithAcc(node=inner, acc=the_acc)
-
-              return _Internal(children=new_children)
-
-          # Should not reach
-          return node
-
-
-      def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T], Acc]]:
-          # Enumerate (stack, acc) pairs represented by the leveled node
-          result: List[Tuple[List[T], Acc]] = []
-
-          def emit_from_inner(inner: _InnerNode[T], prefix: List[T], acc: Acc):
-              if isinstance(inner, _InnerRoot):
-                  result.append((list(prefix), acc))
-                  return
-              # _InnerInternal
-              for t, depth_map in inner.children.items():  # type: ignore[union-attr]
-                  for _, child in depth_map.items():
-                      emit_from_inner(child, prefix + [t], acc)
-
-          def walk(node_b: _LeveledNode[T, Acc], prefix: List[T]):
-              if isinstance(node_b, _Empty):
-                  return
-              if isinstance(node_b, _WithAcc):
-                  emit_from_inner(node_b.node, prefix, node_b.acc)
-                  return
-              # _Internal
-              for key_t, depth_map in node_b.children.items():
-                  for _, child in depth_map.items():
-                      if key_t is _EPS:
-                          # Empty step: do not advance prefix
-                          walk(child, prefix)
-                      else:
-                          walk(child, prefix + [key_t])  # type: ignore[list-item]
-
-          walk(node, [])
-          return _dedup_pairs(result)
-
-
-      # ------------------------------
-      # Invariant validation
-      # ------------------------------
-
-      class InvariantViolation(Exception):
-          pass
-
-
-      def _validate_invariants_node(node: _LeveledNode[T, Acc]):
-          # Ensure that:
-          # 1) Acc only exists at _WithAcc nodes.
-          # 2) _Inner nodes never contain any acc; only structure.
-          # 3) "Suck up" has been applied whenever possible: for any _Internal node,
-          #    if all children are _WithAcc and share the same acc, we should not leave it as _Internal.
-          # 4) If a _WithAcc node has an _InnerInternal child whose children are identical (structurally),
-          #    that's fine; but _WithAcc's descendants should have no another acc (by construction).
-          #
-          # We traverse and check these constraints; for #3 we just detect a violation opportunity.
-
-          def check_inner(inner: _InnerNode[T]):
-              if isinstance(inner, _InnerRoot):
-                  return
-              if isinstance(inner, _InnerInternal):
-                  for t, depth_map in inner.children.items():
-                      # Keys must not be EPS at A-level
-                      if t is _EPS:
-                          raise InvariantViolation("EPS sentinel leaked into A-level inner structure.")
-                      for _, child in depth_map.items():
-                          check_inner(child)
-
-          def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
-              if isinstance(node_b, _Empty):
-                  return True, None
-              if isinstance(node_b, _WithAcc):
-                  # Its inner must be pure structure
-                  check_inner(node_b.node)
-                  return True, node_b.acc
-              if isinstance(node_b, _Internal):
-                  # Recurse, collect child accs when child is WithAcc
-                  child_accs: List[Acc] = []
-                  child_types: List[type] = []
-                  for kt, depth_map in node_b.children.items():
-                      for _, ch in depth_map.items():
-                          ok, acc = check(ch)
-                          if not ok:
-                              return False, None
-                          child_types.append(type(ch))
-                          if isinstance(ch, _WithAcc):
-                              child_accs.append(ch.acc)
-                  # suck-up opportunity detection
-                  if child_types and all(ct is _WithAcc for ct in child_types):
-                      # All children are WithAcc; if their accs are equal, it should have been sucked up
-                      if child_accs and all(a == child_accs[0] for a in child_accs):
-                          raise InvariantViolation("Suck-up opportunity not applied: Internal with uniform WithAcc children.")
-                  return True, None
-              return True, None
-
-          ok, _ = check(node)
-          if not ok:
-              raise InvariantViolation("Invariant validation failed for unknown reason.")
-
-
-      # ------------------------------
-      # Utility helpers for transformations
-      # ------------------------------
-
-      def _acc_opt_merge(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
-          if a is None:
-              return b
-          if b is None:
-              return a
-          return _merge_acc(a, b)
-
-
-      def _acc_merge_n(acc: Acc, n: int) -> Optional[Acc]:
-          # Efficiently compute acc merged with itself n times (n >= 0).
-          # Returns None if n == 0, otherwise the merged result.
-          if n <= 0:
-              return None
-          # Exponentiation by squaring pattern for monoid addition via merge
-          result: Optional[Acc] = None
-          base: Acc = acc
-          k = n
-          while k > 0:
-              if k & 1:
-                  result = base if result is None else _merge_acc(result, base)
-              base = _merge_acc(base, base)
-              k >>= 1
-          return result
-
-
-      # Inner A-level transforms and queries with memoization
-
-      def _inner_push(node: _InnerNode[T], value: T, cache: Dict[int, _InnerNode[T]]) -> _InnerNode[T]:
-          key = (id(node), id(value))
-          if key in cache:  # type: ignore[dict-item]
-              return cache[key]  # type: ignore[index]
-
-          if isinstance(node, _InnerRoot):
-              res: _InnerNode[T] = _InnerInternal(children={value: {0: _InnerRoot()}})
-          else:
-              new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-              for t, dm in node.children.items():
-                  for d, ch in dm.items():
-                      pushed = _inner_push(ch, value, cache)
-                      new_children.setdefault(t, {})[d] = pushed
-              res = _InnerInternal(children=new_children)
-
-          cache[key] = res  # type: ignore[index]
-          return res
-
-
-      def _inner_count(node: _InnerNode[T], cache: Dict[int, int]) -> int:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          if isinstance(node, _InnerRoot):
-              cache[iid] = 1
-              return 1
-          total = 0
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  total += _inner_count(ch, cache)
-          cache[iid] = total
-          return total
-
-
-      def _inner_pop(node: _InnerNode[T], cache: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[Optional[_InnerNode[T]], int]:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          if isinstance(node, _InnerRoot):
-              res = (None, 0)
-              cache[iid] = res
-              return res
-
-          # node is _InnerInternal
-          new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          empties_from_len1 = 0  # number of sequences of length exactly 1
-          for t, dm in node.children.items():
-              # dm: depth -> child
-              # For each child:
-              # - if child is Root: contributes one empty on pop
-              # - else recurse, add child_new to new_children, and add child_empties times Root to new_children[t]
-              #   (this represents sequences reduced to length 1 after pop)
-              # We do not accumulate child_empties into empties_from_len1 since those are now non-empty [t]
-              # after pop; empties_from_len1 only counts direct [t] sequences.
-              # Also, we carry depth keys but they are not semantically significant; we can reuse existing d when available or 0.
-              add_idx = 0
-              for d, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      empties_from_len1 += 1
-                  else:
-                      ch_new, ch_empties = _inner_pop(ch, cache)
-                      if ch_new is not None:
-                          new_children.setdefault(t, {})[d] = ch_new
-                      # Add ch_empties many Root edges under t
-                      for _ in range(ch_empties):
-                          new_children.setdefault(t, {})[add_idx] = _InnerRoot()
-                          add_idx += 1
-
-          if not new_children:
-              res = (None, empties_from_len1)
-          else:
-              res = (_InnerInternal(children=new_children), empties_from_len1)
-          cache[iid] = res
-          return res
-
-
-      def _inner_last_tokens(node: _InnerNode[T], cache: Dict[int, Set[T]]) -> Set[T]:
-          iid = id(node)
-          if iid in cache:
-              return cache[iid]
-          tokens: Set[T] = set()
-          if isinstance(node, _InnerRoot):
-              cache[iid] = tokens
-              return tokens
-          # look for edges t -> Root
-          for t, dm in node.children.items():
-              for _, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      tokens.add(t)
-          cache[iid] = tokens
-          return tokens
-
-
-      def _inner_filter_last(node: _InnerNode[T], value: T, cache: Dict[Tuple[int, int], Optional[_InnerNode[T]]]) -> Optional[_InnerNode[T]]:
-          key = (id(node), id(value))
-          if key in cache:
-              return cache[key]
-          if isinstance(node, _InnerRoot):
-              cache[key] = None
-              return None
-          # Keep only edges t == value that lead directly to Root.
-          kept: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          idx = 0
-          for t, dm in node.children.items():
-              if t != value:
-                  continue
-              for _, ch in dm.items():
-                  if isinstance(ch, _InnerRoot):
-                      kept.setdefault(t, {})[idx] = _InnerRoot()
-                      idx += 1
-          res = None if not kept else _InnerInternal(children=kept)
-          cache[key] = res
-          return res
-
-
-      def _inner_plus(a: _InnerNode[T], b: _InnerNode[T], cache: Dict[Tuple[int, int], _InnerNode[T]]) -> _InnerNode[T]:
-          """
-          Multiset union of two inner trees: sequence multiplicities add.
-          This is used to merge two _WithAcc with the same acc without losing multiplicities.
-          """
-          key = (id(a), id(b))
-          if key in cache:
-              return cache[key]
-
-          if isinstance(a, _InnerRoot) and isinstance(b, _InnerRoot):
-              # Two empties: still a single empty sequence; multiplicity is represented at the WithAcc level
-              # by having two WithAccs; but since we use a single WithAcc for same-acc merge, we must not lose
-              # multiplicity. However inner cannot express multiple empties, so we leave Root here and rely
-              # on acc merge at higher level when appropriate (for identical WithAcc we will wrap via EPS if needed).
-              res: _InnerNode[T] = _InnerRoot()
-              cache[key] = res
-              return res
-
-          if isinstance(a, _InnerRoot) and isinstance(b, _InnerInternal):
-              # Union: keep b's structure and also preserve the empty. Representing empty already exists via Root.
-              # Root presence is already a Root component; since b is not Root, we need to keep both: we can
-              # convert to Internal with the same children as b; Root remains implicit via separate WithAcc path.
-              # Here, we return an Internal with children = b.children; the Root presence cannot be encoded here,
-              # but the presence of Root in 'a' is not representable without losing structure; it's fine because
-              # the WithAcc using this inner will still include empty via separate handling if required by caller.
-              res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in b.children.items()))
-              cache[key] = res
-              return res
-
-          if isinstance(a, _InnerInternal) and isinstance(b, _InnerRoot):
-              res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in a.children.items()))
-              cache[key] = res
-              return res
-
-          # Both are Internal: merge child maps key-wise, concatenating multiplicities (depth entries)
-          assert isinstance(a, _InnerInternal) and isinstance(b, _InnerInternal)
-          merged_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-          # First add all from a
-          for t, dm in a.children.items():
-              for d, ch in dm.items():
-                  merged_children.setdefault(t, {})[d] = ch
-          # Then add from b; use fresh depth indices to avoid overwriting
-          for t, dm in b.children.items():
-              next_idx = 0 if t not in merged_children else (max(merged_children[t].keys(), default=-1) + 1)
-              for _, ch in dm.items():
-                  merged_children.setdefault(t, {})[next_idx] = ch
-                  next_idx += 1
-          res = _InnerInternal(children=merged_children)
-          cache[key] = res
-          return res
-
-
-      # ------------------------------
-      # Traversal-based operations on leveled nodes
-      # ------------------------------
-
-      def _has_any(node: _LeveledNode[T, Acc], memo: Dict[int, bool]) -> bool:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = False
-              return False
-          if isinstance(node, _WithAcc):
-              # Any WithAcc always yields at least one sequence (inner Root yields empty)
-              memo[nid] = True
-              return True
-          # _Internal
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  if _has_any(ch, memo):
-                      memo[nid] = True
-                      return True
-          memo[nid] = False
-          return False
-
-
-      def _push_node(node: _LeveledNode[T, Acc], value: T,
-                     memo_node: Dict[int, _LeveledNode[T, Acc]],
-                     memo_inner: Dict[int, _InnerNode[T]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-          if isinstance(node, _Empty):
-              memo_node[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              new_inner = _inner_push(node.node, value, memo_inner)
-              res: _LeveledNode[T, Acc] = _WithAcc(node=new_inner, acc=node.acc)
-              memo_node[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  pushed = _push_node(ch, value, memo_node, memo_inner)
-                  new_children.setdefault(kt, {})[d] = pushed
-          res = _normalize_suck_up(_Internal(children=new_children))
-          memo_node[nid] = res
-          return res
-
-
-      def _empty_accumulate(node: _LeveledNode[T, Acc],
-                            memo: Dict[int, Optional[Acc]]) -> Optional[Acc]:
-          """
-          Compute merged accumulator for all empty stacks represented by this node.
-          Empty stacks are those reachable from root by taking only EPS edges to a WithAcc whose inner is Root.
-          Multiplicity is honored via multiple EPS paths and duplicate entries.
-          """
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = None
-              return None
-          if isinstance(node, _WithAcc):
-              if isinstance(node.node, _InnerRoot):
-                  memo[nid] = node.acc
-                  return node.acc
-              memo[nid] = None
-              return None
-          # _Internal
-          acc_total: Optional[Acc] = None
-          eps_map = node.children.get(_EPS, {})
-          for _, ch in eps_map.items():
-              acc_total = _acc_opt_merge(acc_total, _empty_accumulate(ch, memo))
-          memo[nid] = acc_total
-          return acc_total
-
-
-      def _pop_node(node: _LeveledNode[T, Acc],
-                    memo_node: Dict[int, Tuple[_LeveledNode[T, Acc], Optional[Acc]]],
-                    memo_inner: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[_LeveledNode[T, Acc], Optional[Acc]]:
-          """
-          Pop removes the last token from all non-empty sequences.
-          Returns:
-            - new leveled node representing all sequences after pop that remain non-empty
-            - aggregated accumulator for the empty stack produced by popping length-1 sequences anywhere
-          """
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-
-          if isinstance(node, _Empty):
-              res = (_Empty(), None)
-              memo_node[nid] = res
-              return res
-
-          if isinstance(node, _WithAcc):
-              inner_new, empties_len1 = _inner_pop(node.node, memo_inner)
-              # Non-empty results become a WithAcc if inner_new exists
-              if inner_new is None:
-                  nonempty_node: _LeveledNode[T, Acc] = _Empty()
-              else:
-                  nonempty_node = _WithAcc(node=inner_new, acc=node.acc)
-              # Empty accumulators come from sequences of length 1 in this WithAcc
-              empty_acc = _acc_merge_n(node.acc, empties_len1)
-              res = (nonempty_node, empty_acc)
-              memo_node[nid] = res
-              return res
-
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          empty_total: Optional[Acc] = None
-
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  ch_new, ch_empty = _pop_node(ch, memo_node, memo_inner)
-                  if kt is _EPS:
-                      # Propagate popped non-empty under EPS, and collect empties to top-level empty_total
-                      if not isinstance(ch_new, _Empty):
-                          new_children.setdefault(_EPS, {})[d] = ch_new
-                      empty_total = _acc_opt_merge(empty_total, ch_empty)
-                  else:
-                      # For token edges: prepend token to the popped non-empty results
-                      if not isinstance(ch_new, _Empty):
-                          new_children.setdefault(kt, {})[d] = ch_new
-                      # empty sequences from child become [kt]
-                      if ch_empty is not None:
-                          # Represent [kt] as a direct WithAcc(inner=Root, acc=ch_empty) under kt
-                          # Use a fresh depth index to avoid clobbering
-                          next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
-                          new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=ch_empty)
-
-          nonempty_res = _Internal(children=new_children) if new_children else _Empty()
-          res = (_normalize_suck_up(nonempty_res), empty_total)
-          memo_node[nid] = res
-          return res
-
-
-      def _isolate_by_last(node: _LeveledNode[T, Acc], value: Optional[T],
-                           memo_node: Dict[Tuple[int, Optional[int]], _LeveledNode[T, Acc]],
-                           memo_empty: Dict[int, Optional[Acc]]) -> _LeveledNode[T, Acc]:
-          """
-          Keep only stacks whose last token equals `value`. If value is None, keep only empty stacks.
-          """
-          key = (id(node), None if value is None else id(value))
-          if key in memo_node:
-              return memo_node[key]
-
-          if isinstance(node, _Empty):
-              memo_node[key] = node
-              return node
-
-          if value is None:
-              # Keep only empty stacks
-              if isinstance(node, _WithAcc):
-                  res = _WithAcc(node=_InnerRoot(), acc=node.acc) if isinstance(node.node, _InnerRoot) else _Empty()
-                  memo_node[key] = res
-                  return res
-              # _Internal: accumulate empties through EPS
-              eacc = _empty_accumulate(node, memo_empty)
-              if eacc is None:
-                  memo_node[key] = _Empty()
-                  return _Empty()
-              res = _WithAcc(node=_InnerRoot(), acc=eacc)
-              memo_node[key] = res
-              return res
-
-          # value is not None
-          if isinstance(node, _WithAcc):
-              # Within WithAcc, last token equals `value` iff edge value -> Root exists directly
-              inner_res = _inner_filter_last(node.node, value, {})
-              res2: _LeveledNode[T, Acc] = _WithAcc(node=inner_res, acc=node.acc) if inner_res is not None else _Empty()
-              memo_node[key] = res2
-              return res2
-
-          # _Internal: compose from children
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          # First, EPS branch: last token deeper
-          eps_map = node.children.get(_EPS, {})
-          for d, ch in eps_map.items():
-              ch_kept = _isolate_by_last(ch, value, memo_node, memo_empty)
-              if not isinstance(ch_kept, _Empty):
-                  new_children.setdefault(_EPS, {})[d] = ch_kept
-
-          # For each token t:
-          for kt, dm in node.children.items():
-              if kt is _EPS:
-                  continue
-              for d, ch in dm.items():
-                  # Deep matches: sequences whose last token equals `value` deeper in child
-                  deep = _isolate_by_last(ch, value, memo_node, memo_empty)
-                  if not isinstance(deep, _Empty):
-                      new_children.setdefault(kt, {})[d] = deep
-                  # Immediate match: last token equals `value` at this step requires kt == value and child empties
-                  if kt == value:
-                      eacc = _empty_accumulate(ch, memo_empty)
-                      if eacc is not None:
-                          next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
-                          new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=eacc)
-
-          res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
-          memo_node[key] = res
-          return res
-
-
-      def _apply_node(node: _LeveledNode[T, Acc],
-                      func: Callable[[Acc], Acc],
-                      memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              new_acc = func(node.acc)
-              # Keep the same inner structure; only acc changes
-              res: _LeveledNode[T, Acc] = _WithAcc(node=node.node, acc=new_acc)
-              memo[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  new_children.setdefault(kt, {})[d] = _apply_node(ch, func, memo)
-          res = _normalize_suck_up(_Internal(children=new_children))
-          memo[nid] = res
-          return res
-
-
-      def _prune_node(node: _LeveledNode[T, Acc],
-                      pred: Callable[[Acc], bool],
-                      memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
-          nid = id(node)
-          if nid in memo:
-              return memo[nid]
-          if isinstance(node, _Empty):
-              memo[nid] = node
-              return node
-          if isinstance(node, _WithAcc):
-              res: _LeveledNode[T, Acc] = node if pred(node.acc) else _Empty()
-              memo[nid] = res
-              return res
-          # _Internal
-          new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-          for kt, dm in node.children.items():
-              for d, ch in dm.items():
-                  pruned = _prune_node(ch, pred, memo)
-                  if not isinstance(pruned, _Empty):
-                      new_children.setdefault(kt, {})[d] = pruned
-          res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
-          memo[nid] = res
-          return res
-
-
-      def _reduce_node(node: _LeveledNode[T, Acc],
-                       memo_node: Dict[int, Optional[Acc]],
-                       memo_inner_count: Dict[int, int]) -> Optional[Acc]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-          if isinstance(node, _Empty):
-              memo_node[nid] = None
-              return None
-          if isinstance(node, _WithAcc):
-              count = _inner_count(node.node, memo_inner_count)
-              total = _acc_merge_n(node.acc, count)
-              memo_node[nid] = total
-              return total
-          # _Internal
-          total: Optional[Acc] = None
-          for _, dm in node.children.items():
-              for _, ch in dm.items():
-                  total = _acc_opt_merge(total, _reduce_node(ch, memo_node, memo_inner_count))
-          memo_node[nid] = total
-          return total
-
-
-      def _peek_node(node: _LeveledNode[T, Acc],
-                     memo_node: Dict[int, Set[T]],
-                     memo_inner_last: Dict[int, Set[T]],
-                     memo_empty: Dict[int, Optional[Acc]]) -> Set[T]:
-          nid = id(node)
-          if nid in memo_node:
-              return memo_node[nid]
-
-          if isinstance(node, _Empty):
-              memo_node[nid] = set()
-              return set()
-
-          if isinstance(node, _WithAcc):
-              res = _inner_last_tokens(node.node, memo_inner_last)
-              memo_node[nid] = set(res)
-              return set(res)
-
-          # _Internal
-          res_set: Set[T] = set()
-          # EPS: last token deeper
-          eps_map = node.children.get(_EPS, {})
-          for _, ch in eps_map.items():
-              res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
-          # T children:
-          for kt, dm in node.children.items():
-              if kt is _EPS:
-                  continue
-              # For [kt] to be a last token at this level, child must have an empty path
-              for _, ch in dm.items():
-                  # If child has an empty, then kt is a last token possibility
-                  if _empty_accumulate(ch, memo_empty) is not None:
-                      res_set.add(kt)  # type: ignore[arg-type]
-                  # Also include last tokens deeper in child
-                  res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
-          memo_node[nid] = res_set
-          return res_set
-
-
-      def _merge_nodes(a: _LeveledNode[T, Acc], b: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
-          """
-          Merge two leveled nodes efficiently, preserving sharing. This merging
-          does NOT require enumerating pairs. It preserves multiplicities and
-          ensures invariants by applying suck-up only where safe.
-
-          Special cases:
-          - If both are _WithAcc and have equal acc (==), combine into a single _WithAcc
-            with inner being multiset union (_inner_plus) to preserve multiplicities.
-          - Otherwise, represent the union by an _Internal with a single _EPS branch
-            having two children (a and b). This preserves duplicates and sharing.
-          """
-          # Quick paths
-          if isinstance(a, _Empty):
-              return b
-          if isinstance(b, _Empty):
-              return a
-          if a is b:
-              # Represent duplication as two EPS entries to preserve multiplicity
-              return _Internal(children={_EPS: {0: a, 1: b}})
-
-          if isinstance(a, _WithAcc) and isinstance(b, _WithAcc):
-              same_acc: bool
-              try:
-                  same_acc = (a.acc == b.acc)  # type: ignore[operator]
-              except Exception:
-                  same_acc = (a.acc is b.acc)
-              if same_acc:
-                  inner = _inner_plus(a.node, b.node, {})
-                  return _WithAcc(node=inner, acc=a.acc)
-              # Different acc: cannot combine uniformly without losing per-path differences
-              return _Internal(children={_EPS: {0: a, 1: b}})
-
-          # Generic union with EPS child collecting both
-          return _Internal(children={_EPS: {0: a, 1: b}})
-
-
-      # ------------------------------
-      # Public LeveledGSS implementation
-      # ------------------------------
-
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A leveled, graph-structured stack implementation with node sharing.
-
-          Key points:
-          - Operations traverse and transform the leveled DAG directly; no conversion to explicit stacks.
-          - Sharing is preserved via pointer-identity memoization.
-          - apply/prune use memoization to avoid rebuilding unchanged subtrees.
-          - merge avoids structural copying and uses EPS-union and inner multiset union when relevant.
-          - Invariants are validated after construction; normalization ("suck-up") is applied in local transforms.
-          """
-
-          # Construction
-          def __init__(self, node: _LeveledNode[T, Acc]):
-              self._node = node
-              # Validate invariants; if they fail, rebuild canonically from enumeration as a last resort
-              try:
-                  _validate_invariants_node(self._node)
-              except InvariantViolation:
-                  rebuilt = _build_leveled_from_pairs(_enumerate_pairs_from_node(self._node))
-                  _validate_invariants_node(rebuilt)
-                  self._node = rebuilt
-
-          # ---- GSS interface ----
-
-          @classmethod
-          def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              node = _build_leveled_from_pairs(stacks)
-              return cls(node)
-
-          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              new_node = _push_node(self._node, value, {}, {})
-              return LeveledGSS(new_node)
-
-          def pop(self) -> 'LeveledGSS[T, Acc]':
-              nonempty_node, empty_acc = _pop_node(self._node, {}, {})
-              if empty_acc is None:
-                  return LeveledGSS(nonempty_node)
-              # Include the resulting empty stacks
-              empty_node: _LeveledNode[T, Acc] = _WithAcc(node=_InnerRoot(), acc=empty_acc)
-              merged = _merge_nodes(nonempty_node, empty_node)
-              # Suck-up may be safe here if applicable
-              merged = _normalize_suck_up(merged)
-              return LeveledGSS(merged)
-
-          def is_empty(self) -> bool:
-              return not _has_any(self._node, {})
-
-          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              new_node = _isolate_by_last(self._node, value, {}, {})
-              return LeveledGSS(new_node)
-
-          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              new_node = _apply_node(self._node, func, {})
-              return LeveledGSS(new_node)
-
-          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              new_node = _prune_node(self._node, predicate, {})
-              return LeveledGSS(new_node)
-
-          def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              # Convert other's representation to LeveledGSS if needed
-              if isinstance(other, LeveledGSS):
-                  other_node = other._node
-              else:
-                  # We only use ReferenceGSS conversion here to obtain a leveled node once, not per operation
-                  other_ref = other.to_reference_impl()
-                  other_node = _build_leveled_from_pairs(_pairs_from_ref(other_ref))
-              merged = _merge_nodes(self._node, other_node)
-              # Apply normalization; this will not lose multiplicity in handled cases (see _merge_nodes logic)
-              merged = _normalize_suck_up(merged)
-              return LeveledGSS(merged)
-
-          def peek(self) -> Set[T]:
-              return _peek_node(self._node, {}, {}, {})
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return _reduce_node(self._node, {}, {})
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              # Enumerate to canonical ReferenceGSS (gold standard for comparisons/JSON)
-              pairs = _enumerate_pairs_from_node(self._node)
-              return ReferenceGSS.from_stacks(pairs)
-
-          # Expose a validator for debugging
-          def validate_invariants(self) -> None:
-              _validate_invariants_node(self._node)
-
-          # Optional: convenience for debugging
-          def __repr__(self) -> str:
-              return f"LeveledGSS(node={self._node!r})"
-
-          def __str__(self) -> str:
-              return f"LeveledGSS({self.to_reference_impl().to_json_serializable()})"
       ```
     metadata:
   - user: |
@@ -3875,15 +3696,20 @@ messages:
       ```python "python/gss_tester/leveled_impl.py"
       Found 1 code blocks.
       Matching against available files:
-        1: python/gss_tester/reference_impl.py
-        2: python/gss_tester/leveled_impl.py
-        3: python/gss_tester/interface.py
+        1: python/gss_tester/test_spec.py
+        2: python/gss_tester/fuzzer.py
+        3: python/gss_tester/__init__.py
+        4: python/gss_tester/leveled_impl.py
+        5: python/gss_tester/reference_impl.py
+        6: python/gss_tester/runner.py
+        7: python/gss_tester/interface.py
+        8: python/gss_tester/analyzer.py
       --- Phase 1: Processing explicit file paths in fences ---
       Assigned block to python/gss_tester/leveled_impl.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 2
+      Remaining unassigned blocks: 0, Available files: 7
       --- Phase 6: Applying changes to assigned files ---
     metadata:
-  - user: 'Changes committed with message: "Implement traversal-based operations and
-      memoization in LeveledGSS for improved efficiency and node sharing."'
+  - user: 'Changes committed with message: "Implement LeveledGSS with Rust-like structure
+      and invariant validation"'
     metadata:
 ...
