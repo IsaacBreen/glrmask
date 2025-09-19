@@ -8,7 +8,7 @@ from .interface import GSS, T, Acc
 
 
 # ------------------------------
-# Internal node classes
+# Internal node classes (unchanged)
 # ------------------------------
 
 @dataclass(frozen=True, eq=True)
@@ -80,71 +80,59 @@ def _acc_reduce(accs: Iterable[Acc]) -> Optional[Acc]:
 
 
 # ------------------------------
-# Canonical children helpers
+# Canonical helpers (simplified)
 # ------------------------------
 
 def _is_empty_branch(node: Lower[T]) -> bool:
     return isinstance(node.inner, LowerBranch) and not node.inner.children
 
 
-def _normalize_children(children: Dict[Any, Dict[int, Lower[T]]]) -> Tuple[Dict[T, Lower[T]], Optional[Acc]]:
+def _empty_lower() -> Lower[T]:
+    return Lower(LowerBranch(children={}))
+
+
+def _split(node: Lower[T]) -> Tuple[Dict[T, Lower[T]], Optional[Acc]]:
     """
-    Converts the possibly multi-index 'children' mapping into:
-    - a canonical label->Lower map with at most one Lower per label (merged if necessary),
-    - a single optional accumulator at this node (merged if multiple sentinel entries exist).
+    Splits a canonical Lower node into (label_children, root_acc).
+    Assumes children are canonical:
+      - For each label key, only index 0 exists.
+      - At most one _AccKey with index 0 contains the root accumulator.
     """
+    if isinstance(node.inner, Leaf):
+        return {}, None
+
     labels: Dict[T, Lower[T]] = {}
     root_acc: Optional[Acc] = None
 
-    # First collect per-label lists and all root accs
-    temp_label_children: Dict[T, List[Lower[T]]] = {}
-    accs: List[Acc] = []
-
-    for key, idx_map in children.items():
+    for key, idx_map in node.inner.children.items():
         if _is_acc_key(key):
-            # Sentinel(s) storing accumulator(s) for stacks ending at this node.
-            # Merge later for canonical single acc at root.
-            # There should be only one, but be defensive.
-            # Extract acc from sentinel key.
-            accs.append(key.acc)  # type: ignore[attr-defined]
+            # Merge defensively if multiple sentinels appear (shouldn't happen in canonical form).
+            root_acc = _merge_acc(root_acc, key.acc)  # type: ignore[attr-defined]
         else:
-            lst = temp_label_children.setdefault(key, [])
-            lst.extend(idx_map.values())
+            # Canonical form uses only index 0; fall back to any if not present.
+            child = idx_map.get(0)
+            if child is None and idx_map:
+                child = next(iter(idx_map.values()))
+            if child is not None and not _is_empty_branch(child):
+                labels[key] = child  # type: ignore[assignment]
 
-    # Merge per-label lists down to a single Lower per label
-    for label, lowers in temp_label_children.items():
-        if not lowers:
-            continue
-        merged: Optional[Lower[T]] = None
-        for child in lowers:
-            merged = child if merged is None else _merge_lower(merged, child)
-        if merged is not None and (not isinstance(merged.inner, LowerBranch) or merged.inner.children):
-            labels[label] = merged
-
-    # Merge all root accs into a single one
-    root_acc = _acc_reduce(accs)
     return labels, root_acc
 
 
-def _build_children(labels: Dict[T, Lower[T]], root_acc: Optional[Acc]) -> Dict[Any, Dict[int, Lower[T]]]:
-    """
-    Builds a children dict from canonical label map and an optional root accumulator.
-    Uses only index 0 for deterministic placement and to keep structure simple.
-    """
-    out: Dict[Any, Dict[int, Lower[T]]] = {}
-    for label, lower in labels.items():
-        out[label] = {0: lower}
+def _make_node(labels: Dict[T, Lower[T]], root_acc: Optional[Acc]) -> Lower[T]:
+    if not labels and root_acc is None:
+        return _empty_lower()
+
+    children: Dict[Any, Dict[int, Lower[T]]] = {}
+    for label, child in labels.items():
+        children[label] = {0: child}
     if root_acc is not None:
-        out[_AccKey(root_acc)] = {0: Lower(Leaf())}
-    return out
-
-
-def _make_lower(labels: Dict[T, Lower[T]], root_acc: Optional[Acc]) -> Lower[T]:
-    return Lower(LowerBranch(children=_build_children(labels, root_acc)))
+        children[_AccKey(root_acc)] = {0: Lower(Leaf())}
+    return Lower(LowerBranch(children=children))
 
 
 # ------------------------------
-# Core trie operations
+# Core trie operations (simplified yet equivalent)
 # ------------------------------
 
 def _merge_lower(a: Lower[T], b: Lower[T]) -> Lower[T]:
@@ -156,11 +144,13 @@ def _merge_lower(a: Lower[T], b: Lower[T]) -> Lower[T]:
     if isinstance(b.inner, Leaf):
         return a
 
-    a_labels, a_acc = _normalize_children(a.inner.children)
-    b_labels, b_acc = _normalize_children(b.inner.children)
+    a_labels, a_acc = _split(a)
+    b_labels, b_acc = _split(b)
 
-    all_keys: Set[T] = set(a_labels.keys()) | set(b_labels.keys())
     merged_labels: Dict[T, Lower[T]] = {}
+
+    # Merge children by label
+    all_keys = set(a_labels.keys()) | set(b_labels.keys())
     for key in all_keys:
         if key in a_labels and key in b_labels:
             merged_labels[key] = _merge_lower(a_labels[key], b_labels[key])
@@ -170,31 +160,23 @@ def _merge_lower(a: Lower[T], b: Lower[T]) -> Lower[T]:
             merged_labels[key] = b_labels[key]
 
     merged_acc = _merge_acc(a_acc, b_acc)
-    return _make_lower(merged_labels, merged_acc)
+    return _make_node(merged_labels, merged_acc)
 
 
 def _add_root_acc(lower: Lower[T], acc: Optional[Acc]) -> Lower[T]:
-    """
-    Returns a new Lower equal to `lower` but with its root having an added accumulator (merged if present).
-    """
     if acc is None:
         return lower
     if isinstance(lower.inner, Leaf):
-        return _make_lower({}, acc)
-
-    labels, root_acc = _normalize_children(lower.inner.children)
-    return _make_lower(labels, _merge_acc(root_acc, acc))
+        return _make_node({}, acc)
+    labels, root_acc = _split(lower)
+    return _make_node(labels, _merge_acc(root_acc, acc))
 
 
 def _remove_root_acc(lower: Lower[T]) -> Tuple[Lower[T], Optional[Acc]]:
-    """
-    Removes all accumulator entries at the root of `lower` and returns (new_lower_without_root_acc, merged_acc_removed).
-    """
     if isinstance(lower.inner, Leaf):
         return lower, None
-
-    labels, root_acc = _normalize_children(lower.inner.children)
-    return _make_lower(labels, None), root_acc
+    labels, root_acc = _split(lower)
+    return _make_node(labels, None), root_acc
 
 
 def _push_lower(node: Lower[T], value: T) -> Lower[T]:
@@ -205,7 +187,7 @@ def _push_lower(node: Lower[T], value: T) -> Lower[T]:
     if isinstance(node.inner, Leaf):
         return node
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
 
     # Recurse into existing children
     new_labels: Dict[T, Lower[T]] = {}
@@ -219,9 +201,9 @@ def _push_lower(node: Lower[T], value: T) -> Lower[T]:
         if value in new_labels:
             new_labels[value] = _add_root_acc(new_labels[value], root_acc)
         else:
-            new_labels[value] = _make_lower({}, root_acc)
+            new_labels[value] = _make_node({}, root_acc)
 
-    return _make_lower(new_labels, None)
+    return _make_node(new_labels, None)
 
 
 def _pop_lower(node: Lower[T]) -> Lower[T]:
@@ -232,7 +214,7 @@ def _pop_lower(node: Lower[T]) -> Lower[T]:
     if isinstance(node.inner, Leaf):
         return node
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
     # Discard root_acc (empty stacks can't be popped)
     del root_acc
 
@@ -246,7 +228,7 @@ def _pop_lower(node: Lower[T]) -> Lower[T]:
         if not _is_empty_branch(popped_child):
             new_labels[label] = popped_child
 
-    return _make_lower(new_labels, contributions)
+    return _make_node(new_labels, contributions)
 
 
 def _isolate_lower_by_top(node: Lower[T], target: Optional[T], incoming_label: Optional[T] = None) -> Optional[Lower[T]]:
@@ -257,7 +239,7 @@ def _isolate_lower_by_top(node: Lower[T], target: Optional[T], incoming_label: O
     if isinstance(node.inner, Leaf):
         return None
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
 
     keep_root = (incoming_label is None and target is None) or (incoming_label is not None and target == incoming_label)
     root_keep_acc = root_acc if keep_root else None
@@ -271,7 +253,7 @@ def _isolate_lower_by_top(node: Lower[T], target: Optional[T], incoming_label: O
     if not new_labels and root_keep_acc is None:
         return None
 
-    return _make_lower(new_labels, root_keep_acc)
+    return _make_node(new_labels, root_keep_acc)
 
 
 def _apply_lower(node: Lower[T], func: Callable[[Acc], Acc]) -> Lower[T]:
@@ -281,7 +263,7 @@ def _apply_lower(node: Lower[T], func: Callable[[Acc], Acc]) -> Lower[T]:
     if isinstance(node.inner, Leaf):
         return node
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
     transformed_root = func(root_acc) if root_acc is not None else None
 
     new_labels: Dict[T, Lower[T]] = {}
@@ -290,7 +272,7 @@ def _apply_lower(node: Lower[T], func: Callable[[Acc], Acc]) -> Lower[T]:
         if not _is_empty_branch(transformed_child):
             new_labels[label] = transformed_child
 
-    return _make_lower(new_labels, transformed_root)
+    return _make_node(new_labels, transformed_root)
 
 
 def _prune_lower(node: Lower[T], predicate: Callable[[Acc], bool]) -> Optional[Lower[T]]:
@@ -301,7 +283,7 @@ def _prune_lower(node: Lower[T], predicate: Callable[[Acc], bool]) -> Optional[L
     if isinstance(node.inner, Leaf):
         return None
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
     kept_root: Optional[Acc] = root_acc if (root_acc is not None and predicate(root_acc)) else None
 
     new_labels: Dict[T, Lower[T]] = {}
@@ -313,7 +295,7 @@ def _prune_lower(node: Lower[T], predicate: Callable[[Acc], bool]) -> Optional[L
     if not new_labels and kept_root is None:
         return None
 
-    return _make_lower(new_labels, kept_root)
+    return _make_node(new_labels, kept_root)
 
 
 def _has_any_stack(node: Lower[T]) -> bool:
@@ -322,16 +304,12 @@ def _has_any_stack(node: Lower[T]) -> bool:
     """
     if isinstance(node.inner, Leaf):
         return False
-    # Check root
-    for key in node.inner.children:
+    for key, idx_map in node.inner.children.items():
         if _is_acc_key(key):
             return True
-    # Recurse
-    for key, idx_map in node.inner.children.items():
-        if not _is_acc_key(key):
-            for child in idx_map.values():
-                if _has_any_stack(child):
-                    return True
+        for child in idx_map.values():
+            if _has_any_stack(child):
+                return True
     return False
 
 
@@ -344,7 +322,7 @@ def _peek_values(node: Lower[T], incoming_label: Optional[T] = None, out: Option
     if isinstance(node.inner, Leaf):
         return out
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
 
     # Root accumulators imply top-of-stack == incoming_label (if not None)
     if root_acc is not None and incoming_label is not None:
@@ -362,12 +340,16 @@ def _reduce_all_acc(node: Lower[T]) -> Optional[Acc]:
     if isinstance(node.inner, Leaf):
         return None
 
-    labels, root_acc = _normalize_children(node.inner.children)
+    labels, root_acc = _split(node)
     total: Optional[Acc] = root_acc
     for child in labels.values():
         total = _merge_acc(total, _reduce_all_acc(child))
     return total
 
+
+# ------------------------------
+# Public LeveledGSS implementation (simplified but functionally equivalent)
+# ------------------------------
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
@@ -394,27 +376,33 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 merged[key] = acc
 
         # Build a nested Python dict trie first: Dict[node_key, child_dict]
+        acc_key = object()
         trie: Dict[Any, Dict] = {}
 
         def insert_path(path: List[T], acc: Acc) -> None:
             node = trie
             for item in path:
                 node = node.setdefault(item, {})
-            node[_AccKey(acc)] = {}
+            # Merge accumulator if a stack already ends here
+            prev = node.get(acc_key)
+            node[acc_key] = acc if prev is None else prev.merge(acc)
 
         for key, acc in merged.items():
             insert_path(list(key), acc)
 
         # Convert the trie into Lower nodes (immutable dataclasses)
         def build_lower(node_dict: Dict[Any, Dict]) -> Lower[T]:
-            children_map: Dict[Any, Dict[int, Lower[T]]] = {}
+            labels: Dict[T, Lower[T]] = {}
+            root_acc: Optional[Acc] = None
+
             for key, sub in node_dict.items():
-                if isinstance(key, _AccKey):
-                    child_lower = Lower(Leaf())
+                if key is acc_key:
+                    # Accumulator stored here
+                    root_acc = sub  # type: ignore[assignment]
                 else:
-                    child_lower = build_lower(sub)
-                children_map.setdefault(key, {})[0] = child_lower  # type: ignore[arg-type]
-            return Lower(LowerBranch(children=children_map))
+                    labels[key] = build_lower(sub)
+
+            return _make_node(labels, root_acc)
 
         lower_root = build_lower(trie)
 
@@ -432,7 +420,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         def collect(node: Lower[T], prefix: List[T]) -> None:
             if isinstance(node.inner, Leaf):
                 return
-            labels, root_acc = _normalize_children(node.inner.children)
+            labels, root_acc = _split(node)
             if root_acc is not None:
                 results.append((list(prefix), root_acc))
             for label, child in labels.items():
@@ -555,6 +543,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         lower = self._get_lower()
         return _reduce_all_acc(lower)
 
+
+# ------------------------------
+# Invariant validation (unchanged public API)
+# ------------------------------
 
 def _validate_upper(node: Upper[T, Acc]):
     """
