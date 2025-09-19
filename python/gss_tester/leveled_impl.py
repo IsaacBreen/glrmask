@@ -111,9 +111,15 @@ def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[
     # Check if all stacks share the same accumulator; then we can store them under a single WithAcc node.
     accs = {acc for _, acc in pairs}
     if len(accs) == 1:
-        only_acc = next(iter(accs))
-        inner = _build_inner_from_sequences([vals for vals, _ in pairs])
-        return WithAcc(node=inner, acc=only_acc)
+        vals_list = [vals for vals, _ in pairs]
+        has_empty = any(not v for v in vals_list)
+        has_non_empty = any(v for v in vals_list)
+
+        if not (has_empty and has_non_empty):
+            only_acc = next(iter(accs))
+            inner = _build_inner_from_sequences(vals_list)
+            return WithAcc(node=inner, acc=only_acc)
+        # else: fall through to the general case which can handle mixed empty/non-empty
 
     # Otherwise, build an Internal node, partitioning by first symbol.
     # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
@@ -174,6 +180,14 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
         if all_with_acc:
             accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, WithAcc))
             if len(accs) == 1:
+                # A suck-up would lose information if we need to represent both a terminal
+                # state (from an _EPS child) and a branching state (from non-EPS children),
+                # because the _InnerNode structure cannot do both.
+                has_eps_child = any(kt is _EPS for kt, _, _ in child_list)
+                has_non_eps_child = any(kt is not _EPS for kt, _, _ in child_list)
+                if has_eps_child and has_non_eps_child:
+                    return Branch(children=new_children)
+
                 # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
                 the_acc = next(iter(accs))
                 # Build an A-level Internal whose children map keys to the inner nodes of the children.
