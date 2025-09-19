@@ -178,18 +178,24 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             case Empty():
                 return self
             case WithAcc(node=a, acc=acc):
-                # Replace A-edges with B-edges carrying the same acc in WithAcc children
-                # Build children for B Internal by reading A edges
-                children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = {}
+                # When popping a WithAcc node, all resulting stacks (the tails)
+                # share the same accumulator. We find all unique tails from the
+                # A-layer children, build a new A-layer node representing them,
+                # and wrap it in a new WithAcc node.
+                all_tails: Set[Tuple[T, ...]] = set()
                 for (t, d, a_child) in _iter_a_edges(a):
                     if t is EPSILON:
                         # Popping empty stacks: discard (do not produce any stack)
                         continue
-                    # Child after popping: WithAcc whose A-root is a_child
-                    # Depth on the B edge remains the same d from A (total length at this point)
-                    by_depth = children.setdefault(t, {})
-                    by_depth[d] = LeveledGSS.with_acc(a_child, acc)
-                return _canonicalize_b(LeveledGSS.internal(children))
+                    # Enumerate all tails represented by the child A-node
+                    for tail in _enumerate_a(a_child):
+                        all_tails.add(tail)
+
+                if not all_tails:
+                    return LeveledGSS.empty()
+
+                new_a_node = _build_a_from_seqs(all_tails)
+                return LeveledGSS.with_acc(new_a_node, acc)
             case Internal(children=children):
                 # Pop removes the top: just return the union of children at one level down.
                 result = LeveledGSS.empty()
