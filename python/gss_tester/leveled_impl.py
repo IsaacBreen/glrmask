@@ -30,8 +30,7 @@ class WithAcc(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Branch(Generic[T, Acc]):
-    # children: T_or_EPS -> depth -> LeveledGSS
-    # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
+    # children: T -> depth -> LeveledGSS
     children: Dict[object, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
