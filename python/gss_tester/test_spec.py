@@ -21,7 +21,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
         line_no = caller_frame.f_lineno
         yield (gss_state.to_stacks(), line_no)
 
-    # --- Test 1: Basic push/pop ---
+    # --- Test 1: Basic push/pop/construction ---
     gss1 = gss_class.from_stacks([([], acc_factory())])
     yield from _yield_state(gss1)
 
@@ -36,6 +36,12 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
 
     gss_popped_10 = gss_popped_20.isolate(10).pop()
     yield from _yield_state(gss_popped_10)
+
+    gss1 = gss_class.from_stacks([([], acc_factory())])
+    yield from _yield_state(gss1)
+
+    gss1 = gss_class.from_stacks([([10], acc_factory())])
+    yield from _yield_state(gss1)
 
     # --- Test 2: Forking and Merging ---
     gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
