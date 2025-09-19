@@ -108,17 +108,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 children[top] = {}
             children[top][length] = cls.from_stacks(group)
 
-        # Canonicalization: if all children are interfaces with the same accumulator,
-        # "suck up" the accumulator into a single parent interface node.
-        all_children = [c for d in children.values() for c in d.values()]
-        if all_children and all(isinstance(c.inner, Interface) for c in all_children):
-            child_first_acc = all_children[0].inner.acc
-            if all(c.inner.acc == child_first_acc for c in all_children[1:]):
-                # The invariant is violated. This structure should be an Interface node.
-                # We can reconstruct it from the original stacks for this call.
-                list_of_stacks = [s[0] for s in stacks]
-                return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), child_first_acc))
-
         return LeveledGSS(Upper(children))
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
@@ -210,20 +199,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # Recurse validation to children.
             for child in all_children:
                 child.validate_invariants()
-
-            # Invariant: if all children are interfaces, they must not have equal accs.
-            all_children_are_interfaces = all(isinstance(c.inner, Interface) for c in all_children)
-            if all_children_are_interfaces:
-                accs = [c.inner.acc for c in all_children]
-                # Accumulators may not be hashable, so we can't use a set.
-                # This is O(n^2) but likely fine for tests.
-                if len(accs) > 1:
-                    for i in range(len(accs)):
-                        for j in range(i + 1, len(accs)):
-                            if accs[i] == accs[j]:
-                                raise InvariantViolation(
-                                    "Upper with all-interface children has duplicate accumulators."
-                                )
 
         elif isinstance(self.inner, Interface):
             # Delegate validation to the inner Lower node.
