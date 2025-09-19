@@ -48,6 +48,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
     empty: Optional[Acc]
 
+    @classmethod
+    def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+        raise NotImplementedError
+    def push(self, value: T) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def pop(self) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def is_empty(self) -> bool:
+        raise NotImplementedError
+    def isolate(self, value: Optional[T]) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def apply(self, func: Callable[[Acc], Acc]) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def prune(self, predicate: Callable[[Acc], bool]) -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+        raise NotImplementedError
+    def peek(self) -> Set[T]:
+        raise NotImplementedError
+    def reduce_acc(self) -> Optional[Acc]:
+        raise NotImplementedError
+
 
 def _validate_upper(node: Upper[T, Acc]):
     """Recursively validates invariants on Upper nodes."""
