@@ -61,29 +61,31 @@ class Lower(Generic[T]):
                     stacks.append(prefix + [top])
         return stacks
 
-    def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
-
-    def pop(self) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+    def pop(self) -> 'Lower[T]':
+        if not self.children:
+            return Lower(children={}, is_leaf=False)
+        all_children = []
+        for t, children_at_depths in self.children.items():
+            all_children[t] = {}
+            for depth, child_node in children_at_depths.items():
+                all_children.append(child_node)
+        return reduce(lambda c, n: c.merge(n), all_children[1:], all_children[0])
 
     def is_empty(self) -> bool:
-        raise NotImplementedError
+        return not self.children and not self.is_leaf
 
-    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+    def isolate(self, value: Optional[T]) -> 'Lower[T]':
+        if value is None:
+            return Lower(children={}, is_leaf=self.is_leaf)
+        if value not in self.children:
+            return Lower(children={}, is_leaf=False)
+        return Lower(children={value: self.children[value]}, is_leaf=False)
 
-    def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
-
-    def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
-
-    def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+    def merge(self, other: Lower[T]) -> 'Lower[T]':
         raise NotImplementedError
 
     def peek(self) -> Set[T]:
-        raise NotImplementedError
+        return set(self.children.keys())
 
     def validate_invariants(self) -> None:
         # Invariant: lower must either have children or be a leaf (or both)
@@ -179,7 +181,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def is_empty(self) -> bool:
         if isinstance(self.inner, Interface):
-            return False
+            return self.inner.node.is_empty()
         # It's an Upper node. It's empty if it has no children.
         return not self.inner.children
 
@@ -205,7 +207,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def peek(self) -> Set[T]:
         if isinstance(self.inner, Interface):
-            return set(self.inner.node.children.keys())
+            return self.inner.node.peek()
         # It's an Upper node. The keys of its children are the top elements.
         return set(self.inner.children.keys())
 
