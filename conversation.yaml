@@ -208,15 +208,12 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are preserved.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
                       new_stacks.append((vals[:-1], acc))
-                  else:
-                      # Preserve empty stacks
-                      new_stacks.append((vals, acc))
               return ReferenceGSS(new_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
@@ -376,33 +373,25 @@ local_system:
       LeveledGSSInnerVariant = Union[BranchInner[T], Leaf]
 
       @dataclass(frozen=True, eq=True)
-      class LeveledGSSInner(GSS[T, Unit], Generic[T]):
+      class LeveledGSSInner(Generic[T]):
           """
           An inner Leveled GSS that only represents a set of stacks, without accumulators.
           The accumulator type is fixed to `Unit`.
           This is used for the inner nodes in the main LeveledGSS.
           """
-          variant: Optional[LeveledGSSInnerVariant]
+          variant: LeveledGSSInnerVariant
 
           # --- Constructors ---
-          @classmethod
-          def empty(cls) -> 'LeveledGSSInner[T]':
-              return cls(None)
-
           @classmethod
           def leaf(cls) -> 'LeveledGSSInner[T]':
               return cls(Leaf())
 
           @classmethod
-          def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> 'LeveledGSSInner[T]':
-              cleaned: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']] = {}
-              for t, depths in children.items():
-                  c2 = {d: ch for d, ch in depths.items() if not ch.is_empty()}
-                  if c2:
-                      cleaned[t] = c2
+          def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> Optional['LeveledGSSInner[T]']:
+              cleaned = {t: depths for t, depths in children.items() if depths}
               
               if not cleaned:
-                  return cls.empty()
+                  return None
 
               if set(cleaned.keys()) == {EPSILON} and set(cleaned[EPSILON].keys()) == {0}:
                   if isinstance(cleaned[EPSILON][0].variant, Leaf):
@@ -410,90 +399,54 @@ local_system:
               
               return cls(BranchInner(cleaned))
 
-          # --- GSS Interface ---
           @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> 'LeveledGSSInner[T]':
+          def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> Optional['LeveledGSSInner[T]']:
               seqs = {tuple(s[0]) for s in stacks}
               return _build_inner_from_seqs(cls, seqs)
 
-          def push(self, value: T) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
-              max_d = self.max_depth()
-              new_depth = max_d + 1
-              return self.internal({value: {new_depth: self}})
-
-          def pop(self) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
+          def pop(self) -> Optional['LeveledGSSInner[T]']:
+              from functools import reduce
               match self.variant:
                   case Leaf():
-                      return self.empty()
+                      return None
                   case BranchInner(children):
-                      result = self.empty()
-                      for t, by_depth in children.items():
-                          if t is EPSILON:
-                              continue
-                          for _, child in by_depth.items():
-                              result = result.merge(child)
-                      return result
+                      popped_children = [
+                          child
+                          for t, by_depth in children.items()
+                          if t is not EPSILON
+                          for child in by_depth.values()
+                      ]
+                      if not popped_children:
+                          return None
+                      return reduce(lambda acc, next: acc.merge(next), popped_children)
 
-          def is_empty(self) -> bool:
-              return self.variant is None
-
-          def isolate(self, value: Optional[T]) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
+          def isolate(self, value: Optional[T]) -> Optional['LeveledGSSInner[T]']:
               match self.variant:
                   case Leaf():
-                      return self if value is None else self.empty()
+                      return self if value is None else None
                   case BranchInner(children):
                       key = EPSILON if value is None else value
                       by_depth = children.get(key, {})
                       if not by_depth:
-                          return self.empty()
+                          return None
 
                       if key is EPSILON:
                           return self.leaf()
 
-                      return self.internal({key: by_depth})
+                      return LeveledGSSInner.internal({key: by_depth})
 
-          def apply(self, func: Callable[[Unit], Unit]) -> 'LeveledGSSInner[T]':
-              return self
-
-          def prune(self, predicate: Callable[[Unit], bool]) -> 'LeveledGSSInner[T]':
-              return self if predicate(UNIT) else self.empty()
-
-          def merge(self, other: 'GSS[T, Unit]') -> 'LeveledGSSInner[T]':
-              if other is self or other.is_empty():
-                  return self
-              if self.is_empty():
-                  return cast(LeveledGSSInner[T], other)
-              
-              s1 = {s for s in self.enumerate_stacks()}
-              s2 = {s for s in cast(LeveledGSSInner[T], other).enumerate_stacks()}
-              return _build_inner_from_seqs(self.__class__, s1.union(s2))
+          def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
+              ...
 
           def peek(self) -> Set[T]:
-              if self.is_empty():
-                  return set()
               match self.variant:
                   case Leaf():
                       return set()
                   case BranchInner(children):
                       return {cast(T, t) for t in children.keys() if t is not EPSILON}
 
-          def reduce_acc(self) -> Optional[Unit]:
-              return UNIT if not self.is_empty() else None
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Unit]':
-              stacks = [(list(vals), UNIT) for vals in self.enumerate_stacks()]
-              return ReferenceGSS.from_stacks(stacks)
-
           # --- LeveledA specific helpers ---
           def has_epsilon(self) -> bool:
-              if self.is_empty():
-                  return False
               match self.variant:
                   case Leaf():
                       return True
@@ -501,8 +454,6 @@ local_system:
                       return EPSILON in children
 
           def max_depth(self) -> int:
-              if self.is_empty():
-                  return 0
               match self.variant:
                   case Leaf():
                       return 0
@@ -514,8 +465,6 @@ local_system:
                       return max_d
 
           def enumerate_stacks(self) -> Iterator[Tuple[T, ...]]:
-              if self.is_empty():
-                  return
               match self.variant:
                   case Leaf():
                       yield tuple()
@@ -534,7 +483,7 @@ local_system:
               if errors:
                   raise ValueError("LeveledGSSInner invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
 
-      def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> LeveledGSSInner[T]:
+      def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> Optional[LeveledGSSInner[T]]:
           buckets: DefaultDict[Optional[T], DefaultDict[int, List[Tuple[T, ...]]]] = defaultdict(lambda: defaultdict(list))
           has_empty = False
           has_any = False
@@ -547,7 +496,7 @@ local_system:
                   buckets[t][d].append(prefix)
           
           if not has_any:
-              return cls.empty()
+              return None
 
           children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = {}
           if has_empty:
@@ -557,13 +506,13 @@ local_system:
               children[t] = {}
               for d, group in by_depth.items():
                   child = _build_inner_from_seqs(cls, group)
-                  if not child.is_empty():
+                  if child is not None:
                       children[t][d] = child
           
           return cls.internal(children)
 
-      def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
-          if a.is_empty():
+      def _validate_inner(a: Optional[LeveledGSSInner[T]], errors: List[str]) -> None:
+          if a is None:
               return
           match a.variant:
               case Leaf():
@@ -571,8 +520,6 @@ local_system:
               case BranchInner(children):
                   for t, by_depth in children.items():
                       for d, ch in by_depth.items():
-                          if ch.is_empty():
-                              errors.append("Inner-layer internal node contains an Empty child")
                           if t is EPSILON:
                               if d != 0: errors.append("Inner-layer EPSILON edge with non-zero depth")
                               if not isinstance(ch.variant, Leaf): errors.append("Inner-layer EPSILON edge must point to Leaf")
@@ -615,8 +562,8 @@ local_system:
               return cls(Empty())
 
           @classmethod
-          def with_acc(cls, node: LeveledGSSInner[T], acc: Acc) -> 'LeveledGSS[T, Acc]':
-              if node.is_empty():
+          def with_acc(cls, node: Optional[LeveledGSSInner[T]], acc: Acc) -> 'LeveledGSS[T, Acc]':
+              if node is None:
                   return cls.empty()
               return cls(Constant(node=node, acc=acc))
 
@@ -655,7 +602,8 @@ local_system:
                   case Empty():
                       return self
                   case Constant(node=a, acc=acc):
-                      return LeveledGSS.with_acc(a.pop(), acc)
+                      popped_node = a.pop()
+                      return LeveledGSS.with_acc(popped_node, acc)
                   case Branch(children=children):
                       result = LeveledGSS.empty()
                       for t, by_depth in children.items():
@@ -677,7 +625,8 @@ local_system:
                           return LeveledGSS.empty()
                       return LeveledGSS.internal({key: by_depth})
                   case Constant(node=a, acc=acc):
-                      return LeveledGSS.with_acc(a.isolate(value), acc)
+                      isolated_node = a.isolate(value)
+                      return LeveledGSS.with_acc(isolated_node, acc)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
               memo_b: Dict[int, 'LeveledGSS[T, Acc]'] = {}
@@ -729,15 +678,7 @@ local_system:
               return prune_b(self)
 
           def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-              if other is self: return self
-              if self.is_empty(): return cast(LeveledGSS[T, Acc], other)
-              if other.is_empty(): return self
-
-              d1 = _to_stack_map(self)
-              d2 = _to_stack_map(cast(LeveledGSS[T, Acc], other))
-              for k, acc2 in d2.items():
-                  d1[k] = d1[k].merge(acc2) if k in d1 else acc2
-              return _build_from_stack_map(self.__class__, d1)
+              ...
 
           def peek(self) -> Set[T]:
               match self.variant:
@@ -781,7 +722,7 @@ local_system:
           if all(acc == accs[0] for acc in accs):
               acc = accs[0]
               stacks = [(list(k), UNIT) for k in stack_map.keys()]
-              inner = LeveledGSSInner.from_stacks(stacks)
+              inner = LeveledGSSInner.from_stacks(stacks) # type: ignore
               return _canonicalize(cls.with_acc(inner, acc))
 
           buckets: DefaultDict[Optional[T], DefaultDict[int, Dict[Tuple[T, ...], Acc]]] = defaultdict(lambda: defaultdict(dict))
@@ -1102,15 +1043,12 @@ local_system:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are preserved.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
                       new_stacks.append((vals[:-1], acc))
-                  else:
-                      # Preserve empty stacks
-                      new_stacks.append((vals, acc))
               return ReferenceGSS(new_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
@@ -1280,10 +1218,6 @@ local_system:
 
           # --- Constructors ---
           @classmethod
-          def empty(cls) -> 'LeveledGSSInner[T]':
-              return cls(None)
-
-          @classmethod
           def leaf(cls) -> 'LeveledGSSInner[T]':
               return cls(Leaf())
 
@@ -1337,13 +1271,7 @@ local_system:
                       return LeveledGSSInner.internal({key: by_depth})
 
           def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-              if other is self:
-                  return self
-              
-              s1 = {s for s in self.enumerate_stacks()}
-              s2 = {s for s in other.enumerate_stacks()}
-              res = _build_inner_from_seqs(self.__class__, s1.union(s2))
-              return cast('LeveledGSSInner[T]', res)
+              return _merge_inner_recursive(self, other, {})
 
           def peek(self) -> Set[T]:
               match self.variant:
@@ -1436,6 +1364,61 @@ local_system:
                               if d != child_max + 1:
                                   errors.append(f"Inner-layer edge depth mismatch: expected {child_max + 1}, found {d}")
                           _validate_inner(ch, errors)
+
+      def _merge_inner_recursive(
+          n1: LeveledGSSInner[T],
+          n2: LeveledGSSInner[T],
+          memo: Dict[Tuple[int, int], LeveledGSSInner[T]]
+      ) -> LeveledGSSInner[T]:
+          if n1 == n2:
+              return n1
+          key = (id(n1), id(n2)) if id(n1) < id(n2) else (id(n2), id(n1))
+          if key in memo:
+              return memo[key]
+
+          res: LeveledGSSInner[T]
+          match (n1.variant, n2.variant):
+              case (Leaf(), Leaf()):
+                  res = n1
+              case (Leaf(), BranchInner(c2)):
+                  if EPSILON in c2:
+                      res = n2
+                  else:
+                      new_children = {t: d.copy() for t, d in c2.items()}
+                      new_children[EPSILON] = {0: LeveledGSSInner.leaf()}
+                      merged_node = LeveledGSSInner.internal(new_children)
+                      assert merged_node is not None, "Adding a child should not result in an empty node"
+                      res = merged_node
+              case (BranchInner(_), Leaf()):
+                  res = _merge_inner_recursive(n2, n1, memo)
+              case (BranchInner(c1), BranchInner(c2)):
+                  new_children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = defaultdict(dict)
+                  all_keys = c1.keys() | c2.keys()
+
+                  for t in all_keys:
+                      by_depth1 = c1.get(t, {})
+                      by_depth2 = c2.get(t, {})
+                      all_depths = by_depth1.keys() | by_depth2.keys()
+
+                      for d in all_depths:
+                          child1 = by_depth1.get(d)
+                          child2 = by_depth2.get(d)
+
+                          if child1 and child2:
+                              merged_child = _merge_inner_recursive(child1, child2, memo)
+                              new_children[t][d] = merged_child
+                          elif child1:
+                              new_children[t][d] = child1
+                          elif child2:
+                              new_children[t][d] = child2
+                  
+                  merged_node = LeveledGSSInner.internal(dict(new_children))
+                  assert merged_node is not None, "Merging non-empty nodes should result in a non-empty node"
+                  res = merged_node
+
+          memo[key] = res
+          return res
+
 
       # -----------------------------
       # B-layer (main) node variants
@@ -1585,15 +1568,14 @@ local_system:
               return prune_b(self)
 
           def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-              if other is self: return self
-              if self.is_empty(): return cast(LeveledGSS[T, Acc], other)
-              if other.is_empty(): return self
+              other_leveled: 'LeveledGSS[T, Acc]'
+              if isinstance(other, LeveledGSS):
+                  other_leveled = other
+              else:
+                  ref = other.to_reference_impl()
+                  other_leveled = LeveledGSS.from_stacks(ref._stacks)
 
-              d1 = _to_stack_map(self)
-              d2 = _to_stack_map(cast(LeveledGSS[T, Acc], other))
-              for k, acc2 in d2.items():
-                  d1[k] = d1[k].merge(acc2) if k in d1 else acc2
-              return _build_from_stack_map(self.__class__, d1)
+              return _merge_leveled(self, other_leveled, {})
 
           def peek(self) -> Set[T]:
               match self.variant:
@@ -1628,6 +1610,95 @@ local_system:
               _validate(self, errors)
               if errors:
                   raise ValueError("LeveledGSS invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
+
+      def _distribute_acc(
+          node: LeveledGSSInner[T],
+          acc: Acc,
+          memo: Dict[int, 'LeveledGSS[T, Acc]']
+      ) -> 'LeveledGSS[T, Acc]':
+          key = id(node)
+          if key in memo:
+              return memo[key]
+
+          res: 'LeveledGSS[T, Acc]'
+          match node.variant:
+              case Leaf():
+                  res = LeveledGSS.with_acc(LeveledGSSInner.leaf(), acc)
+              case BranchInner(children):
+                  new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+                  for t, by_depth in children.items():
+                      for d, child_a in by_depth.items():
+                          new_children[t][d] = _distribute_acc(child_a, acc, memo)
+                  res = LeveledGSS.internal(dict(new_children))
+          
+          memo[key] = res
+          return res
+
+
+      def _merge_leveled(
+          b1: 'LeveledGSS[T, Acc]',
+          b2: 'LeveledGSS[T, Acc]',
+          memo: Dict[Tuple[int, int], 'LeveledGSS[T, Acc]']
+      ) -> 'LeveledGSS[T, Acc]':
+          if b1.is_empty():
+              return b2
+          if b2.is_empty():
+              return b1
+          if b1 == b2:
+              return b1
+
+          key = (id(b1), id(b2)) if id(b1) < id(b2) else (id(b2), id(b1))
+          if key in memo:
+              return memo[key]
+
+          res: 'LeveledGSS[T, Acc]'
+          match (b1.variant, b2.variant):
+              case (Constant(a1, acc1), Constant(a2, acc2)):
+                  if a1 == a2:
+                      res = LeveledGSS.with_acc(a1, acc1.merge(acc2))
+                  elif acc1 == acc2:
+                      merged_a = a1.merge(a2)
+                      res = LeveledGSS.with_acc(merged_a, acc1)
+                  else:
+                      dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+                      b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                      b2_dist = _distribute_acc(a2, acc2, dist_memo)
+                      res = _merge_leveled(b1_dist, b2_dist, memo)
+              
+              case (Constant(a1, acc1), Branch(_)):
+                  dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+                  b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                  res = _merge_leveled(b1_dist, b2, memo)
+
+              case (Branch(_), Constant(a2, acc2)):
+                  res = _merge_leveled(b2, b1, memo)
+
+              case (Branch(c1), Branch(c2)):
+                  new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+                  all_keys = c1.keys() | c2.keys()
+
+                  for t in all_keys:
+                      by_depth1 = c1.get(t, {})
+                      by_depth2 = c2.get(t, {})
+                      all_depths = by_depth1.keys() | by_depth2.keys()
+
+                      for d in all_depths:
+                          child1 = by_depth1.get(d)
+                          child2 = by_depth2.get(d)
+
+                          if child1 and child2:
+                              merged_child = _merge_leveled(child1, child2, memo)
+                              if not merged_child.is_empty():
+                                  new_children[t][d] = merged_child
+                          elif child1:
+                              new_children[t][d] = child1
+                          elif child2:
+                              new_children[t][d] = child2
+                  
+                  res = _canonicalize(LeveledGSS.internal(dict(new_children)))
+
+          memo[key] = res
+          return res
 
       def _build_from_stack_map(cls: Type[LeveledGSS[T, Acc]], stack_map: Dict[Tuple[T, ...], Acc]) -> LeveledGSS[T, Acc]:
           if not stack_map:
@@ -2007,15 +2078,12 @@ messages:
               return ReferenceGSS(new_stacks)
 
           def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are preserved.
+              # Pop from all non-empty stacks. Empty stacks are discarded.
               # If multiple stacks become identical, they are merged by the constructor.
               new_stacks: List[Tuple[List[T], Acc]] = []
               for vals, acc in self._stacks:
                   if vals:
                       new_stacks.append((vals[:-1], acc))
-                  else:
-                      # Preserve empty stacks
-                      new_stacks.append((vals, acc))
               return ReferenceGSS(new_stacks)
 
           def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
@@ -2180,33 +2248,25 @@ messages:
       LeveledGSSInnerVariant = Union[BranchInner[T], Leaf]
 
       @dataclass(frozen=True, eq=True)
-      class LeveledGSSInner(GSS[T, Unit], Generic[T]):
+      class LeveledGSSInner(Generic[T]):
           """
           An inner Leveled GSS that only represents a set of stacks, without accumulators.
           The accumulator type is fixed to `Unit`.
           This is used for the inner nodes in the main LeveledGSS.
           """
-          variant: Optional[LeveledGSSInnerVariant]
+          variant: LeveledGSSInnerVariant
 
           # --- Constructors ---
-          @classmethod
-          def empty(cls) -> 'LeveledGSSInner[T]':
-              return cls(None)
-
           @classmethod
           def leaf(cls) -> 'LeveledGSSInner[T]':
               return cls(Leaf())
 
           @classmethod
-          def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> 'LeveledGSSInner[T]':
-              cleaned: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']] = {}
-              for t, depths in children.items():
-                  c2 = {d: ch for d, ch in depths.items() if not ch.is_empty()}
-                  if c2:
-                      cleaned[t] = c2
+          def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> Optional['LeveledGSSInner[T]']:
+              cleaned = {t: depths for t, depths in children.items() if depths}
               
               if not cleaned:
-                  return cls.empty()
+                  return None
 
               if set(cleaned.keys()) == {EPSILON} and set(cleaned[EPSILON].keys()) == {0}:
                   if isinstance(cleaned[EPSILON][0].variant, Leaf):
@@ -2214,90 +2274,54 @@ messages:
               
               return cls(BranchInner(cleaned))
 
-          # --- GSS Interface ---
           @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> 'LeveledGSSInner[T]':
+          def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> Optional['LeveledGSSInner[T]']:
               seqs = {tuple(s[0]) for s in stacks}
               return _build_inner_from_seqs(cls, seqs)
 
-          def push(self, value: T) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
-              max_d = self.max_depth()
-              new_depth = max_d + 1
-              return self.internal({value: {new_depth: self}})
-
-          def pop(self) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
+          def pop(self) -> Optional['LeveledGSSInner[T]']:
+              from functools import reduce
               match self.variant:
                   case Leaf():
-                      return self.empty()
+                      return None
                   case BranchInner(children):
-                      result = self.empty()
-                      for t, by_depth in children.items():
-                          if t is EPSILON:
-                              continue
-                          for _, child in by_depth.items():
-                              result = result.merge(child)
-                      return result
+                      popped_children = [
+                          child
+                          for t, by_depth in children.items()
+                          if t is not EPSILON
+                          for child in by_depth.values()
+                      ]
+                      if not popped_children:
+                          return None
+                      return reduce(lambda acc, next: acc.merge(next), popped_children)
 
-          def is_empty(self) -> bool:
-              return self.variant is None
-
-          def isolate(self, value: Optional[T]) -> 'LeveledGSSInner[T]':
-              if self.is_empty():
-                  return self
+          def isolate(self, value: Optional[T]) -> Optional['LeveledGSSInner[T]']:
               match self.variant:
                   case Leaf():
-                      return self if value is None else self.empty()
+                      return self if value is None else None
                   case BranchInner(children):
                       key = EPSILON if value is None else value
                       by_depth = children.get(key, {})
                       if not by_depth:
-                          return self.empty()
+                          return None
 
                       if key is EPSILON:
                           return self.leaf()
 
-                      return self.internal({key: by_depth})
+                      return LeveledGSSInner.internal({key: by_depth})
 
-          def apply(self, func: Callable[[Unit], Unit]) -> 'LeveledGSSInner[T]':
-              return self
-
-          def prune(self, predicate: Callable[[Unit], bool]) -> 'LeveledGSSInner[T]':
-              return self if predicate(UNIT) else self.empty()
-
-          def merge(self, other: 'GSS[T, Unit]') -> 'LeveledGSSInner[T]':
-              if other is self or other.is_empty():
-                  return self
-              if self.is_empty():
-                  return cast(LeveledGSSInner[T], other)
-              
-              s1 = {s for s in self.enumerate_stacks()}
-              s2 = {s for s in cast(LeveledGSSInner[T], other).enumerate_stacks()}
-              return _build_inner_from_seqs(self.__class__, s1.union(s2))
+          def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
+              ...
 
           def peek(self) -> Set[T]:
-              if self.is_empty():
-                  return set()
               match self.variant:
                   case Leaf():
                       return set()
                   case BranchInner(children):
                       return {cast(T, t) for t in children.keys() if t is not EPSILON}
 
-          def reduce_acc(self) -> Optional[Unit]:
-              return UNIT if not self.is_empty() else None
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Unit]':
-              stacks = [(list(vals), UNIT) for vals in self.enumerate_stacks()]
-              return ReferenceGSS.from_stacks(stacks)
-
           # --- LeveledA specific helpers ---
           def has_epsilon(self) -> bool:
-              if self.is_empty():
-                  return False
               match self.variant:
                   case Leaf():
                       return True
@@ -2305,8 +2329,6 @@ messages:
                       return EPSILON in children
 
           def max_depth(self) -> int:
-              if self.is_empty():
-                  return 0
               match self.variant:
                   case Leaf():
                       return 0
@@ -2318,8 +2340,6 @@ messages:
                       return max_d
 
           def enumerate_stacks(self) -> Iterator[Tuple[T, ...]]:
-              if self.is_empty():
-                  return
               match self.variant:
                   case Leaf():
                       yield tuple()
@@ -2338,7 +2358,7 @@ messages:
               if errors:
                   raise ValueError("LeveledGSSInner invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
 
-      def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> LeveledGSSInner[T]:
+      def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> Optional[LeveledGSSInner[T]]:
           buckets: DefaultDict[Optional[T], DefaultDict[int, List[Tuple[T, ...]]]] = defaultdict(lambda: defaultdict(list))
           has_empty = False
           has_any = False
@@ -2351,7 +2371,7 @@ messages:
                   buckets[t][d].append(prefix)
           
           if not has_any:
-              return cls.empty()
+              return None
 
           children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = {}
           if has_empty:
@@ -2361,13 +2381,13 @@ messages:
               children[t] = {}
               for d, group in by_depth.items():
                   child = _build_inner_from_seqs(cls, group)
-                  if not child.is_empty():
+                  if child is not None:
                       children[t][d] = child
           
           return cls.internal(children)
 
-      def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
-          if a.is_empty():
+      def _validate_inner(a: Optional[LeveledGSSInner[T]], errors: List[str]) -> None:
+          if a is None:
               return
           match a.variant:
               case Leaf():
@@ -2375,8 +2395,6 @@ messages:
               case BranchInner(children):
                   for t, by_depth in children.items():
                       for d, ch in by_depth.items():
-                          if ch.is_empty():
-                              errors.append("Inner-layer internal node contains an Empty child")
                           if t is EPSILON:
                               if d != 0: errors.append("Inner-layer EPSILON edge with non-zero depth")
                               if not isinstance(ch.variant, Leaf): errors.append("Inner-layer EPSILON edge must point to Leaf")
@@ -2419,8 +2437,8 @@ messages:
               return cls(Empty())
 
           @classmethod
-          def with_acc(cls, node: LeveledGSSInner[T], acc: Acc) -> 'LeveledGSS[T, Acc]':
-              if node.is_empty():
+          def with_acc(cls, node: Optional[LeveledGSSInner[T]], acc: Acc) -> 'LeveledGSS[T, Acc]':
+              if node is None:
                   return cls.empty()
               return cls(Constant(node=node, acc=acc))
 
@@ -2459,7 +2477,8 @@ messages:
                   case Empty():
                       return self
                   case Constant(node=a, acc=acc):
-                      return LeveledGSS.with_acc(a.pop(), acc)
+                      popped_node = a.pop()
+                      return LeveledGSS.with_acc(popped_node, acc)
                   case Branch(children=children):
                       result = LeveledGSS.empty()
                       for t, by_depth in children.items():
@@ -2481,7 +2500,8 @@ messages:
                           return LeveledGSS.empty()
                       return LeveledGSS.internal({key: by_depth})
                   case Constant(node=a, acc=acc):
-                      return LeveledGSS.with_acc(a.isolate(value), acc)
+                      isolated_node = a.isolate(value)
+                      return LeveledGSS.with_acc(isolated_node, acc)
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
               memo_b: Dict[int, 'LeveledGSS[T, Acc]'] = {}
@@ -2533,15 +2553,7 @@ messages:
               return prune_b(self)
 
           def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-              if other is self: return self
-              if self.is_empty(): return cast(LeveledGSS[T, Acc], other)
-              if other.is_empty(): return self
-
-              d1 = _to_stack_map(self)
-              d2 = _to_stack_map(cast(LeveledGSS[T, Acc], other))
-              for k, acc2 in d2.items():
-                  d1[k] = d1[k].merge(acc2) if k in d1 else acc2
-              return _build_from_stack_map(self.__class__, d1)
+              ...
 
           def peek(self) -> Set[T]:
               match self.variant:
@@ -2585,7 +2597,7 @@ messages:
           if all(acc == accs[0] for acc in accs):
               acc = accs[0]
               stacks = [(list(k), UNIT) for k in stack_map.keys()]
-              inner = LeveledGSSInner.from_stacks(stacks)
+              inner = LeveledGSSInner.from_stacks(stacks) # type: ignore
               return _canonicalize(cls.with_acc(inner, acc))
 
           buckets: DefaultDict[Optional[T], DefaultDict[int, Dict[Tuple[T, ...], Acc]]] = defaultdict(lambda: defaultdict(dict))
@@ -2707,13 +2719,115 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: "`LeveledGSSInner` isn't really a GSS because it can't be empty - it can't
-      be in a state where it contains no stacks. It *can* have an empty stack -- but
-      this is different from having *no* stack. In fact, `LeveledGSSInner` is only
-      needed for use in `LeveledGSSInner`, so we don't have to implement `GSS`. Don't
-      implement GSS. Remove methods of `LeveledGSSInner` that are unused in this code.
-      Make `LeveledGSSInner.pop` and `isolate` etc return `Optional[LeveledGSSInner[T]]`,
-      which it does if there's no stacks left."
+  - user: |-
+      Here was my original prompt for creating the GSS interface:
+
+      A GSS is this
+      - From stacks takes List[Tuple[List[T], Acc]] and returns Self.
+      - Push takes Self and T and returns Self.
+      - Pop takes Self and returns Self. It simply pops one from each stack. Empty stacks are discarded.
+      - There's also a function apply that mutates all the Accs independently. It takes a closure.
+      - And there'll have to be a function merge that takes an iterable of Selfs and a closure for merging two Accs returns Self.
+      - reduce_acc takes a closure that takes two accs and returns one acc, and returns an optional acc. This one's guaranteed to output the same value between impls as long as the reduce closure is order-independent.
+      - Peek takes Self and returns a set of Ts, the top values across stacks.
+      - Merge takes two Selfs and a closure that merges two Accs.
+      - `is_empty` takes Self and returns bool, true if there are no stacks (but false if there's an empty stack).
+      - isolate takes Self and Optional[T] and keeps only those stacks that have T on top, or empty stacks if T is None.
+
+      reference_impl.py will be a crude but gold-standard-for-correctness implementation that simply stores `List[Tuple[List[T], Acc]]` and does all operations using 'brute force'.
+
+      Bonus (many of these can be defined using a default impl on the interface):
+      - init_empty calls from_stacks([])
+      - push_many takes list[tuple[Self, T]] and returns Self. It loops over the entries, pushes T to each Self, then gathers all the Selfs into one Self and returns it. If empty, returns init_empty.
+      - merge_many takes many Selfs and a closure. If empty, returns init_empty.
+      - popn just pops n times
+      - to_reference_impl converts to reference implementation
+      - to_json_serializable converts to reference impl and then calls to_json_serializable on that (overridden for to_json_serializable)
+      - `__str__` and `__repr__`: `return f"{self.__class__.__name__}({self.to_json_serializable()})"`
+      - `__eq__` should be overridden, and should generally be false if different types. Should be tailored to each impl.
+
+
+
+      Here was my original prompt for creating the leveled GSS code:
+
+      > Create a new implementation of GSS.
+      > 
+      > This impl should be a graph. Edges will carry T. But also max depth.
+      > a map from a parent to its children could be a map T -> max depth -> node
+      > This should reduce unnecessary merges in some cases. e.g. imagine we have these stacks (same acc - doesn't matter):
+      > - [1,2,3,4]
+      > - [1,2,4]
+      > Could be this
+      > A <-1- B <-2- C <-3- D <-4- E
+      > C <-4- E
+      > this'd be an efficient representation. But it requires us to have 2 edges to different nodes on E with T=4. So we'd be required to merge more eagerly.
+      > having max depth solves this.
+      > 
+      > I want Accs in this implementation to existing only at one 'level', if that makes sense.
+      > ie either all of a node's children have Accs, or none of them do. And if the parent has an acc then none of its children do.
+      > And it should be maintained such that if all the children's accs are equal, the accs are sucked up into the parent. ie they aren't at the children any more.
+      > So, if the children of a node have accs, then there must be at least one inequality between them.
+      > 
+      > We can enforce that Accs can only exist at one level by defining different types of node: type A that can be either root or an internal node that maps to other type As, and type B that can either contain type A and an Acc OR that maps to other type Bs. 'Contain' here means just contains one - wraps. Maps means contains a node map.
+      > If we were working in Rust, these'd both be enums.
+      > 
+      > Oh except that type B can also be a variant that represents 'empty' or having 'no stacks'. Having 'no stack' is different from having 'an empty stack'.
+      > 
+      > When I say accs only exist at one 'level', I don't mean they necessarily exist all at the same depth. But rather that if we drew the GSS on a page top to bottom, and drew a dot where each acc exists, then drew a line through the accs, the line would go up and down but would always go right, or left, on the page. ie each x-value in the line has exactly one y-value. (But not that it'd be a straight line.)
+      > 
+      > These are just the invariants I want. How you achieve them is up to you. Do it as elegantly as possible.
+      > 
+      > It should behave equivalently to reference_impl.py (with the caveat that reduce_acc is only guaranteed to output the same value between impls as long as the reduce closure is order-independent.)
+
+      The main type we deal with should be `LeveledGSS`. But this itself should be a union of three variants: containing A and Acc, mapping to other Bs, or being empty. And A should also be a union of variants: one that represents being a root node, one for an internal node that maps to other type As.
+
+      The 'suck up' logic, in terms of types A and B etc, means this:
+      - Suppose we have a node of type B of the variant that that maps to other nodes of type B.
+      - Suppose all of those children are nodes of type B of the other variant -- the one that that contains a node of type A and an Acc.
+      - Suppose the Accs in these children are all equal.
+      - Then we can suck up the Acc into the parent.
+      - The parent becomes a node (still of type B) of the variant that contains a node of type A and Acc.
+      - The Acc it contains is the one on the children.
+      - The node of type A it contains is a new node of the type A variant that maps to other type A nodes.
+      - Its children are each of the type A nodes inside the type B children of the original parent. They carry the same Ts.
+      ie we go from a type B node pointing to other type B nodes, to a type B node containing a type A node (and an Acc) that points to other type A nodes. And those child type A nodes are all those type B nodes that the original parent pointed to.
+
+      It's crucial to use memoization in `apply` to ensure that shared nodes remain shared.
+
+
+      Here's the node types in Rust I want to basically mirror:
+
+      ```rust
+      use std::collections::HashMap;
+      use std::rc::Rc;
+
+      #[derive(Debug, Clone)]
+      pub enum LeveledGSS<T, Acc> {
+          WithAcc {
+              node: LeveledGSSInner<T>,
+              acc: Acc,
+          },
+          Internal(HashMap<T, HashMap<usize, Rc<LeveledGSS<T, Acc>>>>),
+          Empty,
+      }
+
+      #[derive(Debug, Clone)]
+      pub enum LeveledGSSInner<T> {
+          Root,
+          InternalInner(HashMap<T, HashMap<usize, Rc<LeveledGSSInner<T>>>>),
+      }
+      ```
+
+
+      Write a function that validates the invariants I've specified for the GSS. In particular, we need to ensure that Acc is always 'sucked up' when it can be.
+
+      `prune` and `apply` should not unnecessarily create new nodes. Shared nodes are the cornerstone of performance in this code. If we go around creating multiple equal nodes at different places in memory, it hurts performance greatly.
+
+      Note that in leveled_impl Acc should only ever exist at the type B node variant that contains a (single) type A node and an Acc. It should never exist in a type A node, nor should it exist in either of the other type B variants: the empty variant and the variant that maps to other type B nodes.
+    metadata:
+  - user: Implement `LeveledGSS.merge` and `LeveledGSSInner.merge`. Make sure they're
+      efficient. Don't just convert to reference impl/stacks and merge on that. Do
+      it efficiently. Try to keep shared nodes shared.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2732,375 +2846,218 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the requested changes, followed by the git diff.
+      Of course. Here are the step-by-step instructions to implement the efficient `merge` operations for `LeveledGSS` and `LeveledGSSInner`, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/gss_tester/leveled_impl.py`:
+      #### File: `python/gss_tester/leveled_impl.py`
 
-      1.  **Update `LeveledGSSInner` Class Definition**:
-          *   Locate the class definition for `LeveledGSSInner`.
-          *   Change `class LeveledGSSInner(GSS[T, Unit], Generic[T]):` to `class LeveledGSSInner(Generic[T]):`.
-          *   Change the `variant` attribute's type hint from `variant: Optional[LeveledGSSInnerVariant]` to `variant: LeveledGSSInnerVariant`.
+      1.  **Implement `LeveledGSSInner.merge`**:
+          *   Locate the `merge` method inside the `LeveledGSSInner` class (around line 140).
+          *   Replace its body (`...`) with a call to a new helper function: `return _merge_inner_recursive(self, other, {})`.
 
-      2.  **Refactor `LeveledGSSInner` Methods**:
-          *   Delete the `empty` classmethod.
-          *   Replace the `internal` classmethod with this new version that returns `Optional['LeveledGSSInner[T]']` and is simplified:
-              ```python
-                  @classmethod
-                  def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> Optional['LeveledGSSInner[T]']:
-                      cleaned = {t: depths for t, depths in children.items() if depths}
-                      
-                      if not cleaned:
-                          return None
+      2.  **Add `_merge_inner_recursive` helper**:
+          *   After the `_validate_inner` function (around line 237), insert the new `_merge_inner_recursive` helper function. This function will contain the recursive logic for merging two `LeveledGSSInner` nodes with memoization to preserve sharing.
 
-                      if set(cleaned.keys()) == {EPSILON} and set(cleaned[EPSILON].keys()) == {0}:
-                          if isinstance(cleaned[EPSILON][0].variant, Leaf):
-                              return cls.leaf()
-                      
-                      return cls(BranchInner(cleaned))
-              ```
-          *   Remove the entire `# --- GSS Interface ---` comment block and the `from_stacks` method that follows it.
-          *   Re-add `from_stacks` under `# --- Constructors ---` with a return type of `Optional`:
-              ```python
-                  @classmethod
-                  def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> Optional['LeveledGSSInner[T]']:
-                      seqs = {tuple(s[0]) for s in stacks}
-                      return _build_inner_from_seqs(cls, seqs)
-              ```
-          *   Delete the `push` method.
-          *   Replace the `pop` method with this version that returns `Optional` and uses `reduce`:
-              ```python
-                  def pop(self) -> Optional['LeveledGSSInner[T]']:
-                      from functools import reduce
-                      match self.variant:
-                          case Leaf():
-                              return None
-                          case BranchInner(children):
-                              popped_children = [
-                                  child
-                                  for t, by_depth in children.items()
-                                  if t is not EPSILON
-                                  for child in by_depth.values()
-                              ]
-                              if not popped_children:
-                                  return None
-                              return reduce(lambda acc, next: acc.merge(next), popped_children)
-              ```
-          *   Delete the `is_empty` method.
-          *   Replace the `isolate` method with this version that returns `Optional`:
-              ```python
-                  def isolate(self, value: Optional[T]) -> Optional['LeveledGSSInner[T]']:
-                      match self.variant:
-                          case Leaf():
-                              return self if value is None else None
-                          case BranchInner(children):
-                              key = EPSILON if value is None else value
-                              by_depth = children.get(key, {})
-                              if not by_depth:
-                                  return None
+      3.  **Implement `LeveledGSS.merge`**:
+          *   Locate the `merge` method inside the `LeveledGSS` class (around line 438).
+          *   Replace its body (`...`) with the logic to handle different GSS implementation types and then call a new `_merge_leveled` helper function.
 
-                              if key is EPSILON:
-                                  return self.leaf()
-
-                              return LeveledGSSInner.internal({key: by_depth})
-              ```
-          *   Delete the `apply` and `prune` methods.
-          *   Replace the `merge` method to accept `LeveledGSSInner[T]` and `cast` the result:
-              ```python
-                  def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-                      if other is self:
-                          return self
-                      
-                      s1 = {s for s in self.enumerate_stacks()}
-                      s2 = {s for s in other.enumerate_stacks()}
-                      res = _build_inner_from_seqs(self.__class__, s1.union(s2))
-                      return cast('LeveledGSSInner[T]', res)
-              ```
-          *   Remove the `reduce_acc` and `to_reference_impl` methods.
-          *   For the methods `peek`, `has_epsilon`, `max_depth`, and `enumerate_stacks`, remove the initial `if self.is_empty(): return ...` block.
-
-      3.  **Update Helper Functions**:
-          *   In `_build_inner_from_seqs`, change its signature to return `Optional[LeveledGSSInner[T]]`. Inside, change `if not has_any: return cls.empty()` to `if not has_any: return None`. Also, change `if not child.is_empty():` to `if child is not None:`.
-          *   In `_validate_inner`, change its signature to accept `a: Optional[LeveledGSSInner[T]]`. Change `if a.is_empty():` to `if a is None:`. Remove the line `if ch.is_empty(): errors.append("Inner-layer internal node contains an Empty child")`.
-
-      4.  **Update `LeveledGSS.with_acc`**:
-          *   In the `with_acc` classmethod of `LeveledGSS`, change the `node` parameter's type hint to `Optional[LeveledGSSInner[T]]`.
-          *   Change the condition `if node.is_empty():` to `if node is None:`.
+      4.  **Add `_distribute_acc` and `_merge_leveled` helpers**:
+          *   After the `validate_invariants` method of the `LeveledGSS` class (around line 464), insert two new helper functions:
+              *   `_distribute_acc`: This function transforms a `Constant` node into a `Branch` node by pushing the accumulator down to the leaves of the inner tree.
+              *   `_merge_leveled`: This function contains the core recursive logic for merging two `LeveledGSS` nodes, using `_distribute_acc` when necessary and memoization to maintain performance.
 
       ### Git Diffs
+
+      Here are the git diffs to apply these changes:
 
       ```diff
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -53,7 +53,7 @@
-       LeveledGSSInnerVariant = Union[BranchInner[T], Leaf]
+      @@ -140,7 +140,7 @@
+                       return LeveledGSSInner.internal({key: by_depth})
        
-       @dataclass(frozen=True, eq=True)
-      -class LeveledGSSInner(GSS[T, Unit], Generic[T]):
-      +class LeveledGSSInner(Generic[T]):
-           """
-           An inner Leveled GSS that only represents a set of stacks, without accumulators.
-           The accumulator type is fixed to `Unit`.
-           This is used for the inner nodes in the main LeveledGSS.
-           """
-      -    variant: Optional[LeveledGSSInnerVariant]
-      +    variant: LeveledGSSInnerVariant
-       
-           # --- Constructors ---
-           @classmethod
-      @@ -64,95 +64,74 @@
-               return cls(Leaf())
-       
-           @classmethod
-      -    def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> 'LeveledGSSInner[T]':
-      -        cleaned: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']] = {}
-      -        for t, depths in children.items():
-      -            c2 = {d: ch for d, ch in depths.items() if not ch.is_empty()}
-      -            if c2:
-      -                cleaned[t] = c2
-      +    def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> Optional['LeveledGSSInner[T]']:
-      +        cleaned = {t: depths for t, depths in children.items() if depths}
-               
-               if not cleaned:
-      -            return cls.empty()
-      +            return None
-       
-               if set(cleaned.keys()) == {EPSILON} and set(cleaned[EPSILON].keys()) == {0}:
-                   if isinstance(cleaned[EPSILON][0].variant, Leaf):
-                       return cls.leaf()
-               
-               return cls(BranchInner(cleaned))
-       
-      -    # --- GSS Interface ---
-      -    @classmethod
-      -    def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> 'LeveledGSSInner[T]':
-      +    @classmethod
-      +    def from_stacks(cls, stacks: List[Tuple[List[T], Unit]]) -> Optional['LeveledGSSInner[T]']:
-               seqs = {tuple(s[0]) for s in stacks}
-               return _build_inner_from_seqs(cls, seqs)
-       
-      -    def push(self, value: T) -> 'LeveledGSSInner[T]':
-      -        if self.is_empty():
-      -            return self
-      -        max_d = self.max_depth()
-      -        new_depth = max_d + 1
-      -        return self.internal({value: {new_depth: self}})
-      -
-      -    def pop(self) -> 'LeveledGSSInner[T]':
-      -        if self.is_empty():
-      -            return self
-      -        match self.variant:
-      -            case Leaf():
-      -                return self.empty()
-      -            case BranchInner(children):
-      -                result = self.empty()
-      -                for t, by_depth in children.items():
-      -                    if t is EPSILON:
-      -                        continue
-      -                    for _, child in by_depth.items():
-      -                        result = result.merge(child)
-      -                return result
-      -
-      -    def is_empty(self) -> bool:
-      -        return self.variant is None
-      -
-      -    def isolate(self, value: Optional[T]) -> 'LeveledGSSInner[T]':
-      -        if self.is_empty():
-      -            return self
-      -        match self.variant:
-      -            case Leaf():
-      -                return self if value is None else self.empty()
-      -            case BranchInner(children):
-      -                key = EPSILON if value is None else value
-      -                by_depth = children.get(key, {})
-      -                if not by_depth:
-      -                    return self.empty()
-      -
-      -                if key is EPSILON:
-      -                    return self.leaf()
-      -
-      -                return self.internal({key: by_depth})
-      -
-      -    def apply(self, func: Callable[[Unit], Unit]) -> 'LeveledGSSInner[T]':
-      -        return self
-      -
-      -    def prune(self, predicate: Callable[[Unit], bool]) -> 'LeveledGSSInner[T]':
-      -        return self if predicate(UNIT) else self.empty()
-      -
-      -    def merge(self, other: 'GSS[T, Unit]') -> 'LeveledGSSInner[T]':
-      -        if other is self or other.is_empty():
-      -            return self
-      -        if self.is_empty():
-      -            return cast(LeveledGSSInner[T], other)
-      +    def pop(self) -> Optional['LeveledGSSInner[T]']:
-      +        from functools import reduce
-      +        match self.variant:
-      +            case Leaf():
-      +                return None
-      +            case BranchInner(children):
-      +                popped_children = [
-      +                    child
-      +                    for t, by_depth in children.items()
-      +                    if t is not EPSILON
-      +                    for child in by_depth.values()
-      +                ]
-      +                if not popped_children:
-      +                    return None
-      +                return reduce(lambda acc, next: acc.merge(next), popped_children)
-      +
-      +    def isolate(self, value: Optional[T]) -> Optional['LeveledGSSInner[T]']:
-      +        match self.variant:
-      +            case Leaf():
-      +                return self if value is None else None
-      +            case BranchInner(children):
-      +                key = EPSILON if value is None else value
-      +                by_depth = children.get(key, {})
-      +                if not by_depth:
-      +                    return None
-      +
-      +                if key is EPSILON:
-      +                    return self.leaf()
-      +
-      +                return LeveledGSSInner.internal({key: by_depth})
-      +
-      +    def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-      +        if other is self:
-      +            return self
-               
-      -        s1 = {s for s in self.enumerate_stacks()}
-      -        s2 = {s for s in cast(LeveledGSSInner[T], other).enumerate_stacks()}
-      -        return _build_inner_from_seqs(self.__class__, s1.union(s2))
-      +        s1 = {s for s in self.enumerate_stacks()}
-      +        s2 = {s for s in other.enumerate_stacks()}
-      +        res = _build_inner_from_seqs(self.__class__, s1.union(s2))
-      +        return cast('LeveledGSSInner[T]', res)
+           def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
+      -        ...
+      +        return _merge_inner_recursive(self, other, {})
        
            def peek(self) -> Set[T]:
-      -        if self.is_empty():
-      -            return set()
                match self.variant:
-                   case Leaf():
-                       return set()
-                   case BranchInner(children):
-                       return {cast(T, t) for t in children.keys() if t is not EPSILON}
+      @@ -237,6 +237,62 @@
+                                   errors.append(f"Inner-layer edge depth mismatch: expected {child_max + 1}, found {d}")
+                           _validate_inner(ch, errors)
        
-      -    def reduce_acc(self) -> Optional[Unit]:
-      -        return UNIT if not self.is_empty() else None
-      -
-      -    def to_reference_impl(self) -> 'ReferenceGSS[T, Unit]':
-      -        stacks = [(list(vals), UNIT) for vals in self.enumerate_stacks()]
-      -        return ReferenceGSS.from_stacks(stacks)
-      -
-           # --- LeveledA specific helpers ---
-           def has_epsilon(self) -> bool:
-      -        if self.is_empty():
-      -            return False
-               match self.variant:
-                   case Leaf():
-                       return True
-      @@ -160,8 +139,6 @@
-                       return EPSILON in children
+      +def _merge_inner_recursive(
+      +    n1: LeveledGSSInner[T],
+      +    n2: LeveledGSSInner[T],
+      +    memo: Dict[Tuple[int, int], LeveledGSSInner[T]]
+      +) -> LeveledGSSInner[T]:
+      +    if n1 == n2:
+      +        return n1
+      +    key = (id(n1), id(n2)) if id(n1) < id(n2) else (id(n2), id(n1))
+      +    if key in memo:
+      +        return memo[key]
+      +
+      +    res: LeveledGSSInner[T]
+      +    match (n1.variant, n2.variant):
+      +        case (Leaf(), Leaf()):
+      +            res = n1
+      +        case (Leaf(), BranchInner(c2)):
+      +            if EPSILON in c2:
+      +                res = n2
+      +            else:
+      +                new_children = {t: d.copy() for t, d in c2.items()}
+      +                new_children[EPSILON] = {0: LeveledGSSInner.leaf()}
+      +                merged_node = LeveledGSSInner.internal(new_children)
+      +                assert merged_node is not None, "Adding a child should not result in an empty node"
+      +                res = merged_node
+      +        case (BranchInner(_), Leaf()):
+      +            res = _merge_inner_recursive(n2, n1, memo)
+      +        case (BranchInner(c1), BranchInner(c2)):
+      +            new_children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = defaultdict(dict)
+      +            all_keys = c1.keys() | c2.keys()
+      +
+      +            for t in all_keys:
+      +                by_depth1 = c1.get(t, {})
+      +                by_depth2 = c2.get(t, {})
+      +                all_depths = by_depth1.keys() | by_depth2.keys()
+      +
+      +                for d in all_depths:
+      +                    child1 = by_depth1.get(d)
+      +                    child2 = by_depth2.get(d)
+      +
+      +                    if child1 and child2:
+      +                        merged_child = _merge_inner_recursive(child1, child2, memo)
+      +                        new_children[t][d] = merged_child
+      +                    elif child1:
+      +                        new_children[t][d] = child1
+      +                    elif child2:
+      +                        new_children[t][d] = child2
+      +            
+      +            merged_node = LeveledGSSInner.internal(dict(new_children))
+      +            assert merged_node is not None, "Merging non-empty nodes should result in a non-empty node"
+      +            res = merged_node
+      +
+      +    memo[key] = res
+      +    return res
+      +
+      +
+       # -----------------------------
+       # B-layer (main) node variants
+       # -----------------------------
+      @@ -438,7 +494,14 @@
+               return prune_b(self)
        
-           def max_depth(self) -> int:
-      -        if self.is_empty():
-      -            return 0
-               match self.variant:
-                   case Leaf():
-                       return 0
-      @@ -173,8 +150,6 @@
-                       return max_d
+           def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
+      -        ...
+      +        other_leveled: 'LeveledGSS[T, Acc]'
+      +        if isinstance(other, LeveledGSS):
+      +            other_leveled = other
+      +        else:
+      +            ref = other.to_reference_impl()
+      +            other_leveled = LeveledGSS.from_stacks(ref._stacks)
+      +
+      +        return _merge_leveled(self, other_leveled, {})
        
-           def enumerate_stacks(self) -> Iterator[Tuple[T, ...]]:
-      -        if self.is_empty():
-      -            return
+           def peek(self) -> Set[T]:
                match self.variant:
-                   case Leaf():
-                       yield tuple()
-      @@ -193,7 +168,7 @@
+      @@ -470,6 +533,93 @@
                if errors:
-                   raise ValueError("LeveledGSSInner invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
+                   raise ValueError("LeveledGSS invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
        
-      -def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> LeveledGSSInner[T]:
-      +def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T, ...]]) -> Optional[LeveledGSSInner[T]]:
-           buckets: DefaultDict[Optional[T], DefaultDict[int, List[Tuple[T, ...]]]] = defaultdict(lambda: defaultdict(list))
-           has_empty = False
-           has_any = False
-      @@ -206,7 +181,7 @@
-                   buckets[t][d].append(prefix)
-           
-           if not has_any:
-      -        return cls.empty()
-      +        return None
-       
-           children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = {}
-           if has_empty:
-      @@ -216,19 +191,18 @@
-               children[t] = {}
-               for d, group in by_depth.items():
-                   child = _build_inner_from_seqs(cls, group)
-      -            if not child.is_empty():
-      +            if child is not None:
-                       children[t][d] = child
-           
-           return cls.internal(children)
-       
-      -def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
-      -    if a.is_empty():
-      +def _validate_inner(a: Optional[LeveledGSSInner[T]], errors: List[str]) -> None:
-      +    if a is None:
-               return
-           match a.variant:
-               case Leaf():
-                   return
-               case BranchInner(children):
-                   for t, by_depth in children.items():
-                       for d, ch in by_depth.items():
-      -                    if ch.is_empty():
-      -                        errors.append("Inner-layer internal node contains an Empty child")
-                           if t is EPSILON:
-                               if d != 0: errors.append("Inner-layer EPSILON edge with non-zero depth")
-                               if not isinstance(ch.variant, Leaf): errors.append("Inner-layer EPSILON edge must point to Leaf")
-      @@ -270,8 +244,8 @@
-               return cls(Empty())
-       
-           @classmethod
-      -    def with_acc(cls, node: LeveledGSSInner[T], acc: Acc) -> 'LeveledGSS[T, Acc]':
-      -        if node.is_empty():
-      +    def with_acc(cls, node: Optional[LeveledGSSInner[T]], acc: Acc) -> 'LeveledGSS[T, Acc]':
-      +        if node is None:
-                   return cls.empty()
-               return cls(Constant(node=node, acc=acc))
-       
-      @@ -310,7 +284,8 @@
-                   case Empty():
-                       return self
-                   case Constant(node=a, acc=acc):
-      -                return LeveledGSS.with_acc(a.pop(), acc)
-      +                popped_node = a.pop()
-      +                return LeveledGSS.with_acc(popped_node, acc)
-                   case Branch(children=children):
-                       result = LeveledGSS.empty()
-                       for t, by_depth in children.items():
-      @@ -332,7 +307,8 @@
-                           return LeveledGSS.empty()
-                       return LeveledGSS.internal({key: by_depth})
-                   case Constant(node=a, acc=acc):
-      -                return LeveledGSS.with_acc(a.isolate(value), acc)
-      +                isolated_node = a.isolate(value)
-      +                return LeveledGSS.with_acc(isolated_node, acc)
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-               memo_b: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-      @@ -433,7 +409,7 @@
-           if all(acc == accs[0] for acc in accs):
-               acc = accs[0]
-               stacks = [(list(k), UNIT) for k in stack_map.keys()]
-      -        inner = LeveledGSSInner.from_stacks(stacks)
-      +        inner = LeveledGSSInner.from_stacks(stacks) # type: ignore
-               return _canonicalize(cls.with_acc(inner, acc))
-       
-           buckets: DefaultDict[Optional[T], DefaultDict[int, Dict[Tuple[T, ...], Acc]]] = defaultdict(lambda: defaultdict(dict))
+      +def _distribute_acc(
+      +    node: LeveledGSSInner[T],
+      +    acc: Acc,
+      +    memo: Dict[int, 'LeveledGSS[T, Acc]']
+      +) -> 'LeveledGSS[T, Acc]':
+      +    key = id(node)
+      +    if key in memo:
+      +        return memo[key]
+      +
+      +    res: 'LeveledGSS[T, Acc]'
+      +    match node.variant:
+      +        case Leaf():
+      +            res = LeveledGSS.with_acc(LeveledGSSInner.leaf(), acc)
+      +        case BranchInner(children):
+      +            new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+      +            for t, by_depth in children.items():
+      +                for d, child_a in by_depth.items():
+      +                    new_children[t][d] = _distribute_acc(child_a, acc, memo)
+      +            res = LeveledGSS.internal(dict(new_children))
+      +    
+      +    memo[key] = res
+      +    return res
+      +
+      +
+      +def _merge_leveled(
+      +    b1: 'LeveledGSS[T, Acc]',
+      +    b2: 'LeveledGSS[T, Acc]',
+      +    memo: Dict[Tuple[int, int], 'LeveledGSS[T, Acc]']
+      +) -> 'LeveledGSS[T, Acc]':
+      +    if b1.is_empty():
+      +        return b2
+      +    if b2.is_empty():
+      +        return b1
+      +    if b1 == b2:
+      +        return b1
+      +
+      +    key = (id(b1), id(b2)) if id(b1) < id(b2) else (id(b2), id(b1))
+      +    if key in memo:
+      +        return memo[key]
+      +
+      +    res: 'LeveledGSS[T, Acc]'
+      +    match (b1.variant, b2.variant):
+      +        case (Constant(a1, acc1), Constant(a2, acc2)):
+      +            if a1 == a2:
+      +                res = LeveledGSS.with_acc(a1, acc1.merge(acc2))
+      +            elif acc1 == acc2:
+      +                merged_a = a1.merge(a2)
+      +                res = LeveledGSS.with_acc(merged_a, acc1)
+      +            else:
+      +                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+      +                b1_dist = _distribute_acc(a1, acc1, dist_memo)
+      +                b2_dist = _distribute_acc(a2, acc2, dist_memo)
+      +                res = _merge_leveled(b1_dist, b2_dist, memo)
+      +        
+      +        case (Constant(a1, acc1), Branch(_)):
+      +            dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+      +            b1_dist = _distribute_acc(a1, acc1, dist_memo)
+      +            res = _merge_leveled(b1_dist, b2, memo)
+      +
+      +        case (Branch(_), Constant(a2, acc2)):
+      +            res = _merge_leveled(b2, b1, memo)
+      +
+      +        case (Branch(c1), Branch(c2)):
+      +            new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+      +            all_keys = c1.keys() | c2.keys()
+      +
+      +            for t in all_keys:
+      +                by_depth1 = c1.get(t, {})
+      +                by_depth2 = c2.get(t, {})
+      +                all_depths = by_depth1.keys() | by_depth2.keys()
+      +
+      +                for d in all_depths:
+      +                    child1 = by_depth1.get(d)
+      +                    child2 = by_depth2.get(d)
+      +
+      +                    if child1 and child2:
+      +                        merged_child = _merge_leveled(child1, child2, memo)
+      +                        if not merged_child.is_empty():
+      +                            new_children[t][d] = merged_child
+      +                    elif child1:
+      +                        new_children[t][d] = child1
+      +                    elif child2:
+      +                        new_children[t][d] = child2
+      +            
+      +            res = _canonicalize(LeveledGSS.internal(dict(new_children)))
+      +
+      +    memo[key] = res
+      +    return res
+      +
+       def _build_from_stack_map(cls: Type[LeveledGSS[T, Acc]], stack_map: Dict[Tuple[T, ...], Acc]) -> LeveledGSS[T, Acc]:
+           if not stack_map:
+               return cls.empty()
 
       ```
     metadata:
@@ -3113,7 +3070,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor LeveledGSSInner to use Optional
-      for empty states and simplify interface"'
+  - user: 'Changes committed with message: "Implement efficient merge for LeveledGSS
+      using recursive helpers and memoization"'
     metadata:
 ...

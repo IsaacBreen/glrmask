@@ -120,7 +120,7 @@ class LeveledGSSInner(Generic[T]):
                 return LeveledGSSInner.internal({key: by_depth})
 
     def merge(self, other: 'LeveledGSSInner[T]') -> 'LeveledGSSInner[T]':
-        ...
+        return _merge_inner_recursive(self, other, {})
 
     def peek(self) -> Set[T]:
         match self.variant:
@@ -213,6 +213,61 @@ def _validate_inner(a: Optional[LeveledGSSInner[T]], errors: List[str]) -> None:
                         if d != child_max + 1:
                             errors.append(f"Inner-layer edge depth mismatch: expected {child_max + 1}, found {d}")
                     _validate_inner(ch, errors)
+
+def _merge_inner_recursive(
+    n1: LeveledGSSInner[T],
+    n2: LeveledGSSInner[T],
+    memo: Dict[Tuple[int, int], LeveledGSSInner[T]]
+) -> LeveledGSSInner[T]:
+    if n1 == n2:
+        return n1
+    key = (id(n1), id(n2)) if id(n1) < id(n2) else (id(n2), id(n1))
+    if key in memo:
+        return memo[key]
+
+    res: LeveledGSSInner[T]
+    match (n1.variant, n2.variant):
+        case (Leaf(), Leaf()):
+            res = n1
+        case (Leaf(), BranchInner(c2)):
+            if EPSILON in c2:
+                res = n2
+            else:
+                new_children = {t: d.copy() for t, d in c2.items()}
+                new_children[EPSILON] = {0: LeveledGSSInner.leaf()}
+                merged_node = LeveledGSSInner.internal(new_children)
+                assert merged_node is not None, "Adding a child should not result in an empty node"
+                res = merged_node
+        case (BranchInner(_), Leaf()):
+            res = _merge_inner_recursive(n2, n1, memo)
+        case (BranchInner(c1), BranchInner(c2)):
+            new_children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = defaultdict(dict)
+            all_keys = c1.keys() | c2.keys()
+
+            for t in all_keys:
+                by_depth1 = c1.get(t, {})
+                by_depth2 = c2.get(t, {})
+                all_depths = by_depth1.keys() | by_depth2.keys()
+
+                for d in all_depths:
+                    child1 = by_depth1.get(d)
+                    child2 = by_depth2.get(d)
+
+                    if child1 and child2:
+                        merged_child = _merge_inner_recursive(child1, child2, memo)
+                        new_children[t][d] = merged_child
+                    elif child1:
+                        new_children[t][d] = child1
+                    elif child2:
+                        new_children[t][d] = child2
+            
+            merged_node = LeveledGSSInner.internal(dict(new_children))
+            assert merged_node is not None, "Merging non-empty nodes should result in a non-empty node"
+            res = merged_node
+
+    memo[key] = res
+    return res
+
 
 # -----------------------------
 # B-layer (main) node variants
@@ -362,7 +417,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return prune_b(self)
 
     def merge(self, other: 'GSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
-        ...
+        other_leveled: 'LeveledGSS[T, Acc]'
+        if isinstance(other, LeveledGSS):
+            other_leveled = other
+        else:
+            ref = other.to_reference_impl()
+            other_leveled = LeveledGSS.from_stacks(ref._stacks)
+
+        return _merge_leveled(self, other_leveled, {})
 
     def peek(self) -> Set[T]:
         match self.variant:
@@ -397,6 +459,95 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         _validate(self, errors)
         if errors:
             raise ValueError("LeveledGSS invariant violations:\n" + "\n".join(f"- {e}" for e in errors))
+
+def _distribute_acc(
+    node: LeveledGSSInner[T],
+    acc: Acc,
+    memo: Dict[int, 'LeveledGSS[T, Acc]']
+) -> 'LeveledGSS[T, Acc]':
+    key = id(node)
+    if key in memo:
+        return memo[key]
+
+    res: 'LeveledGSS[T, Acc]'
+    match node.variant:
+        case Leaf():
+            res = LeveledGSS.with_acc(LeveledGSSInner.leaf(), acc)
+        case BranchInner(children):
+            new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+            for t, by_depth in children.items():
+                for d, child_a in by_depth.items():
+                    new_children[t][d] = _distribute_acc(child_a, acc, memo)
+            res = LeveledGSS.internal(dict(new_children))
+    
+    memo[key] = res
+    return res
+
+
+def _merge_leveled(
+    b1: 'LeveledGSS[T, Acc]',
+    b2: 'LeveledGSS[T, Acc]',
+    memo: Dict[Tuple[int, int], 'LeveledGSS[T, Acc]']
+) -> 'LeveledGSS[T, Acc]':
+    if b1.is_empty():
+        return b2
+    if b2.is_empty():
+        return b1
+    if b1 == b2:
+        return b1
+
+    key = (id(b1), id(b2)) if id(b1) < id(b2) else (id(b2), id(b1))
+    if key in memo:
+        return memo[key]
+
+    res: 'LeveledGSS[T, Acc]'
+    match (b1.variant, b2.variant):
+        case (Constant(a1, acc1), Constant(a2, acc2)):
+            if a1 == a2:
+                res = LeveledGSS.with_acc(a1, acc1.merge(acc2))
+            elif acc1 == acc2:
+                merged_a = a1.merge(a2)
+                res = LeveledGSS.with_acc(merged_a, acc1)
+            else:
+                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+                b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                b2_dist = _distribute_acc(a2, acc2, dist_memo)
+                res = _merge_leveled(b1_dist, b2_dist, memo)
+        
+        case (Constant(a1, acc1), Branch(_)):
+            dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
+            b1_dist = _distribute_acc(a1, acc1, dist_memo)
+            res = _merge_leveled(b1_dist, b2, memo)
+
+        case (Branch(_), Constant(a2, acc2)):
+            res = _merge_leveled(b2, b1, memo)
+
+        case (Branch(c1), Branch(c2)):
+            new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = defaultdict(dict)
+            all_keys = c1.keys() | c2.keys()
+
+            for t in all_keys:
+                by_depth1 = c1.get(t, {})
+                by_depth2 = c2.get(t, {})
+                all_depths = by_depth1.keys() | by_depth2.keys()
+
+                for d in all_depths:
+                    child1 = by_depth1.get(d)
+                    child2 = by_depth2.get(d)
+
+                    if child1 and child2:
+                        merged_child = _merge_leveled(child1, child2, memo)
+                        if not merged_child.is_empty():
+                            new_children[t][d] = merged_child
+                    elif child1:
+                        new_children[t][d] = child1
+                    elif child2:
+                        new_children[t][d] = child2
+            
+            res = _canonicalize(LeveledGSS.internal(dict(new_children)))
+
+    memo[key] = res
+    return res
 
 def _build_from_stack_map(cls: Type[LeveledGSS[T, Acc]], stack_map: Dict[Tuple[T, ...], Acc]) -> LeveledGSS[T, Acc]:
     if not stack_map:
