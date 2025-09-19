@@ -29,6 +29,8 @@ except NameError:
     # If not running under kernprof, create a dummy decorator.
     def profile(func): return func
 
+_EMPTY_STACK_KEY = object()
+
 # ------------------------------
 # Structural Trie (_A nodes)
 #
@@ -115,8 +117,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     _node: Optional[_A[T]] = None
     _acc: Optional[Acc] = None
     # BRANCH payload
-    _empty_acc: Optional[Acc] = None
-    _children: Optional[Dict[T, LeveledGSS[T, Acc]]] = None
+    _children: Optional[Dict[Any, LeveledGSS[T, Acc]]] = None
 
     # -------------------------
     # Construction and Canonicalization
@@ -132,16 +133,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def _branch(
-        cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+        cls, children: Dict[Any, LeveledGSS[T, Acc]]
     ) -> LeveledGSS[T, Acc]:
-        return cls(_kind="BRANCH", _empty_acc=empty_acc, _children=children)
+        return cls(_kind="BRANCH", _children=children)
 
     # -------------------------
 
     @classmethod
     @profile
     def _create(
-        cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
+        cls, children: Dict[Any, LeveledGSS[T, Acc]]
     ) -> LeveledGSS[T, Acc]:
         """
         Canonical factory for LeveledGSS. This is the sole entry point for
@@ -152,12 +153,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             v: c for v, c in children.items() if not c.is_empty()
         }
 
-        if empty_acc is None and not live_children:
+        if not live_children:
             return cls._empty()
 
         # "Suck-up" logic: If there's no empty stack accumulator and all children
         # are GROUP nodes with the same accumulator, merge them into a single GROUP.
-        can_suck_up = empty_acc is None and live_children
+        can_suck_up = live_children
         if can_suck_up:
             child_vals = list(live_children.values())
             first_child = child_vals[0]
@@ -172,7 +173,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_a_node = _AInternal.from_dict(new_a_children)
                     return cls._group(new_a_node, first_acc)
 
-        return cls._branch(empty_acc, live_children)
+        return cls._branch(live_children)
 
     @profile
     def _distribute(self) -> LeveledGSS[T, Acc]:
@@ -182,12 +183,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         node, acc = cast(_A[T], self._node), cast(Acc, self._acc)
         if isinstance(node, _ARoot):
-            return self._create(acc, {})
+            return self
         if isinstance(node, _AInternal):
             new_children = {
                 v: self._group(c, acc) for v, c in node.get_children().items()
             }
-            return self._create(None, new_children)
+            return self._create(new_children)
         return self._empty()  # Should be unreachable
 
     # -------------------------
@@ -201,25 +202,29 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if not stacks:
             return cls._empty()
 
-        empty_acc: Optional[Acc] = None
-        by_prefix: Dict[T, List[Tuple[List[T], Acc]]] = defaultdict(list)
+        # Base case for recursion: if all stacks are empty, merge into one GROUP.
+        if all(not stack for stack, _ in stacks):
+            merged_acc = reduce(lambda a, b: a.merge(b), (acc for _, acc in stacks))
+            return cls._group(_A_ROOT, merged_acc)
+
+        by_prefix: Dict[Any, List[Tuple[List[T], Acc]]] = defaultdict(list)
 
         for stack, acc in stacks:
             if not stack:
-                empty_acc = acc if empty_acc is None else empty_acc.merge(acc)
+                by_prefix[_EMPTY_STACK_KEY].append(([], acc))
             else:
                 by_prefix[stack[0]].append((stack[1:], acc))
 
         children = {
             prefix: cls.from_stacks(s_list) for prefix, s_list in by_prefix.items()
         }
-        return cls._create(empty_acc, children)
+        return cls._create(children)
 
     @profile
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         if self.is_empty():
             return self._empty()
-        return self._create(None, {value: self})
+        return self._create({value: self})
 
     @profile
     def pop(self) -> LeveledGSS[T, Acc]:
@@ -241,17 +246,18 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @profile
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        gss = self._distribute()
-        if gss._kind != "BRANCH":  # Can only be EMPTY
+        distributed = self._distribute()
+        if distributed._kind != "BRANCH":  # Can only be EMPTY or GROUP(_A_ROOT)
+            if value is None and distributed._kind == "GROUP":
+                return distributed
             return self._empty()
 
         if value is None:
-            return self._create(gss._empty_acc, {})
+            child = cast(Dict, distributed._children).get(_EMPTY_STACK_KEY)
+            return child if child is not None else self._empty()
         else:
-            child = cast(Dict, gss._children).get(value)
-            if child is None:
-                return self._empty()
-            return self._create(None, {value: child})
+            child = cast(Dict, distributed._children).get(value)
+            return self._create({value: child}) if child is not None else self._empty()
 
     @profile
     def apply(
@@ -271,24 +277,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 result = self._group(cast(_A[T], self._node), new_acc)
         else:  # BRANCH
-            new_empty_acc = (
-                func(self._empty_acc) if self._empty_acc is not None else None
-            )
-            empty_acc_changed = new_empty_acc is not self._empty_acc
-
             children = cast(Dict, self._children)
             new_children = {}
             children_changed = False
             for v, c in children.items():
                 new_c = c.apply(func, _memo=_memo)
-                if new_c is not c:
-                    children_changed = True
+                children_changed |= new_c is not c
                 new_children[v] = new_c
 
-            if not empty_acc_changed and not children_changed:
-                result = self
-            else:
-                result = self._create(new_empty_acc, new_children)
+            result = self if not children_changed else self._create(new_children)
 
         _memo[id(self)] = result
         return result
@@ -301,26 +298,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self if predicate(cast(Acc, self._acc)) else self._empty()
 
         # BRANCH
-        new_empty_acc = (
-            self._empty_acc
-            if self._empty_acc is not None and predicate(self._empty_acc)
-            else None
-        )
-        empty_acc_changed = new_empty_acc is not self._empty_acc
-
         children = cast(Dict, self._children)
         new_children = {}
         children_changed = False
         for v, c in children.items():
             new_c = c.prune(predicate)
-            if new_c is not c:
-                children_changed = True
+            children_changed |= new_c is not c
             new_children[v] = new_c
 
-        if not empty_acc_changed and not children_changed:
+        if not children_changed:
             return self
-
-        return self._create(new_empty_acc, new_children)
+        return self._create(new_children)
 
     @profile
     def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
@@ -340,33 +328,32 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         gss1 = self._distribute()
         gss2 = other._distribute()
 
-        # After distribution, they must be BRANCH kind (or EMPTY, handled above).
-        # Merge empty accumulators
-        merged_empty_acc: Optional[Acc] = None
-        if gss1._empty_acc is not None and gss2._empty_acc is not None:
-            merged_empty_acc = gss1._empty_acc.merge(gss2._empty_acc)
-        elif gss1._empty_acc is not None:
-            merged_empty_acc = gss1._empty_acc
-        else:
-            merged_empty_acc = gss2._empty_acc
+        # After distribution, nodes are either BRANCH or GROUP(_A_ROOT, ...).
+        # Treat GROUP(_A_ROOT, ...) as a BRANCH with one child for the empty stack.
+        gss1_children = (
+            cast(dict, gss1._children)
+            if gss1._kind == "BRANCH"
+            else {_EMPTY_STACK_KEY: gss1}
+        )
+        gss2_children = (
+            cast(dict, gss2._children)
+            if gss2._kind == "BRANCH"
+            else {_EMPTY_STACK_KEY: gss2}
+        )
 
-        # Merge children
-        gss1_children = gss1._children or {}
-        gss2_children = gss2._children or {}
         all_keys = gss1_children.keys() | gss2_children.keys()
-
         merged_children: Dict[T, LeveledGSS[T, Acc]] = {}
         for k in all_keys:
             c1 = gss1_children.get(k)
             c2 = gss2_children.get(k)
-            merged_children[k] = c1.merge(c2) if c1 and c2 else (c1 or c2)
+            merged_children[k] = c1.merge(c2) if c1 and c2 else cast(LeveledGSS, c1 or c2)
 
-        return LeveledGSS._create(merged_empty_acc, merged_children)
+        return LeveledGSS._create(merged_children)
 
     def peek(self) -> Set[T]:
         gss = self._distribute()
         if gss._kind == "BRANCH":
-            return set(cast(Dict, gss._children).keys())
+            return {k for k in cast(Dict, gss._children).keys() if k is not _EMPTY_STACK_KEY}
         return set()
 
     def _iter_stacks(self) -> Iterable[Tuple[List[T], Acc]]:
@@ -377,11 +364,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             for stack_list in cast(_A[T], self._node)._iter_stacks():
                 yield stack_list, acc
         else:  # BRANCH
-            if self._empty_acc is not None:
-                yield [], self._empty_acc
             for value, child_gss in cast(Dict, self._children).items():
                 for stack_suffix, acc in child_gss._iter_stacks():
-                    yield [value] + stack_suffix, acc
+                    if value is _EMPTY_STACK_KEY:
+                        yield stack_suffix, acc
+                    else:
+                        yield [value] + stack_suffix, acc
 
     def reduce_acc(self) -> Optional[Acc]:
         accs = [acc for _, acc in self._iter_stacks()]
@@ -406,7 +394,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # Invariant 1: A BRANCH node should not be "suck-up-able".
             # This would mean it's a non-canonical representation that should be a GROUP.
             children = cast(Dict, self._children)
-            if self._empty_acc is None and children:
+            if children:
 
                 def get_group_parts(
                     g: LeveledGSS[T, Acc],
@@ -415,11 +403,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     if g._kind == "GROUP":
                         return g._node, g._acc
                     # A BRANCH representing a single empty stack is equivalent to a GROUP.
-                    if (
-                        g._kind == "BRANCH"
-                        and g._empty_acc is not None
-                        and not g._children
-                    ):
+                    if g._kind == "BRANCH" and list(
+                        g._children.keys()
+                    ) == [_EMPTY_STACK_KEY]:
+                        # This case should not happen due to how from_stacks is structured
                         return _A_ROOT, g._empty_acc
                     return None
 
@@ -468,7 +455,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 self._kind == other._kind
                 and self._node == other._node
                 and self._acc == other._acc
-                and self._empty_acc == other._empty_acc
                 and self._children == other._children
             )
         if isinstance(other, GSS):
@@ -483,10 +469,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return f"LeveledGSS(GROUP stacks={stacks!r}, acc={self._acc!r})"
         # BRANCH
         parts = []
-        if self._empty_acc is not None:
-            parts.append(f"[]: {self._empty_acc!r}")
         # Sort for deterministic output
         sorted_children = sorted(cast(Dict, self._children).items())
         for v, c in sorted_children:
-            parts.append(f"{v!r}: {c!r}")
+            key_repr = "[]" if v is _EMPTY_STACK_KEY else repr(v)
+            parts.append(f"{key_repr}: {c!r}")
         return f"LeveledGSS(BRANCH {{{', '.join(parts)}}})"
