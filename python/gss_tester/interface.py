@@ -71,6 +71,11 @@ class GSS(ABC, Generic[T, Acc]):
         pass
 
     @abstractmethod
+    def merge(self, other: 'GSS[T, Acc]') -> 'GSS[T, Acc]':
+        """Merges this GSS with another, combining accumulators for identical stacks."""
+        pass
+
+    @abstractmethod
     def peek(self) -> Set[T]:
         """Returns the set of all values at the top of any stack."""
         pass
@@ -89,12 +94,6 @@ class GSS(ABC, Generic[T, Acc]):
         Converts the GSS to its canonical ReferenceGSS representation.
         This involves merging accumulators for identical stacks.
         """
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def merge(gss_list: Iterable['GSS[T, Acc]']) -> 'GSS[T, Acc]':
-        """Merges multiple GSS instances into one, combining accumulators for identical stacks."""
         pass
 
     def to_json_serializable(self) -> Any:

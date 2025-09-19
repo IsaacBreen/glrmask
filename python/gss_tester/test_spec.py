@@ -53,12 +53,12 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
     gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
     
-    merged1 = gss_class.merge([gss_a, gss_b])
+    merged1 = gss_a.merge(gss_b)
     yield from _yield_state(merged1)
     
     # Merge a stack that already exists to test accumulator merging
     gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-    merged2 = gss_class.merge([merged1, gss_c])
+    merged2 = merged1.merge(gss_c)
     yield from _yield_state(merged2)
 
     # --- Test 3: Apply accumulator function ---
@@ -76,7 +76,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     s1 = s0.push(1)
     s2 = s1.push(2)
     s3 = s1.push(3)
-    s4 = gss_class.merge([s2, s3])
+    s4 = s2.merge(s3)
     yield from _yield_state(s4)
     
     s5 = s4.push(4)
@@ -90,7 +90,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(s7)
     yield from _yield_state(s8)
     
-    s9 = gss_class.merge([s7, s8])
+    s9 = s7.merge(s8)
     yield from _yield_state(s9) # should be same as s1
     
     # --- Test 6: Merging empty GSS ---
@@ -98,13 +98,13 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
     yield from _yield_state(gss_empty)
     
-    merged_with_empty = gss_class.merge([gss_d, gss_empty])
+    merged_with_empty = gss_d.merge(gss_empty)
     yield from _yield_state(merged_with_empty) # should be same as gss_d
 
     # --- Test 7: Pruning ---
     gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
     gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
-    gss_to_prune = gss_class.merge([gss_e, gss_f])
+    gss_to_prune = gss_e.merge(gss_f)
     yield from _yield_state(gss_to_prune)
 
     pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
@@ -119,7 +119,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
     s_branch1 = s_base.push(101)
     s_branch2 = s_base.push(102)
-    s_merged = gss_class.merge([s_branch1, s_branch2])
+    s_merged = s_branch1.merge(s_branch2)
     yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
 
     s_popped = s_merged.pop()
@@ -135,7 +135,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
     s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
     s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
-    s_merged2 = gss_class.merge([s_branch3, s_branch4])
+    s_merged2 = s_branch3.merge(s_branch4)
     yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
 
     s_popped2 = s_merged2.pop()
@@ -146,7 +146,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     # Case 9a: popn less than stack depth
     gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
     gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
-    gss_pn_merged = gss_class.merge([gss_pn1, gss_pn2])
+    gss_pn_merged = gss_pn1.merge(gss_pn2)
     yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
 
     gss_pn_pop2 = gss_pn_merged.popn(2)
@@ -160,7 +160,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     # --- Test 10: Isolate empty stacks ---
     gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
     gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
-    gss_i_merged = gss_class.merge([gss_i1, gss_i2])
+    gss_i_merged = gss_i1.merge(gss_i2)
     yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
 
     gss_isolated_empty = gss_i_merged.isolate(None)

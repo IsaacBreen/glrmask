@@ -95,6 +95,11 @@ class ReferenceGSS(GSS[T, Acc]):
                 kept.append((list(vals), acc))
         return ReferenceGSS(kept)
 
+    def merge(self, other: GSS[T, Acc]) -> 'ReferenceGSS[T, Acc]':
+        other_ref = other.to_reference_impl()
+        # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
+        return ReferenceGSS(self._stacks + other_ref._stacks)
+
     def peek(self) -> Set[T]:
         # Return all top values across non-empty stacks
         tops: Set[T] = set()
@@ -110,23 +115,9 @@ class ReferenceGSS(GSS[T, Acc]):
         accs = [acc for _, acc in self._stacks]
         return reduce(lambda a, b: a.merge(b), accs)
 
-    @staticmethod
-    def merge(gss_list: Iterable['ReferenceGSS[T, Acc]']) -> 'ReferenceGSS[T, Acc]':
-        # Merge multiple GSS states, combining accumulators for identical stacks (by stack content)
-        merged: Dict[Tuple[T, ...], Acc] = {}
-        for gss in gss_list:
-            for vals, acc in gss._stacks:
-                key = tuple(vals)
-                if key in merged:
-                    merged[key] = merged[key].merge(acc)
-                else:
-                    merged[key] = acc
-        result_stacks: List[Tuple[List[T], Acc]] = [(list(key), acc) for key, acc in merged.items()]
-        return ReferenceGSS(result_stacks)
-
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
         """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
-        return ReferenceGSS.merge([self])
+        return ReferenceGSS(self._stacks)
 
     def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
         """Helper to sort stacks for deterministic representations."""

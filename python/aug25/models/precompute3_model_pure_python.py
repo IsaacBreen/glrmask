@@ -280,7 +280,7 @@ class Model(GraphProvider):
                 new_states[end_state].append(gss)
 
         merged_states = {
-            sid: GSS.merge(gss_list)
+            sid: GSS.merge_many(gss_list)
             for sid, gss_list in new_states.items()
             if gss_list
         }
@@ -300,7 +300,7 @@ class Model(GraphProvider):
 
         while heads_by_state:
             state_id, state_gsss = heads_by_state.popitem()
-            state_gss = GSS.merge(state_gsss)
+            state_gss = GSS.merge_many(state_gsss)
             row = self.parser_table.table.get(state_id)
             if not row:
                 continue
@@ -331,7 +331,7 @@ class Model(GraphProvider):
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-        return GSS.merge(shifted_gsses)
+        return GSS.merge_many(shifted_gsses)
 
     def get_mask(self) -> RangeSet:
         """
@@ -364,7 +364,7 @@ class Model(GraphProvider):
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = GSS.merge([existing_gss, gss])
+                merged_gss = existing_gss.merge(gss)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -451,13 +451,13 @@ class Model(GraphProvider):
                         if not matched:
                             continue
 
-                        child_gss_node = GSS.merge(matched)
+                        child_gss_node = GSS.merge_many(matched)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = GSS.merge([existing_gss, child_gss_node])
+                            merged_gss = existing_gss.merge(child_gss_node)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                         else:
