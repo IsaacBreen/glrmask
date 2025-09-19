@@ -39,10 +39,45 @@ class LeveledGSSInner(Generic[T]):
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
-        raise NotImplementedError
+        if not stacks:
+            raise ValueError("Cannot create LeveledGSSInner from an empty list of stacks.")
+
+        has_empty = any(not s for s in stacks)
+        has_non_empty = any(s for s in stacks)
+
+        if has_empty and has_non_empty:
+            raise ValueError("LeveledGSSInner cannot be created from a mix of empty and non-empty stacks.")
+
+        if has_empty:
+            return LeveledGSSInner(InnerLeaf())
+
+        # All stacks are non-empty
+        children: Dict[T, Dict[int, List[List[T]]]] = {}
+        for stack in stacks:
+            top = stack[-1]
+            popped = stack[:-1]
+            depth = len(popped)
+            children.setdefault(top, {}).setdefault(depth, []).append(popped)
+
+        new_children: Dict[T, Dict[int, LeveledGSSInner[T]]] = {}
+        for top, depths in children.items():
+            new_children[top] = {}
+            for depth, popped_stacks in depths.items():
+                new_children[top][depth] = LeveledGSSInner.from_stacks(popped_stacks)
+
+        return LeveledGSSInner(InnerBranch(new_children))
 
     def to_stacks(self) -> List[List[T]]:
-        raise NotImplementedError
+        if isinstance(self.inner, InnerLeaf):
+            return [[]]
+        if isinstance(self.inner, InnerBranch):
+            result = []
+            for value, depths in self.inner.children.items():
+                for _, child_node in depths.items():
+                    for stack in child_node.to_stacks():
+                        result.append(stack + [value])
+            return result
+        raise TypeError(f"Unknown LeveledGSSInner inner type: {type(self.inner)}")
 
 
 # ------------------------------
@@ -60,10 +95,53 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        if not stacks:
+            return LeveledGSS(Branch({}))
+
+        # If all stacks share an accumulator, create a WithAcc node.
+        # This is required for normalization.
+        first_acc = stacks[0][1]
+        if all(acc == first_acc for _, acc in stacks):
+            stack_structs = [s for s, _ in stacks]
+            inner_node = LeveledGSSInner.from_stacks(stack_structs)
+            return LeveledGSS(WithAcc(inner_node, first_acc))
+
+        # Otherwise, create a Branch node.
+        final_children: Dict[object, Dict[int, LeveledGSS[T, Acc]]] = {}
+
+        empty_stacks = [item for item in stacks if not item[0]]
+        if empty_stacks:
+            final_children[None] = {0: LeveledGSS.from_stacks(empty_stacks)}
+
+        non_empty_stacks = [item for item in stacks if item[0]]
+        grouped_by_top_depth: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = {}
+        for s, acc in non_empty_stacks:
+            top = s[-1]
+            popped = s[:-1]
+            depth = len(popped)
+            grouped_by_top_depth.setdefault((top, depth), []).append((popped, acc))
+
+        for (top, depth), substacks in grouped_by_top_depth.items():
+            child_gss = LeveledGSS.from_stacks(substacks)
+            final_children.setdefault(top, {})[depth] = child_gss
+
+        return LeveledGSS(Branch(final_children))
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-        raise NotImplementedError
+        if isinstance(self.inner, WithAcc):
+            return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
+        if isinstance(self.inner, Branch):
+            result = []
+            for value, depths in self.inner.children.items():
+                for _, child_gss in depths.items():
+                    sub_stacks = child_gss.to_stacks()
+                    for s, acc in sub_stacks:
+                        if value is None:
+                            result.append((s, acc))
+                        else:
+                            result.append((s + [value], acc))
+            return result
+        raise TypeError(f"Unknown LeveledGSS inner type: {type(self.inner)}")
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
         ref_impl = self.to_reference_impl()
