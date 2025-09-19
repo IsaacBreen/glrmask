@@ -19,13 +19,13 @@ def run_fuzz_test(
         value_pool = list(range(20)) + ['a', 'b', 'c']
 
     rng = random.Random(seed)
-    gss_states: List[GSS] = [gss_class.from_stacks([([value_pool[0]], MergeableInt(0))])]
+    gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
     yield gss_states[0]
 
     for _ in range(num_steps):
         if not gss_states:
             # All states were pruned or became empty, start over.
-            gss_states.append(gss_class.from_stacks([([value_pool[0]], MergeableInt(0))]))
+            gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
             yield gss_states[0]
             if len(gss_states) >= max_gss_states:
                 continue

@@ -22,10 +22,10 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
         yield (gss_state.to_stacks(), line_no)
 
     # --- Test 1: Basic push/pop/construction ---
-    gss1 = gss_class.from_stacks([])
+    gss1 = gss_class.from_stacks([([], acc_factory())])
     yield from _yield_state(gss1)
 
-    gss1 = gss_class.from_stacks([([10], acc_factory())])
+    gss1 = gss1.push(10)
     yield from _yield_state(gss1)
 
     gss1 = gss1.push(20)
@@ -34,40 +34,40 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     gss_popped_20 = gss1.isolate(20).pop()
     yield from _yield_state(gss_popped_20)
 
-    # This pop results in an empty stack, which is discarded, creating an empty GSS.
     gss_popped_10 = gss_popped_20.isolate(10).pop()
     yield from _yield_state(gss_popped_10)
 
-    gss1 = gss_class.from_stacks([])
+    gss1 = gss_class.from_stacks([([], acc_factory())])
     yield from _yield_state(gss1)
 
     gss1 = gss_class.from_stacks([([10], acc_factory())])
     yield from _yield_state(gss1)
 
     # --- Test 2: Forking and Merging ---
-    gss_a = gss_class.from_stacks([([1], acc_factory())]).push(2)
-    gss_b = gss_class.from_stacks([([1], acc_factory())]).push(3)
+    gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
+    gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
     
     merged1 = gss_a.merge(gss_b)
     yield from _yield_state(merged1)
     
     # Merge a stack that already exists to test accumulator merging
-    gss_c = gss_class.from_stacks([([1, 2], acc_factory())]).apply(lambda acc: acc + 5)
+    gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
     merged2 = merged1.merge(gss_c)
     yield from _yield_state(merged2)
 
     # --- Test 3: Apply accumulator function ---
-    gss_to_apply = gss_class.from_stacks([([5], acc_factory())])
+    gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
     gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
     yield from _yield_state(gss_to_apply)
 
     # --- Test 4: Pop with no match ---
-    gss_no_match = gss_class.from_stacks([([88, 99], acc_factory())])
+    gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
     gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
     yield from _yield_state(gss_after_failed_pop)
 
     # --- Test 5: Complex sequence (diamond pattern) ---
-    s1 = gss_class.from_stacks([([1], acc_factory())])
+    s0 = gss_class.from_stacks([([], acc_factory())])
+    s1 = s0.push(1)
     s2 = s1.push(2)
     s3 = s1.push(3)
     s4 = s2.merge(s3)
@@ -88,7 +88,7 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(s9) # should be same as s1
     
     # --- Test 6: Merging empty GSS ---
-    gss_d = gss_class.from_stacks([([1], acc_factory())])
+    gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
     gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
     yield from _yield_state(gss_empty)
     
@@ -96,8 +96,8 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(merged_with_empty) # should be same as gss_d
 
     # --- Test 7: Pruning ---
-    gss_e = gss_class.from_stacks([([1], acc_factory())]).apply(lambda acc: MergeableInt(5))
-    gss_f = gss_class.from_stacks([([2], acc_factory())]).apply(lambda acc: MergeableInt(10))
+    gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
+    gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
     gss_to_prune = gss_e.merge(gss_f)
     yield from _yield_state(gss_to_prune)
 
@@ -109,7 +109,8 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
 
     # --- Test 8: Pop operations on merged stacks ---
     # Case 8a: Pop to a common parent, should result in one stack.
-    s_base = gss_class.from_stacks([([100], acc_factory())])
+    # This exposes a bug in ReferenceGSS which creates duplicate stacks.
+    s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
     s_branch1 = s_base.push(101)
     s_branch2 = s_base.push(102)
     s_merged = s_branch1.merge(s_branch2)
@@ -124,51 +125,54 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
 
     # Case 8c: Pop to a common parent with different accumulators.
-    s_base2 = gss_class.from_stacks([([200], acc_factory())])
+    # This exposes a bug in FastGSS which loses accumulator information on pop.
+    s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
     s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
     s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
     s_merged2 = s_branch3.merge(s_branch4)
     yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
 
     s_popped2 = s_merged2.pop()
-    # Should have one stack: [200] with merged acc 15
+    # Should have two stacks: [200] acc 7, and [200] acc 8
     yield from _yield_state(s_popped2)
 
     # --- Test 9: popn ---
     # Case 9a: popn less than stack depth
-    gss_pn1 = gss_class.from_stacks([([1, 2, 3], MergeableInt(0))])
-    gss_pn2 = gss_class.from_stacks([([4, 5], MergeableInt(0))])
+    gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
+    gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
     gss_pn_merged = gss_pn1.merge(gss_pn2)
     yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
 
     gss_pn_pop2 = gss_pn_merged.popn(2)
-    yield from _yield_state(gss_pn_pop2) # has [1] (stack [4,5] becomes [] and is discarded)
+    yield from _yield_state(gss_pn_pop2) # has [1] and []
 
     # Case 9b: popn more than stack depth
 
     gss_pn_pop4 = gss_pn_merged.popn(4)
-    yield from _yield_state(gss_pn_pop4) # becomes empty
+    yield from _yield_state(gss_pn_pop4) # has []
 
-    # --- Test 10: Isolate with None (no empty stacks) ---
+    # --- Test 10: Isolate empty stacks ---
+    gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
     gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
-    yield from _yield_state(gss_i2)
+    gss_i_merged = gss_i1.merge(gss_i2)
+    yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
 
-    gss_isolated_empty = gss_i2.isolate(None)
-    yield from _yield_state(gss_isolated_empty) # should be an empty GSS
+    gss_isolated_empty = gss_i_merged.isolate(None)
+    yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
 
-    gss_isolated_10 = gss_i2.isolate(10)
+    gss_isolated_10 = gss_i_merged.isolate(10)
     yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
 
     # --- Test 11: reduce_acc and peek ---
     gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
     gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
-    gss_rp3 = gss_class.from_stacks([]) # This GSS is empty
+    gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
     gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
     yield from _yield_state(gss_rp_merged)
 
     # peek() should return {2, 3}
     peek_result = gss_rp_merged.peek()
-    # reduce_acc() should be 3 + 4 = 7
+    # reduce_acc() should be 3 + 4 + 5 = 12
     reduce_result = gss_rp_merged.reduce_acc()
     
     # We can't yield non-GSS objects, so we'll create GSSs that represent the result
@@ -198,16 +202,15 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     # Expected: [a] acc 3, [b] acc 3, [c] acc 4
     yield from _yield_state(gss_merged_many)
 
-    # --- Test 13: Pop from GSS resulting in empty stack ---
-    # Pop should discard stacks that become empty.
-    gss_pe1 = gss_class.from_stacks([([10], MergeableInt(1))])
-    gss_pe2 = gss_class.from_stacks([([20, 30], MergeableInt(2))])
+    # --- Test 13: Pop from GSS containing an empty stack ---
+    gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
+    gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
     gss_pe_merged = gss_pe1.merge(gss_pe2)
-    yield from _yield_state(gss_pe_merged) # has [10] acc 1 and [20, 30] acc 2
+    yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
 
     gss_pe_popped = gss_pe_merged.pop()
-    # [10] becomes [] and is discarded. [20, 30] becomes [20].
-    # Expected: ([20], acc 2)
+    # pop should only affect non-empty stacks.
+    # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
     yield from _yield_state(gss_pe_popped)
 
     # --- Test 14: String values and popn(0) ---
