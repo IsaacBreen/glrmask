@@ -12,32 +12,32 @@ from .reference_impl import ReferenceGSS
 # Internal node classes
 # ------------------------------
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class InnerLeaf:
     pass
 
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class InnerBranch(Generic[T]):
     # children: T -> depth -> LeveledGSSInner
     children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class WithAcc(Generic[T, Acc]):
     node: 'LeveledGSSInner[T]'
     acc: Acc
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class Branch(Generic[T, Acc]):
     # children: T_or_EPS -> depth -> LeveledGSS
     # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
     children: Dict[object, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
-@dataclass
+@dataclass(frozen=True, eq=True)
 class LeveledGSSInner(Generic[T]):
     inner: Union[InnerLeaf, InnerBranch[T]]
 
@@ -130,11 +130,9 @@ def _validate_invariants_node(node: LeveledGSS[T, Acc]):
 # Public LeveledGSS implementation
 # ------------------------------
 
+@dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Union[WithAcc[T, Acc], Branch[T, Acc]]
-
-    def __init__(self, inner: Union[WithAcc[T, Acc], Branch[T, Acc]]):
-        self.inner = inner
 
     # ---- GSS interface ----
 
