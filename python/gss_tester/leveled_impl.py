@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import reduce
 from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
 
 from .interface import GSS, T, Acc, MergeableInt
@@ -69,11 +70,6 @@ def _dedup_pairs(pairs: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
         else:
             merged[key] = acc
     return [(list(k), v) for k, v in merged.items()]
-
-
-def _pairs_from_ref(ref: ReferenceGSS[T, Acc]) -> List[Tuple[List[T], Acc]]:
-    # The ReferenceGSS stores canonical stacks in _stacks already merged
-    return [(list(vals), acc) for (vals, acc) in ref._stacks]  # type: ignore[attr-defined]
 
 
 def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
@@ -278,6 +274,199 @@ def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T]
 
 
 # ------------------------------
+# Efficient Traversal-Based Operations
+# ------------------------------
+
+def _node_max_depth(node: _LeveledNode[T, Acc]) -> int:
+    if isinstance(node, _Empty):
+        return 0
+    if isinstance(node, _WithAcc):
+        return _inner_max_depth(node.node)
+    # _Internal
+    max_d = 0
+    for _, depth_map in node.children.items():
+        for depth, child in depth_map.items():
+            max_d = max(max_d, 1 + _node_max_depth(child))
+    return max_d
+
+
+def _inner_max_depth(inner: _InnerNode[T]) -> int:
+    if isinstance(inner, _InnerRoot):
+        return 0
+    # _InnerInternal
+    max_d = 0
+    for _, depth_map in inner.children.items():
+        for depth, child in depth_map.items():
+            max_d = max(max_d, 1 + _inner_max_depth(child))
+    return max_d
+
+
+def _explode(node: _WithAcc[T, Acc]) -> _Internal[T, Acc]:
+    """Converts a _WithAcc node into an equivalent _Internal node."""
+    if isinstance(node.node, _InnerRoot):
+        # Represents a single empty stack with an accumulator.
+        # The child is _WithAcc because _EPS must lead to a node with an accumulator.
+        return _Internal(children={_EPS: {0: _WithAcc(node=_InnerRoot(), acc=node.acc)}})
+
+    # _InnerInternal
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    for t, depth_map in node.node.children.items():
+        for depth, child_inner in depth_map.items():
+            new_children.setdefault(t, {})[depth] = _WithAcc(node=child_inner, acc=node.acc)
+    return _Internal(children=new_children)
+
+
+def _merge_inners(a: _InnerNode[T], b: _InnerNode[T]) -> _InnerNode[T]:
+    if a is b: return a
+    if isinstance(a, _InnerRoot): return b
+    if isinstance(b, _InnerRoot): return a
+
+    # Both are _InnerInternal
+    new_children = {k: v.copy() for k, v in a.children.items()}
+    for t, d_map_b in b.children.items():
+        if t not in new_children:
+            new_children[t] = d_map_b
+        else:
+            # Merge depth maps
+            for d, child_b in d_map_b.items():
+                if d not in new_children[t]:
+                    new_children[t][d] = child_b
+                else:
+                    new_children[t][d] = _merge_inners(new_children[t][d], child_b)
+    return _InnerInternal(children=new_children)
+
+
+def _merge_nodes(a: _LeveledNode[T, Acc], b: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
+    if a is b: return a
+    if isinstance(a, _Empty): return b
+    if isinstance(b, _Empty): return a
+
+    # If both are WithAcc with same acc, merge their inners.
+    if isinstance(a, _WithAcc) and isinstance(b, _WithAcc) and a.acc == b.acc:
+        return _WithAcc(node=_merge_inners(a.node, b.node), acc=a.acc)
+
+    # Explode any WithAcc to Internal to proceed with merge.
+    a_int = _explode(a) if isinstance(a, _WithAcc) else a
+    b_int = _explode(b) if isinstance(b, _WithAcc) else b
+    assert isinstance(a_int, _Internal)
+    assert isinstance(b_int, _Internal)
+
+    # Merge children of the two _Internal nodes.
+    new_children = {k: v.copy() for k, v in a_int.children.items()}
+    for t, d_map_b in b_int.children.items():
+        if t not in new_children:
+            new_children[t] = d_map_b
+        else:
+            for d, child_b in d_map_b.items():
+                if d not in new_children[t]:
+                    new_children[t][d] = child_b
+                else:
+                    new_children[t][d] = _merge_nodes(new_children[t][d], child_b)
+
+    return _normalize_suck_up(_Internal(children=new_children))
+
+
+def _merge_many_nodes(nodes: Iterable[_LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
+    return reduce(_merge_nodes, nodes, _Empty())
+
+
+def _pop_inner(inner: _InnerNode[T]) -> _InnerNode[T]:
+    if isinstance(inner, _InnerRoot):
+        return _InnerRoot() # Cannot pop empty, effectively remains empty.
+    # Merge all children.
+    return reduce(_merge_inners, (child for dm in inner.children.values() for child in dm.values()), _InnerRoot())
+
+
+def _pop_node(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
+    if isinstance(node, _Empty):
+        return _Empty()
+    if isinstance(node, _WithAcc):
+        return _WithAcc(node=_pop_inner(node.node), acc=node.acc)
+    # _Internal: merge all non-EPS children
+    children_to_merge = [child for t, dm in node.children.items() if t is not _EPS for child in dm.values()]
+    return _merge_many_nodes(children_to_merge)
+
+
+def _apply_node(node: _LeveledNode[T, Acc], func: Callable[[Acc], Acc], memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
+    if id(node) in memo:
+        return memo[id(node)]
+
+    if isinstance(node, _Empty):
+        result = _Empty()
+    elif isinstance(node, _WithAcc):
+        new_acc = func(node.acc)
+        result = node if new_acc == node.acc else _WithAcc(node=node.node, acc=new_acc)
+    else: # _Internal
+        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+        changed = False
+        for t, d_map in node.children.items():
+            for d, child in d_map.items():
+                new_child = _apply_node(child, func, memo)
+                if new_child is not child:
+                    changed = True
+                new_children.setdefault(t, {})[d] = new_child
+        result = node if not changed else _normalize_suck_up(_Internal(children=new_children))
+
+    memo[id(node)] = result
+    return result
+
+
+def _prune_node(node: _LeveledNode[T, Acc], predicate: Callable[[Acc], bool], memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
+    if id(node) in memo:
+        return memo[id(node)]
+
+    if isinstance(node, _Empty):
+        result = _Empty()
+    elif isinstance(node, _WithAcc):
+        result = node if predicate(node.acc) else _Empty()
+    else: # _Internal
+        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+        changed = False
+        for t, d_map in node.children.items():
+            for d, child in d_map.items():
+                new_child = _prune_node(child, predicate, memo)
+                if new_child is not child:
+                    changed = True
+                if not isinstance(new_child, _Empty):
+                    new_children.setdefault(t, {})[d] = new_child
+        if not changed:
+            result = node
+        else:
+            result = _Empty() if not new_children else _normalize_suck_up(_Internal(children=new_children))
+
+    memo[id(node)] = result
+    return result
+
+
+def _peek_inner(inner: _InnerNode[T]) -> Set[T]:
+    if isinstance(inner, _InnerRoot):
+        return set()
+    return set(inner.children.keys())
+
+
+def _peek_node(node: _LeveledNode[T, Acc]) -> Set[T]:
+    if isinstance(node, _Empty):
+        return set()
+    if isinstance(node, _WithAcc):
+        return _peek_inner(node.node)
+    # _Internal
+    return {t for t in node.children.keys() if t is not _EPS}
+
+
+def _reduce_acc_node(node: _LeveledNode[T, Acc]) -> Optional[Acc]:
+    if isinstance(node, _Empty):
+        return None
+    if isinstance(node, _WithAcc):
+        return node.acc
+    # _Internal
+    accs = [_reduce_acc_node(child) for dm in node.children.values() for child in dm.values()]
+    valid_accs = [acc for acc in accs if acc is not None]
+    if not valid_accs:
+        return None
+    return reduce(_merge_acc, valid_accs)
+
+
+# ------------------------------
 # Invariant validation
 # ------------------------------
 
@@ -355,15 +544,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     """
 
     # Construction
-    def __init__(self, ref: ReferenceGSS[T, Acc], node: _LeveledNode[T, Acc]):
-        self._ref = ref
+    def __init__(self, node: _LeveledNode[T, Acc]):
         self._node = node
         # Validate invariants in debug-oriented fashion (can be toggled off if performance becomes a concern)
         try:
             _validate_invariants_node(self._node)
         except InvariantViolation:
-            # As a fallback, try to rebuild from current reference impl (which is canonical) and re-validate.
-            rebuilt = _build_leveled_from_pairs(_pairs_from_ref(self._ref))
+            # As a fallback, try to rebuild from pairs and re-validate.
+            rebuilt = _build_leveled_from_pairs(_enumerate_pairs_from_node(self._node))
             _validate_invariants_node(rebuilt)
             self._node = rebuilt
 
@@ -371,77 +559,62 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        # Build a canonical ReferenceGSS first
-        ref = ReferenceGSS.from_stacks(stacks)
-        # Build our leveled node from the deduped pairs
-        pairs = _pairs_from_ref(ref)
-        node = _build_leveled_from_pairs(pairs)
-        return cls(ref, node)
+        # Stacks are stored reversed to make push/pop efficient.
+        reversed_stacks = [(s[::-1], acc) for s, acc in stacks]
+        node = _build_leveled_from_pairs(reversed_stacks)
+        return cls(node)
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        # Delegate semantics to ReferenceGSS
-        new_ref = self._ref.push(value)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        if self.is_empty():
+            return self
+        # With reversed stacks, push adds a new root.
+        depth = _node_max_depth(self._node)
+        new_node = _normalize_suck_up(_Internal(children={value: {depth: self._node}}))
+        return LeveledGSS(new_node)
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        new_ref = self._ref.pop()
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS(_pop_node(self._node))
 
     def is_empty(self) -> bool:
-        return self._ref.is_empty()
+        return isinstance(self._node, _Empty)
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        # Semantics: keep only stacks whose top equals value; if value is None, keep only empty stacks.
-        pairs = _pairs_from_ref(self._ref)
-        if value is None:
-            filtered = [(v, a) for v, a in pairs if len(v) == 0]
-        else:
-            filtered = [(v, a) for v, a in pairs if v and v[-1] == value]
-        new_ref = ReferenceGSS.from_stacks(filtered)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        # This is inefficient but correct. A fully structural implementation is complex.
+        ref = self.to_reference_impl()
+        new_ref = ref.isolate(value)
+        return LeveledGSS.from_stacks(new_ref._stacks)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        # Apply func independently to each accumulator
-        pairs = _pairs_from_ref(self._ref)
-        applied = [(vals, func(acc)) for vals, acc in pairs]
-        new_ref = ReferenceGSS.from_stacks(applied)
-        # Memoized rebuild would preserve sharing; for now rebuild canonical leveled node
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS(_apply_node(self._node, func, memo={}))
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        pairs = _pairs_from_ref(self._ref)
-        kept = [(v, a) for v, a in pairs if predicate(a)]
-        new_ref = ReferenceGSS.from_stacks(kept)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        return LeveledGSS(_prune_node(self._node, predicate, memo={}))
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        # Convert other's reference representation and merge via ReferenceGSS semantics
-        other_ref = other.to_reference_impl()
-        assert isinstance(other_ref, ReferenceGSS)
-        merged_ref = ReferenceGSS(self._ref._stacks + other_ref._stacks)  # type: ignore[attr-defined]
-        # ReferenceGSS constructor canonicalizes and merges duplicate stacks
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(merged_ref))
-        return LeveledGSS(merged_ref, new_node)
+        if not isinstance(other, LeveledGSS):
+            # Fallback for unknown GSS types
+            other = LeveledGSS.from_stacks(other.to_reference_impl()._stacks)
+
+        if self is other:
+            return self
+        if self.is_empty():
+            return other
+        if other.is_empty():
+            return self
+
+        return LeveledGSS(_merge_nodes(self._node, other._node))
 
     def peek(self) -> Set[T]:
-        # Set of all top values across non-empty stacks
-        result: Set[T] = set()
-        for vals, _ in _pairs_from_ref(self._ref):
-            if vals:
-                result.add(vals[-1])
-        return result
+        return _peek_node(self._node)
 
     def reduce_acc(self) -> Optional[Acc]:
-        return self._ref.reduce_acc()
+        return _reduce_acc_node(self._node)
 
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-        # Return the canonical ReferenceGSS (gold standard for comparisons)
-        return ReferenceGSS(_pairs_from_ref(self._ref))  # type: ignore[arg-type]
+        # Enumerate reversed stacks and reverse them back.
+        reversed_pairs = _enumerate_pairs_from_node(self._node)
+        pairs = [(s[::-1], acc) for s, acc in reversed_pairs]
+        return ReferenceGSS.from_stacks(pairs)
 
     # Also expose a human-friendly validator
     def validate_invariants(self) -> None:
@@ -449,7 +622,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     # Optional: convenience for debugging
     def __repr__(self) -> str:
-        return f"LeveledGSS(ref={self._ref!r})"
+        return f"LeveledGSS({self.to_json_serializable()!r})"
 
     def __str__(self) -> str:
-        return f"LeveledGSS({self._ref.to_json_serializable()})"
+        return f"LeveledGSS({self.to_json_serializable()})"
