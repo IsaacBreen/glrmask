@@ -139,7 +139,7 @@ class ReferenceGSS(GSS[T, Acc]):
         # Canonical, deterministic representation: a list of [values, acc] pairs, sorted
         items = self._get_canonical_sorted_stacks()
         # Return a plain JSON-serializable structure
-        return [[vals, acc] for vals, acc in items]
+        return [(vals, acc) for vals, acc in items]
 
     def __str__(self) -> str:
         """Provides a human-readable, deterministic string representation."""
