@@ -119,28 +119,29 @@ class InvariantViolation(Exception):
 def _validate_invariants_node(node: _LeveledNode[T, Acc]):
     # Ensure that "Suck up" has been applied whenever possible: for any Branch node, if all children are WithAcc and share the same acc, we should not leave it as Branch.
     def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
-        if isinstance(node_b, Empty):
-            return True, None
-        if isinstance(node_b, WithAcc):
-            return True, node_b.acc
-        if isinstance(node_b, Branch):
-            # Recurse, collect child accs when child is WithAcc
-            child_accs: List[Acc] = []
-            child_types: List[type] = []
-            for kt, depth_map in node_b.children.items():
-                for _, ch in depth_map.items():
-                    ok, acc = check(ch)
-                    if not ok:
-                        return False, None
-                    child_types.append(type(ch))
-                    if isinstance(ch, WithAcc):
-                        child_accs.append(ch.acc)
-            # suck-up opportunity detection
-            if child_types and all(ct is WithAcc for ct in child_types):
-                # All children are WithAcc; if their accs are equal, it should have been sucked up
-                if child_accs and all(a == child_accs[0] for a in child_accs):
-                    raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-            return True, None
+        match node_b:
+            case Empty():
+                return True, None
+            case WithAcc(acc=acc):
+                return True, acc
+            case Branch(children=children):
+                # Recurse, collect child accs when child is WithAcc
+                child_accs: List[Acc] = []
+                child_types: List[type] = []
+                for kt, depth_map in children.items():
+                    for _, ch in depth_map.items():
+                        ok, acc = check(ch)
+                        if not ok:
+                            return False, None
+                        child_types.append(type(ch))
+                        if isinstance(ch, WithAcc):
+                            child_accs.append(ch.acc)
+                # suck-up opportunity detection
+                if child_types and all(ct is WithAcc for ct in child_types):
+                    # All children are WithAcc; if their accs are equal, it should have been sucked up
+                    if child_accs and all(a == child_accs[0] for a in child_accs):
+                        raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
+                return True, None
 
     ok, _ = check(node)
     if not ok:
