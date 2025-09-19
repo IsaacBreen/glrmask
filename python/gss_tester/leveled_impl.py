@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import reduce
 from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
 
 from .interface import GSS, T, Acc
