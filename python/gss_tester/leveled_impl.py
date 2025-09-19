@@ -22,17 +22,6 @@ class Interface(Generic[T, Acc]):
     acc: Acc
 
 
-@dataclass(frozen=True, eq=True)
-class LowerBranch(Generic[T]):
-    # children: T -> depth -> LeveledGSSInner
-    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
-
-
-@dataclass(frozen=True, eq=True)
-class Leaf:
-    pass
-
-
 class InvariantViolation(Exception):
     pass
 
@@ -84,7 +73,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSSInner(Generic[T]):
-    inner: Union[LowerBranch[T], Leaf]
+    # children: T -> depth -> LeveledGSSInner
+    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
+    is_leaf: bool
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSSInner[T]'], stacks: List[List[T]]) -> 'LeveledGSSInner[T]':
