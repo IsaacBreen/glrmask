@@ -138,18 +138,21 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
 
     gss_pn_pop2 = gss_pn_merged.popn(2)
-    yield from _yield_state(gss_pn_pop2) # has [1]
+    yield from _yield_state(gss_pn_pop2) # has [1] and []
 
     # Case 9b: popn more than stack depth
 
     gss_pn_pop4 = gss_pn_merged.popn(4)
-    yield from _yield_state(gss_pn_pop4) # should be empty
+    yield from _yield_state(gss_pn_pop4) # has []
 
-    # --- Test 10: Isolate non-empty stacks ---
+    # --- Test 10: Isolate empty stacks ---
     gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
     gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
     gss_i_merged = gss_i1.merge(gss_i2)
     yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+
+    gss_isolated_empty = gss_i_merged.isolate(None)
+    yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
 
     gss_isolated_10 = gss_i_merged.isolate(10)
     yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
@@ -200,8 +203,8 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
 
     gss_pe_popped = gss_pe_merged.pop()
-    # The non-empty stack [10] is popped, becomes empty, and is discarded.
-    # The original empty stack is also discarded by pop. Result is an empty GSS.
+    # pop should only affect non-empty stacks.
+    # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
     yield from _yield_state(gss_pe_popped)
 
     # --- Test 14: String values and popn(0) ---

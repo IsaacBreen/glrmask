@@ -19,7 +19,7 @@ class ReferenceGSS(GSS[T, Acc]):
     Notes on semantics (aligned with GSS interface):
     - from_stacks: constructs a new GSS from explicit stacks.
     - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-    - pop(): for all non-empty stacks, pops the top element. Stacks that become empty are discarded.
+    - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
              Returns a new GSS with the resulting stacks.
     - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
     - apply(func): transforms each accumulator independently; returns a new GSS.
@@ -68,20 +68,24 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks. Stacks that become empty are discarded.
+        # Pop from all non-empty stacks. Empty stacks are discarded.
         # If multiple stacks become identical, they are merged by the constructor.
         new_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
-            if len(vals) > 1:
+            if vals:
                 new_stacks.append((vals[:-1], acc))
         return ReferenceGSS(new_stacks)
 
-    def isolate(self, value: T) -> 'ReferenceGSS[T, Acc]':
-        # Keep only stacks whose top equals `value`.
+    def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
+        # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
         filtered: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
-            if vals and vals[-1] == value:
-                filtered.append((list(vals), acc))
+            if value is None:
+                if not vals:
+                    filtered.append((list(vals), acc))
+            else:
+                if vals and vals[-1] == value:
+                    filtered.append((list(vals), acc))
         return ReferenceGSS(filtered)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':

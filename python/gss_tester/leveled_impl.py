@@ -60,7 +60,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def is_empty(self) -> bool:
         raise NotImplementedError
 
-    def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
+    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
         raise NotImplementedError
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':

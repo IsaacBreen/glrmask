@@ -56,7 +56,11 @@ def run_fuzz_test(
                 new_gss = source_gss.popn(n)
 
             elif op_choice == 'isolate':
-                value = rng.choice(value_pool)
+                # 20% chance of isolating empty stack
+                if rng.random() < 0.2:
+                    value = None
+                else:
+                    value = rng.choice(value_pool)
                 new_gss = source_gss.isolate(value)
 
             elif op_choice == 'apply':
