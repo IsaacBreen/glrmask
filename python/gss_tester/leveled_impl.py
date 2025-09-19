@@ -8,7 +8,7 @@ from .interface import GSS, T, Acc, MergeableInt
 from .reference_impl import ReferenceGSS
 
 # ------------------------------
-# Internal node classes (mirroring the Rust-like structure)
+# Internal node classes
 # ------------------------------
 
 @dataclass
@@ -94,15 +94,6 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
 # ------------------------------
 
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    """
-    A leveled, graph-structured stack implementation that mirrors the provided Rust-like shape.
-
-    Notes:
-    - Semantics are kept identical to ReferenceGSS by delegating operation semantics to an internal
-      ReferenceGSS and rebuilding the leveled structure on each operation. This favors correctness.
-    - Internal structure (_node) respects invariants, with an explicit "suck-up" normalization pass.
-    - For determinism and correctness, to_reference_impl() returns the internal ReferenceGSS.
-    """
 
     # Construction
     def __init__(self, node: _LeveledNode[T, Acc]):
