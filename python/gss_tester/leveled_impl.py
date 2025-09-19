@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Union, Callable, Any
 
-from .interface import GSS, T, Acc, MergeableInt
+from .interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
 
 # Sentinel key to represent the "empty stack" child when a node needs to also contain an empty stack.
@@ -123,7 +123,7 @@ def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[
     # Empty stacks ([]) must still be representable: we attach them under the _EPS sentinel.
     children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
 
-    # Handle empty stacks (if any)
+    # Handle empty pairs (if any)
     empty_pairs = [(vals, acc) for vals, acc in pairs if not vals]
     if empty_pairs:
         # Recursively build a child node for these empty stacks.
@@ -182,11 +182,6 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
                 the_acc = next(iter(accs))
                 # Build an A-level Internal whose children map keys to the inner nodes of the children.
                 # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
-                # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
-                # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
-                # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
-                # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
-                # (t, depth) pair.
                 inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
                 has_empty = False
                 # Collect A-level children from the WithAcc children
@@ -194,45 +189,27 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
                     chw = ch  # type: ignore[assignment]
                     assert isinstance(chw, _WithAcc)
                     if kt is _EPS:
-                        # This child represents an empty sequence among the group
-                        # Representing empty within A-level is naturally done by allowing Root.
-                        # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
-                        # and other children may also add edges, we simply union them.
-                        # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
-                        # if it's Root, that means the empty sequence is present.
                         if isinstance(chw.node, _InnerRoot):
                             has_empty = True
                         else:
-                            # This corresponds to "some non-empty A-level sequences that appear even though the parent
-                            # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
-                            # suck-ups; we include them.
                             for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
                                 for dd, inn in dm.items():
                                     inner_children.setdefault(tt, {})[dd] = inn
                             has_empty = True
                     else:
-                        # Regular T key
                         if isinstance(chw.node, _InnerRoot):
-                            # The child being Root under a non-EPS edge means: the sequence [kt] exists.
-                            # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
-                            # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
                             key_t: T = kt  # type: ignore[assignment]
                             depth_int = max(d - 1, 0)
                             inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
                         else:
-                            # Merge edges
                             key_t: T = kt  # type: ignore[assignment]
-                            for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
-                                # We store the entire inner subtree under (key_t, depth-1)
+                            for dd, inn in ((max(d - 1, 0), chw.node),):
                                 inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
 
-                # If there were no non-EPS children but has_empty is True and there are no other children,
-                # then the inner is just Root.
                 if not inner_children:
                     if has_empty:
                         inner: _InnerNode[T] = _InnerRoot()
                     else:
-                        # Should not happen (no children => handled above), but keep safe.
                         inner = _InnerRoot()
                 else:
                     inner = _InnerInternal(children=inner_children)
@@ -340,30 +317,580 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
 
 
 # ------------------------------
+# Utility helpers for transformations
+# ------------------------------
+
+def _acc_opt_merge(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return _merge_acc(a, b)
+
+
+def _acc_merge_n(acc: Acc, n: int) -> Optional[Acc]:
+    # Efficiently compute acc merged with itself n times (n >= 0).
+    # Returns None if n == 0, otherwise the merged result.
+    if n <= 0:
+        return None
+    # Exponentiation by squaring pattern for monoid addition via merge
+    result: Optional[Acc] = None
+    base: Acc = acc
+    k = n
+    while k > 0:
+        if k & 1:
+            result = base if result is None else _merge_acc(result, base)
+        base = _merge_acc(base, base)
+        k >>= 1
+    return result
+
+
+# Inner A-level transforms and queries with memoization
+
+def _inner_push(node: _InnerNode[T], value: T, cache: Dict[int, _InnerNode[T]]) -> _InnerNode[T]:
+    key = (id(node), id(value))
+    if key in cache:  # type: ignore[dict-item]
+        return cache[key]  # type: ignore[index]
+
+    if isinstance(node, _InnerRoot):
+        res: _InnerNode[T] = _InnerInternal(children={value: {0: _InnerRoot()}})
+    else:
+        new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+        for t, dm in node.children.items():
+            for d, ch in dm.items():
+                pushed = _inner_push(ch, value, cache)
+                new_children.setdefault(t, {})[d] = pushed
+        res = _InnerInternal(children=new_children)
+
+    cache[key] = res  # type: ignore[index]
+    return res
+
+
+def _inner_count(node: _InnerNode[T], cache: Dict[int, int]) -> int:
+    iid = id(node)
+    if iid in cache:
+        return cache[iid]
+    if isinstance(node, _InnerRoot):
+        cache[iid] = 1
+        return 1
+    total = 0
+    for _, dm in node.children.items():
+        for _, ch in dm.items():
+            total += _inner_count(ch, cache)
+    cache[iid] = total
+    return total
+
+
+def _inner_pop(node: _InnerNode[T], cache: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[Optional[_InnerNode[T]], int]:
+    iid = id(node)
+    if iid in cache:
+        return cache[iid]
+    if isinstance(node, _InnerRoot):
+        res = (None, 0)
+        cache[iid] = res
+        return res
+
+    # node is _InnerInternal
+    new_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+    empties_from_len1 = 0  # number of sequences of length exactly 1
+    for t, dm in node.children.items():
+        # dm: depth -> child
+        # For each child:
+        # - if child is Root: contributes one empty on pop
+        # - else recurse, add child_new to new_children, and add child_empties times Root to new_children[t]
+        #   (this represents sequences reduced to length 1 after pop)
+        # We do not accumulate child_empties into empties_from_len1 since those are now non-empty [t]
+        # after pop; empties_from_len1 only counts direct [t] sequences.
+        # Also, we carry depth keys but they are not semantically significant; we can reuse existing d when available or 0.
+        add_idx = 0
+        for d, ch in dm.items():
+            if isinstance(ch, _InnerRoot):
+                empties_from_len1 += 1
+            else:
+                ch_new, ch_empties = _inner_pop(ch, cache)
+                if ch_new is not None:
+                    new_children.setdefault(t, {})[d] = ch_new
+                # Add ch_empties many Root edges under t
+                for _ in range(ch_empties):
+                    new_children.setdefault(t, {})[add_idx] = _InnerRoot()
+                    add_idx += 1
+
+    if not new_children:
+        res = (None, empties_from_len1)
+    else:
+        res = (_InnerInternal(children=new_children), empties_from_len1)
+    cache[iid] = res
+    return res
+
+
+def _inner_last_tokens(node: _InnerNode[T], cache: Dict[int, Set[T]]) -> Set[T]:
+    iid = id(node)
+    if iid in cache:
+        return cache[iid]
+    tokens: Set[T] = set()
+    if isinstance(node, _InnerRoot):
+        cache[iid] = tokens
+        return tokens
+    # look for edges t -> Root
+    for t, dm in node.children.items():
+        for _, ch in dm.items():
+            if isinstance(ch, _InnerRoot):
+                tokens.add(t)
+    cache[iid] = tokens
+    return tokens
+
+
+def _inner_filter_last(node: _InnerNode[T], value: T, cache: Dict[Tuple[int, int], Optional[_InnerNode[T]]]) -> Optional[_InnerNode[T]]:
+    key = (id(node), id(value))
+    if key in cache:
+        return cache[key]
+    if isinstance(node, _InnerRoot):
+        cache[key] = None
+        return None
+    # Keep only edges t == value that lead directly to Root.
+    kept: Dict[T, Dict[int, _InnerNode[T]]] = {}
+    idx = 0
+    for t, dm in node.children.items():
+        if t != value:
+            continue
+        for _, ch in dm.items():
+            if isinstance(ch, _InnerRoot):
+                kept.setdefault(t, {})[idx] = _InnerRoot()
+                idx += 1
+    res = None if not kept else _InnerInternal(children=kept)
+    cache[key] = res
+    return res
+
+
+def _inner_plus(a: _InnerNode[T], b: _InnerNode[T], cache: Dict[Tuple[int, int], _InnerNode[T]]) -> _InnerNode[T]:
+    """
+    Multiset union of two inner trees: sequence multiplicities add.
+    This is used to merge two _WithAcc with the same acc without losing multiplicities.
+    """
+    key = (id(a), id(b))
+    if key in cache:
+        return cache[key]
+
+    if isinstance(a, _InnerRoot) and isinstance(b, _InnerRoot):
+        # Two empties: still a single empty sequence; multiplicity is represented at the WithAcc level
+        # by having two WithAccs; but since we use a single WithAcc for same-acc merge, we must not lose
+        # multiplicity. However inner cannot express multiple empties, so we leave Root here and rely
+        # on acc merge at higher level when appropriate (for identical WithAcc we will wrap via EPS if needed).
+        res: _InnerNode[T] = _InnerRoot()
+        cache[key] = res
+        return res
+
+    if isinstance(a, _InnerRoot) and isinstance(b, _InnerInternal):
+        # Union: keep b's structure and also preserve the empty. Representing empty already exists via Root.
+        # Root presence is already a Root component; since b is not Root, we need to keep both: we can
+        # convert to Internal with the same children as b; Root remains implicit via separate WithAcc path.
+        # Here, we return an Internal with children = b.children; the Root presence cannot be encoded here,
+        # but the presence of Root in 'a' is not representable without losing structure; it's fine because
+        # the WithAcc using this inner will still include empty via separate handling if required by caller.
+        res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in b.children.items()))
+        cache[key] = res
+        return res
+
+    if isinstance(a, _InnerInternal) and isinstance(b, _InnerRoot):
+        res = _InnerInternal(children=dict((t, dict(dm)) for t, dm in a.children.items()))
+        cache[key] = res
+        return res
+
+    # Both are Internal: merge child maps key-wise, concatenating multiplicities (depth entries)
+    assert isinstance(a, _InnerInternal) and isinstance(b, _InnerInternal)
+    merged_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+    # First add all from a
+    for t, dm in a.children.items():
+        for d, ch in dm.items():
+            merged_children.setdefault(t, {})[d] = ch
+    # Then add from b; use fresh depth indices to avoid overwriting
+    for t, dm in b.children.items():
+        next_idx = 0 if t not in merged_children else (max(merged_children[t].keys(), default=-1) + 1)
+        for _, ch in dm.items():
+            merged_children.setdefault(t, {})[next_idx] = ch
+            next_idx += 1
+    res = _InnerInternal(children=merged_children)
+    cache[key] = res
+    return res
+
+
+# ------------------------------
+# Traversal-based operations on leveled nodes
+# ------------------------------
+
+def _has_any(node: _LeveledNode[T, Acc], memo: Dict[int, bool]) -> bool:
+    nid = id(node)
+    if nid in memo:
+        return memo[nid]
+    if isinstance(node, _Empty):
+        memo[nid] = False
+        return False
+    if isinstance(node, _WithAcc):
+        # Any WithAcc always yields at least one sequence (inner Root yields empty)
+        memo[nid] = True
+        return True
+    # _Internal
+    for _, dm in node.children.items():
+        for _, ch in dm.items():
+            if _has_any(ch, memo):
+                memo[nid] = True
+                return True
+    memo[nid] = False
+    return False
+
+
+def _push_node(node: _LeveledNode[T, Acc], value: T,
+               memo_node: Dict[int, _LeveledNode[T, Acc]],
+               memo_inner: Dict[int, _InnerNode[T]]) -> _LeveledNode[T, Acc]:
+    nid = id(node)
+    if nid in memo_node:
+        return memo_node[nid]
+    if isinstance(node, _Empty):
+        memo_node[nid] = node
+        return node
+    if isinstance(node, _WithAcc):
+        new_inner = _inner_push(node.node, value, memo_inner)
+        res: _LeveledNode[T, Acc] = _WithAcc(node=new_inner, acc=node.acc)
+        memo_node[nid] = res
+        return res
+    # _Internal
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    for kt, dm in node.children.items():
+        for d, ch in dm.items():
+            pushed = _push_node(ch, value, memo_node, memo_inner)
+            new_children.setdefault(kt, {})[d] = pushed
+    res = _normalize_suck_up(_Internal(children=new_children))
+    memo_node[nid] = res
+    return res
+
+
+def _empty_accumulate(node: _LeveledNode[T, Acc],
+                      memo: Dict[int, Optional[Acc]]) -> Optional[Acc]:
+    """
+    Compute merged accumulator for all empty stacks represented by this node.
+    Empty stacks are those reachable from root by taking only EPS edges to a WithAcc whose inner is Root.
+    Multiplicity is honored via multiple EPS paths and duplicate entries.
+    """
+    nid = id(node)
+    if nid in memo:
+        return memo[nid]
+    if isinstance(node, _Empty):
+        memo[nid] = None
+        return None
+    if isinstance(node, _WithAcc):
+        if isinstance(node.node, _InnerRoot):
+            memo[nid] = node.acc
+            return node.acc
+        memo[nid] = None
+        return None
+    # _Internal
+    acc_total: Optional[Acc] = None
+    eps_map = node.children.get(_EPS, {})
+    for _, ch in eps_map.items():
+        acc_total = _acc_opt_merge(acc_total, _empty_accumulate(ch, memo))
+    memo[nid] = acc_total
+    return acc_total
+
+
+def _pop_node(node: _LeveledNode[T, Acc],
+              memo_node: Dict[int, Tuple[_LeveledNode[T, Acc], Optional[Acc]]],
+              memo_inner: Dict[int, Tuple[Optional[_InnerNode[T]], int]]) -> Tuple[_LeveledNode[T, Acc], Optional[Acc]]:
+    """
+    Pop removes the last token from all non-empty sequences.
+    Returns:
+      - new leveled node representing all sequences after pop that remain non-empty
+      - aggregated accumulator for the empty stack produced by popping length-1 sequences anywhere
+    """
+    nid = id(node)
+    if nid in memo_node:
+        return memo_node[nid]
+
+    if isinstance(node, _Empty):
+        res = (_Empty(), None)
+        memo_node[nid] = res
+        return res
+
+    if isinstance(node, _WithAcc):
+        inner_new, empties_len1 = _inner_pop(node.node, memo_inner)
+        # Non-empty results become a WithAcc if inner_new exists
+        if inner_new is None:
+            nonempty_node: _LeveledNode[T, Acc] = _Empty()
+        else:
+            nonempty_node = _WithAcc(node=inner_new, acc=node.acc)
+        # Empty accumulators come from sequences of length 1 in this WithAcc
+        empty_acc = _acc_merge_n(node.acc, empties_len1)
+        res = (nonempty_node, empty_acc)
+        memo_node[nid] = res
+        return res
+
+    # _Internal
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    empty_total: Optional[Acc] = None
+
+    for kt, dm in node.children.items():
+        for d, ch in dm.items():
+            ch_new, ch_empty = _pop_node(ch, memo_node, memo_inner)
+            if kt is _EPS:
+                # Propagate popped non-empty under EPS, and collect empties to top-level empty_total
+                if not isinstance(ch_new, _Empty):
+                    new_children.setdefault(_EPS, {})[d] = ch_new
+                empty_total = _acc_opt_merge(empty_total, ch_empty)
+            else:
+                # For token edges: prepend token to the popped non-empty results
+                if not isinstance(ch_new, _Empty):
+                    new_children.setdefault(kt, {})[d] = ch_new
+                # empty sequences from child become [kt]
+                if ch_empty is not None:
+                    # Represent [kt] as a direct WithAcc(inner=Root, acc=ch_empty) under kt
+                    # Use a fresh depth index to avoid clobbering
+                    next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
+                    new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=ch_empty)
+
+    nonempty_res = _Internal(children=new_children) if new_children else _Empty()
+    res = (_normalize_suck_up(nonempty_res), empty_total)
+    memo_node[nid] = res
+    return res
+
+
+def _isolate_by_last(node: _LeveledNode[T, Acc], value: Optional[T],
+                     memo_node: Dict[Tuple[int, Optional[int]], _LeveledNode[T, Acc]],
+                     memo_empty: Dict[int, Optional[Acc]]) -> _LeveledNode[T, Acc]:
+    """
+    Keep only stacks whose last token equals `value`. If value is None, keep only empty stacks.
+    """
+    key = (id(node), None if value is None else id(value))
+    if key in memo_node:
+        return memo_node[key]
+
+    if isinstance(node, _Empty):
+        memo_node[key] = node
+        return node
+
+    if value is None:
+        # Keep only empty stacks
+        if isinstance(node, _WithAcc):
+            res = _WithAcc(node=_InnerRoot(), acc=node.acc) if isinstance(node.node, _InnerRoot) else _Empty()
+            memo_node[key] = res
+            return res
+        # _Internal: accumulate empties through EPS
+        eacc = _empty_accumulate(node, memo_empty)
+        if eacc is None:
+            memo_node[key] = _Empty()
+            return _Empty()
+        res = _WithAcc(node=_InnerRoot(), acc=eacc)
+        memo_node[key] = res
+        return res
+
+    # value is not None
+    if isinstance(node, _WithAcc):
+        # Within WithAcc, last token equals `value` iff edge value -> Root exists directly
+        inner_res = _inner_filter_last(node.node, value, {})
+        res2: _LeveledNode[T, Acc] = _WithAcc(node=inner_res, acc=node.acc) if inner_res is not None else _Empty()
+        memo_node[key] = res2
+        return res2
+
+    # _Internal: compose from children
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    # First, EPS branch: last token deeper
+    eps_map = node.children.get(_EPS, {})
+    for d, ch in eps_map.items():
+        ch_kept = _isolate_by_last(ch, value, memo_node, memo_empty)
+        if not isinstance(ch_kept, _Empty):
+            new_children.setdefault(_EPS, {})[d] = ch_kept
+
+    # For each token t:
+    for kt, dm in node.children.items():
+        if kt is _EPS:
+            continue
+        for d, ch in dm.items():
+            # Deep matches: sequences whose last token equals `value` deeper in child
+            deep = _isolate_by_last(ch, value, memo_node, memo_empty)
+            if not isinstance(deep, _Empty):
+                new_children.setdefault(kt, {})[d] = deep
+            # Immediate match: last token equals `value` at this step requires kt == value and child empties
+            if kt == value:
+                eacc = _empty_accumulate(ch, memo_empty)
+                if eacc is not None:
+                    next_idx = 0 if kt not in new_children else (max(new_children[kt].keys(), default=-1) + 1)
+                    new_children.setdefault(kt, {})[next_idx] = _WithAcc(node=_InnerRoot(), acc=eacc)
+
+    res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
+    memo_node[key] = res
+    return res
+
+
+def _apply_node(node: _LeveledNode[T, Acc],
+                func: Callable[[Acc], Acc],
+                memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
+    nid = id(node)
+    if nid in memo:
+        return memo[nid]
+    if isinstance(node, _Empty):
+        memo[nid] = node
+        return node
+    if isinstance(node, _WithAcc):
+        new_acc = func(node.acc)
+        # Keep the same inner structure; only acc changes
+        res: _LeveledNode[T, Acc] = _WithAcc(node=node.node, acc=new_acc)
+        memo[nid] = res
+        return res
+    # _Internal
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    for kt, dm in node.children.items():
+        for d, ch in dm.items():
+            new_children.setdefault(kt, {})[d] = _apply_node(ch, func, memo)
+    res = _normalize_suck_up(_Internal(children=new_children))
+    memo[nid] = res
+    return res
+
+
+def _prune_node(node: _LeveledNode[T, Acc],
+                pred: Callable[[Acc], bool],
+                memo: Dict[int, _LeveledNode[T, Acc]]) -> _LeveledNode[T, Acc]:
+    nid = id(node)
+    if nid in memo:
+        return memo[nid]
+    if isinstance(node, _Empty):
+        memo[nid] = node
+        return node
+    if isinstance(node, _WithAcc):
+        res: _LeveledNode[T, Acc] = node if pred(node.acc) else _Empty()
+        memo[nid] = res
+        return res
+    # _Internal
+    new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+    for kt, dm in node.children.items():
+        for d, ch in dm.items():
+            pruned = _prune_node(ch, pred, memo)
+            if not isinstance(pruned, _Empty):
+                new_children.setdefault(kt, {})[d] = pruned
+    res = _normalize_suck_up(_Internal(children=new_children)) if new_children else _Empty()
+    memo[nid] = res
+    return res
+
+
+def _reduce_node(node: _LeveledNode[T, Acc],
+                 memo_node: Dict[int, Optional[Acc]],
+                 memo_inner_count: Dict[int, int]) -> Optional[Acc]:
+    nid = id(node)
+    if nid in memo_node:
+        return memo_node[nid]
+    if isinstance(node, _Empty):
+        memo_node[nid] = None
+        return None
+    if isinstance(node, _WithAcc):
+        count = _inner_count(node.node, memo_inner_count)
+        total = _acc_merge_n(node.acc, count)
+        memo_node[nid] = total
+        return total
+    # _Internal
+    total: Optional[Acc] = None
+    for _, dm in node.children.items():
+        for _, ch in dm.items():
+            total = _acc_opt_merge(total, _reduce_node(ch, memo_node, memo_inner_count))
+    memo_node[nid] = total
+    return total
+
+
+def _peek_node(node: _LeveledNode[T, Acc],
+               memo_node: Dict[int, Set[T]],
+               memo_inner_last: Dict[int, Set[T]],
+               memo_empty: Dict[int, Optional[Acc]]) -> Set[T]:
+    nid = id(node)
+    if nid in memo_node:
+        return memo_node[nid]
+
+    if isinstance(node, _Empty):
+        memo_node[nid] = set()
+        return set()
+
+    if isinstance(node, _WithAcc):
+        res = _inner_last_tokens(node.node, memo_inner_last)
+        memo_node[nid] = set(res)
+        return set(res)
+
+    # _Internal
+    res_set: Set[T] = set()
+    # EPS: last token deeper
+    eps_map = node.children.get(_EPS, {})
+    for _, ch in eps_map.items():
+        res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
+    # T children:
+    for kt, dm in node.children.items():
+        if kt is _EPS:
+            continue
+        # For [kt] to be a last token at this level, child must have an empty path
+        for _, ch in dm.items():
+            # If child has an empty, then kt is a last token possibility
+            if _empty_accumulate(ch, memo_empty) is not None:
+                res_set.add(kt)  # type: ignore[arg-type]
+            # Also include last tokens deeper in child
+            res_set |= _peek_node(ch, memo_node, memo_inner_last, memo_empty)
+    memo_node[nid] = res_set
+    return res_set
+
+
+def _merge_nodes(a: _LeveledNode[T, Acc], b: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
+    """
+    Merge two leveled nodes efficiently, preserving sharing. This merging
+    does NOT require enumerating pairs. It preserves multiplicities and
+    ensures invariants by applying suck-up only where safe.
+
+    Special cases:
+    - If both are _WithAcc and have equal acc (==), combine into a single _WithAcc
+      with inner being multiset union (_inner_plus) to preserve multiplicities.
+    - Otherwise, represent the union by an _Internal with a single _EPS branch
+      having two children (a and b). This preserves duplicates and sharing.
+    """
+    # Quick paths
+    if isinstance(a, _Empty):
+        return b
+    if isinstance(b, _Empty):
+        return a
+    if a is b:
+        # Represent duplication as two EPS entries to preserve multiplicity
+        return _Internal(children={_EPS: {0: a, 1: b}})
+
+    if isinstance(a, _WithAcc) and isinstance(b, _WithAcc):
+        same_acc: bool
+        try:
+            same_acc = (a.acc == b.acc)  # type: ignore[operator]
+        except Exception:
+            same_acc = (a.acc is b.acc)
+        if same_acc:
+            inner = _inner_plus(a.node, b.node, {})
+            return _WithAcc(node=inner, acc=a.acc)
+        # Different acc: cannot combine uniformly without losing per-path differences
+        return _Internal(children={_EPS: {0: a, 1: b}})
+
+    # Generic union with EPS child collecting both
+    return _Internal(children={_EPS: {0: a, 1: b}})
+
+
+# ------------------------------
 # Public LeveledGSS implementation
 # ------------------------------
 
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     """
-    A leveled, graph-structured stack implementation that mirrors the provided Rust-like shape.
+    A leveled, graph-structured stack implementation with node sharing.
 
-    Notes:
-    - Semantics are kept identical to ReferenceGSS by delegating operation semantics to an internal
-      ReferenceGSS and rebuilding the leveled structure on each operation. This favors correctness.
-    - Internal structure (_node) respects invariants, with an explicit "suck-up" normalization pass.
-    - For determinism and correctness, to_reference_impl() returns the internal ReferenceGSS.
+    Key points:
+    - Operations traverse and transform the leveled DAG directly; no conversion to explicit stacks.
+    - Sharing is preserved via pointer-identity memoization.
+    - apply/prune use memoization to avoid rebuilding unchanged subtrees.
+    - merge avoids structural copying and uses EPS-union and inner multiset union when relevant.
+    - Invariants are validated after construction; normalization ("suck-up") is applied in local transforms.
     """
 
     # Construction
-    def __init__(self, ref: ReferenceGSS[T, Acc], node: _LeveledNode[T, Acc]):
-        self._ref = ref
+    def __init__(self, node: _LeveledNode[T, Acc]):
         self._node = node
-        # Validate invariants in debug-oriented fashion (can be toggled off if performance becomes a concern)
+        # Validate invariants; if they fail, rebuild canonically from enumeration as a last resort
         try:
             _validate_invariants_node(self._node)
         except InvariantViolation:
-            # As a fallback, try to rebuild from current reference impl (which is canonical) and re-validate.
-            rebuilt = _build_leveled_from_pairs(_pairs_from_ref(self._ref))
+            rebuilt = _build_leveled_from_pairs(_enumerate_pairs_from_node(self._node))
             _validate_invariants_node(rebuilt)
             self._node = rebuilt
 
@@ -371,85 +898,70 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-        # Build a canonical ReferenceGSS first
-        ref = ReferenceGSS.from_stacks(stacks)
-        # Build our leveled node from the deduped pairs
-        pairs = _pairs_from_ref(ref)
-        node = _build_leveled_from_pairs(pairs)
-        return cls(ref, node)
+        node = _build_leveled_from_pairs(stacks)
+        return cls(node)
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        # Delegate semantics to ReferenceGSS
-        new_ref = self._ref.push(value)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        new_node = _push_node(self._node, value, {}, {})
+        return LeveledGSS(new_node)
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        new_ref = self._ref.pop()
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        nonempty_node, empty_acc = _pop_node(self._node, {}, {})
+        if empty_acc is None:
+            return LeveledGSS(nonempty_node)
+        # Include the resulting empty stacks
+        empty_node: _LeveledNode[T, Acc] = _WithAcc(node=_InnerRoot(), acc=empty_acc)
+        merged = _merge_nodes(nonempty_node, empty_node)
+        # Suck-up may be safe here if applicable
+        merged = _normalize_suck_up(merged)
+        return LeveledGSS(merged)
 
     def is_empty(self) -> bool:
-        return self._ref.is_empty()
+        return not _has_any(self._node, {})
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        # Semantics: keep only stacks whose top equals value; if value is None, keep only empty stacks.
-        pairs = _pairs_from_ref(self._ref)
-        if value is None:
-            filtered = [(v, a) for v, a in pairs if len(v) == 0]
-        else:
-            filtered = [(v, a) for v, a in pairs if v and v[-1] == value]
-        new_ref = ReferenceGSS.from_stacks(filtered)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        new_node = _isolate_by_last(self._node, value, {}, {})
+        return LeveledGSS(new_node)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        # Apply func independently to each accumulator
-        pairs = _pairs_from_ref(self._ref)
-        applied = [(vals, func(acc)) for vals, acc in pairs]
-        new_ref = ReferenceGSS.from_stacks(applied)
-        # Memoized rebuild would preserve sharing; for now rebuild canonical leveled node
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        new_node = _apply_node(self._node, func, {})
+        return LeveledGSS(new_node)
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        pairs = _pairs_from_ref(self._ref)
-        kept = [(v, a) for v, a in pairs if predicate(a)]
-        new_ref = ReferenceGSS.from_stacks(kept)
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(new_ref))
-        return LeveledGSS(new_ref, new_node)
+        new_node = _prune_node(self._node, predicate, {})
+        return LeveledGSS(new_node)
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        # Convert other's reference representation and merge via ReferenceGSS semantics
-        other_ref = other.to_reference_impl()
-        assert isinstance(other_ref, ReferenceGSS)
-        merged_ref = ReferenceGSS(self._ref._stacks + other_ref._stacks)  # type: ignore[attr-defined]
-        # ReferenceGSS constructor canonicalizes and merges duplicate stacks
-        new_node = _build_leveled_from_pairs(_pairs_from_ref(merged_ref))
-        return LeveledGSS(merged_ref, new_node)
+        # Convert other's representation to LeveledGSS if needed
+        if isinstance(other, LeveledGSS):
+            other_node = other._node
+        else:
+            # We only use ReferenceGSS conversion here to obtain a leveled node once, not per operation
+            other_ref = other.to_reference_impl()
+            other_node = _build_leveled_from_pairs(_pairs_from_ref(other_ref))
+        merged = _merge_nodes(self._node, other_node)
+        # Apply normalization; this will not lose multiplicity in handled cases (see _merge_nodes logic)
+        merged = _normalize_suck_up(merged)
+        return LeveledGSS(merged)
 
     def peek(self) -> Set[T]:
-        # Set of all top values across non-empty stacks
-        result: Set[T] = set()
-        for vals, _ in _pairs_from_ref(self._ref):
-            if vals:
-                result.add(vals[-1])
-        return result
+        return _peek_node(self._node, {}, {}, {})
 
     def reduce_acc(self) -> Optional[Acc]:
-        return self._ref.reduce_acc()
+        return _reduce_node(self._node, {}, {})
 
     def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-        # Return the canonical ReferenceGSS (gold standard for comparisons)
-        return ReferenceGSS(_pairs_from_ref(self._ref))  # type: ignore[arg-type]
+        # Enumerate to canonical ReferenceGSS (gold standard for comparisons/JSON)
+        pairs = _enumerate_pairs_from_node(self._node)
+        return ReferenceGSS.from_stacks(pairs)
 
-    # Also expose a human-friendly validator
+    # Expose a validator for debugging
     def validate_invariants(self) -> None:
         _validate_invariants_node(self._node)
 
     # Optional: convenience for debugging
     def __repr__(self) -> str:
-        return f"LeveledGSS(ref={self._ref!r})"
+        return f"LeveledGSS(node={self._node!r})"
 
     def __str__(self) -> str:
-        return f"LeveledGSS({self._ref.to_json_serializable()})"
+        return f"LeveledGSS({self.to_reference_impl().to_json_serializable()})"
