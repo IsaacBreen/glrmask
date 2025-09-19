@@ -338,9 +338,16 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
                         child_accs.append(ch.acc)
             # suck-up opportunity detection
             if child_types and all(ct is WithAcc for ct in child_types):
-                # All children are WithAcc; if their accs are equal, it should have been sucked up
+                # All children are WithAcc; if their accs are equal, it should have been sucked up.
                 if child_accs and all(a == child_accs[0] for a in child_accs):
-                    raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
+                    # Exception: suck-up is intentionally skipped if there's a mix of EPS and non-EPS children,
+                    # because the InnerNode structure cannot represent a node that is both terminal and has branches.
+                    # The invariant check must also skip this case.
+                    has_eps_child = any(kt is _EPS for kt in node_b.children)
+                    has_non_eps_child = any(kt is not _EPS for kt in node_b.children)
+
+                    if not (has_eps_child and has_non_eps_child):
+                        raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
             return True, None
         return True, None
 
