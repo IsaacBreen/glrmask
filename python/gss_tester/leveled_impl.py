@@ -50,51 +50,8 @@ _LeveledNode = Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
 # Helpers to convert between ReferenceGSS and our leveled node representation
 # ------------------------------
 
-def _merge_acc(a: Acc, b: Acc) -> Acc:
-    # Acc is Mergeable by protocol; use merge to combine
-    return a.merge(b)  # type: ignore[attr-defined]
-
-
-def _dedup_pairs(pairs: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
-    # Merge duplicate stacks by merging accumulators
-    merged: Dict[Tuple[T, ...], Acc] = {}
-    for vals, acc in pairs:
-        key = tuple(vals)
-        if key in merged:
-            merged[key] = _merge_acc(merged[key], acc)
-        else:
-            merged[key] = acc
-    return [(list(k), v) for k, v in merged.items()]
-
-
 def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
-    # Build the A-level inner tree (no accumulators at this level)
-    if not seqs:
-        return InnerLeaf()
-
-    # Partition by whether sequence is empty
-    non_empty = [s for s in seqs if s]
-    empty_count = len(seqs) - len(non_empty)
-
-    if not non_empty:
-        # Only empty sequences present -> Leaf
-        return InnerLeaf()
-
-    # Group by first token
-    group: Dict[T, List[List[T]]] = {}
-    for s in non_empty:
-        t = s[0]
-        tail = s[1:]
-        group.setdefault(t, []).append(tail)
-
-    children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-    for t, tails in group.items():
-        child_inner = _build_inner_from_sequences(tails)
-        # We set "depth" to the maximum length remaining (for determinism and a form of "max depth")
-        max_depth = max((len(tl) for tl in tails), default=0)
-        children.setdefault(t, {})[max_depth] = child_inner
-
-    return InnerBranch(children=children)
+    raise NotImplementedError
 
 
 def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
@@ -117,35 +74,19 @@ class InvariantViolation(Exception):
 
 
 def _validate_invariants_node(node: _LeveledNode[T, Acc]):
-    # Ensure that "Suck up" has been applied whenever possible: for any Branch node, if all children are WithAcc and share the same acc, we should not leave it as Branch.
-    def check(node_b: _LeveledNode[T, Acc]) -> Tuple[bool, Optional[Acc]]:
-        match node_b:
-            case Empty():
-                return True, None
-            case WithAcc(acc=acc):
-                return True, acc
+    def check(n: _LeveledNode[T, Acc]) -> None:
+        match n:
+            case Empty() | WithAcc():
+                return
             case Branch(children=children):
-                # Recurse, collect child accs when child is WithAcc
-                child_accs: List[Acc] = []
-                child_types: List[type] = []
-                for kt, depth_map in children.items():
-                    for _, ch in depth_map.items():
-                        ok, acc = check(ch)
-                        if not ok:
-                            return False, None
-                        child_types.append(type(ch))
-                        if isinstance(ch, WithAcc):
-                            child_accs.append(ch.acc)
-                # suck-up opportunity detection
-                if child_types and all(ct is WithAcc for ct in child_types):
-                    # All children are WithAcc; if their accs are equal, it should have been sucked up
-                    if child_accs and all(a == child_accs[0] for a in child_accs):
+                kids = [ch for m in children.values() for ch in m.values()]
+                for ch in kids:
+                    check(ch)
+                if kids and all(isinstance(ch, WithAcc) for ch in kids):
+                    acc0 = kids[0].acc
+                    if all(ch.acc == acc0 for ch in kids):
                         raise InvariantViolation("Suck-up opportunity not applied: Branch with uniform WithAcc children.")
-                return True, None
-
-    ok, _ = check(node)
-    if not ok:
-        raise InvariantViolation("Invariant validation failed for unknown reason.")
+    check(node)
 
 
 # ------------------------------
