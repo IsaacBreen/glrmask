@@ -17,26 +17,24 @@ class InnerLeaf:
     pass
 
 
+
 @dataclass
 class InnerBranch(Generic[T]):
-    # children: T -> depth -> _InnerNode
-    children: Dict[T, Dict[int, '_InnerNode[T]']]
-
-
-_InnerNode = Union[InnerLeaf, InnerBranch[T]]
+    # children: T -> depth -> LeveledGSSInner
+    children: Dict[T, Dict[int, 'LeveledGSSInner[T]']]
 
 
 @dataclass
 class WithAcc(Generic[T, Acc]):
-    node: _InnerNode[T]
+    node: 'LeveledGSSInner[T]'
     acc: Acc
 
 
 @dataclass
 class Branch(Generic[T, Acc]):
-    # children: T_or_EPS -> depth -> _LeveledNode
+    # children: T_or_EPS -> depth -> LeveledGSS
     # Note: T_or_EPS is either a T value or the _EPS sentinel for "empty" stacks at this node.
-    children: Dict[object, Dict[int, '_LeveledNode[T, Acc]']]
+    children: Dict[object, Dict[int, 'LeveledGSS[T, Acc]']]
 
 
 @dataclass
@@ -44,31 +42,30 @@ class Empty:
     pass
 
 
-_LeveledNode = Union[WithAcc[T, Acc], Branch[T, Acc], Empty]
-
-
 @dataclass
 class LeveledGSSInner(Generic[T]):
-    inner: _InnerNode[T]
+    inner: Union[InnerLeaf, InnerBranch[T]]
 
 
 # ------------------------------
 # Helpers to convert between ReferenceGSS and our leveled node representation
 # ------------------------------
 
-def _build_inner_from_sequences(seqs: List[List[T]]) -> _InnerNode[T]:
+def _build_inner_from_sequences(seqs: List[List[T]]) -> Union[InnerLeaf, InnerBranch[T]]:
     raise NotImplementedError
 
 
-def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> _LeveledNode[T, Acc]:
+def _build_leveled_from_pairs(pairs: List[Tuple[List[T], Acc]]) -> Union[WithAcc[T, Acc], Branch[T, Acc], Empty]:
     raise NotImplementedError
 
 
-def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
+def _normalize_suck_up(node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]) -> Union[WithAcc[T, Acc], Branch[T, Acc], Empty]:
     raise NotImplementedError
 
-def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T], Acc]]:
+def _enumerate_pairs_from_node(node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]) -> List[Tuple[List[T], Acc]]:
     raise NotImplementedError
+
+
 
 
 # ------------------------------
@@ -79,13 +76,13 @@ class InvariantViolation(Exception):
     pass
 
 
-def _validate_invariants_node(node: _LeveledNode[T, Acc]):
-    def check(n: _LeveledNode[T, Acc]) -> None:
+def _validate_invariants_node(node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]):
+    def check(n: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]) -> None:
         match n:
             case Empty() | WithAcc():
                 return
             case Branch(children=children):
-                kids = [ch for m in children.values() for ch in m.values()]
+                kids = [ch._node for m in children.values() for ch in m.values()]
                 for ch in kids:
                     check(ch)
                 if kids and all(isinstance(ch, WithAcc) for ch in kids):
@@ -102,7 +99,7 @@ def _validate_invariants_node(node: _LeveledNode[T, Acc]):
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     # Construction
-    def __init__(self, node: _LeveledNode[T, Acc]):
+    def __init__(self, node: Union[WithAcc[T, Acc], Branch[T, Acc], Empty]):
         self._node = node
         _validate_invariants_node(self._node)
 
