@@ -318,8 +318,9 @@ local_system:
     python/gss_tester/leveled_impl.py: |
       from __future__ import annotations
 
+      from collections import defaultdict
       from dataclasses import dataclass
-      from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
 
       from .interface import GSS, T, Acc
 
@@ -348,10 +349,34 @@ local_system:
 
           @classmethod
           def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
-              raise NotImplementedError
+              is_leaf = any(not s for s in stacks)
+              children: Dict[T, Dict[int, 'Lower[T]']] = {}
+
+              stacks_by_top: Dict[T, List[List[T]]] = defaultdict(list)
+              for stack in stacks:
+                  if stack:
+                      stacks_by_top[stack[-1]].append(stack[:-1])
+
+              for top, prefixes in stacks_by_top.items():
+                  children[top] = {}
+                  prefixes_by_len: Dict[int, List[List[T]]] = defaultdict(list)
+                  for prefix in prefixes:
+                      prefixes_by_len[len(prefix)].append(prefix)
+
+                  for length, group in prefixes_by_len.items():
+                      children[top][length] = Lower.from_stacks(group)
+
+              return Lower(children=children, is_leaf=is_leaf)
 
           def to_stacks(self) -> List[List[T]]:
-              raise NotImplementedError
+              stacks: List[List[T]] = []
+              if self.is_leaf:
+                  stacks.append([])
+              for top, children_at_depths in self.children.items():
+                  for _, child_node in children_at_depths.items():
+                      for prefix in child_node.to_stacks():
+                          stacks.append(prefix + [top])
+              return stacks
 
           def validate_invariants(self) -> None:
               # Invariant: lower must either have children or be a leaf (or both)
@@ -377,10 +402,41 @@ local_system:
 
           @classmethod
           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              if not stacks:
+                  return LeveledGSS(Upper({}))
+
+              accs = {s[1] for s in stacks}
+              if len(accs) == 1:
+                  acc = accs.pop()
+                  list_of_stacks = [s[0] for s in stacks]
+                  return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), acc))
+
+              children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
+              stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
+
+              for stack, acc in stacks:
+                  if stack:
+                      top = stack[-1]
+                      prefix = stack[:-1]
+                      stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+
+              for (top, length), group in stacks_by_top_and_len.items():
+                  if top not in children:
+                      children[top] = {}
+                  children[top][length] = cls.from_stacks(group)
+
+              return LeveledGSS(Upper(children))
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              raise NotImplementedError
+              if isinstance(self.inner, Interface):
+                  return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
+              elif isinstance(self.inner, Upper):
+                  all_stacks: List[Tuple[List[T], Acc]] = []
+                  for top, children_at_depths in self.inner.children.items():
+                      for _, child_gss in children_at_depths.items():
+                          all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
+                  return all_stacks
+              return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
               raise NotImplementedError
@@ -875,31 +931,43 @@ local_system:
               return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.push(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def pop(self) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.pop()
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def is_empty(self) -> bool:
-              raise NotImplementedError
+              return self.to_reference_impl().is_empty()
 
           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.isolate(value)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.apply(func)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.prune(predicate)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              ref_gss = self.to_reference_impl()
+              new_ref_gss = ref_gss.merge(other)
+              return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
           def peek(self) -> Set[T]:
-              raise NotImplementedError
+              return self.to_reference_impl().peek()
 
           def reduce_acc(self) -> Optional[Acc]:
-              raise NotImplementedError
+              return self.to_reference_impl().reduce_acc()
 
           def validate_invariants(self) -> None:
               if isinstance(self.inner, Upper):
@@ -1300,8 +1368,9 @@ messages:
       ```python 'python/gss_tester/leveled_impl.py'
       from __future__ import annotations
 
+      from collections import defaultdict
       from dataclasses import dataclass
-      from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
 
       from .interface import GSS, T, Acc
 
@@ -1330,10 +1399,34 @@ messages:
 
           @classmethod
           def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
-              raise NotImplementedError
+              is_leaf = any(not s for s in stacks)
+              children: Dict[T, Dict[int, 'Lower[T]']] = {}
+
+              stacks_by_top: Dict[T, List[List[T]]] = defaultdict(list)
+              for stack in stacks:
+                  if stack:
+                      stacks_by_top[stack[-1]].append(stack[:-1])
+
+              for top, prefixes in stacks_by_top.items():
+                  children[top] = {}
+                  prefixes_by_len: Dict[int, List[List[T]]] = defaultdict(list)
+                  for prefix in prefixes:
+                      prefixes_by_len[len(prefix)].append(prefix)
+
+                  for length, group in prefixes_by_len.items():
+                      children[top][length] = Lower.from_stacks(group)
+
+              return Lower(children=children, is_leaf=is_leaf)
 
           def to_stacks(self) -> List[List[T]]:
-              raise NotImplementedError
+              stacks: List[List[T]] = []
+              if self.is_leaf:
+                  stacks.append([])
+              for top, children_at_depths in self.children.items():
+                  for _, child_node in children_at_depths.items():
+                      for prefix in child_node.to_stacks():
+                          stacks.append(prefix + [top])
+              return stacks
 
           def validate_invariants(self) -> None:
               # Invariant: lower must either have children or be a leaf (or both)
@@ -1359,10 +1452,41 @@ messages:
 
           @classmethod
           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-              raise NotImplementedError
+              if not stacks:
+                  return LeveledGSS(Upper({}))
+
+              accs = {s[1] for s in stacks}
+              if len(accs) == 1:
+                  acc = accs.pop()
+                  list_of_stacks = [s[0] for s in stacks]
+                  return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), acc))
+
+              children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
+              stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
+
+              for stack, acc in stacks:
+                  if stack:
+                      top = stack[-1]
+                      prefix = stack[:-1]
+                      stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+
+              for (top, length), group in stacks_by_top_and_len.items():
+                  if top not in children:
+                      children[top] = {}
+                  children[top][length] = cls.from_stacks(group)
+
+              return LeveledGSS(Upper(children))
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              raise NotImplementedError
+              if isinstance(self.inner, Interface):
+                  return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
+              elif isinstance(self.inner, Upper):
+                  all_stacks: List[Tuple[List[T], Acc]] = []
+                  for top, children_at_depths in self.inner.children.items():
+                      for _, child_gss in children_at_depths.items():
+                          all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
+                  return all_stacks
+              return []
 
           def push(self, value: T) -> 'LeveledGSS[T, Acc]':
               raise NotImplementedError
@@ -1427,8 +1551,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/leveled_impl.py
-  - user: Implement `to_stacks` and `from_stacks` for `LeveledGSS` and `LeveledGSSInner`
-      in a way that respects `validate_invariants`.
+  - user: Do a placeholder implementation for each of the leveled_impl.py methods
+      by just converting to a reference GSS impl, applying the method for that, and
+      converting back to a leveled GSS. (I know this is inefficient.)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1447,136 +1572,82 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement `to_stacks` and `from_stacks` for your GSS implementations, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to implement the placeholder methods in `leveled_impl.py`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will implement the requested methods in `python/gss_tester/leveled_impl.py`. The logic for `from_stacks` will be recursive, building up the trie-like structure. The `to_stacks` methods will recursively traverse the structure to reconstruct the list of stacks.
+      I will edit the file `python/gss_tester/leveled_impl.py` to provide placeholder implementations for the abstract methods of the `GSS` interface in the `LeveledGSS` class.
 
-      A key challenge is that the `LeveledGSS` structure as defined cannot represent an empty GSS without violating the `validate_invariants` method (specifically, an `Upper` node must have children). The `GSS` interface requires `from_stacks([])` to work. To resolve this, I will implement `from_stacks` such that when given an empty list, it constructs an `LeveledGSS(Upper({}))`. This will currently fail the validation check, pointing to a necessary relaxation of that invariant for the structure to be fully compliant with the `GSS` interface.
-
-      #### 1. File: `python/gss_tester/leveled_impl.py`
-
-      I'll add the implementation for four methods across two classes: `Lower.from_stacks`, `Lower.to_stacks`, `LeveledGSS.from_stacks`, and `LeveledGSS.to_stacks`.
-
-      1.  **Implement `Lower.from_stacks`**: This class method will take a list of stacks (each a `List[T]`) and build the `Lower` node structure recursively. It groups stacks by their top element and the length of their prefix.
-
-      2.  **Implement `Lower.to_stacks`**: This instance method will convert a `Lower` node back into a list of stacks by traversing its children.
-
-      3.  **Implement `LeveledGSS.from_stacks`**: This class method is the main entry point.
-          *   If the input `stacks` list is empty, it will return `LeveledGSS(Upper({}))`.
-          *   If all stacks share the same accumulator, it will create a single `Interface` node containing a `Lower` node built from the stacks.
-          *   If there are multiple accumulators, it will create an `Upper` node, grouping child GSSs by the top element of the stacks and recursively calling `from_stacks` on the prefixes. This implementation will currently ignore empty stacks when creating an `Upper` node, as the structure cannot represent them alongside non-empty stacks with different accumulators.
-
-      4.  **Implement `LeveledGSS.to_stacks`**: This instance method will convert a `LeveledGSS` into a list of `(stack, accumulator)` tuples. It will handle both `Interface` and `Upper` inner nodes.
-
-      Here are the changes in detail:
-
-      -   In `python/gss_tester/leveled_impl.py`, at the top, add `from collections import defaultdict`.
-      -   In class `Lower`, replace the `NotImplementedError` in `from_stacks` with the recursive implementation.
-      -   In class `Lower`, replace the `NotImplementedError` in `to_stacks` with the recursive implementation.
-      -   In class `LeveledGSS`, replace the `NotImplementedError` in `from_stacks` with its implementation.
-      -   In class `LeveledGSS`, replace the `NotImplementedError` in `to_stacks` with its implementation.
+      1.  **In `python/gss_tester/leveled_impl.py`:**
+          *   I will replace the `NotImplementedError` in `push`, `pop`, `is_empty`, `isolate`, `apply`, `prune`, `merge`, `peek`, and `reduce_acc`.
+          *   Each new implementation will delegate to the `ReferenceGSS` implementation. For methods that return a new GSS state, this involves:
+              1.  Converting `self` to a `ReferenceGSS` using `self.to_reference_impl()`.
+              2.  Calling the corresponding method on the `ReferenceGSS` instance.
+              3.  Converting the resulting `ReferenceGSS` back into a `LeveledGSS` via `LeveledGSS.from_stacks(result.to_stacks())`.
+          *   For methods that return a value (like `is_empty`, `peek`, `reduce_acc`), the implementation will convert to `ReferenceGSS` and return the result of the corresponding method call directly.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here is the git patch to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 455928e..6d2146d 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -1,7 +1,8 @@
-       from __future__ import annotations
-       
-      +from collections import defaultdict
-       from dataclasses import dataclass
-      -from typing import Dict, Generic, List, Optional, Set, Tuple, Type, Union, Callable
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Type, Union
-       
-       from .interface import GSS, T, Acc
-       
-      @@ -29,11 +30,34 @@
-       
-           @classmethod
-           def from_stacks(cls: Type['Lower[T]'], stacks: List[List[T]]) -> 'Lower[T]':
-      -        raise NotImplementedError
-      +        is_leaf = any(not s for s in stacks)
-      +        children: Dict[T, Dict[int, 'Lower[T]']] = {}
-      +
-      +        stacks_by_top: Dict[T, List[List[T]]] = defaultdict(list)
-      +        for stack in stacks:
-      +            if stack:
-      +                stacks_by_top[stack[-1]].append(stack[:-1])
-      +
-      +        for top, prefixes in stacks_by_top.items():
-      +            children[top] = {}
-      +            prefixes_by_len: Dict[int, List[List[T]]] = defaultdict(list)
-      +            for prefix in prefixes:
-      +                prefixes_by_len[len(prefix)].append(prefix)
-      +
-      +            for length, group in prefixes_by_len.items():
-      +                children[top][length] = Lower.from_stacks(group)
-      +
-      +        return Lower(children=children, is_leaf=is_leaf)
-       
-           def to_stacks(self) -> List[List[T]]:
-      -        raise NotImplementedError
-      +        stacks: List[List[T]] = []
-      +        if self.is_leaf:
-      +            stacks.append([])
-      +        for top, children_at_depths in self.children.items():
-      +            for _, child_node in children_at_depths.items():
-      +                for prefix in child_node.to_stacks():
-      +                    stacks.append(prefix + [top])
-      +        return stacks
-       
-           def validate_invariants(self) -> None:
-               # Invariant: lower must either have children or be a leaf (or both)
-      @@ -58,10 +82,39 @@
-       
-           @classmethod
-           def from_stacks(cls: Type['LeveledGSS[T, Acc]'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
-      -        raise NotImplementedError
-      +        if not stacks:
-      +            return LeveledGSS(Upper({}))
-      +
-      +        accs = {s[1] for s in stacks}
-      +        if len(accs) == 1:
-      +            acc = accs.pop()
-      +            list_of_stacks = [s[0] for s in stacks]
-      +            return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), acc))
-      +
-      +        children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
-      +        stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
-      +
-      +        for stack, acc in stacks:
-      +            if stack:
-      +                top = stack[-1]
-      +                prefix = stack[:-1]
-      +                stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
-      +
-      +        for (top, length), group in stacks_by_top_and_len.items():
-      +            if top not in children:
-      +                children[top] = {}
-      +            children[top][length] = cls.from_stacks(group)
-      +
-      +        return LeveledGSS(Upper(children))
-       
-           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-      -        raise NotImplementedError
-      +        if isinstance(self.inner, Interface):
-      +            return [(s, self.inner.acc) for s in self.inner.node.to_stacks()]
-      +        elif isinstance(self.inner, Upper):
-      +            all_stacks: List[Tuple[List[T], Acc]] = []
-      +            for top, children_at_depths in self.inner.children.items():
-      +                for _, child_gss in children_at_depths.items():
-      +                    all_stacks.extend([(prefix + [top], acc) for prefix, acc in child_gss.to_stacks()])
-      +            return all_stacks
-      +        return []
+      @@ -155,31 +155,39 @@
+               return []
        
            def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-               raise NotImplementedError
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.push(value)
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def pop(self) -> 'LeveledGSS[T, Acc]':
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.pop()
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def is_empty(self) -> bool:
+      -        raise NotImplementedError
+      +        return self.to_reference_impl().is_empty()
+       
+           def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.isolate(value)
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.apply(func)
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.prune(predicate)
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+      -        raise NotImplementedError
+      +        ref_gss = self.to_reference_impl()
+      +        new_ref_gss = ref_gss.merge(other)
+      +        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
+       
+           def peek(self) -> Set[T]:
+      -        raise NotImplementedError
+      +        return self.to_reference_impl().peek()
+       
+           def reduce_acc(self) -> Optional[Acc]:
+      -        raise NotImplementedError
+      +        return self.to_reference_impl().reduce_acc()
+       
+           def validate_invariants(self) -> None:
+               if isinstance(self.inner, Upper):
 
       ```
     metadata:
@@ -1589,7 +1660,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement from_stacks and to_stacks
-      for LeveledGSS and Lower"'
+  - user: 'Changes committed with message: "feat(leveled_impl): Implement placeholder
+      methods by delegating to ReferenceGSS"'
     metadata:
 ...

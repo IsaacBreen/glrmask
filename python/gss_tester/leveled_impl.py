@@ -121,31 +121,43 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return []
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.push(value)
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.pop()
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def is_empty(self) -> bool:
-        raise NotImplementedError
+        return self.to_reference_impl().is_empty()
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.isolate(value)
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.apply(func)
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.prune(predicate)
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        raise NotImplementedError
+        ref_gss = self.to_reference_impl()
+        new_ref_gss = ref_gss.merge(other)
+        return LeveledGSS.from_stacks(new_ref_gss.to_stacks())
 
     def peek(self) -> Set[T]:
-        raise NotImplementedError
+        return self.to_reference_impl().peek()
 
     def reduce_acc(self) -> Optional[Acc]:
-        raise NotImplementedError
+        return self.to_reference_impl().reduce_acc()
 
     def validate_invariants(self) -> None:
         if isinstance(self.inner, Upper):
