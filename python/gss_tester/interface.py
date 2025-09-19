@@ -3,6 +3,9 @@ from functools import reduce
 from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Dict, Any, Optional, Protocol, Type
 import json
 
+from python.gss_tester.reference_impl import ReferenceGSS
+
+
 class Mergeable(Protocol):
     """Protocol for accumulator types that can be merged."""
     @abstractmethod
@@ -127,7 +130,7 @@ class GSS(ABC, Generic[T, Acc]):
         Converts the GSS to its canonical ReferenceGSS representation.
         This involves merging accumulators for identical stacks.
         """
-        pass
+        return ReferenceGSS.from_stacks(self.to_stacks())
 
     def __str__(self) -> str:
         """Provides a human-readable string representation for debugging."""

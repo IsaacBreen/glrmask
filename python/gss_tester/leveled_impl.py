@@ -140,6 +140,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         node = _build_leveled_from_pairs(stacks)
         return cls(node)
 
+    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+        pairs = _enumerate_pairs_from_node(self.inner)
+        reference_impl = ReferenceGSS.from_stacks(pairs)
+        return reference_impl.to_stacks()
+
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
         ref_impl = self.to_reference_impl()
         new_ref_impl = ref_impl.push(value)
@@ -178,13 +183,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def reduce_acc(self) -> Optional[Acc]:
         return self.to_reference_impl().reduce_acc()
-
-    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-        return self.to_reference_impl().to_stacks()
-
-    def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-        pairs = _enumerate_pairs_from_node(self.inner)
-        return ReferenceGSS.from_stacks(pairs)
 
     # Also expose a human-friendly validator
     def validate_invariants(self) -> None:
