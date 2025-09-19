@@ -346,7 +346,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             case Branch(children=children):
                 result = LeveledGSS.empty()
                 for t, by_depth in children.items():
-                    for _, child in by_depth.items():
+                    if t is EPSILON:
+                        continue
+                    for child in by_depth.values():
                         result = result.merge(child)
                 return result
 

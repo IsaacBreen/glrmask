@@ -825,9 +825,8 @@ local_system:
                       merged_a = a1.merge(a2)
                       res = LeveledGSS.with_acc(merged_a, acc1)
                   else:
-                      dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                      b1_dist = _distribute_acc(a1, acc1, dist_memo)
-                      b2_dist = _distribute_acc(a2, acc2, dist_memo)
+                      b1_dist = _distribute_acc(a1, acc1, {})
+                      b2_dist = _distribute_acc(a2, acc2, {})
                       res = _merge_leveled(b1_dist, b2_dist, memo)
               
               case (Constant(a1, acc1), Branch(c2)):
@@ -852,8 +851,7 @@ local_system:
                       res = _canonicalize(LeveledGSS.internal(new_children))
                   else:
                       # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
-                      dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                      b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                      b1_dist = _distribute_acc(a1, acc1, {})
                       res = _merge_leveled(b1_dist, b2, memo)
 
               case (Branch(_), Constant(a2, acc2)):
@@ -1669,7 +1667,9 @@ local_system:
                   case Branch(children=children):
                       result = LeveledGSS.empty()
                       for t, by_depth in children.items():
-                          for _, child in by_depth.items():
+                          if t is EPSILON:
+                              continue
+                          for child in by_depth.values():
                               result = result.merge(child)
                       return result
 
@@ -2891,9 +2891,8 @@ messages:
                       merged_a = a1.merge(a2)
                       res = LeveledGSS.with_acc(merged_a, acc1)
                   else:
-                      dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                      b1_dist = _distribute_acc(a1, acc1, dist_memo)
-                      b2_dist = _distribute_acc(a2, acc2, dist_memo)
+                      b1_dist = _distribute_acc(a1, acc1, {})
+                      b2_dist = _distribute_acc(a2, acc2, {})
                       res = _merge_leveled(b1_dist, b2_dist, memo)
               
               case (Constant(a1, acc1), Branch(c2)):
@@ -2918,8 +2917,7 @@ messages:
                       res = _canonicalize(LeveledGSS.internal(new_children))
                   else:
                       # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
-                      dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                      b1_dist = _distribute_acc(a1, acc1, dist_memo)
+                      b1_dist = _distribute_acc(a1, acc1, {})
                       res = _merge_leveled(b1_dist, b2, memo)
 
               case (Branch(_), Constant(a2, acc2)):
@@ -3084,7 +3082,7 @@ messages:
       filename: python/gss_tester/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-19_12-08-06
+      Test results will be saved in: gss_test_results/2025-09-19_12-10-09
       ---
       Reference Implementation: gss_tester/reference_impl.py
       Other Implementations: gss_tester/leveled_impl.py
@@ -3092,25 +3090,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-08-06/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.reference_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-08-06/gss_tester.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/reference_impl.py
 
       >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-08-06/gss_tester.leveled_impl.LeveledGSS.json
+      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.leveled_impl...
       Running test specification...
       Successfully ran 149 checks.
-      Results saved to gss_test_results/2025-09-19_12-08-06/gss_tester.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-08-06/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-08-06/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-08-06/gss_tester.reference_impl.ReferenceGSS.json
+      python -m gss_tester.analyzer gss_test_results/2025-09-19_12-10-09/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-19_12-10-09/gss_tester.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -3128,15 +3126,15 @@ messages:
       --- Divergence Report ---
 
       Comparing 'gss_tester.leveled_impl.LeveledGSS' with 'gss_tester.reference_impl.ReferenceGSS':
-        - First divergence at yield index 23:
-          - gss_tester.leveled_impl.LeveledGSS (L127): [[[200, 201], 7], [[200, 202], 7]]
-          - gss_tester.reference_impl.ReferenceGSS (L127): [[[200, 201], 7], [[200, 202], 8]]
+        - First divergence at yield index 38:
+          - gss_tester.leveled_impl.LeveledGSS (L208): [[[], 3]]
+          - gss_tester.reference_impl.ReferenceGSS (L208): [[[], 2]]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-19_12-08-06
+      Full JSON results are in: gss_test_results/2025-09-19_12-10-09
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3155,79 +3153,63 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the test results, there's a bug in the `LeveledGSS` implementation related to how accumulators are handled during merge operations. Specifically, the memoization logic in `_distribute_acc` is flawed when called from `_merge_leveled`. A shared memoization dictionary causes accumulators from one GSS to leak into another when their internal structures share common sub-nodes.
+      Hello! I see your `LeveledGSS` implementation is failing the consistency check against the reference implementation. The divergence report points to an issue with how accumulator values are being calculated. I've analyzed the code and found the bug. Here are the step-by-step instructions to fix it, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions to fix the bug in `python/gss_tester/leveled_impl.py`.
+      ### The Bug
+
+      The issue lies in the `pop` method of the `LeveledGSS` class in `python/gss_tester/leveled_impl.py`. When `pop` is called on a `Branch` node, it should process only the non-empty stacks, effectively discarding any empty stacks present in the GSS. However, the current implementation iterates over all children of the `Branch` node, including the special `EPSILON` child that represents the set of empty stacks. This causes the GSS for empty stacks to be merged into the result of the pop operation, leading to incorrect accumulator values.
+
+      The fix is to add a check to skip the `EPSILON` child within the loop.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/gss_tester/leveled_impl.py`**.
+      1.  **Open the file** `python/gss_tester/leveled_impl.py`.
 
-      2.  **Navigate to the `_merge_leveled` function**. This function contains the logic for merging two `LeveledGSS` instances.
+      2.  **Navigate** to the `pop` method within the `LeveledGSS` class (around line 396).
 
-      3.  **Correct the `(Constant, Constant)` merge case**:
-          Locate the `match` block for `(b1.variant, b2.variant)`. Inside the `case (Constant(a1, acc1), Constant(a2, acc2)):`, find the `else` block that handles when both stacks and accumulators are different.
+      3.  **Locate** the `case Branch(children=children):` block inside the `match` statement.
 
-          *   **Delete** these three lines:
-              ```python
-                              dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                              b1_dist = _distribute_acc(a1, acc1, dist_memo)
-                              b2_dist = _distribute_acc(a2, acc2, dist_memo)
-              ```
-          *   **Add** these two lines in their place to ensure each accumulator distribution uses a separate memoization cache:
-              ```python
-                              b1_dist = _distribute_acc(a1, acc1, {})
-                              b2_dist = _distribute_acc(a2, acc2, {})
-              ```
-
-      4.  **Correct the `(Constant, Branch)` merge case**:
-          In the same `match` block, find the `case (Constant(a1, acc1), Branch(c2)):`. Inside its `else` block (which handles non-leaf `Constant` nodes), you'll find the logic to distribute the accumulator before merging.
-
-          *   **Delete** these two lines:
-              ```python
-                              dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-                              b1_dist = _distribute_acc(a1, acc1, dist_memo)
-              ```
-          *   **Add** this single line in their place:
-              ```python
-                              b1_dist = _distribute_acc(a1, acc1, {})
-              ```
-
-      These changes will resolve the bug by correctly isolating the memoization for each accumulator distribution, preventing incorrect accumulator propagation.
+      4.  **Modify the loop** to ignore empty stacks. Replace the following lines:
+          ```python
+                      for t, by_depth in children.items():
+                          for _, child in by_depth.items():
+                              result = result.merge(child)
+          ```
+          with this corrected code, which skips the `EPSILON` key:
+          ```python
+                      for t, by_depth in children.items():
+                          if t is EPSILON:
+                              continue
+                          for child in by_depth.values():
+                              result = result.merge(child)
+          ```
+          This change ensures that only children representing non-empty stacks are merged into the result of the `pop` operation.
 
       ### Git Diff
 
-      Here is the git diff for the changes described above.
+      Here is the git patch to apply the fix.
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 2139611..092570b 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -600,10 +600,8 @@
-                       merged_a = a1.merge(a2)
-                       res = LeveledGSS.with_acc(merged_a, acc1)
-                   else:
-      -                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-      -                b1_dist = _distribute_acc(a1, acc1, dist_memo)
-      -                b2_dist = _distribute_acc(a2, acc2, dist_memo)
-      +                b1_dist = _distribute_acc(a1, acc1, {})
-      +                b2_dist = _distribute_acc(a2, acc2, {})
-                       res = _merge_leveled(b1_dist, b2_dist, memo)
-               
-               case (Constant(a1, acc1), Branch(c2)):
-      @@ -625,8 +623,7 @@
-                       res = _canonicalize(LeveledGSS.internal(new_children))
-                   else:
-                       # Original logic for non-leaf constants: distribute the acc and merge the resulting branches.
-      -                dist_memo: Dict[int, 'LeveledGSS[T, Acc]'] = {}
-      -                b1_dist = _distribute_acc(a1, acc1, dist_memo)
-      +                b1_dist = _distribute_acc(a1, acc1, {})
-                       res = _merge_leveled(b1_dist, b2, memo)
+      @@ -403,9 +403,11 @@
+                   case Branch(children=children):
+                       result = LeveledGSS.empty()
+                       for t, by_depth in children.items():
+      -                    for _, child in by_depth.items():
+      -                        result = result.merge(child)
+      +                    if t is EPSILON:
+      +                        continue
+      +                    for child in by_depth.values():
+      +                        result = result.merge(child)
+                       return result
        
-               case (Branch(_), Constant(a2, acc2)):
+           def is_empty(self) -> bool:
 
       ```
+
+      After applying this change, your `LeveledGSS` implementation should behave consistently with the reference implementation. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -3238,7 +3220,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct memoization for accumulator
-      distribution in LeveledGSS merge"'
+  - user: 'Changes committed with message: "Fix: Exclude EPSILON child from pop operation
+      in LeveledGSS"'
     metadata:
 ...
