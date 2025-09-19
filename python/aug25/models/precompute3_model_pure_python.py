@@ -10,6 +10,15 @@ import _sep1 as ffi
 from python.gss_tester.leveled_impl import LeveledGSS as GSS
 
 
+# Add a dummy profiler for when not running under kernprof
+try:
+    # This will be injected by the kernprof script.
+    profile
+except NameError:
+    # If not running under kernprof, create a dummy decorator.
+    def profile(func): return func
+
+
 @dataclass(frozen=True)
 class Reduce:
     nonterminal_id: int
@@ -160,6 +169,7 @@ class Model(GraphProvider):
         model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
         return model
 
+    @profile
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             allowed_terminals_l2 = acc.terminals_union
@@ -170,6 +180,7 @@ class Model(GraphProvider):
             return True
         return gss.prune(predicate)
 
+    @profile
     def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
             old_l2 = acc.terminals_union
@@ -184,6 +195,7 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=new_l2)
         return gss.apply(apply_map)
 
+    @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_l2 = acc.terminals_union
@@ -217,6 +229,7 @@ class Model(GraphProvider):
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
+    @profile
     def commit(self, token_id: int):
         t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
@@ -291,6 +304,7 @@ class Model(GraphProvider):
         t1 = time.perf_counter()
         print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
+    @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
@@ -333,6 +347,7 @@ class Model(GraphProvider):
 
         return GSS.merge_many(shifted_gsses)
 
+    @profile
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.

@@ -21,6 +21,14 @@ from typing import (
 from .interface import GSS, Acc, T
 from .reference_impl import ReferenceGSS
 
+# Add a dummy profiler for when not running under kernprof
+try:
+    # This will be injected by the kernprof script.
+    profile
+except NameError:
+    # If not running under kernprof, create a dummy decorator.
+    def profile(func): return func
+
 # ------------------------------
 # Structural Trie (_A nodes)
 #
@@ -128,7 +136,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     ) -> LeveledGSS[T, Acc]:
         return cls(_kind="BRANCH", _empty_acc=empty_acc, _children=children)
 
+    # -------------------------
+
     @classmethod
+    @profile
     def _create(
         cls, empty_acc: Optional[Acc], children: Dict[T, LeveledGSS[T, Acc]]
     ) -> LeveledGSS[T, Acc]:
@@ -163,6 +174,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return cls._branch(empty_acc, live_children)
 
+    @profile
     def _distribute(self) -> LeveledGSS[T, Acc]:
         """Converts a GROUP node into its equivalent BRANCH representation."""
         if self._kind != "GROUP":
@@ -207,11 +219,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         }
         return cls._create(empty_acc, children)
 
+    @profile
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         if self._is_structurally_empty():
             return self._empty()
         return self._create(None, {value: self})
 
+    @profile
     def pop(self) -> LeveledGSS[T, Acc]:
         if self._kind == "EMPTY":
             return self
@@ -232,6 +246,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self._empty_acc is not None and not self._children
         return False
 
+    @profile
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         gss = self._distribute()
         if gss._kind != "BRANCH":  # Can happen if distributed to empty/single
@@ -247,6 +262,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return self._empty()
             return self._create(None, {value: child})
 
+    @profile
     def apply(
         self, func: Callable[[Acc], Acc], *, _memo: Optional[Dict[int, Any]] = None
     ) -> LeveledGSS[T, Acc]:
@@ -272,6 +288,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         _memo[id(self)] = result
         return result
 
+    @profile
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         if self._kind == "EMPTY":
             return self
@@ -289,6 +306,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         }
         return self._create(new_empty_acc, new_children)
 
+    @profile
     def merge(self, other: GSS[T, Acc]) -> LeveledGSS[T, Acc]:
         # Convert other to LeveledGSS if it isn't one.
         if not isinstance(other, LeveledGSS):

@@ -1,11 +1,17 @@
+import sys
+from pathlib import Path
+
+# Add project root to sys.path to resolve imports when running as a script
+_project_root = Path(__file__).resolve().parents[2]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import argparse
 import json
 import gzip
 import os
 import time
-import sys
 import importlib.util
-from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
 from tqdm import tqdm
