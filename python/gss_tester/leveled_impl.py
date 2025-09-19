@@ -52,43 +52,31 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         raise NotImplementedError
 
     def push(self, value: T) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.push(value)
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.pop()
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def is_empty(self) -> bool:
-        return len(self.to_stacks()) == 0
+        raise NotImplementedError
 
     def isolate(self, value: T) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.isolate(value)
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.apply(func)
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.prune(predicate)
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
-        ref_impl = self.to_reference_impl()
-        new_ref_impl = ref_impl.merge(other)
-        return LeveledGSS.from_stacks(new_ref_impl.to_stacks())
+        raise NotImplementedError
 
     def peek(self) -> Set[T]:
-        return self.to_reference_impl().peek()
+        raise NotImplementedError
 
     def reduce_acc(self) -> Optional[Acc]:
-        return self.to_reference_impl().reduce_acc()
+        raise NotImplementedError
 
     def validate_invariants(self) -> None:
         raise NotImplementedError
