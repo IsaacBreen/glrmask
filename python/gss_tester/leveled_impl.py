@@ -153,6 +153,97 @@ def _normalize_suck_up(node: _LeveledNode[T, Acc]) -> _LeveledNode[T, Acc]:
     # Bottom-up normalization: recursively transform children first.
     if isinstance(node, _Empty):
         return node
+    if isinstance(node, _WithAcc):
+        # Its inner is a pure A-level tree; no accs inside; nothing to do.
+        return node
+    if isinstance(node, _Internal):
+        # Normalize children first
+        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
+        for key_t, depth_map in node.children.items():
+            for depth, child in depth_map.items():
+                norm = _normalize_suck_up(child)
+                new_children.setdefault(key_t, {})[depth] = norm
+
+        # Check suck-up condition: if all children are WithAcc and share the same acc
+        # If there are no children, it's empty
+        if not new_children:
+            return _Empty()
+
+        # Flatten list of children
+        child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
+        for kt, dm in new_children.items():
+            for d, ch in dm.items():
+                child_list.append((kt, d, ch))
+
+        all_with_acc = all(isinstance(ch, _WithAcc) for _, _, ch in child_list)
+        if all_with_acc:
+            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, _WithAcc))
+            if len(accs) == 1:
+                # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
+                the_acc = next(iter(accs))
+                # Build an A-level Internal whose children map keys to the inner nodes of the children.
+                # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
+                # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
+                # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
+                # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
+                # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
+                # (t, depth) pair.
+                inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
+                has_empty = False
+                # Collect A-level children from the WithAcc children
+                for kt, d, ch in child_list:
+                    chw = ch  # type: ignore[assignment]
+                    assert isinstance(chw, _WithAcc)
+                    if kt is _EPS:
+                        # This child represents an empty sequence among the group
+                        # Representing empty within A-level is naturally done by allowing Root.
+                        # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
+                        # and other children may also add edges, we simply union them.
+                        # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
+                        # if it's Root, that means the empty sequence is present.
+                        if isinstance(chw.node, _InnerRoot):
+                            has_empty = True
+                        else:
+                            # This corresponds to "some non-empty A-level sequences that appear even though the parent
+                            # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
+                            # suck-ups; we include them.
+                            for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
+                                for dd, inn in dm.items():
+                                    inner_children.setdefault(tt, {})[dd] = inn
+                            has_empty = True
+                    else:
+                        # Regular T key
+                        if isinstance(chw.node, _InnerRoot):
+                            # The child being Root under a non-EPS edge means: the sequence [kt] exists.
+                            # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
+                            # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
+                            key_t: T = kt  # type: ignore[assignment]
+                            depth_int = max(d - 1, 0)
+                            inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
+                        else:
+                            # Merge edges
+                            key_t: T = kt  # type: ignore[assignment]
+                            for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
+                                # We store the entire inner subtree under (key_t, depth-1)
+                                inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
+
+                # If there were no non-EPS children but has_empty is True and there are no other children,
+                # then the inner is just Root.
+                if not inner_children:
+                    if has_empty:
+                        inner: _InnerNode[T] = _InnerRoot()
+                    else:
+                        # Should not happen (no children => handled above), but keep safe.
+                        inner = _InnerRoot()
+                else:
+                    inner = _InnerInternal(children=inner_children)
+
+                return _WithAcc(node=inner, acc=the_acc)
+
+        return _Internal(children=new_children)
+
+    # Should not reach
+    return node
 
 
 # ------------------------------
@@ -425,99 +516,6 @@ def _reduce_node(node: _LeveledNode[T, Acc],
 # ------------------------------
 # Invariant validation
 # ------------------------------
-    if isinstance(node, _WithAcc):
-        # Its inner is a pure A-level tree; no accs inside; nothing to do.
-        return node
-    if isinstance(node, _Internal):
-        # Normalize children first
-        new_children: Dict[object, Dict[int, _LeveledNode[T, Acc]]] = {}
-        for key_t, depth_map in node.children.items():
-            for depth, child in depth_map.items():
-                norm = _normalize_suck_up(child)
-                new_children.setdefault(key_t, {})[depth] = norm
-
-        # Check suck-up condition: if all children are WithAcc and share the same acc
-        # If there are no children, it's empty
-        if not new_children:
-            return _Empty()
-
-        # Flatten list of children
-        child_list: List[Tuple[object, int, _LeveledNode[T, Acc]]] = []
-        for kt, dm in new_children.items():
-            for d, ch in dm.items():
-                child_list.append((kt, d, ch))
-
-        all_with_acc = all(isinstance(ch, _WithAcc) for _, _, ch in child_list)
-        if all_with_acc:
-            accs: Set[Acc] = set(ch.acc for _, _, ch in child_list if isinstance(ch, _WithAcc))
-            if len(accs) == 1:
-                # We can "suck up": create a single WithAcc whose inner combines the A-level of all children.
-                the_acc = next(iter(accs))
-                # Build an A-level Internal whose children map keys to the inner nodes of the children.
-                # The EPS child (empty) corresponds to retaining the empty sequence inside the A-level inner.
-                # To incorporate EPS into A-level inner, we treat EPS -> Root child as representing an empty sequence.
-                # We can merge all children's inner trees into one A-level node by creating an A-level Internal where
-                # each edge t maps to the union of the children's inner nodes under that t. For simplicity, we do not
-                # attempt to merge A-level siblings with the same t and different depths; we keep one entry per
-                # (t, depth) pair.
-                inner_children: Dict[T, Dict[int, _InnerNode[T]]] = {}
-                has_empty = False
-                # Collect A-level children from the WithAcc children
-                for kt, d, ch in child_list:
-                    chw = ch  # type: ignore[assignment]
-                    assert isinstance(chw, _WithAcc)
-                    if kt is _EPS:
-                        # This child represents an empty sequence among the group
-                        # Representing empty within A-level is naturally done by allowing Root.
-                        # We mark has_empty to ensure Root is included; but since a WithAcc's node can be Root
-                        # and other children may also add edges, we simply union them.
-                        # We union the child.inner into the overall A-level; if it's non-Root, include those edges;
-                        # if it's Root, that means the empty sequence is present.
-                        if isinstance(chw.node, _InnerRoot):
-                            has_empty = True
-                        else:
-                            # This corresponds to "some non-empty A-level sequences that appear even though the parent
-                            # edge was EPS". It can happen if the empty group collected non-empty A-level nodes via previous
-                            # suck-ups; we include them.
-                            for tt, dm in chw.node.children.items():  # type: ignore[union-attr]
-                                for dd, inn in dm.items():
-                                    inner_children.setdefault(tt, {})[dd] = inn
-                            has_empty = True
-                    else:
-                        # Regular T key
-                        if isinstance(chw.node, _InnerRoot):
-                            # The child being Root under a non-EPS edge means: the sequence [kt] exists.
-                            # So in A-level inner, we create an edge kt -> Root with some depth (we can use depth-1 non-negative)
-                            # Keep the provided depth (already corresponds to remaining length); to be safe ensure >= 0
-                            key_t: T = kt  # type: ignore[assignment]
-                            depth_int = max(d - 1, 0)
-                            inner_children.setdefault(key_t, {})[depth_int] = _InnerRoot()
-                        else:
-                            # Merge edges
-                            key_t: T = kt  # type: ignore[assignment]
-                            for dd, inn in ((max(d - 1, 0), chw.node),):  # one entry, but we may later elaborate
-                                # We store the entire inner subtree under (key_t, depth-1)
-                                inner_children.setdefault(key_t, {})[dd] = inn  # type: ignore[arg-type]
-
-                # If there were no non-EPS children but has_empty is True and there are no other children,
-                # then the inner is just Root.
-                if not inner_children:
-                    if has_empty:
-                        inner: _InnerNode[T] = _InnerRoot()
-                    else:
-                        # Should not happen (no children => handled above), but keep safe.
-                        inner = _InnerRoot()
-                else:
-                    inner = _InnerInternal(children=inner_children)
-
-                return _WithAcc(node=inner, acc=the_acc)
-
-        return _Internal(children=new_children)
-
-    # Should not reach
-    return node
-
-
 def _enumerate_pairs_from_node(node: _LeveledNode[T, Acc]) -> List[Tuple[List[T], Acc]]:
     # Enumerate (stack, acc) pairs represented by the leveled node
     result: List[Tuple[List[T], Acc]] = []
