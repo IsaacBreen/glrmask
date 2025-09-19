@@ -88,11 +88,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if not stacks:
             return LeveledGSS(Upper({}))
 
-        accs = {s[1] for s in stacks}
-        if len(accs) == 1:
-            acc = accs.pop()
+        # Check if all accumulators are the same. This is safer than using a set for unhashable accs.
+        first_acc = stacks[0][1]
+        if all(s[1] == first_acc for s in stacks[1:]):
             list_of_stacks = [s[0] for s in stacks]
-            return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), acc))
+            return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), first_acc))
 
         children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
@@ -107,6 +107,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if top not in children:
                 children[top] = {}
             children[top][length] = cls.from_stacks(group)
+
+        # Canonicalization: if all children are interfaces with the same accumulator,
+        # "suck up" the accumulator into a single parent interface node.
+        all_children = [c for d in children.values() for c in d.values()]
+        if all_children and all(isinstance(c.inner, Interface) for c in all_children):
+            child_first_acc = all_children[0].inner.acc
+            if all(c.inner.acc == child_first_acc for c in all_children[1:]):
+                # The invariant is violated. This structure should be an Interface node.
+                # We can reconstruct it from the original stacks for this call.
+                list_of_stacks = [s[0] for s in stacks]
+                return LeveledGSS(Interface(Lower.from_stacks(list_of_stacks), child_first_acc))
 
         return LeveledGSS(Upper(children))
 
@@ -184,6 +195,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def validate_invariants(self) -> None:
         if isinstance(self.inner, Upper):
+            if not self.inner.children:
+                return  # An empty Upper represents a valid empty GSS.
+
             # Invariant: upper must have at least one child.
             all_children = [
                 child
