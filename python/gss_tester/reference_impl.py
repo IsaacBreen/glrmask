@@ -39,26 +39,15 @@ class ReferenceGSS(GSS[T, Acc]):
         # On creation, merge any stacks with identical values by merging their accumulators.
         # This ensures the GSS is always in a canonical form.
         merged: Dict[Tuple[T, ...], Acc] = {}
-        empty_acc: Optional[Acc] = None
-
         for vals, acc in self._stacks:
             if not vals:
-                # This is an empty stack. Merge its accumulator.
-                if empty_acc is None:
-                    empty_acc = acc
-                else:
-                    empty_acc = empty_acc.merge(acc)
+                continue
+            key = tuple(vals)
+            if key in merged:
+                merged[key] = merged[key].merge(acc)
             else:
-                # This is a non-empty stack.
-                key = tuple(vals)
-                if key in merged:
-                    merged[key] = merged[key].merge(acc)
-                else:
-                    merged[key] = acc
-        new_stacks = [(list(key), acc) for key, acc in merged.items()]
-        if empty_acc is not None:
-            new_stacks.append(([], empty_acc))
-        self._stacks = new_stacks
+                merged[key] = acc
+        self._stacks = [(list(key), acc) for key, acc in merged.items()]
 
     @classmethod
     def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
@@ -79,15 +68,12 @@ class ReferenceGSS(GSS[T, Acc]):
         return ReferenceGSS(new_stacks)
 
     def pop(self) -> 'ReferenceGSS[T, Acc]':
-        # Pop from all non-empty stacks. Empty stacks are preserved.
+        # Pop from all non-empty stacks. Empty stacks are discarded.
         # If multiple stacks become identical, they are merged by the constructor.
         new_stacks: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:
             if vals:
                 new_stacks.append((vals[:-1], acc))
-            else:
-                # Preserve empty stacks
-                new_stacks.append((vals, acc))
         return ReferenceGSS(new_stacks)
 
     def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
