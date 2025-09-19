@@ -117,14 +117,23 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if not stacks:
             return LeveledGSS(Upper({}))
 
+        # If any stack is empty, the representation must be an Interface node.
+        # This implies a single accumulator, so we merge them all.
+        if any(not stack for stack, _ in stacks):
+            all_structs = [stack for stack, _ in stacks]
+            all_accs = [acc for _, acc in stacks]
+            merged_acc = reduce(lambda a, b: a.merge(b), all_accs)
+            return LeveledGSS(Interface(Lower.from_stacks(all_structs), merged_acc))
+
+        # Original logic for when all stacks are non-empty.
         children: Dict[T, Dict[int, 'LeveledGSS[T, Acc]']] = {}
         stacks_by_top_and_len: Dict[Tuple[T, int], List[Tuple[List[T], Acc]]] = defaultdict(list)
 
         for stack, acc in stacks:
-            if stack:
-                top = stack[-1]
-                prefix = stack[:-1]
-                stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
+            # We know `stack` is not empty here due to the check above.
+            top = stack[-1]
+            prefix = stack[:-1]
+            stacks_by_top_and_len[(top, len(prefix))].append((prefix, acc))
 
         for (top, length), group in stacks_by_top_and_len.items():
             if top not in children:
