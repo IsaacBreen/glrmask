@@ -50,11 +50,11 @@ class InternalInner(Generic[T]):
     children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]
 
 @dataclass(frozen=True, eq=True)
-class RootInner:
-    """Represents a GSS containing just one empty stack: {[]}. """
+class LeafInner:
+    """Represents a GSS containing just one empty stack: {[]}, a leaf in the trie. """
     pass
 
-LeveledGSSInnerVariant = Union[InternalInner[T], RootInner]
+LeveledGSSInnerVariant = Union[InternalInner[T], LeafInner]
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSSInner(GSS[T, Unit], Generic[T]):
@@ -71,8 +71,8 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         return cls(None)
 
     @classmethod
-    def root(cls) -> 'LeveledGSSInner[T]':
-        return cls(RootInner())
+    def leaf(cls) -> 'LeveledGSSInner[T]':
+        return cls(LeafInner())
 
     @classmethod
     def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSSInner[T]']]) -> 'LeveledGSSInner[T]':
@@ -86,8 +86,8 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
             return cls.empty()
 
         if set(cleaned.keys()) == {EPSILON} and set(cleaned[EPSILON].keys()) == {0}:
-            if isinstance(cleaned[EPSILON][0].variant, RootInner):
-                return cls.root()
+            if isinstance(cleaned[EPSILON][0].variant, LeafInner):
+                return cls.leaf()
         
         return cls(InternalInner(cleaned))
 
@@ -108,7 +108,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         match self.variant:
             case None:
                 return self
-            case RootInner():
+            case LeafInner():
                 return self.empty()
             case InternalInner(children):
                 result = self.empty()
@@ -126,16 +126,16 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         match self.variant:
             case None:
                 return self
-            case RootInner():
+            case LeafInner():
                 return self if value is None else self.empty()
             case InternalInner(children):
                 key = EPSILON if value is None else value
                 by_depth = children.get(key, {})
                 if not by_depth:
                     return self.empty()
-                
+
                 if key is EPSILON:
-                    return self.root()
+                    return self.leaf()
 
                 return self.internal({key: by_depth})
 
@@ -157,7 +157,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def peek(self) -> Set[T]:
         match self.variant:
-            case None | RootInner():
+            case None | LeafInner():
                 return set()
             case InternalInner(children):
                 return {cast(T, t) for t in children.keys() if t is not EPSILON}
@@ -172,7 +172,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
     # --- LeveledA specific helpers ---
     def has_epsilon(self) -> bool:
         match self.variant:
-            case RootInner():
+            case LeafInner():
                 return True
             case InternalInner(children):
                 return EPSILON in children
@@ -181,7 +181,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
 
     def max_depth(self) -> int:
         match self.variant:
-            case None | RootInner():
+            case None | LeafInner():
                 return 0
             case InternalInner(children):
                 max_d = 0
@@ -194,7 +194,7 @@ class LeveledGSSInner(GSS[T, Unit], Generic[T]):
         match self.variant:
             case None:
                 return
-            case RootInner():
+            case LeafInner():
                 yield tuple()
             case InternalInner(children):
                 for t, by_depth in children.items():
@@ -228,7 +228,7 @@ def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T
 
     children: Dict[Optional[T], Dict[int, LeveledGSSInner[T]]] = {}
     if has_empty:
-        children[EPSILON] = {0: cls.root()}
+        children[EPSILON] = {0: cls.leaf()}
 
     for t, by_depth in buckets.items():
         children[t] = {}
@@ -241,7 +241,7 @@ def _build_inner_from_seqs(cls: Type[LeveledGSSInner[T]], seqs: Iterable[Tuple[T
 
 def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
     match a.variant:
-        case None | RootInner():
+        case None | LeafInner():
             return
         case InternalInner(children):
             for t, by_depth in children.items():
@@ -250,7 +250,7 @@ def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
                         errors.append("Inner-layer internal node contains an Empty child")
                     if t is EPSILON:
                         if d != 0: errors.append("Inner-layer EPSILON edge with non-zero depth")
-                        if not isinstance(ch.variant, RootInner): errors.append("Inner-layer EPSILON edge must point to Root")
+                        if not isinstance(ch.variant, LeafInner): errors.append("Inner-layer EPSILON edge must point to Leaf")
                     else:
                         if d < 1: errors.append("Inner-layer non-epsilon edge has depth < 1")
                         child_max = ch.max_depth()
@@ -263,19 +263,19 @@ def _validate_inner(a: LeveledGSSInner[T], errors: List[str]) -> None:
 # -----------------------------
 
 @dataclass(frozen=True, eq=True)
-class WithAcc(Generic[T, Acc]):
+class UniformAccumulatorNode(Generic[T, Acc]):
     node: LeveledGSSInner[T]
     acc: Acc
 
 @dataclass(frozen=True, eq=True)
-class Internal(Generic[T, Acc]):
+class MixedAccumulatorNode(Generic[T, Acc]):
     children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']]
 
 @dataclass(frozen=True, eq=True)
-class Empty:
+class EmptyNode:
     pass
 
-LeveledVariant = Union[WithAcc[T, Acc], Internal[T, Acc], Empty]
+LeveledVariant = Union[UniformAccumulatorNode[T, Acc], MixedAccumulatorNode[T, Acc], EmptyNode]
 
 # -----------------------------
 # Main LeveledGSS
@@ -287,13 +287,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def empty(cls) -> 'LeveledGSS[T, Acc]':
-        return cls(Empty())
+        return cls(EmptyNode())
 
     @classmethod
     def with_acc(cls, node: LeveledGSSInner[T], acc: Acc) -> 'LeveledGSS[T, Acc]':
         if node.is_empty():
             return cls.empty()
-        return cls(WithAcc(node=node, acc=acc))
+        return cls(UniformAccumulatorNode(node=node, acc=acc))
 
     @classmethod
     def internal(cls, children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']]) -> 'LeveledGSS[T, Acc]':
@@ -304,7 +304,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 cleaned[t] = c2
         if not cleaned:
             return cls.empty()
-        return cls(Internal(children=cleaned))
+        return cls(MixedAccumulatorNode(children=cleaned))
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
@@ -327,11 +327,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def pop(self) -> 'LeveledGSS[T, Acc]':
         match self.variant:
-            case Empty():
+            case EmptyNode():
                 return self
-            case WithAcc(node=a, acc=acc):
+            case UniformAccumulatorNode(node=a, acc=acc):
                 return LeveledGSS.with_acc(a.pop(), acc)
-            case Internal(children=children):
+            case MixedAccumulatorNode(children=children):
                 result = LeveledGSS.empty()
                 for t, by_depth in children.items():
                     for _, child in by_depth.items():
@@ -339,19 +339,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return result
 
     def is_empty(self) -> bool:
-        return isinstance(self.variant, Empty)
+        return isinstance(self.variant, EmptyNode)
 
     def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
         match self.variant:
-            case Empty():
+            case EmptyNode():
                 return self
-            case Internal(children=children):
+            case MixedAccumulatorNode(children=children):
                 key = EPSILON if value is None else value
                 by_depth = children.get(key, {})
                 if not by_depth:
                     return LeveledGSS.empty()
                 return LeveledGSS.internal({key: by_depth})
-            case WithAcc(node=a, acc=acc):
+            case UniformAccumulatorNode(node=a, acc=acc):
                 return LeveledGSS.with_acc(a.isolate(value), acc)
 
     def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
@@ -360,15 +360,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         def apply_b(node: 'LeveledGSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
             key = id(node)
             if key in memo_b: return memo_b[key]
-            
+
             res: 'LeveledGSS[T, Acc]'
             match node.variant:
-                case Empty():
+                case EmptyNode():
                     res = node
-                case WithAcc(node=inner_node, acc=acc):
+                case UniformAccumulatorNode(node=inner_node, acc=acc):
                     new_acc = func(acc)
                     res = node if new_acc == acc else LeveledGSS.with_acc(inner_node, new_acc)
-                case Internal(children=children):
+                case MixedAccumulatorNode(children=children):
                     changed = False
                     new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = {}
                     for t, by_depth in children.items():
@@ -379,7 +379,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                             if new_child is not child: changed = True
                         new_children[t] = inner_map
                     res = _canonicalize(LeveledGSS.internal(new_children)) if changed else node
-            
+
             memo_b[key] = res
             return res
 
@@ -388,11 +388,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
         def prune_b(node: 'LeveledGSS[T, Acc]') -> 'LeveledGSS[T, Acc]':
             match node.variant:
-                case Empty():
+                case EmptyNode():
                     return node
-                case WithAcc(acc=acc):
+                case UniformAccumulatorNode(acc=acc):
                     return node if predicate(acc) else LeveledGSS.empty()
-                case Internal(children=children):
+                case MixedAccumulatorNode(children=children):
                     new_children: Dict[Optional[T], Dict[int, 'LeveledGSS[T, Acc]']] = {}
                     for t, by_depth in children.items():
                         new_by_depth: Dict[int, 'LeveledGSS[T, Acc]'] = {}
@@ -416,20 +416,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def peek(self) -> Set[T]:
         match self.variant:
-            case Empty():
+            case EmptyNode():
                 return set()
-            case Internal(children=children):
+            case MixedAccumulatorNode(children=children):
                 return {cast(T, t) for t in children.keys() if t is not EPSILON}
-            case WithAcc(node=node):
+            case UniformAccumulatorNode(node=node):
                 return node.peek()
 
     def reduce_acc(self) -> Optional[Acc]:
         match self.variant:
-            case Empty():
+            case EmptyNode():
                 return None
-            case WithAcc(acc=acc):
+            case UniformAccumulatorNode(acc=acc):
                 return acc
-            case Internal(children=children):
+            case MixedAccumulatorNode(children=children):
                 acc_opt: Optional[Acc] = None
                 for _, by_depth in children.items():
                     for _, ch in by_depth.items():
@@ -480,9 +480,9 @@ def _build_from_stack_map(cls: Type[LeveledGSS[T, Acc]], stack_map: Dict[Tuple[T
 
 def _canonicalize(node: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
     match node.variant:
-        case Empty() | WithAcc():
+        case EmptyNode() | UniformAccumulatorNode():
             return node
-        case Internal(children):
+        case MixedAccumulatorNode(children):
             acc_val: Optional[Acc] = None
             all_with_acc = True
             child_nodes: List[Tuple[Optional[T], int, LeveledGSSInner[T]]] = []
@@ -491,7 +491,7 @@ def _canonicalize(node: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
                 for d, ch in by_depth.items():
                     if not all_with_acc: break
                     match ch.variant:
-                        case WithAcc(node=a_node, acc=child_acc):
+                        case UniformAccumulatorNode(node=a_node, acc=child_acc):
                             if acc_val is None: acc_val = child_acc
                             elif child_acc != acc_val: all_with_acc = False
                             child_nodes.append((t, d, a_node))
@@ -510,12 +510,12 @@ def _canonicalize(node: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
 
 def _enumerate(g: LeveledGSS[T, Acc]) -> Iterator[Tuple[List[T], Acc]]:
     match g.variant:
-        case Empty():
+        case EmptyNode():
             return
-        case WithAcc(node=node, acc=acc):
+        case UniformAccumulatorNode(node=node, acc=acc):
             for seq in node.enumerate_stacks():
                 yield (list(seq), acc)
-        case Internal(children=children):
+        case MixedAccumulatorNode(children=children):
             for t, by_depth in children.items():
                 for _, child in by_depth.items():
                     for tail, acc in _enumerate(child):
@@ -531,11 +531,11 @@ def _to_stack_map(g: LeveledGSS[T, Acc]) -> Dict[Tuple[T, ...], Acc]:
 
 def _max_depth(g: LeveledGSS[T, Acc]) -> int:
     match g.variant:
-        case Empty():
+        case EmptyNode():
             return 0
-        case WithAcc(node=node):
+        case UniformAccumulatorNode(node=node):
             return node.max_depth()
-        case Internal(children=children):
+        case MixedAccumulatorNode(children=children):
             max_d = 0
             for _, by_depth in children.items():
                 max_d = max(max_d, *by_depth.keys())
@@ -543,15 +543,15 @@ def _max_depth(g: LeveledGSS[T, Acc]) -> int:
 
 def _validate(g: LeveledGSS[T, Acc], errors: List[str]) -> None:
     match g.variant:
-        case Empty():
+        case EmptyNode():
             return
-        case WithAcc(node=node):
+        case UniformAccumulatorNode(node=node):
             try:
                 node.validate_invariants()
             except ValueError as e:
                 errors.append(f"Contained LeveledGSSInner has invariant violations: {e}")
             return
-        case Internal(children=children):
+        case MixedAccumulatorNode(children=children):
             acc_set: List[Acc] = []
             every_child_with_acc = True
             for t, by_depth in children.items():
@@ -568,9 +568,9 @@ def _validate(g: LeveledGSS[T, Acc], errors: List[str]) -> None:
                             errors.append(f"B-layer edge depth mismatch: expected {child_max + 1}, found {d}")
 
                     match ch.variant:
-                        case WithAcc(acc=acc): acc_set.append(acc)
+                        case UniformAccumulatorNode(acc=acc): acc_set.append(acc)
                         case _: every_child_with_acc = False
                     _validate(ch, errors)
 
             if every_child_with_acc and acc_set and all(a == acc_set[0] for a in acc_set):
-                errors.append("Internal node has all WithAcc children with equal accs; should be sucked up")
+                errors.append("Internal node has all UniformAccumulatorNode children with equal accs; should be sucked up")
