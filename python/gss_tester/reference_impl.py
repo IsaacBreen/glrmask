@@ -20,7 +20,7 @@ class ReferenceGSS(GSS[T, Acc]):
     Notes on semantics (aligned with GSS interface):
     - from_stacks: constructs a new GSS from explicit stacks.
     - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-    - pop(): for all non-empty stacks, pops the top element. Empty stacks are preserved.
+    - pop(): for all non-empty stacks, pops the top element. Empty stacks are discarded.
              Returns a new GSS with the resulting stacks.
     - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
     - apply(func): transforms each accumulator independently; returns a new GSS.

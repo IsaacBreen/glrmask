@@ -204,9 +204,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         for vals, acc in stacks:
             if vals:
                 new_stacks.append((vals[:-1], acc))
-            else:
-                # Empty stacks are preserved unchanged
-                new_stacks.append((vals, acc))
         return LeveledGSS.from_stacks(new_stacks)
 
     def is_empty(self) -> bool:

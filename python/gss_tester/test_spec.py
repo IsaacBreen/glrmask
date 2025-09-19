@@ -209,8 +209,8 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
 
     gss_pe_popped = gss_pe_merged.pop()
-    # pop should only affect non-empty stacks.
-    # Expected: [] acc 1, [] acc 2 -> merged to [] acc 3
+    # pop should discard the empty stack and pop the non-empty one.
+    # Expected: `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
     yield from _yield_state(gss_pe_popped)
 
     # --- Test 14: String values and popn(0) ---
