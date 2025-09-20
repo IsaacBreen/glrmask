@@ -135,13 +135,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
-        if isinstance(self.inner, Interface):
-            return LeveledGSS(UpperBranch(children={}, empty=None))
-        all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
-        new_inner: Upper[T, Acc] = _merge_uppers(all_children)
-        if isinstance(new_inner, Interface):
-            new_inner = _convert_interface_to_upper_brach(new_inner)
-        return LeveledGSS(new_inner)
+        # if isinstance(self.inner, Interface):
+        #     return LeveledGSS(UpperBranch(children={}, empty=None))
+        # all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+        # new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+        # if isinstance(new_inner, Interface):
+        #     new_inner = _convert_interface_to_upper_brach(new_inner)
+        # return LeveledGSS(new_inner)
+        return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
     def is_empty(self) -> bool:
         return len(self.to_stacks()) == 0
 
