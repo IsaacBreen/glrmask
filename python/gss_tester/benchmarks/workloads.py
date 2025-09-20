@@ -4,6 +4,7 @@ import time
 import tracemalloc
 import math
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Dict, Any, List, Tuple, Optional, Type, Iterable
 
@@ -21,6 +22,154 @@ class WorkloadResult:
     timed_out: bool = False
 
 
+class TimingCollector:
+    """Collects timing statistics for GSS method calls."""
+    def __init__(self):
+        self.stats: Dict[str, Dict[str, Any]] = {}
+
+    def record(self, method_name: str, ms: float):
+        if method_name not in self.stats:
+            self.stats[method_name] = {'calls': 0, 'total_ms': 0.0}
+        self.stats[method_name]['calls'] += 1
+        self.stats[method_name]['total_ms'] += ms
+
+    def get_stats(self) -> Dict[str, Dict[str, Any]]:
+        return self.stats
+
+    def reset(self):
+        self.stats = {}
+
+
+class BenchmarkContext:
+    """Manages state for a single benchmark run, including timing and phases."""
+    def __init__(self, mem_profile: bool):
+        self.collector = TimingCollector()
+        self.phases: List[Dict[str, Any]] = []
+        self.mem_profile = mem_profile
+        self.start_ms = _now_ms()
+        self.timed_out = False
+        self._memctx = _with_mem_tracking(mem_profile)
+
+    def __enter__(self):
+        self._memctx.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._memctx.__exit__(exc_type, exc_val, exc_tb)
+
+    @contextmanager
+    def phase(self, name: str, **kwargs):
+        self.collector.reset()
+        p_start_ms = _now_ms()
+        phase_data = {"phase": name, **kwargs}
+        yield phase_data
+        phase_data['ms'] = _now_ms() - p_start_ms
+        phase_data['method_stats'] = self.collector.get_stats()
+        self.phases.append(phase_data)
+        self._memctx.checkpoint()
+
+    @property
+    def peak_mem_bytes(self) -> int:
+        return self._memctx.peak_bytes
+
+
+def create_timed_gss_class(gss_class: Type[GSS], collector: TimingCollector) -> Type[GSS]:
+    """Dynamically creates a GSS wrapper class that records method timings."""
+
+    class TimedGSS(GSS[T, Acc]):
+        _collector_ref = collector
+        _wrapped_class_ref = gss_class
+
+        def __init__(self, wrapped_instance: GSS[T, Acc]):
+            self._wrapped = wrapped_instance
+
+        @classmethod
+        def from_stacks(cls: Type, stacks: List[Tuple[List[T], Acc]]) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = cls._wrapped_class_ref.from_stacks(stacks)
+            cls._collector_ref.record('from_stacks', _now_ms() - start_ms)
+            return cls(result)
+
+        def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+            start_ms = _now_ms()
+            result = self._wrapped.to_stacks()
+            self._collector_ref.record('to_stacks', _now_ms() - start_ms)
+            return result
+
+        def push(self: TimedGSS, value: T) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.push(value)
+            self._collector_ref.record('push', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        def pop(self: TimedGSS) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.pop()
+            self._collector_ref.record('pop', _now_ms() - start_ms)
+            return TimedGSS(result)
+        
+        def popn(self: TimedGSS, n: int) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.popn(n)
+            self._collector_ref.record('popn', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        def is_empty(self) -> bool:
+            start_ms = _now_ms()
+            result = self._wrapped.is_empty()
+            self._collector_ref.record('is_empty', _now_ms() - start_ms)
+            return result
+
+        def isolate(self: TimedGSS, value: Optional[T]) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.isolate(value)
+            self._collector_ref.record('isolate', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        def apply(self: TimedGSS, func: Callable[[Acc], Acc]) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.apply(func)
+            self._collector_ref.record('apply', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        def prune(self: TimedGSS, predicate: Callable[[Acc], bool]) -> TimedGSS[T, Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.prune(predicate)
+            self._collector_ref.record('prune', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        def merge(self: TimedGSS, other: GSS[T, Acc]) -> TimedGSS[T, Acc]:
+            # Unwrap the other GSS if it's also a TimedGSS
+            other_wrapped = other._wrapped if isinstance(other, TimedGSS) else other
+            start_ms = _now_ms()
+            result = self._wrapped.merge(other_wrapped)
+            self._collector_ref.record('merge', _now_ms() - start_ms)
+            return TimedGSS(result)
+
+        @classmethod
+        def merge_many(cls: Type, gss_list: Iterable[GSS[T, Acc]]) -> TimedGSS[T, Acc]:
+            # Unwrap all GSS instances in the list
+            unwrapped_list = [g._wrapped if isinstance(g, TimedGSS) else g for g in gss_list]
+            start_ms = _now_ms()
+            result = cls._wrapped_class_ref.merge_many(unwrapped_list)
+            cls._collector_ref.record('merge_many', _now_ms() - start_ms)
+            return cls(result)
+
+        def peek(self) -> Set[T]:
+            start_ms = _now_ms()
+            result = self._wrapped.peek()
+            self._collector_ref.record('peek', _now_ms() - start_ms)
+            return result
+
+        def reduce_acc(self) -> Optional[Acc]:
+            start_ms = _now_ms()
+            result = self._wrapped.reduce_acc()
+            self._collector_ref.record('reduce_acc', _now_ms() - start_ms)
+            return result
+            
+    return TimedGSS
+
+
 @dataclass
 class Workload:
     """
@@ -34,7 +183,7 @@ class Workload:
     name: str
     description: str
     param_presets: Dict[str, Dict[str, Any]]
-    runner: Callable[[Type[GSS], Dict[str, Any], str, int, bool], WorkloadResult]
+    runner: Callable[[Type[GSS], Dict[str, Any], str, int, BenchmarkContext], WorkloadResult]
 
 
 # Registry for discovery/filtering
@@ -192,102 +341,65 @@ def _workload_split_modify_merge_shared(
     params: Dict[str, Any],
     preset: str,
     seed: int,
-    mem_profile: bool,
+    context: BenchmarkContext,
 ) -> WorkloadResult:
     """
     Build a wide DAG with substantial sharing, then create k shallowly-modified clones and merge them all.
     The shallow modification is a single push with a per-clone tag. This should exercise the ability to
     merge variants without revisiting the entire base structure if sharing is preserved.
-
-    Params:
-      depth: number of levels for _build_wide_dag
-      branching: number of clones per level for _build_wide_dag
-      clones: number of clones to create from the base
-      measure_counts: whether to compute to_stacks() size (expensive)
-      max_ms: soft budget for the whole workload
     """
     max_ms = params.get("max_ms", None)
     measure_counts = params.get("measure_counts", False)
     depth = int(params["depth"])
     branching = int(params["branching"])
     clones_n = int(params["clones"])
-
-    phases: List[Dict[str, Any]] = []
-    timed_out = False
-    start_ms = _now_ms()
     totals: Dict[str, Any] = {}
 
     try:
-        with _with_mem_tracking(mem_profile) as memctx:
-            # Phase 1: Build base
-            phase = {"phase": "build_base"}
-            p0 = _now_ms()
-            base, build_info = _build_wide_dag(gss_class, depth, branching, seed)
-            phase["ms"] = _now_ms() - p0
-            phase["detail"] = build_info
-            if measure_counts:
-                c0 = _now_ms()
-                phase["base_stack_count"] = _count_stacks_safely(base)
-                phase["count_ms"] = _now_ms() - c0
-            phases.append(phase)
-            memctx.checkpoint()
-            if _maybe_timeout(start_ms, max_ms):
-                timed_out = True
-
-            # Phase 2: Shallow modifications on clones
-            if not timed_out:
-                phase = {"phase": "create_modified_clones", "num_clones": clones_n}
-                clone_start = _now_ms()
-                clones: List[GSS] = []
-                for i in range(clones_n):
-                    # push a per-clone tag value shallowly
-                    tag = (depth + 1) << 20 | i  # distinct top labels
-                    clones.append(base.push(tag))
-                    if _maybe_timeout(start_ms, max_ms):
-                        timed_out = True
-                        break
-                phase["ms"] = _now_ms() - clone_start
-                phases.append(phase)
-                memctx.checkpoint()
-
-            # Phase 3: merge_many clones
-            if not timed_out:
-                phase = {"phase": "merge_clones"}
-                m0 = _now_ms()
-                merged = _merge_many(gss_class, clones)
-                phase["ms"] = _now_ms() - m0
+        with context:
+            with context.phase("build_base") as phase:
+                base, build_info = _build_wide_dag(gss_class, depth, branching, seed)
+                phase["detail"] = build_info
                 if measure_counts:
                     c0 = _now_ms()
-                    phase["merged_stack_count"] = _count_stacks_safely(merged)
+                    phase["base_stack_count"] = _count_stacks_safely(base)
                     phase["count_ms"] = _now_ms() - c0
-                phases.append(phase)
-                memctx.checkpoint()
+                if _maybe_timeout(context.start_ms, max_ms):
+                    context.timed_out = True
 
-            totals["total_ms"] = _now_ms() - start_ms
-            totals["peak_mem_bytes"] = memctx.peak_bytes
-            totals["timed_out"] = timed_out
+            if not context.timed_out:
+                with context.phase("create_modified_clones", num_clones=clones_n) as phase:
+                    clones: List[GSS] = []
+                    for i in range(clones_n):
+                        tag = (depth + 1) << 20 | i
+                        clones.append(base.push(tag))
+                        if _maybe_timeout(context.start_ms, max_ms):
+                            context.timed_out = True
+                            break
+
+            if not context.timed_out:
+                with context.phase("merge_clones") as phase:
+                    merged = _merge_many(gss_class, clones)
+                    if measure_counts:
+                        c0 = _now_ms()
+                        phase["merged_stack_count"] = _count_stacks_safely(merged)
+                        phase["count_ms"] = _now_ms() - c0
+
+            totals["total_ms"] = _now_ms() - context.start_ms
+            totals["peak_mem_bytes"] = context.peak_mem_bytes
+            totals["timed_out"] = context.timed_out
             totals["base_depth"] = depth
             totals["base_branching"] = branching
             totals["num_clones"] = clones_n
 
         return WorkloadResult(
-            name="split_modify_merge_shared",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=None,
-            timed_out=timed_out,
+            name="split_modify_merge_shared", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
         )
     except Exception as e:
         return WorkloadResult(
-            name="split_modify_merge_shared",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=f"{type(e).__name__}: {e}",
-            timed_out=timed_out,
+            name="split_modify_merge_shared", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
         )
 
 
@@ -296,99 +408,57 @@ def _workload_pairwise_merge_pop(
     params: Dict[str, Any],
     preset: str,
     seed: int,
-    mem_profile: bool,
+    context: BenchmarkContext,
 ) -> WorkloadResult:
     """
     Build a moderately wide base, then produce several pairs of shallowly different clones,
-    merge each pair, and immediately pop. This stresses both merge performance on shared
-    parents and correctness of pop-to-shared-parent at scale.
-
-    Params:
-      depth: depth for base builder
-      branching: branching for base builder
-      pairs: number of pairs to create
-      measure_counts: whether to compute to_stacks() counts
-      max_ms: time budget (soft)
+    merge each pair, and immediately pop.
     """
     max_ms = params.get("max_ms", None)
     measure_counts = params.get("measure_counts", False)
     depth = int(params["depth"])
     branching = int(params["branching"])
     pairs = int(params["pairs"])
-
-    phases: List[Dict[str, Any]] = []
-    timed_out = False
-    start_ms = _now_ms()
     totals: Dict[str, Any] = {}
 
     try:
-        with _with_mem_tracking(mem_profile) as memctx:
-            # Build base
-            phase = {"phase": "build_base"}
-            p0 = _now_ms()
-            base, info = _build_wide_dag(gss_class, depth, branching, seed)
-            phase["ms"] = _now_ms() - p0
-            phase["detail"] = info
-            if measure_counts:
-                c0 = _now_ms()
-                phase["base_stack_count"] = _count_stacks_safely(base)
-                phase["count_ms"] = _now_ms() - c0
-            phases.append(phase)
-            memctx.checkpoint()
+        with context:
+            with context.phase("build_base") as phase:
+                base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                phase["detail"] = info
+                if measure_counts:
+                    c0 = _now_ms()
+                    phase["base_stack_count"] = _count_stacks_safely(base)
+                    phase["count_ms"] = _now_ms() - c0
 
-            # Create and merge pairs
-            merged_times_ms: List[float] = []
-            popped_times_ms: List[float] = []
-            for i in range(pairs):
-                if _maybe_timeout(start_ms, max_ms):
-                    timed_out = True
-                    break
-                tag_a = (depth + 1) << 20 | (2 * i)
-                tag_b = (depth + 1) << 20 | (2 * i + 1)
-                g_a = base.push(tag_a)
-                g_b = base.push(tag_b)
+            with context.phase("pairwise_merge_and_pop") as phase:
+                for i in range(pairs):
+                    if _maybe_timeout(context.start_ms, max_ms):
+                        context.timed_out = True
+                        break
+                    tag_a = (depth + 1) << 20 | (2 * i)
+                    tag_b = (depth + 1) << 20 | (2 * i + 1)
+                    g_a = base.push(tag_a)
+                    g_b = base.push(tag_b)
+                    merged = g_a.merge(g_b)
+                    popped = merged.pop()
+                phase['num_pairs'] = i + 1
 
-                m0 = _now_ms()
-                merged = g_a.merge(g_b)
-                merged_times_ms.append(_now_ms() - m0)
-
-                p0 = _now_ms()
-                popped = merged.pop()
-                popped_times_ms.append(_now_ms() - p0)
-
-            phases.append({
-                "phase": "pairwise_merge_and_pop",
-                "num_pairs": len(merged_times_ms),
-                "merge_ms_stats": _stats(merged_times_ms),
-                "pop_ms_stats": _stats(popped_times_ms),
-            })
-            memctx.checkpoint()
-
-            totals["total_ms"] = _now_ms() - start_ms
-            totals["peak_mem_bytes"] = memctx.peak_bytes
-            totals["timed_out"] = timed_out
+            totals["total_ms"] = _now_ms() - context.start_ms
+            totals["peak_mem_bytes"] = context.peak_mem_bytes
+            totals["timed_out"] = context.timed_out
             totals["base_depth"] = depth
             totals["base_branching"] = branching
             totals["pairs"] = pairs
 
         return WorkloadResult(
-            name="pairwise_merge_pop",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=None,
-            timed_out=timed_out,
+            name="pairwise_merge_pop", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
         )
     except Exception as e:
         return WorkloadResult(
-            name="pairwise_merge_pop",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=f"{type(e).__name__}: {e}",
-            timed_out=timed_out,
+            name="pairwise_merge_pop", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
         )
 
 
@@ -397,19 +467,11 @@ def _workload_isolate_rare_top(
     params: Dict[str, Any],
     preset: str,
     seed: int,
-    mem_profile: bool,
+    context: BenchmarkContext,
 ) -> WorkloadResult:
     """
     Build a wide base with many distinct top-of-stack values, then isolate on a value
     that is present in only a tiny fraction of stacks.
-
-    Params:
-      depth: number of levels
-      branching: number of clones per level
-      target_index: pick which branch value to isolate at the last level (rare)
-      repeats: how many isolate repetitions (averaged)
-      measure_counts: if True, count stacks before/after
-      max_ms: soft budget
     """
     max_ms = params.get("max_ms", None)
     measure_counts = params.get("measure_counts", False)
@@ -417,82 +479,46 @@ def _workload_isolate_rare_top(
     branching = int(params["branching"])
     repeats = int(params["repeats"])
     target_index = int(params.get("target_index", 0))
-
-    phases: List[Dict[str, Any]] = []
-    timed_out = False
-    start_ms = _now_ms()
     totals: Dict[str, Any] = {}
 
     try:
-        with _with_mem_tracking(mem_profile) as memctx:
-            # Build base
-            p0 = _now_ms()
-            base, info = _build_wide_dag(gss_class, depth, branching, seed)
-            build_ms = _now_ms() - p0
-            phases.append({
-                "phase": "build_base",
-                "ms": build_ms,
-                "detail": info,
-            })
-            memctx.checkpoint()
-            if measure_counts:
-                c0 = _now_ms()
-                base_count = _count_stacks_safely(base)
-                phases[-1]["base_stack_count"] = base_count
-                phases[-1]["count_ms"] = _now_ms() - c0
-
-            # Determine a rare top value. We know last level used tags (depth-1, b)
-            rare_val = ((depth - 1) << 20) | target_index
-
-            # Repeat isolates
-            iso_times: List[float] = []
-            post_counts: List[int] = []
-            for _ in range(repeats):
-                i0 = _now_ms()
-                isolated = base.isolate(rare_val)
-                iso_times.append(_now_ms() - i0)
+        with context:
+            with context.phase("build_base") as phase:
+                base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                phase["detail"] = info
                 if measure_counts:
-                    post_counts.append(_count_stacks_safely(isolated))
-                if _maybe_timeout(start_ms, max_ms):
-                    timed_out = True
-                    break
+                    c0 = _now_ms()
+                    phase["base_stack_count"] = _count_stacks_safely(base)
+                    phase["count_ms"] = _now_ms() - c0
 
-            phase = {
-                "phase": "isolate_rare_top",
-                "repeats": len(iso_times),
-                "isolate_ms_stats": _stats(iso_times),
-                "rare_val": rare_val,
-            }
-            if measure_counts:
-                phase["isolated_stack_count_stats"] = _stats(post_counts)
-            phases.append(phase)
-            memctx.checkpoint()
+            rare_val = ((depth - 1) << 20) | target_index
+            with context.phase("isolate_rare_top", repeats=repeats, rare_val=rare_val) as phase:
+                post_counts = []
+                for i in range(repeats):
+                    isolated = base.isolate(rare_val)
+                    if measure_counts:
+                        post_counts.append(_count_stacks_safely(isolated))
+                    if _maybe_timeout(context.start_ms, max_ms):
+                        context.timed_out = True
+                        break
+                if measure_counts:
+                    phase["isolated_stack_count_stats"] = _stats(post_counts)
 
-            totals["total_ms"] = _now_ms() - start_ms
-            totals["peak_mem_bytes"] = memctx.peak_bytes
-            totals["timed_out"] = timed_out
+            totals["total_ms"] = _now_ms() - context.start_ms
+            totals["peak_mem_bytes"] = context.peak_mem_bytes
+            totals["timed_out"] = context.timed_out
             totals["base_depth"] = depth
             totals["base_branching"] = branching
             totals["rare_val"] = rare_val
 
         return WorkloadResult(
-            name="isolate_rare_top",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=None,
-            timed_out=timed_out,
+            name="isolate_rare_top", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
         )
     except Exception as e:
         return WorkloadResult(
-            name="isolate_rare_top",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=f"{type(e).__name__}: {e}",
-            timed_out=timed_out,
+            name="isolate_rare_top", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
         )
 
 
@@ -501,21 +527,11 @@ def _workload_apply_peek_reduce(
     params: Dict[str, Any],
     preset: str,
     seed: int,
-    mem_profile: bool,
+    context: BenchmarkContext,
 ) -> WorkloadResult:
     """
     Build a wide base; then measure apply() over the whole structure,
     followed by peek() and reduce_acc().
-
-    The accumulator work is uniform due to interface constraints, but this still measures
-    per-stack iteration costs. This is helpful to compare naive list-based vs. optimized DAG.
-
-    Params:
-      depth, branching
-      apply_steps: number of times to call apply
-      apply_increment: the increment each apply() adds to the accumulator
-      measure_counts: if True, count stacks once
-      max_ms: soft budget
     """
     max_ms = params.get("max_ms", None)
     measure_counts = params.get("measure_counts", False)
@@ -523,83 +539,45 @@ def _workload_apply_peek_reduce(
     branching = int(params["branching"])
     apply_steps = int(params["apply_steps"])
     apply_inc = int(params["apply_increment"])
-
-    phases: List[Dict[str, Any]] = []
-    timed_out = False
-    start_ms = _now_ms()
     totals: Dict[str, Any] = {}
 
     try:
-        with _with_mem_tracking(mem_profile) as memctx:
-            # Build base
-            p0 = _now_ms()
-            base, info = _build_wide_dag(gss_class, depth, branching, seed)
-            build_ms = _now_ms() - p0
-            phases.append({"phase": "build_base", "ms": build_ms, "detail": info})
-            memctx.checkpoint()
-            if measure_counts:
-                c0 = _now_ms()
-                phases[-1]["base_stack_count"] = _count_stacks_safely(base)
-                phases[-1]["count_ms"] = _now_ms() - c0
-
-            # Apply steps
+        with context:
+            with context.phase("build_base") as phase:
+                base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                phase["detail"] = info
+                if measure_counts:
+                    c0 = _now_ms()
+                    phase["base_stack_count"] = _count_stacks_safely(base)
+                    phase["count_ms"] = _now_ms() - c0
+            
             g = base
-            apply_times: List[float] = []
-            for _ in range(apply_steps):
-                a0 = _now_ms()
-                g = g.apply(lambda acc, inc=apply_inc: MergeableInt(int(acc) + inc))
-                apply_times.append(_now_ms() - a0)
-                if _maybe_timeout(start_ms, max_ms):
-                    timed_out = True
-                    break
-            phases.append({
-                "phase": "apply_steps",
-                "steps": len(apply_times),
-                "apply_ms_stats": _stats(apply_times),
-            })
-            memctx.checkpoint()
+            with context.phase("apply_steps", steps=apply_steps) as phase:
+                for _ in range(apply_steps):
+                    g = g.apply(lambda acc, inc=apply_inc: MergeableInt(int(acc) + inc))
+                    if _maybe_timeout(context.start_ms, max_ms):
+                        context.timed_out = True
+                        break
 
-            # peek and reduce_acc
-            if not timed_out:
-                k0 = _now_ms()
-                peek_result = g.peek()
-                peek_ms = _now_ms() - k0
+            if not context.timed_out:
+                with context.phase("peek_and_reduce") as phase:
+                    peek_result = g.peek()
+                    red = g.reduce_acc()
+                    phase["peek_cardinality"] = len(peek_result)
+                    phase["reduce_result"] = int(red) if red is not None else None
 
-                r0 = _now_ms()
-                red = g.reduce_acc()
-                reduce_ms = _now_ms() - r0
-
-                phases.append({
-                    "phase": "peek_and_reduce",
-                    "peek_ms": peek_ms,
-                    "peek_cardinality": len(peek_result),
-                    "reduce_ms": reduce_ms,
-                    "reduce_result": int(red) if red is not None else None,
-                })
-                memctx.checkpoint()
-
-            totals["total_ms"] = _now_ms() - start_ms
-            totals["peak_mem_bytes"] = memctx.peak_bytes
-            totals["timed_out"] = timed_out
+            totals["total_ms"] = _now_ms() - context.start_ms
+            totals["peak_mem_bytes"] = context.peak_mem_bytes
+            totals["timed_out"] = context.timed_out
 
         return WorkloadResult(
-            name="apply_peek_reduce",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=None,
-            timed_out=timed_out,
+            name="apply_peek_reduce", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
         )
     except Exception as e:
         return WorkloadResult(
-            name="apply_peek_reduce",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=f"{type(e).__name__}: {e}",
-            timed_out=timed_out,
+            name="apply_peek_reduce", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
         )
 
 
@@ -608,101 +586,61 @@ def _workload_popn_scaling(
     params: Dict[str, Any],
     preset: str,
     seed: int,
-    mem_profile: bool,
+    context: BenchmarkContext,
 ) -> WorkloadResult:
     """
     Build several chains of different depths merged together, then measure popn(k) for various k.
-    In an efficient structure with sharing, popn(k) should be roughly O(k) and not the total depth.
-
-    Params:
-      chain_depths: list of ints
-      popn_values: list of ints
-      measure_counts: whether to count stacks occasionally
-      max_ms: time budget (soft)
     """
     max_ms = params.get("max_ms", None)
     measure_counts = params.get("measure_counts", False)
     chain_depths: List[int] = list(params["chain_depths"])
     popn_values: List[int] = list(params["popn_values"])
-
-    phases: List[Dict[str, Any]] = []
-    timed_out = False
-    start_ms = _now_ms()
     totals: Dict[str, Any] = {}
 
     try:
-        with _with_mem_tracking(mem_profile) as memctx:
-            # Build chains
-            chains: List[GSS] = []
-            build_stats: List[Dict[str, Any]] = []
-            for d in chain_depths:
-                b0 = _now_ms()
-                g = gss_class.from_stacks([([], MergeableInt(0))])
-                for i in range(d):
-                    g = g.push(i)
-                build_stats.append({"depth": d, "ms": _now_ms() - b0})
-                chains.append(g)
-                if _maybe_timeout(start_ms, max_ms):
-                    timed_out = True
-                    break
-            phases.append({"phase": "build_chains", "chains": build_stats})
-            memctx.checkpoint()
-
-            if not timed_out:
-                # Merge chains into a single GSS with many stacks of varying lengths
-                m0 = _now_ms()
-                merged = _merge_many(gss_class, chains)
-                m_ms = _now_ms() - m0
-                ph = {"phase": "merge_chains", "ms": m_ms}
-                if measure_counts:
-                    c0 = _now_ms()
-                    ph["stack_count"] = _count_stacks_safely(merged)
-                    ph["count_ms"] = _now_ms() - c0
-                phases.append(ph)
-                memctx.checkpoint()
-
-                # popn for various k
-                popn_stats: List[Dict[str, Any]] = []
-                for k in popn_values:
-                    p0 = _now_ms()
-                    res = merged.popn(k)
-                    popn_ms = _now_ms() - p0
-                    item = {"k": k, "ms": popn_ms}
+        with context:
+            with context.phase("build_chains") as phase:
+                chains: List[GSS] = []
+                for d in chain_depths:
+                    g = gss_class.from_stacks([([], MergeableInt(0))])
+                    for i in range(d):
+                        g = g.push(i)
+                    chains.append(g)
+                    if _maybe_timeout(context.start_ms, max_ms):
+                        context.timed_out = True
+                        break
+            
+            merged = None
+            if not context.timed_out:
+                with context.phase("merge_chains") as phase:
+                    merged = _merge_many(gss_class, chains)
                     if measure_counts:
                         c0 = _now_ms()
-                        item["stack_count"] = _count_stacks_safely(res)
-                        item["count_ms"] = _now_ms() - c0
-                    popn_stats.append(item)
-                    if _maybe_timeout(start_ms, max_ms):
-                        timed_out = True
-                        break
-                phases.append({"phase": "popn_runs", "runs": popn_stats})
-                memctx.checkpoint()
+                        phase["stack_count"] = _count_stacks_safely(merged)
+                        phase["count_ms"] = _now_ms() - c0
 
-            totals["total_ms"] = _now_ms() - start_ms
-            totals["peak_mem_bytes"] = memctx.peak_bytes
-            totals["timed_out"] = timed_out
+            if not context.timed_out and merged is not None:
+                with context.phase("popn_runs") as phase:
+                    for k in popn_values:
+                        res = merged.popn(k)
+                        if _maybe_timeout(context.start_ms, max_ms):
+                            context.timed_out = True
+                            break
+
+            totals["total_ms"] = _now_ms() - context.start_ms
+            totals["peak_mem_bytes"] = context.peak_mem_bytes
+            totals["timed_out"] = context.timed_out
             totals["chain_depths"] = chain_depths
             totals["popn_values"] = popn_values
 
         return WorkloadResult(
-            name="popn_scaling",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=None,
-            timed_out=timed_out,
+            name="popn_scaling", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
         )
     except Exception as e:
         return WorkloadResult(
-            name="popn_scaling",
-            preset=preset,
-            params=params,
-            phases=phases,
-            totals=totals,
-            error=f"{type(e).__name__}: {e}",
-            timed_out=timed_out,
+            name="popn_scaling", preset=preset, params=params,
+            phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
         )
 
 
@@ -711,7 +649,7 @@ def _stats(values: List[float]) -> Dict[str, Any]:
         return {"count": 0, "min": None, "max": None, "mean": None, "stdev": None}
     n = len(values)
     mean = sum(values) / n
-    var = sum((v - mean) ** 2 for v in values) / n
+    var = sum((v - mean) ** 2 for v in values) / n if n > 0 else 0
     stdev = math.sqrt(var)
     return {
         "count": n,

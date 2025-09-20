@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .plotting import Plotter
 
@@ -29,37 +29,64 @@ def _coalesce(files: List[Path]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def _pretty_ms(ms: float) -> str:
+    if ms < 1:
+        return f"{ms:,.3f} ms"
     return f"{ms:,.2f} ms"
+
+
+def _format_summary_lines(impl_map: Dict[str, List[Dict[str, Any]]]) -> List[str]:
+    """Generates formatted lines for both console and file output."""
+    lines = []
+    for impl, runs in sorted(impl_map.items()):
+        lines.append(f"Implementation: {impl}")
+        
+        per_preset: Dict[str, List[Dict[str, Any]]] = {}
+        for r in runs:
+            per_preset.setdefault(r.get("preset", "?"), []).append(r)
+
+        for preset, preset_runs in sorted(per_preset.items()):
+            lines.append(f"  Preset: {preset}")
+            
+            # All runs for a given preset should have the same summary structure. Take the first.
+            summary = preset_runs[0].get("summary", {})
+            
+            for wname, w_summary in sorted(summary.items()):
+                t_mean = w_summary.get("total_ms_mean", 0.0)
+                mem_mean = w_summary.get("peak_mem_bytes_mean", 0.0)
+                mem_str = f"{mem_mean/1024.0:,.1f} KiB"
+                lines.append(f"    Workload: {wname} (Total: {_pretty_ms(t_mean)}, Peak Mem: {mem_str})")
+
+                phases_mean = w_summary.get("phases_mean", [])
+                if not phases_mean:
+                    lines.append("      - No phase data available.")
+                    continue
+
+                for phase in phases_mean:
+                    phase_name = phase.get("phase", "unknown")
+                    phase_ms = phase.get("ms_mean", 0.0)
+                    lines.append(f"      - Phase '{phase_name}' ({_pretty_ms(phase_ms)})")
+                    
+                    method_stats = phase.get("method_stats_mean", {})
+                    if not method_stats:
+                        lines.append("          - No method stats.")
+                        continue
+                    
+                    lines.append("          Methods:")
+                    for method, stats in sorted(method_stats.items()):
+                        calls = stats.get('calls_mean', 0.0)
+                        total_ms = stats.get('total_ms_mean', 0.0)
+                        avg_ms = total_ms / calls if calls > 0 else 0.0
+                        calls_str = f"{calls:,.1f}" if not calls.is_integer() else f"{int(calls)}"
+                        lines.append(f"            - {method:<15}: {calls_str} calls, {_pretty_ms(total_ms)} total, {_pretty_ms(avg_ms)} avg")
+        lines.append("")
+    return lines
 
 
 def _print_summary(impl_map: Dict[str, List[Dict[str, Any]]]):
     print("--- Benchmark Summary ---")
-    for impl, runs in impl_map.items():
-        presets = ", ".join(sorted({r.get("preset", "?") for r in runs}))
-        print(f"Implementation: {impl} (presets: {presets})")
-        # Gather per-workload summaries across runs (potentially different presets)
-        per_workload: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-        for r in runs:
-            summ = r.get("summary", {})
-            for wname, agg in summ.items():
-                per_workload.setdefault(wname, []).append((r.get("preset", "?"), agg))
-
-        for wname, lst in sorted(per_workload.items()):
-            # Print basic metrics
-            # Choose a few key fields
-            # Use total_ms_mean if present
-            metrics_lines = []
-            for preset, agg in sorted(lst, key=lambda x: x[0]):
-                t_mean = agg.get("total_ms_mean", None)
-                mem_mean = agg.get("peak_mem_bytes_mean", None)
-                t_str = _pretty_ms(t_mean) if t_mean is not None else "n/a"
-                if mem_mean is not None:
-                    mem_str = f"{mem_mean/1024.0:,.1f} KiB"
-                else:
-                    mem_str = "n/a"
-                metrics_lines.append(f"[{preset}] time={t_str}, peak_mem={mem_str}")
-            print(f"  - {wname}: " + "; ".join(metrics_lines))
-        print()
+    lines = _format_summary_lines(impl_map)
+    for line in lines:
+        print(line)
 
 
 def _collect_for_plotting(files: List[Path]) -> Tuple[List[str], Dict[str, Dict[str, Dict[str, float]]]]:
@@ -111,25 +138,14 @@ def main():
                                               filename=f"{w}__{preset}.png")
         # Combined summary index.json
         index = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "artifacts": sorted([p.name for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"]),
         }
         (out_dir / "index.json").write_text(json.dumps(index, indent=2))
 
     # Write a textual summary file
-    summary_txt = []
-    for impl, runs in impl_map.items():
-        summary_txt.append(f"Implementation: {impl}")
-        for r in runs:
-            summary_txt.append(f"  Preset: {r.get('preset')}")
-            for wname, agg in r.get("summary", {}).items():
-                t_mean = agg.get("total_ms_mean", None)
-                mem_mean = agg.get("peak_mem_bytes_mean", None)
-                t_str = f"{t_mean:.2f} ms" if t_mean is not None else "n/a"
-                mem_str = f"{mem_mean/1024.0:.1f} KiB" if mem_mean is not None else "n/a"
-                summary_txt.append(f"    - {wname}: time={t_str}, peak_mem={mem_str}")
-        summary_txt.append("")
-    (out_dir / "summary.txt").write_text("\n".join(summary_txt))
+    summary_lines = _format_summary_lines(impl_map)
+    (out_dir / "summary.txt").write_text("\n".join(summary_lines))
 
     print(f"\nAnalysis artifacts saved to: {out_dir}")
 
