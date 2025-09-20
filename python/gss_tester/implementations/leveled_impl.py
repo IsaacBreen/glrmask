@@ -112,43 +112,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return self.empty is None and not self.inner.inner.children
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        if value is None:
-            return LeveledGSS(Upper(UpperBranch({})), self.empty)
-
-        def filter_node(u: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-            if isinstance(u.inner, Interface):
-                return None
-
-            # It's an UpperBranch
-            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-            for v, children_map in u.inner.children.items():
-                new_v_children: Dict[int, Upper[T, Acc]] = {}
-
-                # If v is the value we're looking for, keep its interface children.
-                if v == value:
-                    for i, child in children_map.items():
-                        if isinstance(child.inner, Interface):
-                            new_v_children[i] = child
-
-                # For all branch children, recurse.
-                for i, child in children_map.items():
-                    if isinstance(child.inner, UpperBranch):
-                        filtered_child = filter_node(child)
-                        if filtered_child:
-                            new_v_children[i] = filtered_child
-
-                if new_v_children:
-                    new_children[v] = new_v_children
-
-            if not new_children:
-                return None
-            return Upper(UpperBranch(new_children))
-
-        new_inner = filter_node(self.inner)
-        if not new_inner:
-            new_inner = Upper(UpperBranch({}))
-
-        return LeveledGSS(new_inner, None)
+        return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
@@ -157,40 +121,39 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
     def peek(self) -> Set[T]:
-        tops: Set[T] = set()
+        def _find_tops(u: Upper[T, Acc]) -> Set[T]:
+            if isinstance(u.inner, Interface):
+                return set()
+            # It's an UpperBranch
+            tops = set()
+            for v, children_map in u.inner.children.items():
+                # `v` is a top if any child is an interface
+                if any(isinstance(c.inner, Interface) for c in children_map.values()):
+                    tops.add(v)
+                # Recurse into all children to find tops of longer stacks
+                for child in children_map.values():
+                    tops.update(_find_tops(child))
+            return tops
+        return _find_tops(self.inner)
 
-        def dfs(u: Upper[T, Acc]):
-            if isinstance(u.inner, UpperBranch):
-                for v, children_map in u.inner.children.items():
-                    if any(isinstance(child.inner, Interface) for child in children_map.values()):
-                        tops.add(v)
-
-                    for child in children_map.values():
-                        dfs(child)
-
-        dfs(self.inner)
-        return tops
 
     def reduce_acc(self) -> Optional[Acc]:
         from functools import reduce
-        accs: List[Acc] = []
-        if self.empty is not None:
-            accs.append(self.empty)
-
-        def collect_accs(u: Upper[T, Acc]):
+        def _reduce(u: Upper[T, Acc]) -> Optional[Acc]:
             if isinstance(u.inner, Interface):
-                accs.append(u.inner.acc)
-            elif isinstance(u.inner, UpperBranch):
-                for children_map in u.inner.children.values():
-                    for child in children_map.values():
-                        collect_accs(child)
+                return u.inner.acc
+            # It's an UpperBranch
+            child_accs = [_reduce(c) for cmap in u.inner.children.values() for c in cmap.values()]
+            valid_accs = [acc for acc in child_accs if acc is not None]
+            if not valid_accs:
+                return None
+            return reduce(lambda a, b: a.merge(b), valid_accs)
 
-        collect_accs(self.inner)
+        total_acc = _reduce(self.inner)
+        if self.empty is not None:
+            return self.empty.merge(total_acc) if total_acc else self.empty
+        return total_acc
 
-        if not accs:
-            return None
-
-        return reduce(lambda a, b: a.merge(b), accs)
 
 def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
     """Helper to get all children from an UpperBranch."""
