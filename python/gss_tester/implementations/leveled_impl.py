@@ -34,8 +34,7 @@ class Lower(Generic[T]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: Upper[T, Acc]
-    empty: Optional[Acc]
+    inner: UpperBranch[T, Acc]
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -62,7 +61,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 else:
                     node = entry["sub"]
 
-        def build(d: Dict[T, Dict[str, Any]]) -> Upper[T, Acc]:
+        def build(d: Dict[T, Dict[str, Any]], root_empty: Optional[Acc] = None) -> UpperBranch[T, Acc]:
             children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
             for v, e in d.items():
                 nodes: List[Upper[T, Acc]] = []
@@ -74,20 +73,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     nodes.append(build(sub))
                 if nodes:
                     children[v] = {i: n for i, n in enumerate(nodes)}
-            return UpperBranch(children=children, empty=None)
+            return UpperBranch(children=children, empty=root_empty)
 
-        return LeveledGSS(build(trie), empty_acc)
+        return LeveledGSS(build(trie, empty_acc))
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         res: List[Tuple[List[T], Acc]] = []
-        if self.empty is not None:
-            res.append(([], self.empty))
+        if self.inner.empty is not None:
+            res.append(([], self.inner.empty))
 
-        def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
-            if isinstance(u, Interface):
-                res.append((pref, u.acc))
-                return
-            # u is UpperBranch
+        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
             for v, kids in u.children.items():
                 for child in kids.values():
                     if isinstance(child, Interface):
@@ -95,11 +90,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     else:
                         dfs(child, pref + [v])
 
-        if isinstance(self.inner, Interface):
-            # root is an interface: treat as stack with empty prefix
-            res.append(([], self.inner.acc))
-        else:
-            dfs(self.inner, [])
+        dfs(self.inner, [])
         from .reference_impl import ReferenceGSS
         return ReferenceGSS.from_stacks(res).to_stacks()
 
