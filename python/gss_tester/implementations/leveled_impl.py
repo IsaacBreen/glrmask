@@ -20,14 +20,7 @@ class UpperBranch(Generic[T, Acc]):
     _max_depth: int = field(init=False)
 
     def __post_init__(self):
-        if not self.children:
-            depth = 0
-        else:
-            max_child_depth = 0
-            for v_children in self.children.values():
-                if v_children:
-                    max_child_depth = max(max_child_depth, max(v_children.keys()))
-            depth = 1 + max_child_depth
+        depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
 
     def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
@@ -44,20 +37,12 @@ class Interface(Generic[T, Acc]):
     _max_depth: int = field(init=False)
 
     def __post_init__(self):
-        if not self.children:
-            depth = 0
-        else:
-            max_child_depth = 0
-            for v_children in self.children.values():
-                if v_children:
-                    max_child_depth = max(max_child_depth, max(v_children.keys()))
-            depth = 1 + max_child_depth
+        depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
 
     def _all_children(self) -> Iterator[Lower[T]]:
         for v_children in self.children.values():
-            for child in v_children.values():
-                yield child
+            yield from v_children.values()
 
 
 @dataclass(frozen=True, eq=True)
@@ -67,15 +52,12 @@ class Lower(Generic[T]):
     _max_depth: int = field(init=False)
 
     def __post_init__(self):
-        if not self.children:
-            depth = 0
-        else:
-            max_child_depth = 0
-            for v_children in self.children.values():
-                if v_children:
-                    max_child_depth = max(max_child_depth, max(v_children.keys()))
-            depth = 1 + max_child_depth
+        depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
+
+    def _all_children(self) -> Iterator[Lower[T]]:
+        for v_children in self.children.values():
+            yield from v_children.values()
 
 
 @dataclass(frozen=True, eq=True)
