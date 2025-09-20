@@ -360,10 +360,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         # Keep stacks with `value` at the top.
         if isinstance(self.inner, UpperBranch):
-            filtered_children = {value: self.inner.children[value]}
+            filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
             return LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
         else:
-            filtered_children = {value: self.inner.children[value]}
+            filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
             return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
