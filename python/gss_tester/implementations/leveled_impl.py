@@ -326,7 +326,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     v_map[ci._max_depth()] = ci
                 if v_map:
                     children[v] = v_map
-            return UpperBranch(children=children, empty=it.empty)
+            new_empty = it.empty
+            if not it.children and new_empty is None:
+                new_empty = it.acc
+            return UpperBranch(children=children, empty=new_empty)
 
         def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
             if u1 is u2:
@@ -489,7 +492,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     v_map[ci._max_depth()] = ci
                 if v_map:
                     children[v] = v_map
-            return UpperBranch(children=children, empty=it.empty)
+            new_empty = it.empty
+            if not it.children and new_empty is None:
+                new_empty = it.acc
+            return UpperBranch(children=children, empty=new_empty)
 
         def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
             if u1 is u2:
