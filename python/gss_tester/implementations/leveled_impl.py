@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
 
 from ..interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
@@ -232,7 +232,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 end_acc = e.get("end")
                 sub = e.get("sub", {})
                 if end_acc is not None:
-                    nodes_for_v.append(Interface(children={}, acc=end_acc, empty=None))
+                    # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty'
+                    nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
                 if sub:
                     nodes_for_v.append(build(sub))
                 if nodes_for_v:
@@ -369,7 +370,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             merged = next(it)
             for c in it:
                 merged = merge_upper(merged, c)
-            return LeveledGSS(merged)
+            # Preserve the top-of-stack item by wrapping the merged subtree under 'value'
+            wrapped = UpperBranch(children={value: {merged._max_depth(): merged}}, empty=None)
+            return LeveledGSS(wrapped)
 
         # self.inner is an Interface
         children_to_merge = self.inner.children.get(value, {}).values()
@@ -383,7 +386,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         # Convert the merged Lower subtree back to an Upper tree with the Interface's accumulator.
         upper_node = lower_to_upper(merged_lower, self.inner.acc)
-        return LeveledGSS(upper_node)
+        # Preserve the top-of-stack item by wrapping under 'value'
+        wrapped_upper = UpperBranch(children={value: {upper_node._max_depth(): upper_node}}, empty=None)
+        return LeveledGSS(wrapped_upper)
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         memo: Dict[int, Any] = {}
