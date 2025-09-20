@@ -253,14 +253,87 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_children[v] = {i: alt for i, alt in enumerate(alts)}
             # Preserve non-root empties unchanged (they are not stacks).
             return UpperBranch(children=new_children, empty=u.empty)
-
         pruned = prune_upper(self.inner)
         new_empty = self.inner.empty
         if new_empty is not None and not predicate(new_empty):
             new_empty = None
         return LeveledGSS(UpperBranch(children=pruned.children, empty=new_empty))
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        raise NotImplementedError
+        # Fast path: identical objects
+        if self is other or self.inner is other.inner:
+            return self
+
+        def _merge_opt_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
+            if a is None:
+                return b
+            if b is None:
+                return a
+            return a.merge(b)  # type: ignore[attr-defined]
+
+        def merge_branch(u1: UpperBranch[T, Acc], u2: UpperBranch[T, Acc]) -> UpperBranch[T, Acc]:
+            # Identity shortcut
+            if u1 is u2:
+                return u1
+
+            # Merge root/non-root empties (used by pop semantics)
+            new_empty: Optional[Acc] = _merge_opt_acc(u1.empty, u2.empty)
+
+            # Deterministic key order: keys from u1 followed by new keys from u2
+            keys: List[T] = list(u1.children.keys())
+            for k in u2.children.keys():
+                if k not in u1.children:
+                    keys.append(k)
+
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v in keys:
+                kids1 = u1.children.get(v, {})
+                kids2 = u2.children.get(v, {})
+
+                # Accumulate interface accs and collect branch alts
+                iface_acc: Optional[Acc] = None
+                branch_nodes: List[UpperBranch[T, Acc]] = []
+
+                for child in kids1.values():
+                    if isinstance(child, Interface):
+                        iface_acc = child.acc if iface_acc is None else iface_acc.merge(child.acc)  # type: ignore[attr-defined]
+                    else:
+                        branch_nodes.append(child)
+                for child in kids2.values():
+                    if isinstance(child, Interface):
+                        iface_acc = child.acc if iface_acc is None else iface_acc.merge(child.acc)  # type: ignore[attr-defined]
+                    else:
+                        branch_nodes.append(child)
+
+                # Deduplicate branch nodes by identity to avoid obvious duplicates
+                seen_ids = set()
+                uniq_branches: List[UpperBranch[T, Acc]] = []
+                for bn in branch_nodes:
+                    bid = id(bn)
+                    if bid not in seen_ids:
+                        seen_ids.add(bid)
+                        uniq_branches.append(bn)
+
+                alts: List[Upper[T, Acc]] = []
+                # Merge all branch alts into one if present
+                if uniq_branches:
+                    merged_branch = uniq_branches[0]
+                    for bn in uniq_branches[1:]:
+                        merged_branch = merge_branch(merged_branch, bn)
+                    # Drop useless empty branches (no children and no empty)
+                    if merged_branch.children or merged_branch.empty is not None:
+                        alts.append(merged_branch)
+
+                # Single Interface per symbol with merged accumulator
+                if iface_acc is not None:
+                    alts.insert(0, Interface(children={}, acc=iface_acc, empty=None))
+
+                if alts:
+                    new_children[v] = {i: alt for i, alt in enumerate(alts)}
+
+            return UpperBranch(children=new_children, empty=new_empty)
+
+        merged_inner = merge_branch(self.inner, other.inner)
+        return LeveledGSS(merged_inner)
     def peek(self) -> Set[T]:
         # Collect labels `v` for which an Interface exists under `v` anywhere.
         tops: Set[T] = set()
