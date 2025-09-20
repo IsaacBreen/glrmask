@@ -126,9 +126,9 @@ def main():
     )
     parser.add_argument(
         "--preset",
-        choices=["small", "medium", "large"],
-        default="small",
-        help="Parameter preset for workloads: small (fast), medium, or large.",
+        choices=["tiny", "small", "medium", "large"],
+        default="tiny",
+        help="Parameter preset for workloads: tiny, small, medium, large."
     )
     parser.add_argument(
         "--repeats",

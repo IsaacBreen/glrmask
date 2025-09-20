@@ -9,7 +9,7 @@ set -euo pipefail
 # This script should be run from the `python` directory.
 #
 # Usage:
-#   ./gss_tester/run_benchmarks.sh [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]
+#   ./gss_tester/run_benchmarks.sh [--preset tiny|small|medium|large] [--repeats N] <impl1> [impl2 ...]
 #
 # Example:
 #   ./gss_tester/run_benchmarks.sh --preset medium gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
@@ -23,7 +23,7 @@ PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
 export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
 
 # --- Argument Parsing ---
-PRESET="small"
+PRESET="tiny"
 REPEATS=1
 RAW_IMPLS=()
 
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ "${#RAW_IMPLS[@]}" -eq 0 ]; then
-    echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
+    echo "Usage: $0 [--preset tiny|small|medium|large] [--repeats N] <impl1> [impl2 ...]"
     echo "Error: At least one implementation is required."
     exit 1
 fi

@@ -639,6 +639,7 @@ WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
 def default_specs(preset: str = "tiny") -> Dict[str, List[Dict[str, Any]]]:
     """
     Preset parameter grids for workloads.
+    - tiny: fast to run, suitable for quick smoke tests / CI
     - small: fast to run, suitable for quick comparisons
     - medium: moderate sizes to observe scaling trends
     - large: heavier runs (take longer)
