@@ -107,9 +107,49 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def pop(self) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
     def is_empty(self) -> bool:
-        return self.to_reference_impl().is_empty()
+        # The GSS is empty if there's no accumulator for the empty stack, and
+        # the inner trie has no children. from_stacks ensures inner is an UpperBranch.
+        return self.empty is None and not self.inner.inner.children
+
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+        if value is None:
+            return LeveledGSS(Upper(UpperBranch({})), self.empty)
+
+        def filter_node(u: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+            if isinstance(u.inner, Interface):
+                return None
+
+            # It's an UpperBranch
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v, children_map in u.inner.children.items():
+                new_v_children: Dict[int, Upper[T, Acc]] = {}
+
+                # If v is the value we're looking for, keep its interface children.
+                if v == value:
+                    for i, child in children_map.items():
+                        if isinstance(child.inner, Interface):
+                            new_v_children[i] = child
+
+                # For all branch children, recurse.
+                for i, child in children_map.items():
+                    if isinstance(child.inner, UpperBranch):
+                        filtered_child = filter_node(child)
+                        if filtered_child:
+                            new_v_children[i] = filtered_child
+
+                if new_v_children:
+                    new_children[v] = new_v_children
+
+            if not new_children:
+                return None
+            return Upper(UpperBranch(new_children))
+
+        new_inner = filter_node(self.inner)
+        if not new_inner:
+            new_inner = Upper(UpperBranch({}))
+
+        return LeveledGSS(new_inner, None)
+
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
@@ -117,10 +157,40 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
     def peek(self) -> Set[T]:
-        return self.to_reference_impl().peek()
-    def reduce_acc(self) -> Optional[Acc]:
-        return self.to_reference_impl().reduce_acc()
+        tops: Set[T] = set()
 
+        def dfs(u: Upper[T, Acc]):
+            if isinstance(u.inner, UpperBranch):
+                for v, children_map in u.inner.children.items():
+                    if any(isinstance(child.inner, Interface) for child in children_map.values()):
+                        tops.add(v)
+
+                    for child in children_map.values():
+                        dfs(child)
+
+        dfs(self.inner)
+        return tops
+
+    def reduce_acc(self) -> Optional[Acc]:
+        from functools import reduce
+        accs: List[Acc] = []
+        if self.empty is not None:
+            accs.append(self.empty)
+
+        def collect_accs(u: Upper[T, Acc]):
+            if isinstance(u.inner, Interface):
+                accs.append(u.inner.acc)
+            elif isinstance(u.inner, UpperBranch):
+                for children_map in u.inner.children.values():
+                    for child in children_map.values():
+                        collect_accs(child)
+
+        collect_accs(self.inner)
+
+        if not accs:
+            return None
+
+        return reduce(lambda a, b: a.merge(b), accs)
 
 def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
     """Helper to get all children from an UpperBranch."""
