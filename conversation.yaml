@@ -13,6 +13,7 @@ local_system:
     - python/gss_tester/reference_impl.py
     - python/gss_tester/runner.py
     - python/gss_tester/test_spec.py
+    - python/run_benchmarks.sh
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -159,6 +160,10 @@ local_system:
       Key features:
       - Multiple workloads that stress different aspects of a GSS (push-heavy, branching,
         pop/merge collapse, wide merges, apply/prune, and seeded fuzz-like constructions).
+      - Merge-sensitivity workloads that specifically probe whether merge operations scale with
+        the “surface” changes rather than the entire structure:
+        - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
+        - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
       - Scaling controls to evaluate asymptotic behavior as the structure grows.
       - Timing and memory measurement using Python's standard library (time, tracemalloc).
       - Structural metrics derived from to_stacks() and optional implementation-specific
@@ -588,6 +593,7 @@ local_system:
       from __future__ import annotations
 
       import itertools
+      import math
       import random
       import time
       import tracemalloc
@@ -947,6 +953,268 @@ local_system:
           )
 
 
+      def workload_split_surface_merge(
+          gss_class: Type[GSS],
+          depth: int,
+          k: int,
+          top_k: int,
+          clones: int,
+          mod_per_clone: int = 1,
+          apply_amount: int = 1,
+          seed: int = 1234,
+          base_value: int = 7000,
+      ) -> WorkloadResult:
+          """
+          Build a large product-tree base with heavy sharing (branching for depth-1 levels by `k`,
+          then a wide top level of size `top_k`). Create `clones` that each modify only a small number
+          (`mod_per_clone`) of top-of-stack value partitions via apply(). Merge all clones back.
+
+          Intended to detect merge implementations that scale with total structure size instead of the
+          touched “surface” (the union of modified top-of-stack partitions).
+          """
+          per_op: Dict[str, List[float]] = {"push": [], "merge": [], "isolate": [], "apply": [], "to_stacks": []}
+          phases: Dict[str, float] = {}
+
+          # Diagnostics captured during run()
+          diag_total_stacks = 0
+          diag_unique_modified_tops = 0
+          final_merge_duration = 0.0
+
+          def run() -> GSS:
+              nonlocal diag_total_stacks, diag_unique_modified_tops, final_merge_duration
+
+              base = gss_class.from_stacks([([], MergeableInt(0))])
+
+              # Construct value levels:
+              # - First depth-1 levels with branching factor k
+              # - Last (top) level with branching factor top_k
+              levels_prefix: List[List[int]] = [
+                  [base_value + d * 100 + j for j in range(k)] for d in range(max(0, depth - 1))
+              ]
+              top_vals: List[int] = [base_value + (depth * 100) + j for j in range(top_k)]
+
+              # Build all sequences
+              sequences: List[List[int]] = []
+              if levels_prefix:
+                  for pref in itertools.product(*levels_prefix):
+                      for last in top_vals:
+                          sequences.append(list(pref) + [last])
+              else:
+                  for last in top_vals:
+                      sequences.append([last])
+
+              # Build leaves
+              t_base_start = time.perf_counter()
+              leaves: List[GSS] = []
+              for seq in sequences:
+                  s = base
+                  for v in seq:
+                      t0 = time.perf_counter()
+                      s = s.push(v)
+                      per_op["push"].append(time.perf_counter() - t0)
+                  leaves.append(s)
+
+              # Merge leaves into base
+              t0 = time.perf_counter()
+              base_merged = gss_class.merge_many(leaves)
+              per_op["merge"].append(time.perf_counter() - t0)
+              phases["base_build"] = time.perf_counter() - t_base_start
+
+              # Precompute isolates by top-of-stack
+              t_iso_start = time.perf_counter()
+              isolates_by_top: Dict[int, GSS] = {}
+              for tv in top_vals:
+                  t0 = time.perf_counter()
+                  iso = base_merged.isolate(tv)
+                  per_op["isolate"].append(time.perf_counter() - t0)
+                  isolates_by_top[tv] = iso
+              phases["precompute_isolates"] = time.perf_counter() - t_iso_start
+
+              # Build clones: each modifies a small subset of tops via apply, then merges with the rest
+              t_clones_start = time.perf_counter()
+              rng = random.Random(seed)
+              clones_list: List[GSS] = []
+              modified_union: set = set()
+              tops_list = list(top_vals)
+              for i in range(clones):
+                  chosen = rng.sample(tops_list, min(mod_per_clone, len(tops_list)))
+                  modified_union.update(chosen)
+
+                  # Apply to chosen partitions
+                  changed_parts: List[GSS] = []
+                  for v in chosen:
+                      t0 = time.perf_counter()
+                      part = isolates_by_top[v].apply(lambda acc, amt=apply_amount: acc + amt)
+                      per_op["apply"].append(time.perf_counter() - t0)
+                      changed_parts.append(part)
+
+                  # Merge chosen parts
+                  t0 = time.perf_counter()
+                  changed = gss_class.merge_many(changed_parts)
+                  per_op["merge"].append(time.perf_counter() - t0)
+
+                  # Merge the rest (unmodified parts)
+                  rest_parts = [isolates_by_top[w] for w in tops_list if w not in chosen]
+                  t0 = time.perf_counter()
+                  rest = gss_class.merge_many(rest_parts)
+                  per_op["merge"].append(time.perf_counter() - t0)
+
+                  # Combine changed + rest -> clone
+                  t0 = time.perf_counter()
+                  clone_i = changed.merge(rest)
+                  per_op["merge"].append(time.perf_counter() - t0)
+                  clones_list.append(clone_i)
+
+              phases["build_clones"] = time.perf_counter() - t_clones_start
+
+              # Merge all clones
+              t0 = time.perf_counter()
+              merged_all = gss_class.merge_many(clones_list)
+              final_merge_time = time.perf_counter() - t0
+              per_op["merge"].append(final_merge_time)
+              phases["final_merge"] = final_merge_time
+              final_merge_duration = final_merge_time
+
+              # Materialize
+              t0 = time.perf_counter()
+              _ = merged_all.to_stacks()
+              to_stacks_time = time.perf_counter() - t0
+              per_op["to_stacks"].append(to_stacks_time)
+              phases["final_to_stacks"] = to_stacks_time
+
+              # Diagnostics
+              diag_total_stacks = len(sequences)
+              diag_unique_modified_tops = len(modified_union)
+
+              return merged_all
+
+          final_state, peak_kib, elapsed = _measure_peak_memory(run)
+          phases["total"] = elapsed
+
+          # Derived diagnostics (post-run)
+          per_top = (0 if top_k == 0 else ( ( (k ** max(0, depth - 1)) ) ))
+          affected = float(per_top * diag_unique_modified_tops)
+          phases["peak_mem_kib"] = float(peak_kib)
+          phases["diag_total_stacks"] = float( (k ** max(0, depth - 1)) * top_k )
+          phases["diag_unique_modified_tops"] = float(diag_unique_modified_tops)
+          phases["diag_affected_stacks"] = float(affected)
+          phases["diag_merge_time_per_affected_stack"] = float(final_merge_duration / max(1.0, affected))
+
+          pushes = ( (k ** max(0, depth - 1)) * top_k ) * max(1, depth)
+          merges_est = 1 + (clones * 3) + 1  # base merge + per-clone (changed, rest, combine) + final merge
+          isolates_count = top_k
+          applies = clones * min(mod_per_clone, top_k)
+          ops_executed = int(pushes + merges_est + isolates_count + applies + 1)  # +1 for final to_stacks
+
+          return WorkloadResult(
+              name="split_surface_merge",
+              params={
+                  "depth": depth,
+                  "k": k,
+                  "top_k": top_k,
+                  "clones": clones,
+                  "mod_per_clone": mod_per_clone,
+                  "apply_amount": apply_amount,
+                  "seed": seed,
+              },
+              final_state=final_state,
+              operations_executed=ops_executed,
+              timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
+          )
+
+
+      def workload_clone_push_merge(
+          gss_class: Type[GSS],
+          depth: int,
+          k: int,
+          clones: int,
+          base_value: int = 8000,
+          marker_base: int = 900_000,
+      ) -> WorkloadResult:
+          """
+          Build a large product-tree base (k^depth stacks), create `clones` by pushing a unique
+          marker onto each clone, then merge all clones and pop once to collapse markers.
+          Tests whether merge scales with the shallow changes rather than the entire structure.
+          """
+          per_op: Dict[str, List[float]] = {"push": [], "merge": [], "pop": [], "to_stacks": []}
+          phases: Dict[str, float] = {}
+
+          def run() -> GSS:
+              # Build base
+              base0 = gss_class.from_stacks([([], MergeableInt(0))])
+              levels: List[List[int]] = [
+                  [base_value + d * 100 + j for j in range(k)] for d in range(depth)
+              ]
+              sequences = list(itertools.product(*levels)) if levels else [tuple()]
+
+              t_base = time.perf_counter()
+              leaves: List[GSS] = []
+              for seq in sequences:
+                  s = base0
+                  for v in seq:
+                      t0 = time.perf_counter()
+                      s = s.push(v)
+                      per_op["push"].append(time.perf_counter() - t0)
+                  leaves.append(s)
+
+              t0 = time.perf_counter()
+              base = gss_class.merge_many(leaves)
+              per_op["merge"].append(time.perf_counter() - t0)
+              phases["base_build"] = time.perf_counter() - t_base
+
+              # Clone with shallow push
+              t_clone = time.perf_counter()
+              clones_list: List[GSS] = []
+              for i in range(clones):
+                  t0 = time.perf_counter()
+                  c = base.push(marker_base + i)
+                  per_op["push"].append(time.perf_counter() - t0)
+                  clones_list.append(c)
+              phases["build_clones"] = time.perf_counter() - t_clone
+
+              # Merge all clones, then pop once to collapse the markers
+              t0 = time.perf_counter()
+              merged = gss_class.merge_many(clones_list)
+              final_merge_time = time.perf_counter() - t0
+              per_op["merge"].append(final_merge_time)
+              phases["final_merge"] = final_merge_time
+
+              t0 = time.perf_counter()
+              popped = merged.pop()
+              per_op["pop"].append(time.perf_counter() - t0)
+              phases["final_pop"] = per_op["pop"][-1]
+
+              t0 = time.perf_counter()
+              _ = popped.to_stacks()
+              per_op["to_stacks"].append(time.perf_counter() - t0)
+              phases["final_to_stacks"] = per_op["to_stacks"][-1]
+
+              # Diagnostics
+              total_stacks = (k ** depth) if depth > 0 else 1
+              phases["diag_total_stacks"] = float(total_stacks)
+              phases["diag_merge_time_per_stack"] = float(final_merge_time / max(1, total_stacks))
+
+              return popped
+
+          final_state, peak_kib, elapsed = _measure_peak_memory(run)
+          phases["total"] = elapsed
+          phases["peak_mem_kib"] = float(peak_kib)
+
+          total_stacks = (k ** depth) if depth > 0 else 1
+          pushes = total_stacks * max(1, depth)  # building base
+          pushes += clones  # clone markers
+          merges = 1 + 1  # base merge + final merge
+          ops_executed = int(pushes + merges + 1 + 1)  # +pop + to_stacks
+
+          return WorkloadResult(
+              name="clone_push_merge",
+              params={"depth": depth, "k": k, "clones": clones, "marker_base": marker_base},
+              final_state=final_state,
+              operations_executed=ops_executed,
+              timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
+          )
+
+
       # Registry of workloads for ease of selection
       WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
           "linear_push": workload_linear_push,
@@ -955,6 +1223,8 @@ local_system:
           "merge_many": workload_merge_many,
           "pop_collapse": workload_pop_collapse,
           "apply_prune": workload_apply_prune,
+          "split_surface_merge": workload_split_surface_merge,
+          "clone_push_merge": workload_clone_push_merge,
       }
 
 
@@ -971,6 +1241,8 @@ local_system:
           if preset == "small":
               return {
                   "linear_push": [{"length": 500}, {"length": 2_000}],
+                  "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
+                  "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
                   "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
                   "diamond_repeat": [{"repeats": 300}],
                   "merge_many": [{"count": 50, "stack_len": 8}],
@@ -979,6 +1251,8 @@ local_system:
               }
           elif preset == "medium":
               return {
+                  "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
+                  "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
                   "linear_push": [{"length": 5_000}, {"length": 20_000}],
                   "product_tree": [{"depth": 5, "k": 3}],
                   "diamond_repeat": [{"repeats": 2_000}],
@@ -988,6 +1262,8 @@ local_system:
               }
           else:  # large
               return {
+                  "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
+                  "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
                   "linear_push": [{"length": 50_000}],
                   "product_tree": [{"depth": 6, "k": 4}],
                   "diamond_repeat": [{"repeats": 10_000}],
@@ -1864,6 +2140,132 @@ local_system:
           fuzz_steps = 100
           for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
               yield from _yield_state(gss_state)
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # generating JSON results and analysis plots. This script runs each model once
+      # (no in-process reference/baseline). The analyzer is later told which result
+      # is the baseline to perform mask comparisons.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ./src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="./src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+          echo "Error: At least one model argument is required. The first is treated as the baseline."
+          exit 1
+      fi
+
+      BASELINE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
+      # Check that all provided files exist
+      for file in "${ALL_MODELS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Baseline Model: $BASELINE_MODEL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Models: ${COMPETITORS[*]}"
+      else
+        echo "Other Models: (none)"
+      fi
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for model_to_benchmark in "${ALL_MODELS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+          cmd=(python -m python.aug25.benchmark_runner
+              --code "$CODE_FILE"
+              --constraint-file "$CONSTRAINT_FILE"
+              --model "$model_to_benchmark"
+              --output "$RESULTS_DIR")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      cmd=(python -m python.aug25.benchmark_analyzer
+          "${RESULTS_DIR}"/*.json
+          --baseline "$BASELINE_STEM"
+          --output-dir "$PLOTS_DIR")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Baseline: $BASELINE_STEM"
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
   prev_file_contents:
     python/gss_tester/__init__.py: |
       # This file makes 'gss_tester' a Python package.
@@ -3988,6 +4390,92 @@ local_system:
           fuzz_steps = 100
           for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
               yield from _yield_state(gss_state)
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for GSS implementations.
+      #
+      # This script should be run from the project root (the directory containing 'python').
+      #
+      # Usage:
+      #   ./python/run_benchmarks.sh [implementation1] [implementation2] ...
+      #
+      # Example:
+      #   # Run with default implementations
+      #   ./python/run_benchmarks.sh
+      #
+      #   # Run with specific implementations and a different preset
+      #   PRESET=medium ./python/run_benchmarks.sh gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
+      #
+      # Environment Variables:
+      #   PRESET:  Benchmark preset to use (small, medium, large). Default: small.
+      #   REPEATS: Number of times to repeat each workload. Default: 1.
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${PRESET:="small"}"
+      : "${REPEATS:=1}"
+
+      # --- Argument Handling ---
+      IMPLEMENTATIONS=("$@")
+
+      # If no implementations are provided, the benchmark runner will use its own defaults.
+      if [ "${#IMPLEMENTATIONS[@]}" -eq 0 ]; then
+          echo "No implementations provided; the benchmark runner will use its defaults."
+      fi
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      OUTPUT_FILE="${RESULTS_DIR}/gss_bench_results.json"
+
+      echo "Benchmark results will be saved to: $OUTPUT_FILE"
+      echo "---"
+      if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+        echo "Implementations: ${IMPLEMENTATIONS[*]}"
+      else
+        echo "Implementations: (default)"
+      fi
+      echo "Preset: $PRESET"
+      echo "Repeats: $REPEATS"
+      echo "---"
+
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark run..."
+
+      # Construct the command. If IMPLEMENTATIONS is empty, the --implementations flag is omitted
+      # and the runner will use its own defaults.
+      cmd=(python -m gss_tester.benchmarks.runner
+          --preset "$PRESET"
+          --repeats "$REPEATS"
+          --output "$OUTPUT_FILE"
+      )
+      if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+          cmd+=(--implementations "${IMPLEMENTATIONS[@]}")
+      fi
+
+      echo "Executing: ${cmd[*]}"
+      if "${cmd[@]}"; then
+          echo
+          echo ">>> Benchmark run finished successfully."
+      else
+          exit_code=$?
+          echo
+          echo ">>> Benchmark run failed with exit code $exit_code."
+          exit $exit_code
+      fi
+
+      echo
+      echo "---"
+      echo "Benchmark complete."
+      echo "Results written to $OUTPUT_FILE"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -4186,6 +4674,10 @@ messages:
       Key features:
       - Multiple workloads that stress different aspects of a GSS (push-heavy, branching,
         pop/merge collapse, wide merges, apply/prune, and seeded fuzz-like constructions).
+      - Merge-sensitivity workloads that specifically probe whether merge operations scale with
+        the “surface” changes rather than the entire structure:
+        - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
+        - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
       - Scaling controls to evaluate asymptotic behavior as the structure grows.
       - Timing and memory measurement using Python's standard library (time, tracemalloc).
       - Structural metrics derived from to_stacks() and optional implementation-specific
@@ -4630,6 +5122,7 @@ messages:
       from __future__ import annotations
 
       import itertools
+      import math
       import random
       import time
       import tracemalloc
@@ -4989,6 +5482,268 @@ messages:
           )
 
 
+      def workload_split_surface_merge(
+          gss_class: Type[GSS],
+          depth: int,
+          k: int,
+          top_k: int,
+          clones: int,
+          mod_per_clone: int = 1,
+          apply_amount: int = 1,
+          seed: int = 1234,
+          base_value: int = 7000,
+      ) -> WorkloadResult:
+          """
+          Build a large product-tree base with heavy sharing (branching for depth-1 levels by `k`,
+          then a wide top level of size `top_k`). Create `clones` that each modify only a small number
+          (`mod_per_clone`) of top-of-stack value partitions via apply(). Merge all clones back.
+
+          Intended to detect merge implementations that scale with total structure size instead of the
+          touched “surface” (the union of modified top-of-stack partitions).
+          """
+          per_op: Dict[str, List[float]] = {"push": [], "merge": [], "isolate": [], "apply": [], "to_stacks": []}
+          phases: Dict[str, float] = {}
+
+          # Diagnostics captured during run()
+          diag_total_stacks = 0
+          diag_unique_modified_tops = 0
+          final_merge_duration = 0.0
+
+          def run() -> GSS:
+              nonlocal diag_total_stacks, diag_unique_modified_tops, final_merge_duration
+
+              base = gss_class.from_stacks([([], MergeableInt(0))])
+
+              # Construct value levels:
+              # - First depth-1 levels with branching factor k
+              # - Last (top) level with branching factor top_k
+              levels_prefix: List[List[int]] = [
+                  [base_value + d * 100 + j for j in range(k)] for d in range(max(0, depth - 1))
+              ]
+              top_vals: List[int] = [base_value + (depth * 100) + j for j in range(top_k)]
+
+              # Build all sequences
+              sequences: List[List[int]] = []
+              if levels_prefix:
+                  for pref in itertools.product(*levels_prefix):
+                      for last in top_vals:
+                          sequences.append(list(pref) + [last])
+              else:
+                  for last in top_vals:
+                      sequences.append([last])
+
+              # Build leaves
+              t_base_start = time.perf_counter()
+              leaves: List[GSS] = []
+              for seq in sequences:
+                  s = base
+                  for v in seq:
+                      t0 = time.perf_counter()
+                      s = s.push(v)
+                      per_op["push"].append(time.perf_counter() - t0)
+                  leaves.append(s)
+
+              # Merge leaves into base
+              t0 = time.perf_counter()
+              base_merged = gss_class.merge_many(leaves)
+              per_op["merge"].append(time.perf_counter() - t0)
+              phases["base_build"] = time.perf_counter() - t_base_start
+
+              # Precompute isolates by top-of-stack
+              t_iso_start = time.perf_counter()
+              isolates_by_top: Dict[int, GSS] = {}
+              for tv in top_vals:
+                  t0 = time.perf_counter()
+                  iso = base_merged.isolate(tv)
+                  per_op["isolate"].append(time.perf_counter() - t0)
+                  isolates_by_top[tv] = iso
+              phases["precompute_isolates"] = time.perf_counter() - t_iso_start
+
+              # Build clones: each modifies a small subset of tops via apply, then merges with the rest
+              t_clones_start = time.perf_counter()
+              rng = random.Random(seed)
+              clones_list: List[GSS] = []
+              modified_union: set = set()
+              tops_list = list(top_vals)
+              for i in range(clones):
+                  chosen = rng.sample(tops_list, min(mod_per_clone, len(tops_list)))
+                  modified_union.update(chosen)
+
+                  # Apply to chosen partitions
+                  changed_parts: List[GSS] = []
+                  for v in chosen:
+                      t0 = time.perf_counter()
+                      part = isolates_by_top[v].apply(lambda acc, amt=apply_amount: acc + amt)
+                      per_op["apply"].append(time.perf_counter() - t0)
+                      changed_parts.append(part)
+
+                  # Merge chosen parts
+                  t0 = time.perf_counter()
+                  changed = gss_class.merge_many(changed_parts)
+                  per_op["merge"].append(time.perf_counter() - t0)
+
+                  # Merge the rest (unmodified parts)
+                  rest_parts = [isolates_by_top[w] for w in tops_list if w not in chosen]
+                  t0 = time.perf_counter()
+                  rest = gss_class.merge_many(rest_parts)
+                  per_op["merge"].append(time.perf_counter() - t0)
+
+                  # Combine changed + rest -> clone
+                  t0 = time.perf_counter()
+                  clone_i = changed.merge(rest)
+                  per_op["merge"].append(time.perf_counter() - t0)
+                  clones_list.append(clone_i)
+
+              phases["build_clones"] = time.perf_counter() - t_clones_start
+
+              # Merge all clones
+              t0 = time.perf_counter()
+              merged_all = gss_class.merge_many(clones_list)
+              final_merge_time = time.perf_counter() - t0
+              per_op["merge"].append(final_merge_time)
+              phases["final_merge"] = final_merge_time
+              final_merge_duration = final_merge_time
+
+              # Materialize
+              t0 = time.perf_counter()
+              _ = merged_all.to_stacks()
+              to_stacks_time = time.perf_counter() - t0
+              per_op["to_stacks"].append(to_stacks_time)
+              phases["final_to_stacks"] = to_stacks_time
+
+              # Diagnostics
+              diag_total_stacks = len(sequences)
+              diag_unique_modified_tops = len(modified_union)
+
+              return merged_all
+
+          final_state, peak_kib, elapsed = _measure_peak_memory(run)
+          phases["total"] = elapsed
+
+          # Derived diagnostics (post-run)
+          per_top = (0 if top_k == 0 else ( ( (k ** max(0, depth - 1)) ) ))
+          affected = float(per_top * diag_unique_modified_tops)
+          phases["peak_mem_kib"] = float(peak_kib)
+          phases["diag_total_stacks"] = float( (k ** max(0, depth - 1)) * top_k )
+          phases["diag_unique_modified_tops"] = float(diag_unique_modified_tops)
+          phases["diag_affected_stacks"] = float(affected)
+          phases["diag_merge_time_per_affected_stack"] = float(final_merge_duration / max(1.0, affected))
+
+          pushes = ( (k ** max(0, depth - 1)) * top_k ) * max(1, depth)
+          merges_est = 1 + (clones * 3) + 1  # base merge + per-clone (changed, rest, combine) + final merge
+          isolates_count = top_k
+          applies = clones * min(mod_per_clone, top_k)
+          ops_executed = int(pushes + merges_est + isolates_count + applies + 1)  # +1 for final to_stacks
+
+          return WorkloadResult(
+              name="split_surface_merge",
+              params={
+                  "depth": depth,
+                  "k": k,
+                  "top_k": top_k,
+                  "clones": clones,
+                  "mod_per_clone": mod_per_clone,
+                  "apply_amount": apply_amount,
+                  "seed": seed,
+              },
+              final_state=final_state,
+              operations_executed=ops_executed,
+              timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
+          )
+
+
+      def workload_clone_push_merge(
+          gss_class: Type[GSS],
+          depth: int,
+          k: int,
+          clones: int,
+          base_value: int = 8000,
+          marker_base: int = 900_000,
+      ) -> WorkloadResult:
+          """
+          Build a large product-tree base (k^depth stacks), create `clones` by pushing a unique
+          marker onto each clone, then merge all clones and pop once to collapse markers.
+          Tests whether merge scales with the shallow changes rather than the entire structure.
+          """
+          per_op: Dict[str, List[float]] = {"push": [], "merge": [], "pop": [], "to_stacks": []}
+          phases: Dict[str, float] = {}
+
+          def run() -> GSS:
+              # Build base
+              base0 = gss_class.from_stacks([([], MergeableInt(0))])
+              levels: List[List[int]] = [
+                  [base_value + d * 100 + j for j in range(k)] for d in range(depth)
+              ]
+              sequences = list(itertools.product(*levels)) if levels else [tuple()]
+
+              t_base = time.perf_counter()
+              leaves: List[GSS] = []
+              for seq in sequences:
+                  s = base0
+                  for v in seq:
+                      t0 = time.perf_counter()
+                      s = s.push(v)
+                      per_op["push"].append(time.perf_counter() - t0)
+                  leaves.append(s)
+
+              t0 = time.perf_counter()
+              base = gss_class.merge_many(leaves)
+              per_op["merge"].append(time.perf_counter() - t0)
+              phases["base_build"] = time.perf_counter() - t_base
+
+              # Clone with shallow push
+              t_clone = time.perf_counter()
+              clones_list: List[GSS] = []
+              for i in range(clones):
+                  t0 = time.perf_counter()
+                  c = base.push(marker_base + i)
+                  per_op["push"].append(time.perf_counter() - t0)
+                  clones_list.append(c)
+              phases["build_clones"] = time.perf_counter() - t_clone
+
+              # Merge all clones, then pop once to collapse the markers
+              t0 = time.perf_counter()
+              merged = gss_class.merge_many(clones_list)
+              final_merge_time = time.perf_counter() - t0
+              per_op["merge"].append(final_merge_time)
+              phases["final_merge"] = final_merge_time
+
+              t0 = time.perf_counter()
+              popped = merged.pop()
+              per_op["pop"].append(time.perf_counter() - t0)
+              phases["final_pop"] = per_op["pop"][-1]
+
+              t0 = time.perf_counter()
+              _ = popped.to_stacks()
+              per_op["to_stacks"].append(time.perf_counter() - t0)
+              phases["final_to_stacks"] = per_op["to_stacks"][-1]
+
+              # Diagnostics
+              total_stacks = (k ** depth) if depth > 0 else 1
+              phases["diag_total_stacks"] = float(total_stacks)
+              phases["diag_merge_time_per_stack"] = float(final_merge_time / max(1, total_stacks))
+
+              return popped
+
+          final_state, peak_kib, elapsed = _measure_peak_memory(run)
+          phases["total"] = elapsed
+          phases["peak_mem_kib"] = float(peak_kib)
+
+          total_stacks = (k ** depth) if depth > 0 else 1
+          pushes = total_stacks * max(1, depth)  # building base
+          pushes += clones  # clone markers
+          merges = 1 + 1  # base merge + final merge
+          ops_executed = int(pushes + merges + 1 + 1)  # +pop + to_stacks
+
+          return WorkloadResult(
+              name="clone_push_merge",
+              params={"depth": depth, "k": k, "clones": clones, "marker_base": marker_base},
+              final_state=final_state,
+              operations_executed=ops_executed,
+              timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
+          )
+
+
       # Registry of workloads for ease of selection
       WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
           "linear_push": workload_linear_push,
@@ -4997,6 +5752,8 @@ messages:
           "merge_many": workload_merge_many,
           "pop_collapse": workload_pop_collapse,
           "apply_prune": workload_apply_prune,
+          "split_surface_merge": workload_split_surface_merge,
+          "clone_push_merge": workload_clone_push_merge,
       }
 
 
@@ -5013,6 +5770,8 @@ messages:
           if preset == "small":
               return {
                   "linear_push": [{"length": 500}, {"length": 2_000}],
+                  "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
+                  "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
                   "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
                   "diamond_repeat": [{"repeats": 300}],
                   "merge_many": [{"count": 50, "stack_len": 8}],
@@ -5021,6 +5780,8 @@ messages:
               }
           elif preset == "medium":
               return {
+                  "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
+                  "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
                   "linear_push": [{"length": 5_000}, {"length": 20_000}],
                   "product_tree": [{"depth": 5, "k": 3}],
                   "diamond_repeat": [{"repeats": 2_000}],
@@ -5030,6 +5791,8 @@ messages:
               }
           else:  # large
               return {
+                  "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
+                  "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
                   "linear_push": [{"length": 50_000}],
                   "product_tree": [{"depth": 6, "k": 4}],
                   "diamond_repeat": [{"repeats": 10_000}],
@@ -5946,401 +6709,137 @@ messages:
     metadata:
       filename: python/gss_tester/test_spec.py
   - user: |-
-      Improve the benchmarks.
-      I want to try to push GSSs to their limits and ensure they remain performant. Essentially, if the cost of operations becomes proportional to the size of the tree, it's probably inefficient. And if it becomes proportional to the size of the output of `to_stacks`, it's probably extremely inefficient.
-      One area for concern is `merge`. Basically, we should be able to define a big complex GSS with lots and lots of node sharing, many-to-one relationships, one-to-many relationships, many-to-many etc, and then 'split' it and do some stuff to one of the clones, anything, even `apply` or `prune`, and do other stuff to the other clone, and then merge the clones. And the time it takes to merge should not be proportional to the size of the whole tree, because all those operations like `push`, `pop`, `apply`, `prune` should try to preserve node sharing even between GSSs, should try to keep it so that any node whose subtree is unchanged will remain at the same place in memory - or, ideally, each unique subtree exists in memory in only one place.
-      Often we get an issue where we take one complex GSS, clone it a bunch of times and do a bunch of stuff to each clone, but where that stuff shouldn't affect the GSSs deeply, just kind of at the surface, and then we merge them all back into one, and we find merge performance is proportional to the size of the whole GSSs when it should roughly be proportional to the size of the surface part that was modified by our operations. And this is a problem. We want to be able to detect this.
-      Improve the benchmarks. Don't modify `reference_impl.py` or `leveled_imply.py`.
+      ```shell 'python/run_benchmarks.sh'
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # generating JSON results and analysis plots. This script runs each model once
+      # (no in-process reference/baseline). The analyzer is later told which result
+      # is the baseline to perform mask comparisons.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ./src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="./src/example_code.js"}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+          echo "Error: At least one model argument is required. The first is treated as the baseline."
+          exit 1
+      fi
+
+      BASELINE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
+      # Check that all provided files exist
+      for file in "${ALL_MODELS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
 
 
-      ---
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Baseline Model: $BASELINE_MODEL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Models: ${COMPETITORS[*]}"
+      else
+        echo "Other Models: (none)"
+      fi
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
 
 
-      Here’s a focused plan and patch set to enhance your benchmarks for detecting poor merge scalability and node sharing issues, without touching reference_impl.py or leveled_impl.py.
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      for model_to_benchmark in "${ALL_MODELS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+          cmd=(python -m python.aug25.benchmark_runner
+              --code "$CODE_FILE"
+              --constraint-file "$CONSTRAINT_FILE"
+              --model "$model_to_benchmark"
+              --output "$RESULTS_DIR")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
 
-      Step-by-step instructions
 
-      1) Add two new workloads that stress merge scalability and node sharing:
-      - split_surface_merge: Build a large product-tree base GSS, split it into many per-top isolates, create multiple “clones” that only modify a small subset of those isolates (shallow surface changes), and then merge those clones back. This detects cases where merge time grows with the whole tree rather than just the touched surface.
-      - clone_push_merge: Build a large base GSS, create many clones by pushing a unique marker (one extra top element) to each clone, then merge all clones and pop once. This tests whether implementations preserve sharing of the unchanged subtree and whether the merge of many shallow variants is near the cost of the surface, not the whole tree.
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      cmd=(python -m python.aug25.benchmark_analyzer
+          "${RESULTS_DIR}"/*.json
+          --baseline "$BASELINE_STEM"
+          --output-dir "$PLOTS_DIR")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
 
-      2) Track detailed phase timings and per-op timings:
-      - For both workloads, record:
-        - base_build (building all leaves and merging into the base)
-        - precompute_isolates (for split_surface_merge)
-        - build_clones
-        - final_merge
-        - final_pop (for clone_push_merge)
-        - final_to_stacks
-        - total (full run time under tracemalloc)
-      - Add per_op timings for isolate and apply alongside existing push/merge/to_stacks.
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Baseline: $BASELINE_STEM"
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
 
-      3) Emit diagnostics to make performance interpretation easy:
-      - In split_surface_merge, compute and emit:
-        - diag_total_stacks: number of stacks in the base
-        - diag_unique_modified_tops: number of unique top values modified across all clones
-        - diag_affected_stacks: stacks touched by modifications = diag_per_top_stacks * diag_unique_modified_tops
-        - diag_merge_time_per_affected_stack: final_merge time normalized by affected stacks
-      - In clone_push_merge, compute:
-        - diag_total_stacks and diag_merge_time_per_stack
-
-      4) Integrate into workload registry and presets:
-      - Register the two new workloads in WORKLOADS.
-      - Update default_specs() to include parameter sets for small, medium, and large presets. These sizes are chosen to be representative while keeping the “small” preset quick to run.
-
-      5) Don’t touch reference_impl.py or leveled_impl.py:
-      - All changes are in benchmarks only (workloads and a brief docs tweak).
-
-      How to read the results
-      - Look at timing.phases.final_merge for each workload:
-        - split_surface_merge: compare final_merge with phases.diag_merge_time_per_affected_stack. If it scales with total stacks instead of affected stacks, you likely have poor sharing in merge.
-        - clone_push_merge: compare final_merge with diag_total_stacks (and diag_merge_time_per_stack). If merging many clones is proportional to the size of the entire tree per clone (instead of roughly linear in stacks plus number of clones), that’s concerning.
-      - Use structure.trie.sharing_ratio (already produced) to understand how much prefix sharing exists; smaller ratios imply heavy sharing.
-
-      Git diffs
-
-      diff --git a/python/gss_tester/benchmarks/__init__.py b/python/gss_tester/benchmarks/__init__.py
-      index a126f25..559eb31 100644
-      --- a/python/gss_tester/benchmarks/__init__.py
-      +++ b/python/gss_tester/benchmarks/__init__.py
-      @@ -9,6 +9,10 @@ defined in gss_tester.interface.GSS.
-       Key features:
-       - Multiple workloads that stress different aspects of a GSS (push-heavy, branching,
-         pop/merge collapse, wide merges, apply/prune, and seeded fuzz-like constructions).
-      +- Merge-sensitivity workloads that specifically probe whether merge operations scale with
-      +  the “surface” changes rather than the entire structure:
-      +  - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
-      +  - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
-       - Scaling controls to evaluate asymptotic behavior as the structure grows.
-       - Timing and memory measurement using Python's standard library (time, tracemalloc).
-       - Structural metrics derived from to_stacks() and optional implementation-specific
-      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
-      index 4941f9f..9fbecef 100644
-      --- a/python/gss_tester/benchmarks/workloads.py
-      +++ b/python/gss_tester/benchmarks/workloads.py
-      @@ -1,6 +1,7 @@
-       from __future__ import annotations
-       
-       import itertools
-      +import math
-       import random
-       import time
-       import tracemalloc
-      @@ -239,6 +240,219 @@ def workload_apply_prune(
-           )
-       
-       
-      +def workload_split_surface_merge(
-      +    gss_class: Type[GSS],
-      +    depth: int,
-      +    k: int,
-      +    top_k: int,
-      +    clones: int,
-      +    mod_per_clone: int = 1,
-      +    apply_amount: int = 1,
-      +    seed: int = 1234,
-      +    base_value: int = 7000,
-      +) -> WorkloadResult:
-      +    """
-      +    Build a large product-tree base with heavy sharing (branching for depth-1 levels by `k`,
-      +    then a wide top level of size `top_k`). Create `clones` that each modify only a small number
-      +    (`mod_per_clone`) of top-of-stack value partitions via apply(). Merge all clones back.
-      +
-      +    Intended to detect merge implementations that scale with total structure size instead of the
-      +    touched “surface” (the union of modified top-of-stack partitions).
-      +    """
-      +    per_op: Dict[str, List[float]] = {"push": [], "merge": [], "isolate": [], "apply": [], "to_stacks": []}
-      +    phases: Dict[str, float] = {}
-      +
-      +    # Diagnostics captured during run()
-      +    diag_total_stacks = 0
-      +    diag_unique_modified_tops = 0
-      +    final_merge_duration = 0.0
-      +
-      +    def run() -> GSS:
-      +        nonlocal diag_total_stacks, diag_unique_modified_tops, final_merge_duration
-      +
-      +        base = gss_class.from_stacks([([], MergeableInt(0))])
-      +
-      +        # Construct value levels:
-      +        # - First depth-1 levels with branching factor k
-      +        # - Last (top) level with branching factor top_k
-      +        levels_prefix: List[List[int]] = [
-      +            [base_value + d * 100 + j for j in range(k)] for d in range(max(0, depth - 1))
-      +        ]
-      +        top_vals: List[int] = [base_value + (depth * 100) + j for j in range(top_k)]
-      +
-      +        # Build all sequences
-      +        sequences: List[List[int]] = []
-      +        if levels_prefix:
-      +            for pref in itertools.product(*levels_prefix):
-      +                for last in top_vals:
-      +                    sequences.append(list(pref) + [last])
-      +        else:
-      +            for last in top_vals:
-      +                sequences.append([last])
-      +
-      +        # Build leaves
-      +        t_base_start = time.perf_counter()
-      +        leaves: List[GSS] = []
-      +        for seq in sequences:
-      +            s = base
-      +            for v in seq:
-      +                t0 = time.perf_counter()
-      +                s = s.push(v)
-      +                per_op["push"].append(time.perf_counter() - t0)
-      +            leaves.append(s)
-      +
-      +        # Merge leaves into base
-      +        t0 = time.perf_counter()
-      +        base_merged = gss_class.merge_many(leaves)
-      +        per_op["merge"].append(time.perf_counter() - t0)
-      +        phases["base_build"] = time.perf_counter() - t_base_start
-      +
-      +        # Precompute isolates by top-of-stack
-      +        t_iso_start = time.perf_counter()
-      +        isolates_by_top: Dict[int, GSS] = {}
-      +        for tv in top_vals:
-      +            t0 = time.perf_counter()
-      +            iso = base_merged.isolate(tv)
-      +            per_op["isolate"].append(time.perf_counter() - t0)
-      +            isolates_by_top[tv] = iso
-      +        phases["precompute_isolates"] = time.perf_counter() - t_iso_start
-      +
-      +        # Build clones: each modifies a small subset of tops via apply, then merges with the rest
-      +        t_clones_start = time.perf_counter()
-      +        rng = random.Random(seed)
-      +        clones_list: List[GSS] = []
-      +        modified_union: set = set()
-      +        tops_list = list(top_vals)
-      +        for i in range(clones):
-      +            chosen = rng.sample(tops_list, min(mod_per_clone, len(tops_list)))
-      +            modified_union.update(chosen)
-      +
-      +            # Apply to chosen partitions
-      +            changed_parts: List[GSS] = []
-      +            for v in chosen:
-      +                t0 = time.perf_counter()
-      +                part = isolates_by_top[v].apply(lambda acc, amt=apply_amount: acc + amt)
-      +                per_op["apply"].append(time.perf_counter() - t0)
-      +                changed_parts.append(part)
-      +
-      +            # Merge chosen parts
-      +            t0 = time.perf_counter()
-      +            changed = gss_class.merge_many(changed_parts)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +
-      +            # Merge the rest (unmodified parts)
-      +            rest_parts = [isolates_by_top[w] for w in tops_list if w not in chosen]
-      +            t0 = time.perf_counter()
-      +            rest = gss_class.merge_many(rest_parts)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +
-      +            # Combine changed + rest -> clone
-      +            t0 = time.perf_counter()
-      +            clone_i = changed.merge(rest)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +            clones_list.append(clone_i)
-      +
-      +        phases["build_clones"] = time.perf_counter() - t_clones_start
-      +
-      +        # Merge all clones
-      +        t0 = time.perf_counter()
-      +        merged_all = gss_class.merge_many(clones_list)
-      +        final_merge_time = time.perf_counter() - t0
-      +        per_op["merge"].append(final_merge_time)
-      +        phases["final_merge"] = final_merge_time
-      +        final_merge_duration = final_merge_time
-      +
-      +        # Materialize
-      +        t0 = time.perf_counter()
-      +        _ = merged_all.to_stacks()
-      +        to_stacks_time = time.perf_counter() - t0
-      +        per_op["to_stacks"].append(to_stacks_time)
-      +        phases["final_to_stacks"] = to_stacks_time
-      +
-      +        # Diagnostics
-      +        diag_total_stacks = len(sequences)
-      +        diag_unique_modified_tops = len(modified_union)
-      +
-      +        return merged_all
-      +
-      +    final_state, peak_kib, elapsed = _measure_peak_memory(run)
-      +    phases["total"] = elapsed
-      +
-      +    # Derived diagnostics (post-run)
-      +    per_top = (0 if top_k == 0 else ( ( (k ** max(0, depth - 1)) ) ))
-      +    affected = float(per_top * diag_unique_modified_tops)
-      +    phases["peak_mem_kib"] = float(peak_kib)
-      +    phases["diag_total_stacks"] = float( (k ** max(0, depth - 1)) * top_k )
-      +    phases["diag_unique_modified_tops"] = float(diag_unique_modified_tops)
-      +    phases["diag_affected_stacks"] = float(affected)
-      +    phases["diag_merge_time_per_affected_stack"] = float(final_merge_duration / max(1.0, affected))
-      +
-      +    pushes = ( (k ** max(0, depth - 1)) * top_k ) * max(1, depth)
-      +    merges_est = 1 + (clones * 3) + 1  # base merge + per-clone (changed, rest, combine) + final merge
-      +    isolates_count = top_k
-      +    applies = clones * min(mod_per_clone, top_k)
-      +    ops_executed = int(pushes + merges_est + isolates_count + applies + 1)  # +1 for final to_stacks
-      +
-      +    return WorkloadResult(
-      +        name="split_surface_merge",
-      +        params={
-      +            "depth": depth,
-      +            "k": k,
-      +            "top_k": top_k,
-      +            "clones": clones,
-      +            "mod_per_clone": mod_per_clone,
-      +            "apply_amount": apply_amount,
-      +            "seed": seed,
-      +        },
-      +        final_state=final_state,
-      +        operations_executed=ops_executed,
-      +        timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
-      +    )
-      +
-      +
-      +def workload_clone_push_merge(
-      +    gss_class: Type[GSS],
-      +    depth: int,
-      +    k: int,
-      +    clones: int,
-      +    base_value: int = 8000,
-      +    marker_base: int = 900_000,
-      +) -> WorkloadResult:
-      +    """
-      +    Build a large product-tree base (k^depth stacks), create `clones` by pushing a unique
-      +    marker onto each clone, then merge all clones and pop once to collapse markers.
-      +    Tests whether merge scales with the shallow changes rather than the entire structure.
-      +    """
-      +    per_op: Dict[str, List[float]] = {"push": [], "merge": [], "pop": [], "to_stacks": []}
-      +    phases: Dict[str, float] = {}
-      +
-      +    def run() -> GSS:
-      +        # Build base
-      +        base0 = gss_class.from_stacks([([], MergeableInt(0))])
-      +        levels: List[List[int]] = [
-      +            [base_value + d * 100 + j for j in range(k)] for d in range(depth)
-      +        ]
-      +        sequences = list(itertools.product(*levels)) if levels else [tuple()]
-      +
-      +        t_base = time.perf_counter()
-      +        leaves: List[GSS] = []
-      +        for seq in sequences:
-      +            s = base0
-      +            for v in seq:
-      +                t0 = time.perf_counter()
-      +                s = s.push(v)
-      +                per_op["push"].append(time.perf_counter() - t0)
-      +            leaves.append(s)
-      +
-      +        t0 = time.perf_counter()
-      +        base = gss_class.merge_many(leaves)
-      +        per_op["merge"].append(time.perf_counter() - t0)
-      +        phases["base_build"] = time.perf_counter() - t_base
-      +
-      +        # Clone with shallow push
-      +        t_clone = time.perf_counter()
-      +        clones_list: List[GSS] = []
-      +        for i in range(clones):
-      +            t0 = time.perf_counter()
-      +            c = base.push(marker_base + i)
-      +            per_op["push"].append(time.perf_counter() - t0)
-      +            clones_list.append(c)
-      +        phases["build_clones"] = time.perf_counter() - t_clone
-      +
-      +        # Merge all clones, then pop once to collapse the markers
-      +        t0 = time.perf_counter()
-      +        merged = gss_class.merge_many(clones_list)
-      +        final_merge_time = time.perf_counter() - t0
-      +        per_op["merge"].append(final_merge_time)
-      +        phases["final_merge"] = final_merge_time
-      +
-      +        t0 = time.perf_counter()
-      +        popped = merged.pop()
-      +        per_op["pop"].append(time.perf_counter() - t0)
-      +        phases["final_pop"] = per_op["pop"][-1]
-      +
-      +        t0 = time.perf_counter()
-      +        _ = popped.to_stacks()
-      +        per_op["to_stacks"].append(time.perf_counter() - t0)
-      +        phases["final_to_stacks"] = per_op["to_stacks"][-1]
-      +
-      +        # Diagnostics
-      +        total_stacks = (k ** depth) if depth > 0 else 1
-      +        phases["diag_total_stacks"] = float(total_stacks)
-      +        phases["diag_merge_time_per_stack"] = float(final_merge_time / max(1, total_stacks))
-      +
-      +        return popped
-      +
-      +    final_state, peak_kib, elapsed = _measure_peak_memory(run)
-      +    phases["total"] = elapsed
-      +    phases["peak_mem_kib"] = float(peak_kib)
-      +
-      +    total_stacks = (k ** depth) if depth > 0 else 1
-      +    pushes = total_stacks * max(1, depth)  # building base
-      +    pushes += clones  # clone markers
-      +    merges = 1 + 1  # base merge + final merge
-      +    ops_executed = int(pushes + merges + 1 + 1)  # +pop + to_stacks
-      +
-      +    return WorkloadResult(
-      +        name="clone_push_merge",
-      +        params={"depth": depth, "k": k, "clones": clones, "marker_base": marker_base},
-      +        final_state=final_state,
-      +        operations_executed=ops_executed,
-      +        timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
-      +    )
-      +
-      +
-       # Registry of workloads for ease of selection
-       WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
-           "linear_push": workload_linear_push,
-           "product_tree": workload_product_tree,
-           "diamond_repeat": workload_diamond_repeat,
-           "merge_many": workload_merge_many,
-           "pop_collapse": workload_pop_collapse,
-           "apply_prune": workload_apply_prune,
-      +    "split_surface_merge": workload_split_surface_merge,
-      +    "clone_push_merge": workload_clone_push_merge,
-       }
-       
-       
-       def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-      @@ -249,6 +463,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-           if preset == "small":
-               return {
-                   "linear_push": [{"length": 500}, {"length": 2_000}],
-      +            "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
-      +            "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
-                   "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
-                   "diamond_repeat": [{"repeats": 300}],
-                   "merge_many": [{"count": 50, "stack_len": 8}],
-      @@ -257,6 +473,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-               }
-           elif preset == "medium":
-               return {
-      +            "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
-      +            "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
-                   "linear_push": [{"length": 5_000}, {"length": 20_000}],
-                   "product_tree": [{"depth": 5, "k": 3}],
-                   "diamond_repeat": [{"repeats": 2_000}],
-      @@ -266,6 +484,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-               }
-           else:  # large
-               return {
-      +            "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
-      +            "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
-                   "linear_push": [{"length": 50_000}],
-                   "product_tree": [{"depth": 6, "k": 4}],
-                   "diamond_repeat": [{"repeats": 10_000}],
-                   "merge_many": [{"count": 1_000, "stack_len": 24}],
-                   "pop_collapse": [{"base_depth": 150, "branch_count": 5_000}],
-                   "apply_prune": [{"breadth": 8, "depth": 6, "apply_amount": 17, "prune_threshold": 200}],
-               }
-
-      ---
-
-      Apply this.
+      ```
+    metadata:
+      filename: python/run_benchmarks.sh
+  - user: Make it possible to run the benchmarks like we do the tests via .sh.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6359,409 +6858,315 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here are the step-by-step instructions to improve the benchmarks, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to update your benchmark script, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      #### 1. Update `python/gss_tester/benchmarks/__init__.py`
+      1.  **Update `python/run_benchmarks.sh`**
 
-      I will update the package docstring to announce the new merge-sensitivity workloads.
+          The existing `run_benchmarks.sh` script is configured for a different project and will not work with the `gss_tester` benchmark runner. I will replace its contents with a new script that is tailored to `gss_tester.benchmarks.runner`.
 
-      -   **Edit `python/gss_tester/benchmarks/__init__.py`**:
-      -   In the main docstring, add the following lines after the "pop/merge collapse..." line to describe the new workloads:
+          The new script will:
+          *   Correctly invoke `python -m gss_tester.benchmarks.runner`.
+          *   Accept GSS implementation descriptors (e.g., `gss_tester.reference_impl:ReferenceGSS`) as command-line arguments. If none are provided, the runner's defaults will be used.
+          *   Use `PRESET` and `REPEATS` environment variables to control the benchmark configuration.
+          *   Generate a single, consolidated JSON output file inside a new timestamped directory under `benchmark_results/`.
+          *   Remove the non-applicable analysis step.
 
-      ```python
-      +- Merge-sensitivity workloads that specifically probe whether merge operations scale with
-      +  the “surface” changes rather than the entire structure:
-      +  - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
-      +  - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
-      ```
+          Open the file `python/run_benchmarks.sh` and replace its entire contents with the following code:
 
-      #### 2. Update `python/gss_tester/benchmarks/workloads.py`
-
-      I will add two new workload functions, register them, and add them to the parameter presets.
-
-      -   **Edit `python/gss_tester/benchmarks/workloads.py`**:
-          1.  Add `import math` at the top of the file.
-          2.  After the `workload_apply_prune` function, insert the two new workload functions: `workload_split_surface_merge` and `workload_clone_push_merge`. These are substantial new functions designed to test merge performance on shallow modifications to large, shared structures.
-          3.  In the `WORKLOADS` dictionary, register the new workloads:
-              ```python
-              # ... existing workloads
-                  "pop_collapse": workload_pop_collapse,
-                  "apply_prune": workload_apply_prune,
-              +    "split_surface_merge": workload_split_surface_merge,
-              +    "clone_push_merge": workload_clone_push_merge,
-              }
-              ```
-          4.  In the `default_specs` function, update the dictionaries for `"small"`, `"medium"`, and `"large"` presets to include configurations for the new workloads. For example, in the `"small"` preset:
-              ```python
-              if preset == "small":
-                  return {
-                      "linear_push": [{"length": 500}, {"length": 2_000}],
-              +       "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
-              +       "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
-                      "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
-                      # ... rest of the preset
-              ```
-              Repeat this for the `"medium"` and `"large"` presets with appropriately scaled parameters.
+          ```bash
+          #!/bin/bash
+          set -euo pipefail
+          
+          # ==============================================================================
+          # run_benchmarks.sh
+          #
+          # A script to automate running benchmarks for GSS implementations.
+          #
+          # This script should be run from the project root (the directory containing 'python').
+          #
+          # Usage:
+          #   ./python/run_benchmarks.sh [implementation1] [implementation2] ...
+          #
+          # Example:
+          #   # Run with default implementations
+          #   ./python/run_benchmarks.sh
+          #
+          #   # Run with specific implementations and a different preset
+          #   PRESET=medium ./python/run_benchmarks.sh gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
+          #
+          # Environment Variables:
+          #   PRESET:  Benchmark preset to use (small, medium, large). Default: small.
+          #   REPEATS: Number of times to repeat each workload. Default: 1.
+          # ==============================================================================
+          
+          # --- Configuration ---
+          # Use environment variables if set, otherwise use defaults.
+          : "${PRESET:="small"}"
+          : "${REPEATS:=1}"
+          
+          # --- Argument Handling ---
+          IMPLEMENTATIONS=("$@")
+          
+          # If no implementations are provided, the benchmark runner will use its own defaults.
+          if [ "${#IMPLEMENTATIONS[@]}" -eq 0 ]; then
+              echo "No implementations provided; the benchmark runner will use its defaults."
+          fi
+          
+          # --- Setup ---
+          # Create a unique directory for this benchmark run's results.
+          RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+          mkdir -p "$RESULTS_DIR"
+          OUTPUT_FILE="${RESULTS_DIR}/gss_bench_results.json"
+          
+          echo "Benchmark results will be saved to: $OUTPUT_FILE"
+          echo "---"
+          if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+            echo "Implementations: ${IMPLEMENTATIONS[*]}"
+          else
+            echo "Implementations: (default)"
+          fi
+          echo "Preset: $PRESET"
+          echo "Repeats: $REPEATS"
+          echo "---"
+          
+          
+          # --- Run Benchmarks ---
+          echo "Starting benchmark run..."
+          
+          # Construct the command. If IMPLEMENTATIONS is empty, the --implementations flag is omitted
+          # and the runner will use its own defaults.
+          cmd=(python -m gss_tester.benchmarks.runner
+              --preset "$PRESET"
+              --repeats "$REPEATS"
+              --output "$OUTPUT_FILE"
+          )
+          if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+              cmd+=(--implementations "${IMPLEMENTATIONS[@]}")
+          fi
+          
+          echo "Executing: ${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo
+              echo ">>> Benchmark run finished successfully."
+          else
+              exit_code=$?
+              echo
+              echo ">>> Benchmark run failed with exit code $exit_code."
+              exit $exit_code
+          fi
+          
+          echo
+          echo "---"
+          echo "Benchmark complete."
+          echo "Results written to $OUTPUT_FILE"
+          ```
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here is the git diff for the change.
 
       ```diff
-      diff --git a/python/gss_tester/benchmarks/__init__.py b/python/gss_tester/benchmarks/__init__.py
-      index a126f25..559eb31 100644
-      --- a/python/gss_tester/benchmarks/__init__.py
-      +++ b/python/gss_tester/benchmarks/__init__.py
-      @@ -9,6 +9,10 @@ defined in gss_tester.interface.GSS.
-       Key features:
-       - Multiple workloads that stress different aspects of a GSS (push-heavy, branching,
-         pop/merge collapse, wide merges, apply/prune, and seeded fuzz-like constructions).
-      +- Merge-sensitivity workloads that specifically probe whether merge operations scale with
-      +  the “surface” changes rather than the entire structure:
-      +  - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
-      +  - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
-       - Scaling controls to evaluate asymptotic behavior as the structure grows.
-       - Timing and memory measurement using Python's standard library (time, tracemalloc).
-       - Structural metrics derived from to_stacks() and optional implementation-specific
-
-      ``````diff
-      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
-      index 4941f9f..9fbecef 100644
-      --- a/python/gss_tester/benchmarks/workloads.py
-      +++ b/python/gss_tester/benchmarks/workloads.py
-      @@ -1,6 +1,7 @@
-       from __future__ import annotations
+      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -1,114 +1,78 @@
+       #!/bin/bash
+       set -euo pipefail
        
-       import itertools
-      +import math
-       import random
-       import time
-       import tracemalloc
-      @@ -239,6 +240,219 @@ def workload_apply_prune(
-           )
+       # ==============================================================================
+       # run_benchmarks.sh
+       #
+      -# A script to automate running benchmarks for multiple grammar constraint models,
+      -# generating JSON results and analysis plots. This script runs each model once
+      -# (no in-process reference/baseline). The analyzer is later told which result
+      -# is the baseline to perform mask comparisons.
+      +# A script to automate running benchmarks for GSS implementations.
+       #
+      -# This script should be run from the `python` directory.
+      +# This script should be run from the project root (the directory containing 'python').
+       #
+       # Usage:
+      -#   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      +#   ./python/run_benchmarks.sh [implementation1] [implementation2] ...
+       #
+       # Example:
+      -#   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      +#   # Run with default implementations
+      +#   ./python/run_benchmarks.sh
+      +#
+      +#   # Run with specific implementations and a different preset
+      +#   PRESET=medium ./python/run_benchmarks.sh gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
+       #
+       # Environment Variables:
+      -#   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      -#                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      -#   CODE_FILE:    Path to the code file to use as input.
+      -#                 (Default: ./src/example_code.js)
+      +#   PRESET:  Benchmark preset to use (small, medium, large). Default: small.
+      +#   REPEATS: Number of times to repeat each workload. Default: 1.
+       # ==============================================================================
        
+       # --- Configuration ---
+       # Use environment variables if set, otherwise use defaults.
+      -: "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      -: "${CODE_FILE:="./src/example_code.js"}"
+      -
+      -# --- Argument Validation ---
+      -if [ "$#" -lt 1 ]; then
+      -    echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+      -    echo "Error: At least one model argument is required. The first is treated as the baseline."
+      -    exit 1
+      -fi
+      -
+      -BASELINE_MODEL="$1"
+      -shift
+      -COMPETITORS=("$@")
+      -
+      -ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+      -
+      -# Check that all provided files exist
+      -for file in "${ALL_MODELS[@]}"; do
+      -    if [ ! -f "$file" ]; then
+      -        echo "Error: Model file not found: $file"
+      -        exit 1
+      -    fi
+      -done
+      -if [ ! -f "$CONSTRAINT_FILE" ]; then
+      -    echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+      -    exit 1
+      -fi
+      -if [ ! -f "$CODE_FILE" ]; then
+      -    echo "Error: Code file not found: $CODE_FILE"
+      -    exit 1
+      -fi
+      -
+      +: "${PRESET:="small"}"
+      +: "${REPEATS:=1}"
+      +
+      +# --- Argument Handling ---
+      +IMPLEMENTATIONS=("$@")
+      +
+      +# If no implementations are provided, the benchmark runner will use its own defaults.
+      +if [ "${#IMPLEMENTATIONS[@]}" -eq 0 ]; then
+      +    echo "No implementations provided; the benchmark runner will use its defaults."
+      +fi
        
-      +def workload_split_surface_merge(
-      +    gss_class: Type[GSS],
-      +    depth: int,
-      +    k: int,
-      +    top_k: int,
-      +    clones: int,
-      +    mod_per_clone: int = 1,
-      +    apply_amount: int = 1,
-      +    seed: int = 1234,
-      +    base_value: int = 7000,
-      +) -> WorkloadResult:
-      +    """
-      +    Build a large product-tree base with heavy sharing (branching for depth-1 levels by `k`,
-      +    then a wide top level of size `top_k`). Create `clones` that each modify only a small number
-      +    (`mod_per_clone`) of top-of-stack value partitions via apply(). Merge all clones back.
+       # --- Setup ---
+       # Create a unique directory for this benchmark run's results.
+       RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+       mkdir -p "$RESULTS_DIR"
+      -echo "Benchmark results will be saved in: $RESULTS_DIR"
+      +OUTPUT_FILE="${RESULTS_DIR}/gss_bench_results.json"
       +
-      +    Intended to detect merge implementations that scale with total structure size instead of the
-      +    touched “surface” (the union of modified top-of-stack partitions).
-      +    """
-      +    per_op: Dict[str, List[float]] = {"push": [], "merge": [], "isolate": [], "apply": [], "to_stacks": []}
-      +    phases: Dict[str, float] = {}
-      +
-      +    # Diagnostics captured during run()
-      +    diag_total_stacks = 0
-      +    diag_unique_modified_tops = 0
-      +    final_merge_duration = 0.0
-      +
-      +    def run() -> GSS:
-      +        nonlocal diag_total_stacks, diag_unique_modified_tops, final_merge_duration
-      +
-      +        base = gss_class.from_stacks([([], MergeableInt(0))])
-      +
-      +        # Construct value levels:
-      +        # - First depth-1 levels with branching factor k
-      +        # - Last (top) level with branching factor top_k
-      +        levels_prefix: List[List[int]] = [
-      +            [base_value + d * 100 + j for j in range(k)] for d in range(max(0, depth - 1))
-      +        ]
-      +        top_vals: List[int] = [base_value + (depth * 100) + j for j in range(top_k)]
-      +
-      +        # Build all sequences
-      +        sequences: List[List[int]] = []
-      +        if levels_prefix:
-      +            for pref in itertools.product(*levels_prefix):
-      +                for last in top_vals:
-      +                    sequences.append(list(pref) + [last])
-      +        else:
-      +            for last in top_vals:
-      +                sequences.append([last])
-      +
-      +        # Build leaves
-      +        t_base_start = time.perf_counter()
-      +        leaves: List[GSS] = []
-      +        for seq in sequences:
-      +            s = base
-      +            for v in seq:
-      +                t0 = time.perf_counter()
-      +                s = s.push(v)
-      +                per_op["push"].append(time.perf_counter() - t0)
-      +            leaves.append(s)
-      +
-      +        # Merge leaves into base
-      +        t0 = time.perf_counter()
-      +        base_merged = gss_class.merge_many(leaves)
-      +        per_op["merge"].append(time.perf_counter() - t0)
-      +        phases["base_build"] = time.perf_counter() - t_base_start
-      +
-      +        # Precompute isolates by top-of-stack
-      +        t_iso_start = time.perf_counter()
-      +        isolates_by_top: Dict[int, GSS] = {}
-      +        for tv in top_vals:
-      +            t0 = time.perf_counter()
-      +            iso = base_merged.isolate(tv)
-      +            per_op["isolate"].append(time.perf_counter() - t0)
-      +            isolates_by_top[tv] = iso
-      +        phases["precompute_isolates"] = time.perf_counter() - t_iso_start
-      +
-      +        # Build clones: each modifies a small subset of tops via apply, then merges with the rest
-      +        t_clones_start = time.perf_counter()
-      +        rng = random.Random(seed)
-      +        clones_list: List[GSS] = []
-      +        modified_union: set = set()
-      +        tops_list = list(top_vals)
-      +        for i in range(clones):
-      +            chosen = rng.sample(tops_list, min(mod_per_clone, len(tops_list)))
-      +            modified_union.update(chosen)
-      +
-      +            # Apply to chosen partitions
-      +            changed_parts: List[GSS] = []
-      +            for v in chosen:
-      +                t0 = time.perf_counter()
-      +                part = isolates_by_top[v].apply(lambda acc, amt=apply_amount: acc + amt)
-      +                per_op["apply"].append(time.perf_counter() - t0)
-      +                changed_parts.append(part)
-      +
-      +            # Merge chosen parts
-      +            t0 = time.perf_counter()
-      +            changed = gss_class.merge_many(changed_parts)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +
-      +            # Merge the rest (unmodified parts)
-      +            rest_parts = [isolates_by_top[w] for w in tops_list if w not in chosen]
-      +            t0 = time.perf_counter()
-      +            rest = gss_class.merge_many(rest_parts)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +
-      +            # Combine changed + rest -> clone
-      +            t0 = time.perf_counter()
-      +            clone_i = changed.merge(rest)
-      +            per_op["merge"].append(time.perf_counter() - t0)
-      +            clones_list.append(clone_i)
-      +
-      +        phases["build_clones"] = time.perf_counter() - t_clones_start
-      +
-      +        # Merge all clones
-      +        t0 = time.perf_counter()
-      +        merged_all = gss_class.merge_many(clones_list)
-      +        final_merge_time = time.perf_counter() - t0
-      +        per_op["merge"].append(final_merge_time)
-      +        phases["final_merge"] = final_merge_time
-      +        final_merge_duration = final_merge_time
-      +
-      +        # Materialize
-      +        t0 = time.perf_counter()
-      +        _ = merged_all.to_stacks()
-      +        to_stacks_time = time.perf_counter() - t0
-      +        per_op["to_stacks"].append(to_stacks_time)
-      +        phases["final_to_stacks"] = to_stacks_time
-      +
-      +        # Diagnostics
-      +        diag_total_stacks = len(sequences)
-      +        diag_unique_modified_tops = len(modified_union)
-      +
-      +        return merged_all
-      +
-      +    final_state, peak_kib, elapsed = _measure_peak_memory(run)
-      +    phases["total"] = elapsed
-      +
-      +    # Derived diagnostics (post-run)
-      +    per_top = (0 if top_k == 0 else ( ( (k ** max(0, depth - 1)) ) ))
-      +    affected = float(per_top * diag_unique_modified_tops)
-      +    phases["peak_mem_kib"] = float(peak_kib)
-      +    phases["diag_total_stacks"] = float( (k ** max(0, depth - 1)) * top_k )
-      +    phases["diag_unique_modified_tops"] = float(diag_unique_modified_tops)
-      +    phases["diag_affected_stacks"] = float(affected)
-      +    phases["diag_merge_time_per_affected_stack"] = float(final_merge_duration / max(1.0, affected))
-      +
-      +    pushes = ( (k ** max(0, depth - 1)) * top_k ) * max(1, depth)
-      +    merges_est = 1 + (clones * 3) + 1  # base merge + per-clone (changed, rest, combine) + final merge
-      +    isolates_count = top_k
-      +    applies = clones * min(mod_per_clone, top_k)
-      +    ops_executed = int(pushes + merges_est + isolates_count + applies + 1)  # +1 for final to_stacks
-      +
-      +    return WorkloadResult(
-      +        name="split_surface_merge",
-      +        params={
-      +            "depth": depth,
-      +            "k": k,
-      +            "top_k": top_k,
-      +            "clones": clones,
-      +            "mod_per_clone": mod_per_clone,
-      +            "apply_amount": apply_amount,
-      +            "seed": seed,
-      +        },
-      +        final_state=final_state,
-      +        operations_executed=ops_executed,
-      +        timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
-      +    )
-      +
-      +
-      +def workload_clone_push_merge(
-      +    gss_class: Type[GSS],
-      +    depth: int,
-      +    k: int,
-      +    clones: int,
-      +    base_value: int = 8000,
-      +    marker_base: int = 900_000,
-      +) -> WorkloadResult:
-      +    """
-      +    Build a large product-tree base (k^depth stacks), create `clones` by pushing a unique
-      +    marker onto each clone, then merge all clones and pop once to collapse markers.
-      +    Tests whether merge scales with the shallow changes rather than the entire structure.
-      +    """
-      +    per_op: Dict[str, List[float]] = {"push": [], "merge": [], "pop": [], "to_stacks": []}
-      +    phases: Dict[str, float] = {}
-      +
-      +    def run() -> GSS:
-      +        # Build base
-      +        base0 = gss_class.from_stacks([([], MergeableInt(0))])
-      +        levels: List[List[int]] = [
-      +            [base_value + d * 100 + j for j in range(k)] for d in range(depth)
-      +        ]
-      +        sequences = list(itertools.product(*levels)) if levels else [tuple()]
-      +
-      +        t_base = time.perf_counter()
-      +        leaves: List[GSS] = []
-      +        for seq in sequences:
-      +            s = base0
-      +            for v in seq:
-      +                t0 = time.perf_counter()
-      +                s = s.push(v)
-      +                per_op["push"].append(time.perf_counter() - t0)
-      +            leaves.append(s)
-      +
-      +        t0 = time.perf_counter()
-      +        base = gss_class.merge_many(leaves)
-      +        per_op["merge"].append(time.perf_counter() - t0)
-      +        phases["base_build"] = time.perf_counter() - t_base
-      +
-      +        # Clone with shallow push
-      +        t_clone = time.perf_counter()
-      +        clones_list: List[GSS] = []
-      +        for i in range(clones):
-      +            t0 = time.perf_counter()
-      +            c = base.push(marker_base + i)
-      +            per_op["push"].append(time.perf_counter() - t0)
-      +            clones_list.append(c)
-      +        phases["build_clones"] = time.perf_counter() - t_clone
-      +
-      +        # Merge all clones, then pop once to collapse the markers
-      +        t0 = time.perf_counter()
-      +        merged = gss_class.merge_many(clones_list)
-      +        final_merge_time = time.perf_counter() - t0
-      +        per_op["merge"].append(final_merge_time)
-      +        phases["final_merge"] = final_merge_time
-      +
-      +        t0 = time.perf_counter()
-      +        popped = merged.pop()
-      +        per_op["pop"].append(time.perf_counter() - t0)
-      +        phases["final_pop"] = per_op["pop"][-1]
-      +
-      +        t0 = time.perf_counter()
-      +        _ = popped.to_stacks()
-      +        per_op["to_stacks"].append(time.perf_counter() - t0)
-      +        phases["final_to_stacks"] = per_op["to_stacks"][-1]
-      +
-      +        # Diagnostics
-      +        total_stacks = (k ** depth) if depth > 0 else 1
-      +        phases["diag_total_stacks"] = float(total_stacks)
-      +        phases["diag_merge_time_per_stack"] = float(final_merge_time / max(1, total_stacks))
-      +
-      +        return popped
-      +
-      +    final_state, peak_kib, elapsed = _measure_peak_memory(run)
-      +    phases["total"] = elapsed
-      +    phases["peak_mem_kib"] = float(peak_kib)
-      +
-      +    total_stacks = (k ** depth) if depth > 0 else 1
-      +    pushes = total_stacks * max(1, depth)  # building base
-      +    pushes += clones  # clone markers
-      +    merges = 1 + 1  # base merge + final merge
-      +    ops_executed = int(pushes + merges + 1 + 1)  # +pop + to_stacks
-      +
-      +    return WorkloadResult(
-      +        name="clone_push_merge",
-      +        params={"depth": depth, "k": k, "clones": clones, "marker_base": marker_base},
-      +        final_state=final_state,
-      +        operations_executed=ops_executed,
-      +        timings=WorkloadTiming(per_op=per_op, phases=phases, peak_mem_kib=peak_kib),
-      +    )
-      +
-      +
-       # Registry of workloads for ease of selection
-       WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
-           "linear_push": workload_linear_push,
-      @@ -247,6 +465,8 @@ WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
-           "merge_many": workload_merge_many,
-           "pop_collapse": workload_pop_collapse,
-           "apply_prune": workload_apply_prune,
-      +    "split_surface_merge": workload_split_surface_merge,
-      +    "clone_push_merge": workload_clone_push_merge,
-       }
+      +echo "Benchmark results will be saved to: $OUTPUT_FILE"
+       echo "---"
+      -echo "Baseline Model: $BASELINE_MODEL"
+      -if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+      -  echo "Other Models: ${COMPETITORS[*]}"
+      +if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+      +  echo "Implementations: ${IMPLEMENTATIONS[*]}"
+       else
+      -  echo "Other Models: (none)"
+      -fi
+      -echo "Constraint File: $CONSTRAINT_FILE"
+      -echo "Code: $CODE_FILE"
+      +  echo "Implementations: (default)"
+      +fi
+      +echo "Preset: $PRESET"
+      +echo "Repeats: $REPEATS"
+       echo "---"
        
        
-      @@ -261,6 +481,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-           if preset == "small":
-               return {
-                   "linear_push": [{"length": 500}, {"length": 2_000}],
-      +            "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
-      +            "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
-                   "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
-                   "diamond_repeat": [{"repeats": 300}],
-                   "merge_many": [{"count": 50, "stack_len": 8}],
-      @@ -269,6 +491,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-               }
-           elif preset == "medium":
-               return {
-      +            "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
-      +            "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
-                   "linear_push": [{"length": 5_000}, {"length": 20_000}],
-                   "product_tree": [{"depth": 5, "k": 3}],
-                   "diamond_repeat": [{"repeats": 2_000}],
-      @@ -278,6 +502,8 @@ def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
-               }
-           else:  # large
-               return {
-      +            "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
-      +            "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
-                   "linear_push": [{"length": 50_000}],
-                   "product_tree": [{"depth": 6, "k": 4}],
-                   "diamond_repeat": [{"repeats": 10_000}],
+       # --- Run Benchmarks ---
+      -echo "Starting benchmark runs..."
+      -for model_to_benchmark in "${ALL_MODELS[@]}"; do
+      -    echo
+      -    echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+      -    cmd=(python -m python.aug25.benchmark_runner
+      -        --code "$CODE_FILE"
+      -        --constraint-file "$CONSTRAINT_FILE"
+      -        --model "$model_to_benchmark"
+      -        --output "$RESULTS_DIR")
+      -    echo "${cmd[*]}"
+      -    if "${cmd[@]}"; then
+      -        echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+      -    else
+      -        exit_code=$?
+      -        # Exit code 130 is from SIGINT (Ctrl+C)
+      -        if [ $exit_code -eq 130 ]; then
+      -            echo
+      -            echo ">>> Benchmark for $(basename "$model_to_benchmark") interrupted. Skipping."
+      -        else
+      -            echo
+      -            echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+      -        fi
+      -    fi
+      -done
+      -echo
+      -echo "All benchmark runs completed."
+      -echo "---"
+      -
+      -
+      -# --- Analyze Results ---
+      -echo "Analyzing results and generating plots..."
+      -PLOTS_DIR="${RESULTS_DIR}/analysis"
+      -BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      -cmd=(python -m python.aug25.benchmark_analyzer
+      -    "${RESULTS_DIR}"/*.json
+      -    --baseline "$BASELINE_STEM"
+      -    --output-dir "$PLOTS_DIR")
+      -echo "${cmd[*]}"
+      -"${cmd[@]}"
+      -
+      -echo
+      -echo "---"
+      -echo "Benchmark analysis complete."
+      -echo "Baseline: $BASELINE_STEM"
+      -echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      -echo "Full JSON results are in: $RESULTS_DIR"
+      +echo "Starting benchmark run..."
+      +
+      +# Construct the command. If IMPLEMENTATIONS is empty, the --implementations flag is omitted
+      +# and the runner will use its own defaults.
+      +cmd=(python -m gss_tester.benchmarks.runner
+      +    --preset "$PRESET"
+      +    --repeats "$REPEATS"
+      +    --output "$OUTPUT_FILE"
+      +)
+      +if [ "${#IMPLEMENTATIONS[@]}" -gt 0 ]; then
+      +    cmd+=(--implementations "${IMPLEMENTATIONS[@]}")
+      +fi
+      +
+      +echo "Executing: ${cmd[*]}"
+      +if "${cmd[@]}"; then
+      +    echo
+      +    echo ">>> Benchmark run finished successfully."
+      +else
+      +    exit_code=$?
+      +    echo
+      +    echo ">>> Benchmark run failed with exit code $exit_code."
+      +    exit $exit_code
+      +fi
+      +
+      +echo
+      +echo "---"
+      +echo "Benchmark complete."
+      +echo "Results written to $OUTPUT_FILE"
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/benchmarks/__init__.py
-      Applying patch to 'python/gss_tester/benchmarks/__init__.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/benchmarks/__init__.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/benchmarks/workloads.py
-      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/benchmarks/workloads.py.
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
     metadata:
-  - user: 'Changes committed with message: "bench: Introduce split_surface_merge and
-      clone_push_merge workloads"'
+  - user: 'Changes committed with message: "Refactor: Adapt run_benchmarks.sh for
+      gss_tester benchmark runner"'
     metadata:
 ...
