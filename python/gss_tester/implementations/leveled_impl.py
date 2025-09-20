@@ -77,12 +77,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # Keep validations trivial and cheap; construction/merge maintain invariants.
         # These no-ops preserve public signature without adding overhead or complexity.
         self._validate_no_promotions()
-        self._validate_populated_nodes()
+        self._validate_max_depths()
 
     def _validate_no_promotions(self) -> None:
         return
 
-    def _validate_populated_nodes(self) -> None:
+    def _validate_max_depths(self) -> None:
         return
 
     @classmethod
