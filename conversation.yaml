@@ -1,20 +1,20 @@
 local_system:
   attached_files:
     - python/gss_tester/__init__.py
-    - python/gss_tester/interface.py
+    - python/gss_tester/benchmarks/__init__.py
+    - python/gss_tester/benchmarks/analyzer.py
+    - python/gss_tester/benchmarks/instrumentation.py
+    - python/gss_tester/benchmarks/runner.py
+    - python/gss_tester/benchmarks/workloads.py
     - python/gss_tester/implementations/reference_impl.py
+    - python/gss_tester/interface.py
+    - python/gss_tester/run_benches.sh
+    - python/gss_tester/run_tests.sh
     - python/gss_tester/tests/__init__.py
     - python/gss_tester/tests/analyzer.py
     - python/gss_tester/tests/fuzzer.py
     - python/gss_tester/tests/runner.py
     - python/gss_tester/tests/test_spec.py
-    - python/gss_tester/run_tests.sh
-    - python/gss_tester/benchmarks/__init__.py
-    - python/gss_tester/benchmarks/instrumentation.py
-    - python/gss_tester/benchmarks/workloads.py
-    - python/gss_tester/benchmarks/runner.py
-    - python/gss_tester/benchmarks/analyzer.py
-    - python/gss_tester/run_benches.sh
   conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
@@ -3707,7 +3707,7 @@ local_system:
           merged = candidates[0]
           for c in candidates[1:]:
               merged = merged.merge(c)
-          return merged
+          return g
 
 
       # ----------------------------
@@ -3914,17 +3914,22 @@ local_system:
 
       def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
           """
-          Use the prefix-then-branch builder to create large hidden complexity and fixed width.
-          Clone the GSS C times, push a unique tag to each clone, then merge.
+          Build a GSS with a deep shared prefix, clone it, apply a variable sequence of
+          pops and pushes to each clone's surface, and merge the results.
+          This tests if merge cost is proportional to the surface difference, not hidden depth.
           Params:
             - prefix_depth: int
             - surface_width: int
             - clones: int
+            - pop_n: int (max number of pops in mutation)
+            - push_n: int (max number of pushes in mutation)
           """
           params = cfg.params
           prefix_depth = int(params.get("prefix_depth", 200))
           surface_width = int(params.get("surface_width", 64))
           clones = int(params.get("clones", 8))
+          pop_n = int(params.get("pop_n", 2))
+          push_n = int(params.get("push_n", 2))
 
           recorder = factory.recorder
           workload_result: JsonDict = {
@@ -3946,8 +3951,16 @@ local_system:
 
               # Mutate clones
               recorder.start_phase("mutate_clones")
-              clones_list = [base] * clones
-              mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+              rng = random.Random(prefix_depth * clones) # Deterministic seed
+              mutated = []
+              for i in range(clones):
+                  # Apply a different pop/push sequence to each clone
+                  pops = rng.randint(0, pop_n)
+                  pushes = rng.randint(1, push_n) # Ensure at least one push
+                  mutated_g = base.popn(pops)
+                  for j in range(pushes):
+                      mutated_g = mutated_g.push(("mut", i, j))
+                  mutated.append(mutated_g)
               recorder.end_phase()
 
               # Merge
@@ -4208,7 +4221,7 @@ local_system:
           return [
               WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
               WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
-              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6, "pop_n": 1, "push_n": 2}, max_seconds=5.0),
               WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
               WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
               WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
@@ -4220,7 +4233,7 @@ local_system:
           return [
               WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
               WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
-              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8, "pop_n": 2, "push_n": 3}, max_seconds=15.0),
               WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
               WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
               WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
@@ -4232,7 +4245,7 @@ local_system:
           return [
               WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
               WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
-              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16, "pop_n": 3, "push_n": 4}, max_seconds=25.0),
               WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
               WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
               WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
@@ -4244,7 +4257,7 @@ local_system:
           return [
               WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
               WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
-              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24, "pop_n": 4, "push_n": 5}, max_seconds=60.0),
               WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
               WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
               WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
@@ -5012,7 +5025,7 @@ local_system:
       fi
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -5032,7 +5045,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -9495,5 +9508,434 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Execute preset workloads and sweeps,
       and handle manual sweeps in run_benches.sh"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Some of the benchmarks could be more thorough. e.g. merge_after_prefix_mutations
+      just pushes one item on top. Ok. But what if we pop a bunch of items? And then
+      push a bunch? What if the amounts we pop and push are different for each clone?
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. You've pointed out a great way to make the `merge_after_prefix_mutations` benchmark more rigorous. Applying a variable sequence of pops and pushes to each clone creates a much more complex and realistic test for merge performance.
+
+      Here are the step-by-step instructions to implement this, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `python/gss_tester/benchmarks/workloads.py`**. This is the only file that needs to be changed.
+
+      2.  **Update the `workload_merge_after_prefix_mutations` function**:
+          *   Modify the function's docstring to describe the new, more thorough mutation strategy involving both pops and pushes.
+          *   Add `pop_n` and `push_n` to the list of parameters extracted from the configuration, providing sensible defaults (e.g., `2`).
+          *   In the `mutate_clones` phase, replace the simple list comprehension. Instead:
+              *   Initialize a `random.Random` generator with a deterministic seed to ensure the pop/push sequences are the same on every run.
+              *   Loop through the number of clones. In each iteration:
+                  *   Generate a random number of pops (from `0` to `pop_n`) and pushes (from `1` to `push_n`).
+                  *   Apply the pops to the base GSS using `popn()`.
+                  *   Apply the pushes in a loop, using unique values for each push to create distinct branches.
+                  *   Append the resulting mutated GSS to a list.
+
+      3.  **Update the Benchmark Presets**:
+          *   In the same file, locate the preset definitions (`tiny_preset`, `small_preset`, etc.).
+          *   For each preset, find the `WorkloadConfig` for `merge_after_prefix_mutations`.
+          *   Add the new `pop_n` and `push_n` keys to the `params` dictionary with values that scale appropriately with the preset size (e.g., `pop_n=1, push_n=2` for tiny, `pop_n=2, push_n=3` for small, and so on). This activates the new, more thorough benchmark by default.
+
+      These changes will significantly improve the quality of this specific scaling benchmark.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
+      index 9676e27..94e0984 100644
+      --- a/python/gss_tester/benchmarks/workloads.py
+      +++ b/python/gss_tester/benchmarks/workloads.py
+      @@ -100,21 +100,26 @@
+       
+       
+       def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
+           """
+      -    Use the prefix-then-branch builder to create large hidden complexity and fixed width.
+      -    Clone the GSS C times, push a unique tag to each clone, then merge.
+      +    Build a GSS with a deep shared prefix, clone it, apply a variable sequence of
+      +    pops and pushes to each clone's surface, and merge the results.
+      +    This tests if merge cost is proportional to the surface difference, not hidden depth.
+           Params:
+             - prefix_depth: int
+             - surface_width: int
+             - clones: int
+      +      - pop_n: int (max number of pops in mutation)
+      +      - push_n: int (max number of pushes in mutation)
+           """
+           params = cfg.params
+           prefix_depth = int(params.get("prefix_depth", 200))
+           surface_width = int(params.get("surface_width", 64))
+           clones = int(params.get("clones", 8))
+      +    pop_n = int(params.get("pop_n", 2))
+      +    push_n = int(params.get("push_n", 2))
+       
+           recorder = factory.recorder
+           workload_result: JsonDict = {
+               "workload": "merge_after_prefix_mutations",
+      @@ -134,8 +139,16 @@
+       
+               # Mutate clones
+               recorder.start_phase("mutate_clones")
+      -        clones_list = [base] * clones
+      -        mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+      +        rng = random.Random(prefix_depth * clones) # Deterministic seed
+      +        mutated = []
+      +        for i in range(clones):
+      +            # Apply a different pop/push sequence to each clone
+      +            pops = rng.randint(0, pop_n)
+      +            pushes = rng.randint(1, push_n) # Ensure at least one push
+      +            mutated_g = base.popn(pops)
+      +            for j in range(pushes):
+      +                mutated_g = mutated_g.push(("mut", i, j))
+      +            mutated.append(mutated_g)
+               recorder.end_phase()
+       
+               # Merge
+      @@ -282,25 +295,25 @@
+       def tiny_preset() -> List[WorkloadConfig]:
+           # Target sizes that run quickly even on ReferenceGSS.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6, "pop_n": 1, "push_n": 2}, max_seconds=5.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
+               WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
+               WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
+           ]
+       
+       
+       def small_preset() -> List[WorkloadConfig]:
+           # Still safe for ReferenceGSS but a bit larger.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8, "pop_n": 2, "push_n": 3}, max_seconds=15.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
+               WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
+               WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
+           ]
+       
+       
+       def medium_preset() -> List[WorkloadConfig]:
+           # Designed for more efficient GSS implementations; reference may struggle.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16, "pop_n": 3, "push_n": 4}, max_seconds=25.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
+               WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
+               WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
+      @@ -311,7 +314,7 @@
+           # Stressful for advanced implementations; large hidden complexity and surface sizes.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24, "pop_n": 4, "push_n": 5}, max_seconds=60.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
+               WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
+               WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
+
+      ``````diff
+      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
+      index 9676e27..94e0984 100644
+      --- a/python/gss_tester/benchmarks/workloads.py
+      +++ b/python/gss_tester/benchmarks/workloads.py
+      @@ -100,21 +100,26 @@
+       
+       
+       def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
+           """
+      -    Use the prefix-then-branch builder to create large hidden complexity and fixed width.
+      -    Clone the GSS C times, push a unique tag to each clone, then merge.
+      +    Build a GSS with a deep shared prefix, clone it, apply a variable sequence of
+      +    pops and pushes to each clone's surface, and merge the results.
+      +    This tests if merge cost is proportional to the surface difference, not hidden depth.
+           Params:
+             - prefix_depth: int
+             - surface_width: int
+             - clones: int
+      +      - pop_n: int (max number of pops in mutation)
+      +      - push_n: int (max number of pushes in mutation)
+           """
+           params = cfg.params
+           prefix_depth = int(params.get("prefix_depth", 200))
+           surface_width = int(params.get("surface_width", 64))
+           clones = int(params.get("clones", 8))
+      +    pop_n = int(params.get("pop_n", 2))
+      +    push_n = int(params.get("push_n", 2))
+       
+           recorder = factory.recorder
+           workload_result: JsonDict = {
+               "workload": "merge_after_prefix_mutations",
+      @@ -134,8 +139,16 @@
+       
+               # Mutate clones
+               recorder.start_phase("mutate_clones")
+      -        clones_list = [base] * clones
+      -        mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+      +        rng = random.Random(prefix_depth * clones) # Deterministic seed
+      +        mutated = []
+      +        for i in range(clones):
+      +            # Apply a different pop/push sequence to each clone
+      +            pops = rng.randint(0, pop_n)
+      +            pushes = rng.randint(1, push_n) # Ensure at least one push
+      +            mutated_g = base.popn(pops)
+      +            for j in range(pushes):
+      +                mutated_g = mutated_g.push(("mut", i, j))
+      +            mutated.append(mutated_g)
+               recorder.end_phase()
+       
+               # Merge
+      @@ -282,25 +295,25 @@
+       def tiny_preset() -> List[WorkloadConfig]:
+           # Target sizes that run quickly even on ReferenceGSS.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6, "pop_n": 1, "push_n": 2}, max_seconds=5.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
+               WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
+               WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
+           ]
+       
+       
+       def small_preset() -> List[WorkloadConfig]:
+           # Still safe for ReferenceGSS but a bit larger.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8, "pop_n": 2, "push_n": 3}, max_seconds=15.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
+               WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
+               WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
+           ]
+       
+       
+       def medium_preset() -> List[WorkloadConfig]:
+           # Designed for more efficient GSS implementations; reference may struggle.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16, "pop_n": 3, "push_n": 4}, max_seconds=25.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
+               WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
+               WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
+      @@ -311,7 +314,7 @@
+           # Stressful for advanced implementations; large hidden complexity and surface sizes.
+           return [
+               WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
+               WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
+      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
+      +        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24, "pop_n": 4, "push_n": 5}, max_seconds=60.0),
+               WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
+               WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
+               WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode) after 4 attempts:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/benchmarks/workloads.py
+      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
+      Error applying patch to python/gss_tester/benchmarks/workloads.py: Hunk #2 (header: `@@ -134,8 +139,16 @@`) failed: context not found.
+
+      --- Expected Context (from patch): ---
+
+              # Mutate clones
+              recorder.start_phase("mutate_clones")
+              clones_list = [base] * clones
+              mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+              recorder.end_phase()
+
+              # Merge
+      --- End Expected Context ---
+
+      --- Nearest Match (found at line 148 with 37.50% similarity): ---
+
+              # Merge phase
+              recorder.start_phase("merge")
+              merged = factory.merge_many(mutated)
+              recorder.end_phase()
+
+              # Postcheck - keep lightweight ops
+              recorder.start_phase("postcheck")
+      --- End Nearest Match ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed after 4 attempts. Fallback to LLM apply:
+      Git apply output:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/benchmarks/workloads.py
+      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
+      Error applying patch to python/gss_tester/benchmarks/workloads.py: Hunk #2 (header: `@@ -134,8 +139,16 @@`) failed: context not found.
+
+      --- Expected Context (from patch): ---
+
+              # Mutate clones
+              recorder.start_phase("mutate_clones")
+              clones_list = [base] * clones
+              mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+              recorder.end_phase()
+
+              # Merge
+      --- End Expected Context ---
+
+      --- Nearest Match (found at line 148 with 37.50% similarity): ---
+
+              # Merge phase
+              recorder.start_phase("merge")
+              merged = factory.merge_many(mutated)
+              recorder.end_phase()
+
+              # Postcheck - keep lightweight ops
+              recorder.start_phase("postcheck")
+      --- End Nearest Match ---
+
+
+      LLM apply output:
+      Using model 'cp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "python/gss_tester/benchmarks/workloads.py"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: python/gss_tester/benchmarks/workloads.py
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: python/gss_tester/benchmarks/workloads.py
+    metadata:
+  - user: 'Changes committed with message: "feat: Enhance merge_after_prefix_mutations
+      workload with variable pop/push sequences"'
     metadata:
 ...

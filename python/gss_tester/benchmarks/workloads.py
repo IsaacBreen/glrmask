@@ -49,7 +49,7 @@ def build_prefix_then_branch(factory: GSSFactory, prefix_depth: int, width: int)
     merged = candidates[0]
     for c in candidates[1:]:
         merged = merged.merge(c)
-    return merged
+    return g
 
 
 # ----------------------------
@@ -256,17 +256,22 @@ def workload_push_scaling(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
 
 def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
     """
-    Use the prefix-then-branch builder to create large hidden complexity and fixed width.
-    Clone the GSS C times, push a unique tag to each clone, then merge.
+    Build a GSS with a deep shared prefix, clone it, apply a variable sequence of
+    pops and pushes to each clone's surface, and merge the results.
+    This tests if merge cost is proportional to the surface difference, not hidden depth.
     Params:
       - prefix_depth: int
       - surface_width: int
       - clones: int
+      - pop_n: int (max number of pops in mutation)
+      - push_n: int (max number of pushes in mutation)
     """
     params = cfg.params
     prefix_depth = int(params.get("prefix_depth", 200))
     surface_width = int(params.get("surface_width", 64))
     clones = int(params.get("clones", 8))
+    pop_n = int(params.get("pop_n", 2))
+    push_n = int(params.get("push_n", 2))
 
     recorder = factory.recorder
     workload_result: JsonDict = {
@@ -288,8 +293,16 @@ def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConf
 
         # Mutate clones
         recorder.start_phase("mutate_clones")
-        clones_list = [base] * clones
-        mutated = [mutate_push(g, i) for i, g in enumerate(clones_list)]
+        rng = random.Random(prefix_depth * clones) # Deterministic seed
+        mutated = []
+        for i in range(clones):
+            # Apply a different pop/push sequence to each clone
+            pops = rng.randint(0, pop_n)
+            pushes = rng.randint(1, push_n) # Ensure at least one push
+            mutated_g = base.popn(pops)
+            for j in range(pushes):
+                mutated_g = mutated_g.push(("mut", i, j))
+            mutated.append(mutated_g)
         recorder.end_phase()
 
         # Merge
@@ -550,7 +563,7 @@ def tiny_preset() -> List[WorkloadConfig]:
     return [
         WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
         WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
+        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6, "pop_n": 1, "push_n": 2}, max_seconds=5.0),
         WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
         WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
         WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
@@ -562,7 +575,7 @@ def small_preset() -> List[WorkloadConfig]:
     return [
         WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
         WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
+        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8, "pop_n": 2, "push_n": 3}, max_seconds=15.0),
         WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
         WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
         WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
@@ -574,7 +587,7 @@ def medium_preset() -> List[WorkloadConfig]:
     return [
         WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
         WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
+        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16, "pop_n": 3, "push_n": 4}, max_seconds=25.0),
         WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
         WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
         WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
@@ -586,7 +599,7 @@ def large_preset() -> List[WorkloadConfig]:
     return [
         WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
         WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
+        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24, "pop_n": 4, "push_n": 5}, max_seconds=60.0),
         WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
         WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
         WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
