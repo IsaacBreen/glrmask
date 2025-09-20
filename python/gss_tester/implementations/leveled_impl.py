@@ -117,10 +117,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if self.inner.empty is not None:
                 res.append(([], self.inner.empty))
         elif isinstance(self.inner, UpperBranch):
-            if self.inner.empty is not None:
-                res.append(([], self.inner.empty))
 
             def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                if u.empty is not None:
+                    res.append((pref, u.empty))
                 for v, kids in u.children.items():
                     for child in kids.values():
                         if isinstance(child, Interface):
