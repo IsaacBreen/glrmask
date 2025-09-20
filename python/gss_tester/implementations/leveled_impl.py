@@ -24,19 +24,14 @@ class UpperBranch(Generic[T, Acc]):
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
-    node: LowerBranch[T]
+    children: Dict[T, Dict[int, Lower[T]]]
     acc: Acc
 
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
-    branch: LowerBranch[T]
-    empty: bool
-
-
-@dataclass(frozen=True, eq=True)
-class LowerBranch(Generic[T]):
     children: Dict[T, Dict[int, Lower[T]]]
+    empty: bool
 
 
 
