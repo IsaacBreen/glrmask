@@ -218,3 +218,6 @@ def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
     # Invariant 2: If inner is an interface and empty exists, their accs must differ.
     if isinstance(gss.inner, Interface) and gss.empty is not None and gss.inner.acc == gss.empty:
         raise AssertionError("Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator.")
+    # Invariant 3: If inner is an interface, it must be non-empty.
+    if isinstance(gss.inner, Interface) and isinstance(gss.inner.node.inner, Leaf):
+        raise AssertionError("Invariant violated: LeveledGSS.inner is an Interface with a Leaf node.")
