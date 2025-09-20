@@ -66,12 +66,15 @@ if [ "${#IMPLS[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# Check if the user is asking for a manual sweep.
+# Check if the user is asking for a manual sweep or providing workload filters.
 is_manual_sweep=false
+has_filtering_args=false
 for arg in "${EXTRA_ARGS[@]}"; do
   if [[ "$arg" == "--sweep-workload" ]]; then
     is_manual_sweep=true
-    break
+  fi
+  if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
+    has_filtering_args=true
   fi
 done
 
@@ -128,37 +131,42 @@ for full_impl_path in "${IMPLS[@]}"; do
         [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
     fi
 
-    # --- Run Preset Sweeps ---
-    echo
-    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-
-    if [ -z "$sweeps_to_run" ]; then
-      echo "No predefined sweeps for preset '$PRESET'."
-    else
-      # Use a while loop to read line by line (in case of multiple sweeps)
-      while IFS=';' read -r workload axis values; do
+    # --- Run Preset Sweeps (only if no filtering args are present) ---
+    if $has_filtering_args; then
         echo
-        echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-        output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+        echo ">>> Skipping preset sweeps due to filtering arguments (--only, --include, or --exclude)."
+    else
+        echo
+        echo ">>> Checking for preset sweeps for preset '$PRESET'..."
+        sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
 
-        sweep_cmd=(python -m gss_tester.benchmarks.runner
-            "$module_name"
-            "$class_name"
-            --preset "$PRESET"
-            --output "$output_file_sweep"
-            --sweep-workload "$workload"
-            --sweep-axis "$axis"
-            --sweep-values $values # No quotes to allow word splitting
-        )
-        echo "${sweep_cmd[*]}"
-        if "${sweep_cmd[@]}"; then
-            echo ">>> Finished sweep for: $workload"
+        if [ -z "$sweeps_to_run" ]; then
+        echo "No predefined sweeps for preset '$PRESET'."
         else
-            exit_code=$?
-            [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
+        # Use a while loop to read line by line (in case of multiple sweeps)
+        while IFS=';' read -r workload axis values; do
+            echo
+            echo ">>> Running preset sweep for '$workload' on axis '$axis'"
+            output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+
+            sweep_cmd=(python -m gss_tester.benchmarks.runner
+                "$module_name"
+                "$class_name"
+                --preset "$PRESET"
+                --output "$output_file_sweep"
+                --sweep-workload "$workload"
+                --sweep-axis "$axis"
+                --sweep-values $values # No quotes to allow word splitting
+            )
+            echo "${sweep_cmd[*]}"
+            if "${sweep_cmd[@]}"; then
+                echo ">>> Finished sweep for: $workload"
+            else
+                exit_code=$?
+                [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
+            fi
+        done <<< "$sweeps_to_run"
         fi
-      done <<< "$sweeps_to_run"
     fi
   fi
 done
