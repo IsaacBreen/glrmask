@@ -41,50 +41,8 @@ class Leaf:
     pass
 
 
-# A shared, canonical leaf node for the Lower trie, as this implementation
-# does not require complex Lower structures.
+# A shared, canonical leaf node
 _LOWER_LEAF = Lower(Leaf())
-
-
-def _build_leveled_gss_recursively(
-    stacks: Dict[Tuple[T, ...], Acc]
-) -> LeveledGSS[T, Acc]:
-    """
-    Recursively builds a LeveledGSS from a dictionary of stacks.
-    This approach correctly handles the prefix problem by treating terminations
-    (empty stacks in the recursive context) and branches distinctly.
-    """
-    empty_acc = stacks.pop((), None)
-
-    groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
-    for stack_tuple, acc in stacks.items():
-        val = stack_tuple[0]
-        if val not in groups:
-            groups[val] = []
-        groups[val].append((stack_tuple[1:], acc))
-
-    children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-    for val, sub_stacks_list in groups.items():
-        sub_stacks_dict = dict(sub_stacks_list)
-        sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
-
-        # If the sub-GSS has an accumulator for the empty stack, it means
-        # a stack in the parent context terminated at `val`. We represent this
-        # with an Interface node.
-        if sub_gss.empty is not None:
-            interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
-            if val not in children:
-                children[val] = {}
-            children[val][len(children[val])] = interface_node
-
-        # If the sub-GSS has branches, it means there are stacks longer than `val`.
-        # We embed the inner structure of the sub-GSS as another child.
-        if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-            if val not in children:
-                children[val] = {}
-            children[val][len(children[val])] = sub_gss.inner
-
-    return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
 
 
 @dataclass(frozen=True, eq=True)
@@ -94,6 +52,46 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+        def _build_leveled_gss_recursively(
+                stacks: Dict[Tuple[T, ...], Acc]
+        ) -> LeveledGSS[T, Acc]:
+            """
+            Recursively builds a LeveledGSS from a dictionary of stacks.
+            This approach correctly handles the prefix problem by treating terminations
+            (empty stacks in the recursive context) and branches distinctly.
+            """
+            empty_acc = stacks.pop((), None)
+
+            groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
+            for stack_tuple, acc in stacks.items():
+                val = stack_tuple[0]
+                if val not in groups:
+                    groups[val] = []
+                groups[val].append((stack_tuple[1:], acc))
+
+            children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for val, sub_stacks_list in groups.items():
+                sub_stacks_dict = dict(sub_stacks_list)
+                sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
+
+                # If the sub-GSS has an accumulator for the empty stack, it means
+                # a stack in the parent context terminated at `val`. We represent this
+                # with an Interface node.
+                if sub_gss.empty is not None:
+                    interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
+                    if val not in children:
+                        children[val] = {}
+                    children[val][len(children[val])] = interface_node
+
+                # If the sub-GSS has branches, it means there are stacks longer than `val`.
+                # We embed the inner structure of the sub-GSS as another child.
+                if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+                    if val not in children:
+                        children[val] = {}
+                    children[val][len(children[val])] = sub_gss.inner
+
+            return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+
         # 1. Merge stacks with identical values into a dictionary.
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in stacks:
