@@ -182,11 +182,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 for child in children_at_depth.values():
                     self._validate_node_is_populated(child)
         elif isinstance(node, Interface):
-            if not node.children and node.empty is None:
-                raise ValueError(
-                    "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
-                    f"Node: {node}"
-                )
+            # An Interface is always populated by its `acc`. We only need to recurse on its children.
             for children_at_depth in node.children.values():
                 for child in children_at_depth.values():
                     self._validate_node_is_populated(child)

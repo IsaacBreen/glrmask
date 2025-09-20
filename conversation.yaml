@@ -945,6 +945,11 @@ local_system:
                       max_child_depth = max(max_child_depth, max(v_children.keys()))
               return 1 + max_child_depth
 
+          def _all_children(self) -> Iterator[Lower[T]]:
+              for v_children in self.children.values():
+                  for child in v_children.values():
+                      yield child
+
 
       @dataclass(frozen=True, eq=True)
       class Lower(Generic[T]):
@@ -1273,22 +1278,22 @@ local_system:
               return LeveledGSS(upper_node)
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Any] = {}
+              memo: Dict[int, Any] = {}
 
               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       new_acc = func(node.acc)
                       new_empty = func(node.empty) if node.empty is not None else None
 
                       if new_acc == node.acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -1314,22 +1319,22 @@ local_system:
                           new_children[v] = kids  # Reuse child dict
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               return LeveledGSS(transform(self.inner))
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+              memo: Dict[int, Optional[Upper[T, Acc]]] = {}
 
               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       keep_acc = predicate(node.acc)
@@ -1337,21 +1342,21 @@ local_system:
                       new_empty = node.empty if keep_empty else None
 
                       if keep_acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       if not keep_acc and not keep_empty:
-                          memo[node] = None
+                          memo[id(node)] = None
                           return None
 
                       if not keep_acc and keep_empty:
                           res = UpperBranch(children={}, empty=new_empty)
-                          memo[node] = res
+                          memo[id(node)] = res
                           return res
 
                       # keep_acc is True, but empty might have been pruned.
                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -1380,16 +1385,16 @@ local_system:
                           new_children[v] = kids  # Reuse
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   if not new_children and new_empty is None:
-                      memo[node] = None
+                      memo[id(node)] = None
                       return None
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               res_inner = transform(self.inner)
@@ -2694,6 +2699,11 @@ local_system:
                       max_child_depth = max(max_child_depth, max(v_children.keys()))
               return 1 + max_child_depth
 
+          def _all_children(self) -> Iterator[Lower[T]]:
+              for v_children in self.children.values():
+                  for child in v_children.values():
+                      yield child
+
 
       @dataclass(frozen=True, eq=True)
       class Lower(Generic[T]):
@@ -2818,11 +2828,7 @@ local_system:
                       for child in children_at_depth.values():
                           self._validate_node_is_populated(child)
               elif isinstance(node, Interface):
-                  if not node.children and node.empty is None:
-                      raise ValueError(
-                          "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
-                          f"Node: {node}"
-                      )
+                  # An Interface is always populated by its `acc`. We only need to recurse on its children.
                   for children_at_depth in node.children.values():
                       for child in children_at_depth.values():
                           self._validate_node_is_populated(child)
@@ -4507,6 +4513,11 @@ messages:
                       max_child_depth = max(max_child_depth, max(v_children.keys()))
               return 1 + max_child_depth
 
+          def _all_children(self) -> Iterator[Lower[T]]:
+              for v_children in self.children.values():
+                  for child in v_children.values():
+                      yield child
+
 
       @dataclass(frozen=True, eq=True)
       class Lower(Generic[T]):
@@ -4835,22 +4846,22 @@ messages:
               return LeveledGSS(upper_node)
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Any] = {}
+              memo: Dict[int, Any] = {}
 
               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       new_acc = func(node.acc)
                       new_empty = func(node.empty) if node.empty is not None else None
 
                       if new_acc == node.acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -4876,22 +4887,22 @@ messages:
                           new_children[v] = kids  # Reuse child dict
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               return LeveledGSS(transform(self.inner))
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+              memo: Dict[int, Optional[Upper[T, Acc]]] = {}
 
               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       keep_acc = predicate(node.acc)
@@ -4899,21 +4910,21 @@ messages:
                       new_empty = node.empty if keep_empty else None
 
                       if keep_acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       if not keep_acc and not keep_empty:
-                          memo[node] = None
+                          memo[id(node)] = None
                           return None
 
                       if not keep_acc and keep_empty:
                           res = UpperBranch(children={}, empty=new_empty)
-                          memo[node] = res
+                          memo[id(node)] = res
                           return res
 
                       # keep_acc is True, but empty might have been pruned.
                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -4942,16 +4953,16 @@ messages:
                           new_children[v] = kids  # Reuse
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   if not new_children and new_empty is None:
-                      memo[node] = None
+                      memo[id(node)] = None
                       return None
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               res_inner = transform(self.inner)
@@ -5330,7 +5341,7 @@ messages:
       filename: python/gss_tester/implementations/reference_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-20_21-06-37
+      Test results will be saved in: gss_test_results/2025-09-20_21-14-08
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -5338,15 +5349,15 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_21-14-08/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-20_21-14-08/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_21-14-08/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Traceback (most recent call last):
@@ -5356,24 +5367,29 @@ messages:
           main()
         File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/runner.py", line 37, in main
           for state, line_no in run_test_spec(gss_class):
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/test_spec.py", line 54, in run_test_spec
-          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 433, in apply
-          return LeveledGSS(transform(self.inner))
-                            ^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 387, in transform
-          if node in memo:
-             ^^^^^^^^^^^^
-        File "<string>", line 3, in __hash__
-      TypeError: unhashable type: 'dict'
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/test_spec.py", line 198, in run_test_spec
+          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 279, in from_stacks
+          return LeveledGSS(build(trie, empty_acc))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "<string>", line 4, in __init__
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 85, in __post_init__
+          self._validate_populated_nodes()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 171, in _validate_populated_nodes
+          self._validate_node_is_populated(self.inner)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 183, in _validate_node_is_populated
+          self._validate_node_is_populated(child)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 186, in _validate_node_is_populated
+          raise ValueError(
+      ValueError: LeveledGSS validation failed: Interface with no children and no empty accumulator found. Node: Interface(children={}, acc=2, empty=None)
 
       >>> Test for gss_tester/implementations/leveled_impl.py failed with exit code 1. Skipping.
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_21-14-08/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_21-14-08/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 1 equivalence class(es) among 1 implementations.
 
@@ -5388,9 +5404,9 @@ messages:
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-20_21-06-37
+      Full JSON results are in: gss_test_results/2025-09-20_21-14-08
     metadata:
-  - user: Fix this. Use id(node)
+  - user: Fix this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5409,157 +5425,67 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The `TypeError: unhashable type: 'dict'` occurs because the memoization cache in the `apply` and `prune` methods of `LeveledGSS` attempts to use the node objects as keys. These node objects are dataclasses that contain dictionaries (`children`), which are not hashable.
+      Hello! As an AI assistant, I'm here to help you fix the error in your GSS implementation. Based on the test failure, it looks like there's an incorrect validation check in the `LeveledGSS` implementation that needs to be adjusted.
 
-      To fix this, we will modify the memoization logic to use the unique ID of each node object (`id(node)`) as the key instead. This is a safe approach because the nodes are immutable, and we are memoizing results for specific object instances during a traversal.
-
-      Here are the step-by-step instructions to apply the fix:
+      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      You will need to edit one file: `python/gss_tester/implementations/leveled_impl.py`.
+      The error occurs because the `_validate_populated_nodes` method in `LeveledGSS` incorrectly assumes that an `Interface` node without children or an `empty` accumulator is invalid. However, an `Interface` node always represents at least one stack by virtue of its `acc` field, so this check is too strict.
 
-      #### 1. Modify `LeveledGSS.apply`
+      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
 
-      In `python/gss_tester/implementations/leveled_impl.py`, locate the `apply` method and its nested `transform` function. You will update the memoization logic to use object IDs.
+      2.  **Navigate to the `_validate_node_is_populated` method**. You can find it inside the `LeveledGSS` class, around line 174.
 
-      1.  **Change the memoization dictionary type:**
-          -   Find: `memo: Dict[Any, Any] = {}`
-          -   Replace with: `memo: Dict[int, Any] = {}`
+      3.  **Modify the `elif isinstance(node, Interface):` block**. You need to remove the conditional that raises the `ValueError`. An `Interface` is always considered "populated", but we still need to recursively validate its children.
 
-      2.  **Update memoization checks and assignments:**
-          -   Find: `if node in memo:`
-          -   Replace with: `if id(node) in memo:`
-          -   Find: `return memo[node]`
-          -   Replace with: `return memo[id(node)]`
-          -   In the four places where a value is assigned to `memo[node]`, change the key to `id(node)`. For example, `memo[node] = node` becomes `memo[id(node)] = node`.
+          You will change this code:
+          ```python
+              elif isinstance(node, Interface):
+                  if not node.children and node.empty is None:
+                      raise ValueError(
+                          "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
+                          f"Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+          ```
+          to this:
+          ```python
+              elif isinstance(node, Interface):
+                  # An Interface is always populated by its `acc`. We only need to recurse on its children.
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+          ```
 
-      #### 2. Modify `LeveledGSS.prune`
+      After applying this change, the validation logic will be correct, and the test should pass.
 
-      Next, apply the same changes to the `prune` method in the same file.
+      ### Git Diff
 
-      1.  **Change the memoization dictionary type:**
-          -   Find: `memo: Dict[Any, Optional[Upper[T, Acc]]] = {}`
-          -   Replace with: `memo: Dict[int, Optional[Upper[T, Acc]]] = {}`
-
-      2.  **Update memoization checks and assignments:**
-          -   Find: `if node in memo:`
-          -   Replace with: `if id(node) in memo:`
-          -   Find: `return memo[node]`
-          -   Replace with: `return memo[id(node)]`
-          -   In the six places where a value is assigned to `memo[node]`, change the key to `id(node)`. For example, `memo[node] = node` becomes `memo[id(node)] = node`.
-
-      ### Git Diffs
-
-      Here is the git diff that applies the changes described above.
+      Here is the git patch to apply the fix directly.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 10246a1..8741366 100644
+      index 9872583..0a2d334 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -430,22 +430,22 @@
-               return LeveledGSS(upper_node)
-       
-           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-      -        memo: Dict[Any, Any] = {}
-      +        memo: Dict[int, Any] = {}
-       
-               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-      -            if node in memo:
-      -                return memo[node]
-      +            if id(node) in memo:
-      +                return memo[id(node)]
-       
-                   if isinstance(node, Interface):
-                       new_acc = func(node.acc)
-                       new_empty = func(node.empty) if node.empty is not None else None
-       
-                       if new_acc == node.acc and new_empty == node.empty:
-      -                    memo[node] = node
-      +                    memo[id(node)] = node
-                           return node
-       
-                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-      -                memo[node] = res
-      +                memo[id(node)] = res
-                       return res
-       
-                   # It's an UpperBranch
-      @@ -472,27 +472,27 @@
-                           new_children[v] = kids  # Reuse child dict
-       
-                   if not changed:
-      -                memo[node] = node
-      +                memo[id(node)] = node
-                       return node
-       
-                   res = UpperBranch(children=new_children, empty=new_empty)
-                   promoted = try_promote(res)
-      -            memo[node] = promoted
-      +            memo[id(node)] = promoted
-                   return promoted
-       
-               return LeveledGSS(transform(self.inner))
-       
-           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-      -        memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
-      +        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
-       
-               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-      -            if node in memo:
-      -                return memo[node]
-      +            if id(node) in memo:
-      +                return memo[id(node)]
-       
-                   if isinstance(node, Interface):
-                       keep_acc = predicate(node.acc)
-                       keep_empty = node.empty is not None and predicate(node.empty)
-                       new_empty = node.empty if keep_empty else None
-       
-                       if keep_acc and new_empty == node.empty:
-      -                    memo[node] = node
-      +                    memo[id(node)] = node
-                           return node
-       
-                       if not keep_acc and not keep_empty:
-      -                    memo[node] = None
-      +                    memo[id(node)] = None
-                           return None
-       
-                       if not keep_acc and keep_empty:
-                           res = UpperBranch(children={}, empty=new_empty)
-      -                    memo[node] = res
-      +                    memo[id(node)] = res
-                           return res
-       
-                       # keep_acc is True, but empty might have been pruned.
-                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-      -                memo[node] = res
-      +                memo[id(node)] = res
-                       return res
-       
-                   # It's an UpperBranch
-      @@ -519,17 +519,17 @@
-                           new_children[v] = kids  # Reuse
-       
-                   if not changed:
-      -                memo[node] = node
-      +                memo[id(node)] = node
-                       return node
-       
-                   if not new_children and new_empty is None:
-      -                memo[node] = None
-      +                memo[id(node)] = None
-                       return None
-       
-                   res = UpperBranch(children=new_children, empty=new_empty)
-                   promoted = try_promote(res)
-      -            memo[node] = promoted
-      +            memo[id(node)] = promoted
-                   return promoted
-       
-               res_inner = transform(self.inner)
+      @@ -183,14 +183,9 @@
+                       for child in children_at_depth.values():
+                           self._validate_node_is_populated(child)
+               elif isinstance(node, Interface):
+      -            if not node.children and node.empty is None:
+      -                raise ValueError(
+      -                    "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
+      -                    f"Node: {node}"
+      -                )
+      +            # An Interface is always populated by its `acc`. We only need to recurse on its children.
+                   for children_at_depth in node.children.values():
+                       for child in children_at_depth.values():
+                           self._validate_node_is_populated(child)
+               elif isinstance(node, Lower):
+                   if not node.children and not node.empty:
 
       ```
     metadata:
@@ -5572,7 +5498,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Use object IDs for memoization keys
-      in LeveledGSS apply/prune"'
+  - user: 'Changes committed with message: "Fix: Remove overly strict validation for
+      Interface nodes in LeveledGSS"'
     metadata:
 ...
