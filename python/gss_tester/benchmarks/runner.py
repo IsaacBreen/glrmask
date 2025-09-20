@@ -13,7 +13,9 @@ from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig, get_preset_sweep
 from copy import deepcopy
 
 
-def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str]) -> List[WorkloadConfig]:
+def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
+    if only:
+        return [c for c in configs if c.name in only]
     if include:
         configs = [c for c in configs if any(p.lower() in c.name.lower() for p in include)]
     if exclude:
@@ -29,6 +31,7 @@ def main():
     parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
     parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
     parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
+    parser.add_argument("--only", nargs="*", default=[], help="Only run workloads with exactly these names. Cannot be used with --include/--exclude.")
     parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
     # Sweep options
     parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
@@ -36,6 +39,9 @@ def main():
     parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
     parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
     args = parser.parse_args()
+
+    if (args.include or args.exclude) and args.only:
+        parser.error("--only cannot be used with --include or --exclude")
 
     if args.list_sweeps:
         sweeps = get_preset_sweeps(args.preset)
@@ -93,7 +99,7 @@ def main():
             workloads.append(WorkloadConfig(name=base_cfg.name, params=p, max_seconds=base_cfg.max_seconds))
         sweep_meta = {"workload": sweep_name, "axis": sweep_axis, "values": sweep_values}
     else:
-        workloads = _filter_workloads(base_preset, args.include, args.exclude)
+        workloads = _filter_workloads(base_preset, args.include, args.exclude, args.only)
 
     if args.list:
         if args.sweep_workload:

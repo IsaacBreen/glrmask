@@ -22,8 +22,11 @@ set -euo pipefail
 #   # Run 'small' preset workloads AND all predefined 'small' sweeps
 #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
 #
-#   # Run only the 'push_scaling' workload from the 'tiny' preset
+#   # Run workloads with 'push_scaling' in their name (substring match)
 #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+#
+#   # Run only the workload named exactly 'push_scaling'
+#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --only push_scaling
 #
 #   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
 #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
