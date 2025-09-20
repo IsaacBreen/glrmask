@@ -636,16 +636,28 @@ WORKLOADS: Dict[str, Callable[..., WorkloadResult]] = {
 }
 
 
-def default_specs(preset: str = "small") -> Dict[str, List[Dict[str, Any]]]:
+def default_specs(preset: str = "tiny") -> Dict[str, List[Dict[str, Any]]]:
     """
     Preset parameter grids for workloads.
     - small: fast to run, suitable for quick comparisons
     - medium: moderate sizes to observe scaling trends
     - large: heavier runs (take longer)
     """
-    if preset not in {"small", "medium", "large"}:
-        preset = "small"
+    if preset not in {"tiny", "small", "medium", "large"}:
+        preset = "tiny"
 
+    if preset == "tiny":
+        return {
+            # Very small workloads intended for quick smoke tests / CI
+            "linear_push": [{"length": 50}, {"length": 200}],
+            "product_tree": [{"depth": 2, "k": 2}, {"depth": 3, "k": 2}],
+            "diamond_repeat": [{"repeats": 10}],
+            "merge_many": [{"count": 5, "stack_len": 4}],
+            "pop_collapse": [{"base_depth": 5, "branch_count": 8}],
+            "apply_prune": [{"breadth": 2, "depth": 2, "apply_amount": 3, "prune_threshold": 5}],
+            "split_surface_merge": [{"depth": 3, "k": 2, "top_k": 8, "clones": 2, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
+            "clone_push_merge": [{"depth": 3, "k": 2, "clones": 4}],
+        }
     if preset == "small":
         return {
             "linear_push": [{"length": 500}, {"length": 2_000}],
