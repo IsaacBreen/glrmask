@@ -976,7 +976,7 @@ local_system:
                       empty_acc = acc
                       continue
                   node = trie
-                  for i, v in enumerate(vals):
+                  for i, v in enumerate(reversed(vals)):
                       entry = node.setdefault(v, {"end": None, "sub": {}})
                       if i == len(vals) - 1:
                           if entry["end"] is None:
@@ -1012,11 +1012,11 @@ local_system:
 
                   def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
                       if u.empty is not None:
-                          res.append((pref, u.empty))
+                          res.append((list(reversed(pref)), u.empty))
                       for v, kids in u.children.items():
                           for child in kids.values():
                               if isinstance(child, Interface):
-                                  res.append((pref + [v], child.acc))
+                                  res.append((list(reversed(pref + [v])), child.acc))
                               else:
                                   dfs(child, pref + [v])
 
@@ -2199,10 +2199,8 @@ local_system:
                   for i, v in enumerate(reversed(vals)):
                       entry = node.setdefault(v, {"end": None, "sub": {}})
                       if i == len(vals) - 1:
-                          if entry["end"] is None:
-                              entry["end"] = acc
-                          else:
-                              entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+                          # Since input is canonical, there's no need to merge.
+                          entry["end"] = acc
                       else:
                           node = entry["sub"]
 
@@ -2224,23 +2222,21 @@ local_system:
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               res: List[Tuple[List[T], Acc]] = []
-              if isinstance(self.inner, Interface):
-                  res.append(([], self.inner.acc))
-                  if self.inner.empty is not None:
-                      res.append(([], self.inner.empty))
-              elif isinstance(self.inner, UpperBranch):
 
-                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                      if u.empty is not None:
-                          res.append((list(reversed(pref)), u.empty))
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              if isinstance(child, Interface):
-                                  res.append((list(reversed(pref + [v])), child.acc))
-                              else:
-                                  dfs(child, pref + [v])
+              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                  if u.empty is not None:
+                      res.append((list(reversed(pref)), u.empty))
+                  for v, kids in u.children.items():
+                      for child in kids.values():
+                          if isinstance(child, Interface):
+                              res.append((list(reversed(pref + [v])), child.acc))
+                          else:
+                              dfs(child, pref + [v])
 
+              # self.inner is always an UpperBranch as constructed by from_stacks.
+              if isinstance(self.inner, UpperBranch):
                   dfs(self.inner, [])
+
               from .reference_impl import ReferenceGSS
               return ReferenceGSS.from_stacks(res).to_stacks()
 
@@ -3480,7 +3476,7 @@ messages:
                       empty_acc = acc
                       continue
                   node = trie
-                  for i, v in enumerate(vals):
+                  for i, v in enumerate(reversed(vals)):
                       entry = node.setdefault(v, {"end": None, "sub": {}})
                       if i == len(vals) - 1:
                           if entry["end"] is None:
@@ -3516,11 +3512,11 @@ messages:
 
                   def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
                       if u.empty is not None:
-                          res.append((pref, u.empty))
+                          res.append((list(reversed(pref)), u.empty))
                       for v, kids in u.children.items():
                           for child in kids.values():
                               if isinstance(child, Interface):
-                                  res.append((pref + [v], child.acc))
+                                  res.append((list(reversed(pref + [v])), child.acc))
                               else:
                                   dfs(child, pref + [v])
 
@@ -3741,61 +3737,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: |-
-      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-20_19-22-11
-      ---
-      Reference Implementation: gss_tester/implementations/reference_impl.py
-      Other Implementations: gss_tester/implementations/leveled_impl.py
-      ---
-      Starting test runs...
-
-      >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
-
-      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_19-22-11/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 2 equivalence class(es) among 2 implementations.
-
-      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-
-      Class 1 (1 implementation(s)) [Ref Match: ❌]
-      --------------------------------------------
-        - gss_tester.implementations.leveled_impl.LeveledGSS
-
-      Class 2 (1 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.implementations.reference_impl.ReferenceGSS
-
-
-      --- Divergence Report ---
-
-      Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
-        - First divergence at yield index 2:
-          - gss_tester.implementations.leveled_impl.LeveledGSS (L32): [[[20, 10], 0]]
-          - gss_tester.implementations.reference_impl.ReferenceGSS (L32): [[[10, 20], 0]]
-
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/implementations/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-20_19-22-11
+  - user: Clean up `to_stacks` and `from_stacks` in `LeveledGSS`. Don't touch anything
+      else, just simplify these two as much as possible.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3814,84 +3757,151 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The test results indicate a divergence between your `LeveledGSS` implementation and the `ReferenceGSS`. Specifically, for the same sequence of operations, `LeveledGSS` produces stacks with elements in the reverse order compared to the reference implementation (e.g., `[20, 10]` instead of `[10, 20]`).
-
-      This bug stems from an inconsistent internal representation of stacks. The `push` operation correctly treats the internal trie structure as a suffix trie (where the path from the root represents the stack from top to bottom). However, the `from_stacks` method was building a prefix trie (bottom-to-top), and the `to_stacks` method was reading it as if it were a prefix trie.
-
-      To fix this, we need to make the `from_stacks` and `to_stacks` methods consistent with `push`'s suffix trie convention.
-
-      Here are the step-by-step instructions to apply the fix:
+      Of course. Here are the step-by-step instructions to simplify the `from_stacks` and `to_stacks` methods in `LeveledGSS`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
+      I'll make two changes to `python/gss_tester/implementations/leveled_impl.py`:
 
-      2.  **Modify `from_stacks` to build a suffix trie:**
-          In the `from_stacks` method, find this line:
+      1.  **In `from_stacks`**: The input stacks are already canonicalized by `ReferenceGSS`, so the logic to merge accumulators when building the trie is redundant. I will remove the conditional check and merge, and simply assign the accumulator.
+
+      2.  **In `to_stacks`**: The `from_stacks` and `push` methods guarantee that `self.inner` is always an `UpperBranch`. The check for `isinstance(self.inner, Interface)` at the top level is therefore unreachable. I will remove this dead code to simplify the method.
+
+      Here are the specific edits:
+
+      #### File: `python/gss_tester/implementations/leveled_impl.py`
+
+      1.  **In the `from_stacks` method**, find this block of code:
+
           ```python
-                  for i, v in enumerate(vals):
-          ```
-          Change it to iterate over the values in reverse order, which corresponds to building the trie from the top of the stack to the bottom:
-          ```python
-                  for i, v in enumerate(reversed(vals)):
+                      if i == len(vals) - 1:
+                          if entry["end"] is None:
+                              entry["end"] = acc
+                          else:
+                              entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+                      else:
+                          node = entry["sub"]
           ```
 
-      3.  **Modify `to_stacks` to correctly read the suffix trie:**
-          In the `to_stacks` method, locate the nested `dfs` function. The paths (`pref`) it builds will now be in top-to-bottom order. We need to reverse them before adding them to the results to match the standard bottom-to-top convention.
+          Replace it with the following simplified version:
 
-          a. Find this line inside `dfs`:
           ```python
-                          res.append((pref, u.empty))
+                      if i == len(vals) - 1:
+                          # Since input is canonical, there's no need to merge.
+                          entry["end"] = acc
+                      else:
+                          node = entry["sub"]
           ```
-          Modify it to reverse the prefix:
+
+      2.  **For the `to_stacks` method**, replace its entire body:
+
           ```python
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              res: List[Tuple[List[T], Acc]] = []
+              if isinstance(self.inner, Interface):
+                  res.append(([], self.inner.acc))
+                  if self.inner.empty is not None:
+                      res.append(([], self.inner.empty))
+              elif isinstance(self.inner, UpperBranch):
+
+                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                      if u.empty is not None:
                           res.append((list(reversed(pref)), u.empty))
-          ```
-
-          b. Find the next line that appends to `res`:
-          ```python
-                              if isinstance(child, Interface):
-                                  res.append((pref + [v], child.acc))
-          ```
-          Modify it to reverse the constructed stack path:
-          ```python
+                      for v, kids in u.children.items():
+                          for child in kids.values():
                               if isinstance(child, Interface):
                                   res.append((list(reversed(pref + [v])), child.acc))
+                              else:
+                                  dfs(child, pref + [v])
+
+                  dfs(self.inner, [])
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS.from_stacks(res).to_stacks()
           ```
 
-      These changes ensure that all methods in `LeveledGSS` handle the internal stack representation consistently, resolving the divergence with the reference implementation.
+          with this cleaner implementation:
+
+          ```python
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              res: List[Tuple[List[T], Acc]] = []
+
+              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                  if u.empty is not None:
+                      res.append((list(reversed(pref)), u.empty))
+                  for v, kids in u.children.items():
+                      for child in kids.values():
+                          if isinstance(child, Interface):
+                              res.append((list(reversed(pref + [v])), child.acc))
+                          else:
+                              dfs(child, pref + [v])
+
+              # self.inner is always an UpperBranch as constructed by from_stacks.
+              if isinstance(self.inner, UpperBranch):
+                  dfs(self.inner, [])
+
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS.from_stacks(res).to_stacks()
+          ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git patch to apply these changes directly.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 4b4782e..596541d 100644
+      index 45544d6..5051663 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -109,7 +109,7 @@
-                       empty_acc = acc
-                       continue
-                   node = trie
-      -            for i, v in enumerate(vals):
-      +            for i, v in enumerate(reversed(vals)):
+      @@ -120,11 +120,8 @@
+                   for i, v in enumerate(reversed(vals)):
                        entry = node.setdefault(v, {"end": None, "sub": {}})
                        if i == len(vals) - 1:
-                           if entry["end"] is None:
-      @@ -139,12 +139,12 @@
+      -                    if entry["end"] is None:
+      -                        entry["end"] = acc
+      -                    else:
+      -                        entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+      +                    # Since input is canonical, there's no need to merge.
+      +                    entry["end"] = acc
+                       else:
+                           node = entry["sub"]
        
-                   def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                       if u.empty is not None:
-      -                    res.append((pref, u.empty))
-      +                    res.append((list(reversed(pref)), u.empty))
-                       for v, kids in u.children.items():
-                           for child in kids.values():
-                               if isinstance(child, Interface):
-      -                            res.append((pref + [v], child.acc))
-      +                            res.append((list(reversed(pref + [v])), child.acc))
-                               else:
-                                   dfs(child, pref + [v])
+      @@ -139,26 +136,21 @@
+       
+           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+               res: List[Tuple[List[T], Acc]] = []
+      -        if isinstance(self.inner, Interface):
+      -            res.append(([], self.inner.acc))
+      -            if self.inner.empty is not None:
+      -                res.append(([], self.inner.empty))
+      -        elif isinstance(self.inner, UpperBranch):
+      -
+      -            def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+      -                if u.empty is not None:
+      -                    res.append((list(reversed(pref)), u.empty))
+      -                for v, kids in u.children.items():
+      -                    for child in kids.values():
+      -                        if isinstance(child, Interface):
+      -                            res.append((list(reversed(pref + [v])), child.acc))
+      -                        else:
+      -                            dfs(child, pref + [v])
+      -
+      +
+      +        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+      +            if u.empty is not None:
+      +                res.append((list(reversed(pref)), u.empty))
+      +            for v, kids in u.children.items():
+      +                for child in kids.values():
+      +                    if isinstance(child, Interface):
+      +                        res.append((list(reversed(pref + [v])), child.acc))
+      +                    else:
+      +                        dfs(child, pref + [v])
+      +
+      +        # self.inner is always an UpperBranch as constructed by from_stacks.
+      +        if isinstance(self.inner, UpperBranch):
+                   dfs(self.inner, [])
+      +
+               from .reference_impl import ReferenceGSS
+               return ReferenceGSS.from_stacks(res).to_stacks()
        
 
       ```
@@ -3905,7 +3915,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct stack order in LeveledGSS
-      from_stacks and to_stacks"'
+  - user: 'Changes committed with message: "Simplify LeveledGSS from_stacks and to_stacks
+      methods"'
     metadata:
 ...

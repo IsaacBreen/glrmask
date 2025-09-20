@@ -87,10 +87,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             for i, v in enumerate(reversed(vals)):
                 entry = node.setdefault(v, {"end": None, "sub": {}})
                 if i == len(vals) - 1:
-                    if entry["end"] is None:
-                        entry["end"] = acc
-                    else:
-                        entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+                    # Since input is canonical, there's no need to merge.
+                    entry["end"] = acc
                 else:
                     node = entry["sub"]
 
@@ -112,23 +110,21 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         res: List[Tuple[List[T], Acc]] = []
-        if isinstance(self.inner, Interface):
-            res.append(([], self.inner.acc))
-            if self.inner.empty is not None:
-                res.append(([], self.inner.empty))
-        elif isinstance(self.inner, UpperBranch):
 
-            def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                if u.empty is not None:
-                    res.append((list(reversed(pref)), u.empty))
-                for v, kids in u.children.items():
-                    for child in kids.values():
-                        if isinstance(child, Interface):
-                            res.append((list(reversed(pref + [v])), child.acc))
-                        else:
-                            dfs(child, pref + [v])
+        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+            if u.empty is not None:
+                res.append((list(reversed(pref)), u.empty))
+            for v, kids in u.children.items():
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        res.append((list(reversed(pref + [v])), child.acc))
+                    else:
+                        dfs(child, pref + [v])
 
+        # self.inner is always an UpperBranch as constructed by from_stacks.
+        if isinstance(self.inner, UpperBranch):
             dfs(self.inner, [])
+
         from .reference_impl import ReferenceGSS
         return ReferenceGSS.from_stacks(res).to_stacks()
 
