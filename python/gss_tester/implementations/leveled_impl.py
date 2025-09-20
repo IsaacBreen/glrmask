@@ -69,6 +69,56 @@ class Lower(Generic[T]):
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
 
+    def __post_init__(self):
+        self._validate_no_promotions()
+
+    def _validate_no_promotions(self) -> None:
+        """
+        Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+        An UpperBranch can be promoted if all its children are Interfaces and they all
+        (including the UpperBranch's own empty slot) represent the same single accumulator value.
+        """
+        if isinstance(self.inner, UpperBranch):
+            self._validate_node(self.inner)
+
+    def _validate_node(self, node: Upper[T, Acc]) -> None:
+        """Recursive helper for validation."""
+        if isinstance(node, Interface):
+            return  # Leaf of the upper tree
+
+        # It must be an UpperBranch
+        # First, recurse on children
+        for children_at_depth in node.children.values():
+            for child in children_at_depth.values():
+                self._validate_node(child)
+
+        # Now, check for promotion condition on the current node
+        all_children = [
+            child
+            for children_at_depth in node.children.values()
+            for child in children_at_depth.values()
+        ]
+
+        if not all_children or not all(isinstance(child, Interface) for child in all_children):
+            return  # Cannot promote
+
+        # All children are Interfaces. Gather all accumulators.
+        accs: Set[Acc] = set()
+        if node.empty is not None:
+            accs.add(node.empty)
+
+        for child in all_children:
+            interface_child: Interface[T, Acc] = child
+            accs.add(interface_child.acc)
+            if interface_child.empty is not None:
+                accs.add(interface_child.empty)
+
+        if len(accs) == 1:
+            raise ValueError(
+                "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
+                f"indicating a non-canonical structure. Node: {node}"
+            )
+
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
         # Canonicalize first using the reference implementation

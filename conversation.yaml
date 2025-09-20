@@ -979,10 +979,8 @@ local_system:
                   for i, v in enumerate(reversed(vals)):
                       entry = node.setdefault(v, {"end": None, "sub": {}})
                       if i == len(vals) - 1:
-                          if entry["end"] is None:
-                              entry["end"] = acc
-                          else:
-                              entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+                          # Since input is canonical, there's no need to merge.
+                          entry["end"] = acc
                       else:
                           node = entry["sub"]
 
@@ -1004,23 +1002,21 @@ local_system:
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               res: List[Tuple[List[T], Acc]] = []
-              if isinstance(self.inner, Interface):
-                  res.append(([], self.inner.acc))
-                  if self.inner.empty is not None:
-                      res.append(([], self.inner.empty))
-              elif isinstance(self.inner, UpperBranch):
 
-                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                      if u.empty is not None:
-                          res.append((list(reversed(pref)), u.empty))
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              if isinstance(child, Interface):
-                                  res.append((list(reversed(pref + [v])), child.acc))
-                              else:
-                                  dfs(child, pref + [v])
+              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                  if u.empty is not None:
+                      res.append((list(reversed(pref)), u.empty))
+                  for v, kids in u.children.items():
+                      for child in kids.values():
+                          if isinstance(child, Interface):
+                              res.append((list(reversed(pref + [v])), child.acc))
+                          else:
+                              dfs(child, pref + [v])
 
+              # self.inner is always an UpperBranch as constructed by from_stacks.
+              if isinstance(self.inner, UpperBranch):
                   dfs(self.inner, [])
+
               from .reference_impl import ReferenceGSS
               return ReferenceGSS.from_stacks(res).to_stacks()
 
@@ -2180,6 +2176,56 @@ local_system:
       @dataclass(frozen=True, eq=True)
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
           inner: Upper[T, Acc]
+
+          def __post_init__(self):
+              self._validate_no_promotions()
+
+          def _validate_no_promotions(self) -> None:
+              """
+              Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+              An UpperBranch can be promoted if all its children are Interfaces and they all
+              (including the UpperBranch's own empty slot) represent the same single accumulator value.
+              """
+              if isinstance(self.inner, UpperBranch):
+                  self._validate_node(self.inner)
+
+          def _validate_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for validation."""
+              if isinstance(node, Interface):
+                  return  # Leaf of the upper tree
+
+              # It must be an UpperBranch
+              # First, recurse on children
+              for children_at_depth in node.children.values():
+                  for child in children_at_depth.values():
+                      self._validate_node(child)
+
+              # Now, check for promotion condition on the current node
+              all_children = [
+                  child
+                  for children_at_depth in node.children.values()
+                  for child in children_at_depth.values()
+              ]
+
+              if not all_children or not all(isinstance(child, Interface) for child in all_children):
+                  return  # Cannot promote
+
+              # All children are Interfaces. Gather all accumulators.
+              accs: Set[Acc] = set()
+              if node.empty is not None:
+                  accs.add(node.empty)
+
+              for child in all_children:
+                  interface_child: Interface[T, Acc] = child
+                  accs.add(interface_child.acc)
+                  if interface_child.empty is not None:
+                      accs.add(interface_child.empty)
+
+              if len(accs) == 1:
+                  raise ValueError(
+                      "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
+                      f"indicating a non-canonical structure. Node: {node}"
+                  )
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -3479,10 +3525,8 @@ messages:
                   for i, v in enumerate(reversed(vals)):
                       entry = node.setdefault(v, {"end": None, "sub": {}})
                       if i == len(vals) - 1:
-                          if entry["end"] is None:
-                              entry["end"] = acc
-                          else:
-                              entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
+                          # Since input is canonical, there's no need to merge.
+                          entry["end"] = acc
                       else:
                           node = entry["sub"]
 
@@ -3504,23 +3548,21 @@ messages:
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               res: List[Tuple[List[T], Acc]] = []
-              if isinstance(self.inner, Interface):
-                  res.append(([], self.inner.acc))
-                  if self.inner.empty is not None:
-                      res.append(([], self.inner.empty))
-              elif isinstance(self.inner, UpperBranch):
 
-                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                      if u.empty is not None:
-                          res.append((list(reversed(pref)), u.empty))
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              if isinstance(child, Interface):
-                                  res.append((list(reversed(pref + [v])), child.acc))
-                              else:
-                                  dfs(child, pref + [v])
+              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                  if u.empty is not None:
+                      res.append((list(reversed(pref)), u.empty))
+                  for v, kids in u.children.items():
+                      for child in kids.values():
+                          if isinstance(child, Interface):
+                              res.append((list(reversed(pref + [v])), child.acc))
+                          else:
+                              dfs(child, pref + [v])
 
+              # self.inner is always an UpperBranch as constructed by from_stacks.
+              if isinstance(self.inner, UpperBranch):
                   dfs(self.inner, [])
+
               from .reference_impl import ReferenceGSS
               return ReferenceGSS.from_stacks(res).to_stacks()
 
@@ -3737,8 +3779,17 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: Clean up `to_stacks` and `from_stacks` in `LeveledGSS`. Don't touch anything
-      else, just simplify these two as much as possible.
+  - user: |-
+      Add a function that validates a `LeveledGSS`. It should check that no further UpperBranch -> Interface promotions can occur.
+      The following describes when an UpperBranch -> Interface can occur.
+      It can occur only if all children are interfaces.
+      If they are, gather all those interface's `acc` values. If they have `empty` values (not `None`), gather those too.
+      If this upper branch has an `empty`, gather that as well.
+      Of everything we've gathered, if there is exactly one unique acc, then we *can* promote.
+      Otherwise, we cannot.
+
+      Define the validation function.
+      Run it in `__post_init__`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3757,152 +3808,134 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to simplify the `from_stacks` and `to_stacks` methods in `LeveledGSS`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the validation logic to `LeveledGSS`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I'll make two changes to `python/gss_tester/implementations/leveled_impl.py`:
+      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
 
-      1.  **In `from_stacks`**: The input stacks are already canonicalized by `ReferenceGSS`, so the logic to merge accumulators when building the trie is redundant. I will remove the conditional check and merge, and simply assign the accumulator.
+      2.  **Add the validation methods to the `LeveledGSS` class.** Inside the `LeveledGSS` class definition, after the `inner` field declaration and before the `from_stacks` class method, insert the new `__post_init__`, `_validate_no_promotions`, and `_validate_node` methods. This will ensure the validation is run every time a `LeveledGSS` instance is created.
 
-      2.  **In `to_stacks`**: The `from_stacks` and `push` methods guarantee that `self.inner` is always an `UpperBranch`. The check for `isinstance(self.inner, Interface)` at the top level is therefore unreachable. I will remove this dead code to simplify the method.
-
-      Here are the specific edits:
-
-      #### File: `python/gss_tester/implementations/leveled_impl.py`
-
-      1.  **In the `from_stacks` method**, find this block of code:
+          The code to add is:
 
           ```python
-                      if i == len(vals) - 1:
-                          if entry["end"] is None:
-                              entry["end"] = acc
-                          else:
-                              entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
-                      else:
-                          node = entry["sub"]
-          ```
+          def __post_init__(self):
+              self._validate_no_promotions()
 
-          Replace it with the following simplified version:
-
-          ```python
-                      if i == len(vals) - 1:
-                          # Since input is canonical, there's no need to merge.
-                          entry["end"] = acc
-                      else:
-                          node = entry["sub"]
-          ```
-
-      2.  **For the `to_stacks` method**, replace its entire body:
-
-          ```python
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              res: List[Tuple[List[T], Acc]] = []
-              if isinstance(self.inner, Interface):
-                  res.append(([], self.inner.acc))
-                  if self.inner.empty is not None:
-                      res.append(([], self.inner.empty))
-              elif isinstance(self.inner, UpperBranch):
-
-                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                      if u.empty is not None:
-                          res.append((list(reversed(pref)), u.empty))
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              if isinstance(child, Interface):
-                                  res.append((list(reversed(pref + [v])), child.acc))
-                              else:
-                                  dfs(child, pref + [v])
-
-                  dfs(self.inner, [])
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(res).to_stacks()
-          ```
-
-          with this cleaner implementation:
-
-          ```python
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              res: List[Tuple[List[T], Acc]] = []
-
-              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                  if u.empty is not None:
-                      res.append((list(reversed(pref)), u.empty))
-                  for v, kids in u.children.items():
-                      for child in kids.values():
-                          if isinstance(child, Interface):
-                              res.append((list(reversed(pref + [v])), child.acc))
-                          else:
-                              dfs(child, pref + [v])
-
-              # self.inner is always an UpperBranch as constructed by from_stacks.
+          def _validate_no_promotions(self) -> None:
+              """
+              Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+              An UpperBranch can be promoted if all its children are Interfaces and they all
+              (including the UpperBranch's own empty slot) represent the same single accumulator value.
+              """
               if isinstance(self.inner, UpperBranch):
-                  dfs(self.inner, [])
+                  self._validate_node(self.inner)
 
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(res).to_stacks()
+          def _validate_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for validation."""
+              if isinstance(node, Interface):
+                  return  # Leaf of the upper tree
+
+              # It must be an UpperBranch
+              # First, recurse on children
+              for children_at_depth in node.children.values():
+                  for child in children_at_depth.values():
+                      self._validate_node(child)
+
+              # Now, check for promotion condition on the current node
+              all_children = [
+                  child
+                  for children_at_depth in node.children.values()
+                  for child in children_at_depth.values()
+              ]
+
+              if not all_children or not all(isinstance(child, Interface) for child in all_children):
+                  return  # Cannot promote
+
+              # All children are Interfaces. Gather all accumulators.
+              accs: Set[Acc] = set()
+              if node.empty is not None:
+                  accs.add(node.empty)
+
+              for child in all_children:
+                  interface_child: Interface[T, Acc] = child
+                  accs.add(interface_child.acc)
+                  if interface_child.empty is not None:
+                      accs.add(interface_child.empty)
+
+              if len(accs) == 1:
+                  raise ValueError(
+                      "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
+                      f"indicating a non-canonical structure. Node: {node}"
+                  )
           ```
 
       ### Git Diff
 
-      Here is the git patch to apply these changes directly.
+      Here is the git diff to apply the changes to `python/gss_tester/implementations/leveled_impl.py`.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 45544d6..5051663 100644
+      index 4b95886..0d55986 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -120,11 +120,8 @@
-                   for i, v in enumerate(reversed(vals)):
-                       entry = node.setdefault(v, {"end": None, "sub": {}})
-                       if i == len(vals) - 1:
-      -                    if entry["end"] is None:
-      -                        entry["end"] = acc
-      -                    else:
-      -                        entry["end"] = entry["end"].merge(acc)  # type: ignore[attr-defined]
-      +                    # Since input is canonical, there's no need to merge.
-      +                    entry["end"] = acc
-                       else:
-                           node = entry["sub"]
+      @@ -83,6 +83,50 @@
+       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+           inner: Upper[T, Acc]
        
-      @@ -139,26 +136,21 @@
-       
-           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-               res: List[Tuple[List[T], Acc]] = []
-      -        if isinstance(self.inner, Interface):
-      -            res.append(([], self.inner.acc))
-      -            if self.inner.empty is not None:
-      -                res.append(([], self.inner.empty))
-      -        elif isinstance(self.inner, UpperBranch):
-      -
-      -            def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-      -                if u.empty is not None:
-      -                    res.append((list(reversed(pref)), u.empty))
-      -                for v, kids in u.children.items():
-      -                    for child in kids.values():
-      -                        if isinstance(child, Interface):
-      -                            res.append((list(reversed(pref + [v])), child.acc))
-      -                        else:
-      -                            dfs(child, pref + [v])
-      -
+      +    def __post_init__(self):
+      +        self._validate_no_promotions()
       +
-      +        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-      +            if u.empty is not None:
-      +                res.append((list(reversed(pref)), u.empty))
-      +            for v, kids in u.children.items():
-      +                for child in kids.values():
-      +                    if isinstance(child, Interface):
-      +                        res.append((list(reversed(pref + [v])), child.acc))
-      +                    else:
-      +                        dfs(child, pref + [v])
-      +
-      +        # self.inner is always an UpperBranch as constructed by from_stacks.
+      +    def _validate_no_promotions(self) -> None:
+      +        """
+      +        Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+      +        An UpperBranch can be promoted if all its children are Interfaces and they all
+      +        (including the UpperBranch's own empty slot) represent the same single accumulator value.
+      +        """
       +        if isinstance(self.inner, UpperBranch):
-                   dfs(self.inner, [])
+      +            self._validate_node(self.inner)
       +
-               from .reference_impl import ReferenceGSS
-               return ReferenceGSS.from_stacks(res).to_stacks()
-       
+      +    def _validate_node(self, node: Upper[T, Acc]) -> None:
+      +        """Recursive helper for validation."""
+      +        if isinstance(node, Interface):
+      +            return  # Leaf of the upper tree
+      +
+      +        # It must be an UpperBranch
+      +        # First, recurse on children
+      +        for children_at_depth in node.children.values():
+      +            for child in children_at_depth.values():
+      +                self._validate_node(child)
+      +
+      +        # Now, check for promotion condition on the current node
+      +        all_children = [
+      +            child
+      +            for children_at_depth in node.children.values()
+      +            for child in children_at_depth.values()
+      +        ]
+      +
+      +        if not all_children or not all(isinstance(child, Interface) for child in all_children):
+      +            return  # Cannot promote
+      +
+      +        # All children are Interfaces. Gather all accumulators.
+      +        accs: Set[Acc] = set()
+      +        if node.empty is not None:
+      +            accs.add(node.empty)
+      +
+      +        for child in all_children:
+      +            interface_child: Interface[T, Acc] = child
+      +            accs.add(interface_child.acc)
+      +            if interface_child.empty is not None:
+      +                accs.add(interface_child.empty)
+      +
+      +        if len(accs) == 1:
+      +            raise ValueError(
+      +                "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
+      +                f"indicating a non-canonical structure. Node: {node}"
+      +            )
+      +
+           @classmethod
+           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+               # Canonicalize first using the reference implementation
 
       ```
     metadata:
@@ -3915,7 +3948,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Simplify LeveledGSS from_stacks and to_stacks
-      methods"'
+  - user: 'Changes committed with message: "feat: Add validation to LeveledGSS to
+      prevent non-canonical structures"'
     metadata:
 ...
