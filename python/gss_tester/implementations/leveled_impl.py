@@ -320,6 +320,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return ReferenceGSS(res).to_stacks()
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
+        if self.is_empty():
+            return self
         if isinstance(self.inner, Interface):
             lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
             new_children = {value: {lower_node._max_depth(): lower_node}}
