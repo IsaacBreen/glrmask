@@ -539,14 +539,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
         def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
-            same_empty_presence = (a.empty is None) == (b.empty is None)
-            if a.children == b.children and same_empty_presence:
-                new_acc = a.acc.merge(b.acc)
-                if a.empty is None:
-                    new_empty = None
-                else:
-                    new_empty = a.empty.merge(b.empty)  # type: ignore[union-attr]
-                return Interface(children=a.children, acc=new_acc, empty=new_empty)
+            if a is b:
+                return a
             return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
         return LeveledGSS(merge_upper(self.inner, other.inner))
