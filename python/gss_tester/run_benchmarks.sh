@@ -25,7 +25,7 @@ export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
 # --- Argument Parsing ---
 PRESET="small"
 REPEATS=1
-IMPLS=()
+RAW_IMPLS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,17 +42,38 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            IMPLS+=("$1")
+            RAW_IMPLS+=("$1")
             shift
             ;;
     esac
 done
 
-if [ "${#IMPLS[@]}" -eq 0 ]; then
+if [ "${#RAW_IMPLS[@]}" -eq 0 ]; then
     echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
     echo "Error: At least one implementation is required."
     exit 1
 fi
+
+# --- Implementation Path Parsing ---
+# Convert file paths (e.g., gss_tester/leveled_impl.py) to module:class format.
+PARSED_IMPLS=()
+for impl_path in "${RAW_IMPLS[@]}"; do
+    if [[ "$impl_path" == *.py ]]; then
+        # Handle file path: derive module and class name by convention.
+        # Module name: strip path up to 'python/', remove '.py' suffix, replace '/' with '.'
+        module_name=$(echo "$impl_path" | sed -e 's#^.*python/##' -e 's/\.py$//' -e 's#/#.#g')
+        # Class name: e.g., 'leveled_impl' -> 'LeveledGSS'
+        base_name=$(basename "$impl_path" .py)
+        class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+        class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+        # The benchmark runner prefers module:Class format
+        PARSED_IMPLS+=("${module_name}:${class_name}")
+    else
+        # Assume it's already in module:Class or module.Class format
+        PARSED_IMPLS+=("$impl_path")
+    fi
+done
+
 
 # --- Setup ---
 RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
@@ -61,7 +82,7 @@ OUTPUT_FILE="${RESULTS_DIR}/results.json"
 
 echo "Benchmark results will be saved in: $OUTPUT_FILE"
 echo "---"
-echo "Implementations: ${IMPLS[*]}"
+echo "Implementations: ${PARSED_IMPLS[*]}"
 echo "Preset: $PRESET"
 echo "Repeats: $REPEATS"
 echo "---"
@@ -70,7 +91,7 @@ echo "---"
 echo "Starting benchmark run..."
 
 cmd=(python -m gss_tester.benchmarks.runner
-    --implementations "${IMPLS[@]}"
+    --implementations "${PARSED_IMPLS[@]}"
     --preset "$PRESET"
     --repeats "$REPEATS"
     --output "$OUTPUT_FILE"
