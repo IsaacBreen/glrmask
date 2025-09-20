@@ -18,6 +18,11 @@ class UpperBranch(Generic[T, Acc]):
     children: Dict[T, Dict[int, Upper[T, Acc]]]
     empty: Optional[Acc]
 
+    def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
+        """Returns an iterator over all child nodes."""
+        for children_at_depth in self.children.values():
+            yield from children_at_depth.values()
+
     def _max_depth(self) -> int:
         """Computes the max depth of the subtree rooted at this node."""
         if not self.children:
@@ -110,11 +115,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 self._validate_node(child)
 
         # Now, check for promotion condition on the current node
-        all_children = [
-            child
-            for children_at_depth in node.children.values()
-            for child in children_at_depth.values()
-        ]
+        all_children = list(node._all_children())
 
         if not all_children or not all(isinstance(child, Interface) for child in all_children):
             return  # Cannot promote
@@ -266,9 +267,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             upper_branch = interface_to_upperbranch(self.inner)
         else:
             upper_branch = self.inner
-        all_children: List[Upper[T, Acc]] = []
-        for _, max_depth_to_child in upper_branch.children.items():
-            all_children.extend(max_depth_to_child.values())
+        all_children = list(upper_branch._all_children())
         merged = all_children[0]
         for c in all_children[1:]:
             merged = merge_upper(merged, c)
@@ -494,9 +493,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-    all_children: List[Upper[T, Acc]] = []
-    for kids in node.children.values():
-        all_children.extend(kids.values())
+    all_children = list(node._all_children())
     if not all_children:
         return node
     if not all(isinstance(c, Interface) for c in all_children):
