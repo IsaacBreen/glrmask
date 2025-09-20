@@ -248,9 +248,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return ReferenceGSS.from_stacks(res).to_stacks()
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
-        if isinstance(self.inner, Interface) and self.inner.empty != self.inner.acc:
-            return LeveledGSS(Interface(children={value: {self.inner._max_depth(): Lower(children=self.inner.children, empty=self.inner.empty is None)}}, acc=self.inner.acc, empty=None))
-        else:
+        if isinstance(self.inner, Interface):
+            # When pushing to an Interface, we create a new Interface.
+            # The old Interface's structure becomes a Lower tree under the new value.
+            # The accumulator is preserved.
+            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
+            new_children = {value: {lower_node._max_depth(): lower_node}}
+            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
+        else:  # Must be UpperBranch
+            # Pushing to an UpperBranch (or an empty GSS) creates a new UpperBranch on top.
             return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
