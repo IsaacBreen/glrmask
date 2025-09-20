@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
 
 from ..interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
@@ -292,10 +292,38 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
+        def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
+            if node.empty:
+                yield acc
+            for children_at_depth in node.children.values():
+                for child in children_at_depth.values():
+                    yield from generate_accs_lower(child, acc)
+
         def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-            ...
+            if isinstance(node, UpperBranch):
+                if node.empty is not None:
+                    yield node.empty
+                for children_at_depth in node.children.values():
+                    for child in children_at_depth.values():
+                        yield from generate_accs(child)
+            elif isinstance(node, Interface):
+                if node.empty is not None:
+                    yield node.empty
+
+                # The case where the interface itself is a stack end.
+                if not node.children and node.empty is None:
+                    yield node.acc
+
+                for children_at_depth in node.children.values():
+                    for child in children_at_depth.values():
+                        yield from generate_accs_lower(child, node.acc)
+
         gen = generate_accs(self.inner)
-        reduced_acc = next(gen)
+        try:
+            reduced_acc = next(gen)
+        except StopIteration:
+            return None
+
         for acc in gen:
             reduced_acc = reduced_acc.merge(acc)
         return reduced_acc
