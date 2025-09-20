@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-from .workloads import resolve_workloads, list_workloads, WorkloadResult, WORKLOADS
+from .workloads import resolve_workloads, list_workloads, WorkloadResult, WORKLOADS, BenchmarkContext, create_timed_gss_class
 from ..interface import GSS
 
 
@@ -60,7 +60,10 @@ def _run_for_impl(
         for rep in range(repeat):
             # Variation of seed per repeat for deterministic variety
             rep_seed = seed + rep
-            res = w.runner(gss_class, params, preset, rep_seed, mem)
+            context = BenchmarkContext(mem_profile=mem)
+            timed_gss_class = create_timed_gss_class(gss_class, context.collector)
+            res = w.runner(timed_gss_class, params, preset, rep_seed, context)
+
             # Tag repetition index
             res_dict = {
                 "name": res.name,
