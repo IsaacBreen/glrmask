@@ -179,27 +179,3 @@ else
     echo "Summary printed above. Plots saved to: ${RESULTS_DIR}/analysis/plots"
     echo "Full JSON results are in: $RESULTS_DIR"
 fi
-      else
-          echo
-          echo ">>> Bench for $full_impl_path failed with exit code $exit_code. Skipping."
-      fi
-  fi
-done
-
-echo
-echo "All benchmark runs completed."
-echo "---"
-
-# Analyze and plot
-echo "Analyzing results..."
-cmd=(python -m gss_tester.benchmarks.analyzer
-    "${RESULTS_DIR}"/*.json
-    --outdir "${RESULTS_DIR}/analysis")
-echo "${cmd[*]}"
-"${cmd[@]}"
-
-echo
-echo "---"
-echo "Benchmark analysis complete."
-echo "Summary printed above. Plots saved to: ${RESULTS_DIR}/analysis/plots"
-echo "Full JSON results are in: $RESULTS_DIR"
