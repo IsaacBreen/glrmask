@@ -77,21 +77,63 @@ def _run_for_impl(
             }
             results.append(res)
 
-    # Summarize totals by workload name (averaging across repeats)
+    # Summarize results by workload name (averaging across repeats)
     summary = {}
-    tmp_agg: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    # Group results by (workload_name, preset_name)
+    tmp_agg_results: Dict[Tuple[str, str], List[WorkloadResult]] = {}
     for r in results:
-        tmp_agg.setdefault((r.name, r.preset), []).append(r.totals)
+        tmp_agg_results.setdefault((r.name, r.preset), []).append(r)
 
-    for (wname, preset_name), lst in tmp_agg.items():
-        keys = set().union(*(d.keys() for d in lst))
-        agg: Dict[str, Any] = {"count": len(lst)}
+    for (wname, preset_name), runs in tmp_agg_results.items():
+        # Aggregate totals
+        totals_list = [run.totals for run in runs]
+        keys = set().union(*(d.keys() for d in totals_list))
+        agg: Dict[str, Any] = {"count": len(runs)}
         for k in keys:
-            vals = [d[k] for d in lst if k in d and isinstance(d[k], (int, float))]
+            vals = [d[k] for d in totals_list if k in d and isinstance(d[k], (int, float))]
             if vals:
                 agg[k + "_mean"] = sum(vals) / len(vals)
                 agg[k + "_min"] = min(vals)
                 agg[k + "_max"] = max(vals)
+
+        # Aggregate phases
+        phases_by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for run in runs:
+            for phase_result in run.phases:
+                phase_name = phase_result.get("phase", "unknown")
+                phases_by_name.setdefault(phase_name, []).append(phase_result)
+
+        aggregated_phases = []
+        for phase_name, phase_runs in sorted(phases_by_name.items()):
+            # Average 'ms'
+            ms_vals = [p['ms'] for p in phase_runs if 'ms' in p]
+            ms_mean = sum(ms_vals) / len(ms_vals) if ms_vals else 0.0
+
+            # Average method_stats
+            method_stats_agg: Dict[str, Dict[str, float]] = {}
+            all_method_names = set()
+            for p in phase_runs:
+                all_method_names.update(p.get('method_stats', {}).keys())
+
+            for method in sorted(all_method_names):
+                calls_vals = [p.get('method_stats', {}).get(method, {}).get('calls', 0) for p in phase_runs]
+                total_ms_vals = [p.get('method_stats', {}).get(method, {}).get('total_ms', 0.0) for p in phase_runs]
+
+                calls_mean = sum(calls_vals) / len(calls_vals) if calls_vals else 0.0
+                total_ms_mean = sum(total_ms_vals) / len(total_ms_vals) if total_ms_vals else 0.0
+
+                method_stats_agg[method] = {
+                    'calls_mean': calls_mean,
+                    'total_ms_mean': total_ms_mean,
+                }
+
+            aggregated_phases.append({
+                "phase": phase_name,
+                "ms_mean": ms_mean,
+                "method_stats_mean": method_stats_agg
+            })
+
+        agg["phases_mean"] = aggregated_phases
         summary[wname] = agg
 
     # Construct JSON data
