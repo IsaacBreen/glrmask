@@ -968,6 +968,7 @@ local_system:
 
           def __post_init__(self):
               self._validate_no_promotions()
+              self._validate_populated_nodes()
 
           def _validate_no_promotions(self) -> None:
               """
@@ -1028,6 +1029,47 @@ local_system:
                       "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
                       f"indicating a non-canonical structure. Node: {node}"
                   )
+
+          def _validate_populated_nodes(self) -> None:
+              """
+              Validates that every node represents at least one stack, with the
+              exception of the root UpperBranch for an empty GSS.
+              """
+              # The root can be an empty UpperBranch, which represents an empty GSS.
+              if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
+                  return
+
+              self._validate_node_is_populated(self.inner)
+
+          def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
+              """Recursive helper for validation."""
+              if isinstance(node, UpperBranch):
+                  if not node.children and node.empty is None:
+                      raise ValueError(
+                          "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
+                          f"found in a non-root position. Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+              elif isinstance(node, Interface):
+                  if not node.children and node.empty is None:
+                      raise ValueError(
+                          "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
+                          f"Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+              elif isinstance(node, Lower):
+                  if not node.children and not node.empty:
+                      raise ValueError(
+                          "LeveledGSS validation failed: Lower node with no children and empty=False found. "
+                          f"Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -2658,20 +2700,16 @@ local_system:
           inner: Upper[T, Acc]
 
           def __post_init__(self):
+              self._validate_max_depths()
               self._validate_no_promotions()
               self._validate_populated_nodes()
 
-          def _validate_no_promotions(self) -> None:
-              """
-              Recursively validates that no UpperBranch nodes can be promoted to an Interface.
-              An UpperBranch can be promoted if all its children are Interfaces and they all
-              (including the UpperBranch's own empty slot) represent the same single accumulator value.
-              """
-              if isinstance(self.inner, UpperBranch):
-                  self._validate_node(self.inner)
+          def _validate_max_depths(self) -> None:
+              """Recursively validates that the `_max_depth` of each node is correct."""
+              self._validate_depths_node(self.inner)
 
-          def _validate_node(self, node: Upper[T, Acc]) -> None:
-              """Recursive helper for validation."""
+          def _validate_depths_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for validating max_depth on Upper nodes."""
               if isinstance(node, Interface):
                   # An Interface node has Lower children. We need to validate their depths recursively.
                   def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
@@ -2688,7 +2726,7 @@ local_system:
                   return  # Leaf of the upper tree
 
               # It must be an UpperBranch
-              # First, recurse on children and check their depths
+              # Recurse on children and check their depths
               for children_at_depth in node.children.values():
                   for depth, child in children_at_depth.items():
                       if depth != child._max_depth():
@@ -2696,7 +2734,27 @@ local_system:
                               "LeveledGSS validation failed: incorrect max_depth for Upper child. "
                               f"Expected {depth}, got {child._max_depth()}. Node: {node}"
                           )
-                      self._validate_node(child)
+                      self._validate_depths_node(child)
+
+          def _validate_no_promotions(self) -> None:
+              """
+              Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+              An UpperBranch can be promoted if all its children are Interfaces and they all
+              (including the UpperBranch's own empty slot) represent the same single accumulator value.
+              """
+              if isinstance(self.inner, UpperBranch):
+                  self._validate_promotion_node(self.inner)
+
+          def _validate_promotion_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for promotion validation."""
+              if isinstance(node, Interface):
+                  return  # Leaf of the upper tree
+
+              # It must be an UpperBranch
+              # First, recurse on children
+              for children_at_depth in node.children.values():
+                  for child in children_at_depth.values():
+                      self._validate_promotion_node(child)
 
               # Now, check for promotion condition on the current node
               all_children = list(node._all_children())
@@ -2710,7 +2768,7 @@ local_system:
                   accs.add(node.empty)
 
               for child in all_children:
-                  interface_child: Interface[T, Acc] = child
+                  interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
                   accs.add(interface_child.acc)
                   if interface_child.empty is not None:
                       accs.add(interface_child.empty)
@@ -4456,6 +4514,7 @@ messages:
 
           def __post_init__(self):
               self._validate_no_promotions()
+              self._validate_populated_nodes()
 
           def _validate_no_promotions(self) -> None:
               """
@@ -4516,6 +4575,47 @@ messages:
                       "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
                       f"indicating a non-canonical structure. Node: {node}"
                   )
+
+          def _validate_populated_nodes(self) -> None:
+              """
+              Validates that every node represents at least one stack, with the
+              exception of the root UpperBranch for an empty GSS.
+              """
+              # The root can be an empty UpperBranch, which represents an empty GSS.
+              if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
+                  return
+
+              self._validate_node_is_populated(self.inner)
+
+          def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
+              """Recursive helper for validation."""
+              if isinstance(node, UpperBranch):
+                  if not node.children and node.empty is None:
+                      raise ValueError(
+                          "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
+                          f"found in a non-root position. Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+              elif isinstance(node, Interface):
+                  if not node.children and node.empty is None:
+                      raise ValueError(
+                          "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
+                          f"Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
+              elif isinstance(node, Lower):
+                  if not node.children and not node.empty:
+                      raise ValueError(
+                          "LeveledGSS validation failed: Lower node with no children and empty=False found. "
+                          f"Node: {node}"
+                      )
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          self._validate_node_is_populated(child)
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -5196,10 +5296,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: "another invariant to check: ensure either empty is not None or there is
-      at least one child on every upper branch, interface, and lower. Only exception
-      is the root inner in LeveledGSS, but if that's None and with no children, then
-      it must be upper branch."
+  - user: Separate out validation of max depths from validation that no promotions
+      are possible.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5218,129 +5316,232 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested invariant checks, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to refactor the validation logic, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open `python/gss_tester/implementations/leveled_impl.py`**.
+      I will refactor the validation logic in `python/gss_tester/implementations/leveled_impl.py` to separate the validation of `max_depth` from the validation of promotion rules.
 
-      2.  In the `LeveledGSS` class, locate the `__post_init__` method around line 118. Modify it to call the new validation method `_validate_populated_nodes`:
+      #### File: `python/gss_tester/implementations/leveled_impl.py`
+
+      1.  **Update `__post_init__`:**
+          In the `LeveledGSS` class, modify the `__post_init__` method to call the new `_validate_max_depths` method.
 
           ```python
+          # python/gss_tester/implementations/leveled_impl.py
+
+          # In class LeveledGSS:
           def __post_init__(self):
+              self._validate_max_depths()
               self._validate_no_promotions()
               self._validate_populated_nodes()
           ```
 
-      3.  Next, add the new validation methods `_validate_populated_nodes` and its helper `_validate_node_is_populated` to the `LeveledGSS` class. A good place is right after the existing `_validate_node` method (which ends around line 170).
+      2.  **Add `_validate_max_depths` method:**
+          Insert the new `_validate_max_depths` method and its helper `_validate_depths_node` right after `__post_init__`. This new method will contain the logic for validating `max_depth` values throughout the GSS structure.
 
           ```python
-          def _validate_populated_nodes(self) -> None:
-              """
-              Validates that every node represents at least one stack, with the
-              exception of the root UpperBranch for an empty GSS.
-              """
-              # The root can be an empty UpperBranch, which represents an empty GSS.
-              if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
-                  return
+          # python/gss_tester/implementations/leveled_impl.py
 
-              self._validate_node_is_populated(self.inner)
+          # In class LeveledGSS, after __post_init__:
+          def _validate_max_depths(self) -> None:
+              """Recursively validates that the `_max_depth` of each node is correct."""
+              self._validate_depths_node(self.inner)
 
-          def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
-              """Recursive helper for validation."""
-              if isinstance(node, UpperBranch):
-                  if not node.children and node.empty is None:
-                      raise ValueError(
-                          "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
-                          f"found in a non-root position. Node: {node}"
-                      )
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          self._validate_node_is_populated(child)
-              elif isinstance(node, Interface):
-                  if not node.children and node.empty is None:
-                      raise ValueError(
-                          "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
-                          f"Node: {node}"
-                      )
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          self._validate_node_is_populated(child)
-              elif isinstance(node, Lower):
-                  if not node.children and not node.empty:
-                      raise ValueError(
-                          "LeveledGSS validation failed: Lower node with no children and empty=False found. "
-                          f"Node: {node}"
-                      )
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          self._validate_node_is_populated(child)
+          def _validate_depths_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for validating max_depth on Upper nodes."""
+              if isinstance(node, Interface):
+                  # An Interface node has Lower children. We need to validate their depths recursively.
+                  def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
+                      for children_at_depth in n.children.values():
+                          for depth, child in children_at_depth.items():
+                              if depth != child._max_depth():
+                                  raise ValueError(
+                                      "LeveledGSS validation failed: incorrect max_depth for Lower child. "
+                                      f"Expected {depth}, got {child._max_depth()}. Node: {n}"
+                                  )
+                              _validate_lower_recursively(child)
+
+                  _validate_lower_recursively(node)
+                  return  # Leaf of the upper tree
+
+              # It must be an UpperBranch
+              # Recurse on children and check their depths
+              for children_at_depth in node.children.values():
+                  for depth, child in children_at_depth.items():
+                      if depth != child._max_depth():
+                          raise ValueError(
+                              "LeveledGSS validation failed: incorrect max_depth for Upper child. "
+                              f"Expected {depth}, got {child._max_depth()}. Node: {node}"
+                          )
+                      self._validate_depths_node(child)
           ```
 
-      ### Git Diff
+      3.  **Replace `_validate_no_promotions` and remove `_validate_node`:**
+          Replace the existing `_validate_no_promotions` method and delete the `_validate_node` method. The new implementation of `_validate_no_promotions` will use a new helper, `_validate_promotion_node`, which contains only the promotion-checking logic.
 
-      Here is the git diff to apply these changes.
+          ```python
+          # python/gss_tester/implementations/leveled_impl.py
+          
+          # Replace the old _validate_no_promotions and _validate_node with:
+          def _validate_no_promotions(self) -> None:
+              """
+              Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+              An UpperBranch can be promoted if all its children are Interfaces and they all
+              (including the UpperBranch's own empty slot) represent the same single accumulator value.
+              """
+              if isinstance(self.inner, UpperBranch):
+                  self._validate_promotion_node(self.inner)
+
+          def _validate_promotion_node(self, node: Upper[T, Acc]) -> None:
+              """Recursive helper for promotion validation."""
+              if isinstance(node, Interface):
+                  return  # Leaf of the upper tree
+
+              # It must be an UpperBranch
+              # First, recurse on children
+              for children_at_depth in node.children.values():
+                  for child in children_at_depth.values():
+                      self._validate_promotion_node(child)
+
+              # Now, check for promotion condition on the current node
+              all_children = list(node._all_children())
+
+              if not all_children or not all(isinstance(child, Interface) for child in all_children):
+                  return  # Cannot promote
+
+              # All children are Interfaces. Gather all accumulators.
+              accs: Set[Acc] = set()
+              if node.empty is not None:
+                  accs.add(node.empty)
+
+              for child in all_children:
+                  interface_child: Interface[T, Acc] = child
+                  accs.add(interface_child.acc)
+                  if interface_child.empty is not None:
+                      accs.add(interface_child.empty)
+
+              if len(accs) == 1:
+                  raise ValueError(
+                      "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
+                      f"indicating a non-canonical structure. Node: {node}"
+                  )
+          ```
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -119,6 +119,7 @@
+      @@ -93,59 +93,82 @@
+           inner: Upper[T, Acc]
        
            def __post_init__(self):
+      +        self._validate_max_depths()
                self._validate_no_promotions()
-      +        self._validate_populated_nodes()
+               self._validate_populated_nodes()
        
+      +    def _validate_max_depths(self) -> None:
+      +        """Recursively validates that the `_max_depth` of each node is correct."""
+      +        self._validate_depths_node(self.inner)
+      +
+      +    def _validate_depths_node(self, node: Upper[T, Acc]) -> None:
+      +        """Recursive helper for validating max_depth on Upper nodes."""
+      +        if isinstance(node, Interface):
+      +            # An Interface node has Lower children. We need to validate their depths recursively.
+      +            def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
+      +                for children_at_depth in n.children.values():
+      +                    for depth, child in children_at_depth.items():
+      +                        if depth != child._max_depth():
+      +                            raise ValueError(
+      +                                "LeveledGSS validation failed: incorrect max_depth for Lower child. "
+      +                                f"Expected {depth}, got {child._max_depth()}. Node: {n}"
+      +                            )
+      +                        _validate_lower_recursively(child)
+      +
+      +            _validate_lower_recursively(node)
+      +            return  # Leaf of the upper tree
+      +
+      +        # It must be an UpperBranch
+      +        # Recurse on children and check their depths
+      +        for children_at_depth in node.children.values():
+      +            for depth, child in children_at_depth.items():
+      +                if depth != child._max_depth():
+      +                    raise ValueError(
+      +                        "LeveledGSS validation failed: incorrect max_depth for Upper child. "
+      +                        f"Expected {depth}, got {child._max_depth()}. Node: {node}"
+      +                    )
+      +                self._validate_depths_node(child)
+      +
            def _validate_no_promotions(self) -> None:
                """
-      @@ -171,6 +172,46 @@
-                       f"indicating a non-canonical structure. Node: {node}"
-                   )
+               Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+               An UpperBranch can be promoted if all its children are Interfaces and they all
+               (including the UpperBranch's own empty slot) represent the same single accumulator value.
+               """
+               if isinstance(self.inner, UpperBranch):
+      -            self._validate_node(self.inner)
+      -
+      -    def _validate_node(self, node: Upper[T, Acc]) -> None:
+      -        """Recursive helper for validation."""
+      +            self._validate_promotion_node(self.inner)
+      +
+      +    def _validate_promotion_node(self, node: Upper[T, Acc]) -> None:
+      +        """Recursive helper for promotion validation."""
+               if isinstance(node, Interface):
+      -            # An Interface node has Lower children. We need to validate their depths recursively.
+      -            def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
+      -                for children_at_depth in n.children.values():
+      -                    for depth, child in children_at_depth.items():
+      -                        if depth != child._max_depth():
+      -                            raise ValueError(
+      -                                "LeveledGSS validation failed: incorrect max_depth for Lower child. "
+      -                                f"Expected {depth}, got {child._max_depth()}. Node: {n}"
+      -                            )
+      -                        _validate_lower_recursively(child)
+      -
+      -            _validate_lower_recursively(node)
+                   return  # Leaf of the upper tree
        
-      +    def _validate_populated_nodes(self) -> None:
-      +        """
-      +        Validates that every node represents at least one stack, with the
-      +        exception of the root UpperBranch for an empty GSS.
-      +        """
-      +        # The root can be an empty UpperBranch, which represents an empty GSS.
-      +        if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
-      +            return
-      +
-      +        self._validate_node_is_populated(self.inner)
-      +
-      +    def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
-      +        """Recursive helper for validation."""
-      +        if isinstance(node, UpperBranch):
-      +            if not node.children and node.empty is None:
-      +                raise ValueError(
-      +                    "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
-      +                    f"found in a non-root position. Node: {node}"
-      +                )
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    self._validate_node_is_populated(child)
-      +        elif isinstance(node, Interface):
-      +            if not node.children and node.empty is None:
-      +                raise ValueError(
-      +                    "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
-      +                    f"Node: {node}"
-      +                )
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    self._validate_node_is_populated(child)
-      +        elif isinstance(node, Lower):
-      +            if not node.children and not node.empty:
-      +                raise ValueError(
-      +                    "LeveledGSS validation failed: Lower node with no children and empty=False found. "
-      +                    f"Node: {node}"
-      +                )
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    self._validate_node_is_populated(child)
-      +
-           @classmethod
-           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-               # Use ReferenceGSS to canonicalize stacks by merging accumulators.
+               # It must be an UpperBranch
+      -        # First, recurse on children and check their depths
+      -        for children_at_depth in node.children.values():
+      -            for depth, child in children_at_depth.items():
+      -                if depth != child._max_depth():
+      -                    raise ValueError(
+      -                        "LeveledGSS validation failed: incorrect max_depth for Upper child. "
+      -                        f"Expected {depth}, got {child._max_depth()}. Node: {node}"
+      -                    )
+      -                self._validate_node(child)
+      +        # First, recurse on children
+      +        for children_at_depth in node.children.values():
+      +            for child in children_at_depth.values():
+      +                self._validate_promotion_node(child)
+       
+               # Now, check for promotion condition on the current node
+               all_children = list(node._all_children())
+       
+               if not all_children or not all(isinstance(child, Interface) for child in all_children):
+                   return  # Cannot promote
+       
+               # All children are Interfaces. Gather all accumulators.
+               accs: Set[Acc] = set()
+               if node.empty is not None:
+                   accs.add(node.empty)
+       
+               for child in all_children:
+      -            interface_child: Interface[T, Acc] = child
+      +            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+                   accs.add(interface_child.acc)
+                   if interface_child.empty is not None:
+                       accs.add(interface_child.empty)
+       
+               if len(accs) == 1:
+                   raise ValueError(
+                       "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
 
       ```
     metadata:
@@ -5353,7 +5554,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add invariant checks for populated
-      nodes in LeveledGSS"'
+  - user: 'Changes committed with message: "Refactor: Separate max depth and promotion
+      validation in LeveledGSS"'
     metadata:
 ...

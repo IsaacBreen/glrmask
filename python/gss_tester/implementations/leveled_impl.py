@@ -75,20 +75,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
 
     def __post_init__(self):
+        self._validate_max_depths()
         self._validate_no_promotions()
         self._validate_populated_nodes()
 
-    def _validate_no_promotions(self) -> None:
-        """
-        Recursively validates that no UpperBranch nodes can be promoted to an Interface.
-        An UpperBranch can be promoted if all its children are Interfaces and they all
-        (including the UpperBranch's own empty slot) represent the same single accumulator value.
-        """
-        if isinstance(self.inner, UpperBranch):
-            self._validate_node(self.inner)
+    def _validate_max_depths(self) -> None:
+        """Recursively validates that the `_max_depth` of each node is correct."""
+        self._validate_depths_node(self.inner)
 
-    def _validate_node(self, node: Upper[T, Acc]) -> None:
-        """Recursive helper for validation."""
+    def _validate_depths_node(self, node: Upper[T, Acc]) -> None:
+        """Recursive helper for validating max_depth on Upper nodes."""
         if isinstance(node, Interface):
             # An Interface node has Lower children. We need to validate their depths recursively.
             def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
@@ -105,7 +101,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return  # Leaf of the upper tree
 
         # It must be an UpperBranch
-        # First, recurse on children and check their depths
+        # Recurse on children and check their depths
         for children_at_depth in node.children.values():
             for depth, child in children_at_depth.items():
                 if depth != child._max_depth():
@@ -113,7 +109,27 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                         "LeveledGSS validation failed: incorrect max_depth for Upper child. "
                         f"Expected {depth}, got {child._max_depth()}. Node: {node}"
                     )
-                self._validate_node(child)
+                self._validate_depths_node(child)
+
+    def _validate_no_promotions(self) -> None:
+        """
+        Recursively validates that no UpperBranch nodes can be promoted to an Interface.
+        An UpperBranch can be promoted if all its children are Interfaces and they all
+        (including the UpperBranch's own empty slot) represent the same single accumulator value.
+        """
+        if isinstance(self.inner, UpperBranch):
+            self._validate_promotion_node(self.inner)
+
+    def _validate_promotion_node(self, node: Upper[T, Acc]) -> None:
+        """Recursive helper for promotion validation."""
+        if isinstance(node, Interface):
+            return  # Leaf of the upper tree
+
+        # It must be an UpperBranch
+        # First, recurse on children
+        for children_at_depth in node.children.values():
+            for child in children_at_depth.values():
+                self._validate_promotion_node(child)
 
         # Now, check for promotion condition on the current node
         all_children = list(node._all_children())
@@ -127,7 +143,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             accs.add(node.empty)
 
         for child in all_children:
-            interface_child: Interface[T, Acc] = child
+            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
             accs.add(interface_child.acc)
             if interface_child.empty is not None:
                 accs.add(interface_child.empty)
