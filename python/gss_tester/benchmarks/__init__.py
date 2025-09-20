@@ -8,6 +8,10 @@ defined in gss_tester.interface.GSS.
 Key features:
 - Multiple workloads that stress different aspects of a GSS (push-heavy, branching,
   pop/merge collapse, wide merges, apply/prune, and seeded fuzz-like constructions).
+- Merge-sensitivity workloads that specifically probe whether merge operations scale with
+  the “surface” changes rather than the entire structure:
+  - split_surface_merge: split base by top-of-stack, shallowly modify small subsets in clones, then merge.
+  - clone_push_merge: push a unique marker onto many clones and merge; then pop to collapse.
 - Scaling controls to evaluate asymptotic behavior as the structure grows.
 - Timing and memory measurement using Python's standard library (time, tracemalloc).
 - Structural metrics derived from to_stacks() and optional implementation-specific
