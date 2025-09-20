@@ -4782,18 +4782,26 @@ local_system:
       # Orchestrates running GSS benchmark workloads across one or more implementations,
       # saving JSON results, and producing comparative analyses and plots.
       #
-      # Usage:
-      #   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- include/exclude args...]
+      # Usage (Preset Mode):
+      #   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [filter_args]]
       #
-      # Examples:
-      #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS
-      #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      # Usage (Sweep Mode for scaling analysis):
+      #   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> --sweep-axis <param> --sweep-values <v1> <v2> ...
       #
       # Notes:
       #   - Each implementation is specified as 'module.ClassName' or a .py path.
-      #   - You can pass additional args after implementations to filter workloads:
-      #       --include push_scaling merge_surface_changes
-      #       --exclude fuzz
+      #   - All arguments after the implementation list (or after a '--') are passed
+      #     directly to the benchmark runner script.
+      #
+      # Examples:
+      #   # Run the 'small' preset for two implementations
+      #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      #
+      #   # Run only the 'push_scaling' workload from the 'tiny' preset
+      #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+      #
+      #   # Run a scaling sweep for 'push_scaling' by varying 'prefix_depth'
+      #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
       # ==============================================================================
 
       SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -4801,7 +4809,7 @@ local_system:
       export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
 
       if [ "$#" -lt 2 ]; then
-        echo "Usage: $0 <preset:{tiny|small|medium|large}> <impl1> [impl2 ...] [-- include/exclude args...]"
+        echo "Usage: $0 <preset> <impl1> [impl2 ...] [-- runner_args...]"
         exit 1
       fi
 
@@ -4903,7 +4911,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -8114,5 +8122,181 @@ messages:
       Identified target file: python/gss_tester/benchmarks/analyzer.py
       Applying patch to 'python/gss_tester/benchmarks/analyzer.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/benchmarks/analyzer.py.
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Update the bash script.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to update the benchmark execution script, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `python/gss_tester/run_benches.sh`**.
+      2.  **Update the documentation header**: Replace the existing comment block at the top of the file with the new version below. This clarifies the two modes of operation (preset runs and scaling sweeps) and provides updated examples for filtering and running sweeps.
+      3.  **Update the usage message**: In the argument validation section, modify the `echo` command to show a more general usage string that reflects the new capabilities.
+
+      This will make the script's new scaling analysis features easier to discover and use.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/python/gss_tester/run_benches.sh b/python/gss_tester/run_benches.sh
+      index 101e92c..00c2423 100755
+      --- a/python/gss_tester/run_benches.sh
+      +++ b/python/gss_tester/run_benches.sh
+      @@ -1,26 +1,33 @@
+       #!/bin/bash
+       set -euo pipefail
+       
+       # ==============================================================================
+       # run_benches.sh
+       #
+       # Orchestrates running GSS benchmark workloads across one or more implementations,
+       # saving JSON results, and producing comparative analyses and plots.
+       #
+      -# Usage:
+      -#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- include/exclude args...]
+      +# Usage (Preset Mode):
+      +#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [filter_args]]
+       #
+      -# Examples:
+      -#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS
+      -#   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      +# Usage (Sweep Mode for scaling analysis):
+      +#   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> --sweep-axis <param> --sweep-values <v1> <v2> ...
+       #
+       # Notes:
+      -#   - Each implementation is specified as 'module.ClassName' or a .py path.
+      -#   - You can pass additional args after implementations to filter workloads:
+      -#       --include push_scaling merge_surface_changes
+      -#       --exclude fuzz
+      +#   - Each implementation is specified as 'module.ClassName' or a .py path.
+      +#   - All arguments after the implementation list (or after a '--') are passed
+      +#     directly to the benchmark runner script.
+      +#
+      +# Examples:
+      +#   # Run the 'small' preset for two implementations
+      +#   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      +#
+      +#   # Run only the 'push_scaling' workload from the 'tiny' preset
+      +#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+      +#
+      +#   # Run a scaling sweep for 'push_scaling' by varying 'prefix_depth'
+      +#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
+       # ==============================================================================
+       
+       SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      @@ -28,7 +35,7 @@ PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+       export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
+       
+       if [ "$#" -lt 2 ]; then
+      -  echo "Usage: $0 <preset:{tiny|small|medium|large}> <impl1> [impl2 ...] [-- include/exclude args...]"
+      +  echo "Usage: $0 <preset> <impl1> [impl2 ...] [-- runner_args...]"
+         exit 1
+       fi
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/run_benches.sh
+      Applying patch to 'python/gss_tester/run_benches.sh' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/run_benches.sh.
+    metadata:
+  - user: 'Changes committed with message: "docs: Update run_benches.sh for sweep
+      mode and scaling analysis"'
     metadata:
 ...

@@ -7,18 +7,26 @@ set -euo pipefail
 # Orchestrates running GSS benchmark workloads across one or more implementations,
 # saving JSON results, and producing comparative analyses and plots.
 #
-# Usage:
-#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- include/exclude args...]
+# Usage (Preset Mode):
+#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [filter_args]]
 #
-# Examples:
-#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS
-#   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+# Usage (Sweep Mode for scaling analysis):
+#   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> --sweep-axis <param> --sweep-values <v1> <v2> ...
 #
 # Notes:
 #   - Each implementation is specified as 'module.ClassName' or a .py path.
-#   - You can pass additional args after implementations to filter workloads:
-#       --include push_scaling merge_surface_changes
-#       --exclude fuzz
+#   - All arguments after the implementation list (or after a '--') are passed
+#     directly to the benchmark runner script.
+#
+# Examples:
+#   # Run the 'small' preset for two implementations
+#   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+#
+#   # Run only the 'push_scaling' workload from the 'tiny' preset
+#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+#
+#   # Run a scaling sweep for 'push_scaling' by varying 'prefix_depth'
+#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
 # ==============================================================================
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -26,7 +34,7 @@ PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
 export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
 
 if [ "$#" -lt 2 ]; then
-  echo "Usage: $0 <preset:{tiny|small|medium|large}> <impl1> [impl2 ...] [-- include/exclude args...]"
+  echo "Usage: $0 <preset> <impl1> [impl2 ...] [-- runner_args...]"
   exit 1
 fi
 
