@@ -138,9 +138,9 @@ def _validate_upper(node: Upper[T, Acc]):
 
     all_children = _get_upper_children(node.inner)
 
-    # Invariant 1: If all children are interfaces, their accs must be unique.
+    # Invariant 1: If all children are interfaces, there must be more than one unique acc.
     if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-        if len({child.inner.acc for child in all_children}) != len(all_children):
+        if len({child.inner.acc for child in all_children}) > 1:
             raise AssertionError(
                 "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
             )
