@@ -48,7 +48,11 @@ shift
 IMPLS=()
 EXTRA_ARGS=()
 while (( "$#" )); do
-  if [[ "$1" == --* ]]; then
+  if [[ "$1" == "--" ]]; then
+    shift # Consume the '--'
+    EXTRA_ARGS=("$@")
+    break
+  elif [[ "$1" == --* ]]; then
     EXTRA_ARGS=("$@")
     break
   else
