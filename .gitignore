@@ -10,6 +10,7 @@ external/
 **/target/
 agent_outputs/
 gss_test_results/
+python/gss_bench_results/
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
