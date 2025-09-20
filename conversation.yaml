@@ -884,7 +884,7 @@ local_system:
       import json
       from pathlib import Path
       from typing import Any, Dict, List, Tuple
-      from datetime import datetime
+      from datetime import datetime, timezone
 
       from .plotting import Plotter
 
@@ -909,37 +909,64 @@ local_system:
 
 
       def _pretty_ms(ms: float) -> str:
+          if ms < 1:
+              return f"{ms:,.3f} ms"
           return f"{ms:,.2f} ms"
+
+
+      def _format_summary_lines(impl_map: Dict[str, List[Dict[str, Any]]]) -> List[str]:
+          """Generates formatted lines for both console and file output."""
+          lines = []
+          for impl, runs in sorted(impl_map.items()):
+              lines.append(f"Implementation: {impl}")
+              
+              per_preset: Dict[str, List[Dict[str, Any]]] = {}
+              for r in runs:
+                  per_preset.setdefault(r.get("preset", "?"), []).append(r)
+
+              for preset, preset_runs in sorted(per_preset.items()):
+                  lines.append(f"  Preset: {preset}")
+                  
+                  # All runs for a given preset should have the same summary structure. Take the first.
+                  summary = preset_runs[0].get("summary", {})
+                  
+                  for wname, w_summary in sorted(summary.items()):
+                      t_mean = w_summary.get("total_ms_mean", 0.0)
+                      mem_mean = w_summary.get("peak_mem_bytes_mean", 0.0)
+                      mem_str = f"{mem_mean/1024.0:,.1f} KiB"
+                      lines.append(f"    Workload: {wname} (Total: {_pretty_ms(t_mean)}, Peak Mem: {mem_str})")
+
+                      phases_mean = w_summary.get("phases_mean", [])
+                      if not phases_mean:
+                          lines.append("      - No phase data available.")
+                          continue
+
+                      for phase in phases_mean:
+                          phase_name = phase.get("phase", "unknown")
+                          phase_ms = phase.get("ms_mean", 0.0)
+                          lines.append(f"      - Phase '{phase_name}' ({_pretty_ms(phase_ms)})")
+                          
+                          method_stats = phase.get("method_stats_mean", {})
+                          if not method_stats:
+                              lines.append("          - No method stats.")
+                              continue
+                          
+                          lines.append("          Methods:")
+                          for method, stats in sorted(method_stats.items()):
+                              calls = stats.get('calls_mean', 0.0)
+                              total_ms = stats.get('total_ms_mean', 0.0)
+                              avg_ms = total_ms / calls if calls > 0 else 0.0
+                              calls_str = f"{calls:,.1f}" if not calls.is_integer() else f"{int(calls)}"
+                              lines.append(f"            - {method:<15}: {calls_str} calls, {_pretty_ms(total_ms)} total, {_pretty_ms(avg_ms)} avg")
+              lines.append("")
+          return lines
 
 
       def _print_summary(impl_map: Dict[str, List[Dict[str, Any]]]):
           print("--- Benchmark Summary ---")
-          for impl, runs in impl_map.items():
-              presets = ", ".join(sorted({r.get("preset", "?") for r in runs}))
-              print(f"Implementation: {impl} (presets: {presets})")
-              # Gather per-workload summaries across runs (potentially different presets)
-              per_workload: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-              for r in runs:
-                  summ = r.get("summary", {})
-                  for wname, agg in summ.items():
-                      per_workload.setdefault(wname, []).append((r.get("preset", "?"), agg))
-
-              for wname, lst in sorted(per_workload.items()):
-                  # Print basic metrics
-                  # Choose a few key fields
-                  # Use total_ms_mean if present
-                  metrics_lines = []
-                  for preset, agg in sorted(lst, key=lambda x: x[0]):
-                      t_mean = agg.get("total_ms_mean", None)
-                      mem_mean = agg.get("peak_mem_bytes_mean", None)
-                      t_str = _pretty_ms(t_mean) if t_mean is not None else "n/a"
-                      if mem_mean is not None:
-                          mem_str = f"{mem_mean/1024.0:,.1f} KiB"
-                      else:
-                          mem_str = "n/a"
-                      metrics_lines.append(f"[{preset}] time={t_str}, peak_mem={mem_str}")
-                  print(f"  - {wname}: " + "; ".join(metrics_lines))
-              print()
+          lines = _format_summary_lines(impl_map)
+          for line in lines:
+              print(line)
 
 
       def _collect_for_plotting(files: List[Path]) -> Tuple[List[str], Dict[str, Dict[str, Dict[str, float]]]]:
@@ -991,25 +1018,14 @@ local_system:
                                                     filename=f"{w}__{preset}.png")
               # Combined summary index.json
               index = {
-                  "generated_at": datetime.utcnow().isoformat() + "Z",
+                  "generated_at": datetime.now(timezone.utc).isoformat(),
                   "artifacts": sorted([p.name for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"]),
               }
               (out_dir / "index.json").write_text(json.dumps(index, indent=2))
 
           # Write a textual summary file
-          summary_txt = []
-          for impl, runs in impl_map.items():
-              summary_txt.append(f"Implementation: {impl}")
-              for r in runs:
-                  summary_txt.append(f"  Preset: {r.get('preset')}")
-                  for wname, agg in r.get("summary", {}).items():
-                      t_mean = agg.get("total_ms_mean", None)
-                      mem_mean = agg.get("peak_mem_bytes_mean", None)
-                      t_str = f"{t_mean:.2f} ms" if t_mean is not None else "n/a"
-                      mem_str = f"{mem_mean/1024.0:.1f} KiB" if mem_mean is not None else "n/a"
-                      summary_txt.append(f"    - {wname}: time={t_str}, peak_mem={mem_str}")
-              summary_txt.append("")
-          (out_dir / "summary.txt").write_text("\n".join(summary_txt))
+          summary_lines = _format_summary_lines(impl_map)
+          (out_dir / "summary.txt").write_text("\n".join(summary_lines))
 
           print(f"\nAnalysis artifacts saved to: {out_dir}")
 
@@ -1257,6 +1273,7 @@ local_system:
       import tracemalloc
       import math
       import random
+      from contextlib import contextmanager
       from dataclasses import dataclass
       from typing import Callable, Dict, Any, List, Tuple, Optional, Type, Iterable
 
@@ -1274,6 +1291,154 @@ local_system:
           timed_out: bool = False
 
 
+      class TimingCollector:
+          """Collects timing statistics for GSS method calls."""
+          def __init__(self):
+              self.stats: Dict[str, Dict[str, Any]] = {}
+
+          def record(self, method_name: str, ms: float):
+              if method_name not in self.stats:
+                  self.stats[method_name] = {'calls': 0, 'total_ms': 0.0}
+              self.stats[method_name]['calls'] += 1
+              self.stats[method_name]['total_ms'] += ms
+
+          def get_stats(self) -> Dict[str, Dict[str, Any]]:
+              return self.stats
+
+          def reset(self):
+              self.stats = {}
+
+
+      class BenchmarkContext:
+          """Manages state for a single benchmark run, including timing and phases."""
+          def __init__(self, mem_profile: bool):
+              self.collector = TimingCollector()
+              self.phases: List[Dict[str, Any]] = []
+              self.mem_profile = mem_profile
+              self.start_ms = _now_ms()
+              self.timed_out = False
+              self._memctx = _with_mem_tracking(mem_profile)
+
+          def __enter__(self):
+              self._memctx.__enter__()
+              return self
+
+          def __exit__(self, exc_type, exc_val, exc_tb):
+              self._memctx.__exit__(exc_type, exc_val, exc_tb)
+
+          @contextmanager
+          def phase(self, name: str, **kwargs):
+              self.collector.reset()
+              p_start_ms = _now_ms()
+              phase_data = {"phase": name, **kwargs}
+              yield phase_data
+              phase_data['ms'] = _now_ms() - p_start_ms
+              phase_data['method_stats'] = self.collector.get_stats()
+              self.phases.append(phase_data)
+              self._memctx.checkpoint()
+
+          @property
+          def peak_mem_bytes(self) -> int:
+              return self._memctx.peak_bytes
+
+
+      def create_timed_gss_class(gss_class: Type[GSS], collector: TimingCollector) -> Type[GSS]:
+          """Dynamically creates a GSS wrapper class that records method timings."""
+
+          class TimedGSS(GSS[T, Acc]):
+              _collector_ref = collector
+              _wrapped_class_ref = gss_class
+
+              def __init__(self, wrapped_instance: GSS[T, Acc]):
+                  self._wrapped = wrapped_instance
+
+              @classmethod
+              def from_stacks(cls: Type, stacks: List[Tuple[List[T], Acc]]) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = cls._wrapped_class_ref.from_stacks(stacks)
+                  cls._collector_ref.record('from_stacks', _now_ms() - start_ms)
+                  return cls(result)
+
+              def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.to_stacks()
+                  self._collector_ref.record('to_stacks', _now_ms() - start_ms)
+                  return result
+
+              def push(self: TimedGSS, value: T) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.push(value)
+                  self._collector_ref.record('push', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              def pop(self: TimedGSS) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.pop()
+                  self._collector_ref.record('pop', _now_ms() - start_ms)
+                  return TimedGSS(result)
+              
+              def popn(self: TimedGSS, n: int) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.popn(n)
+                  self._collector_ref.record('popn', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              def is_empty(self) -> bool:
+                  start_ms = _now_ms()
+                  result = self._wrapped.is_empty()
+                  self._collector_ref.record('is_empty', _now_ms() - start_ms)
+                  return result
+
+              def isolate(self: TimedGSS, value: Optional[T]) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.isolate(value)
+                  self._collector_ref.record('isolate', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              def apply(self: TimedGSS, func: Callable[[Acc], Acc]) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.apply(func)
+                  self._collector_ref.record('apply', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              def prune(self: TimedGSS, predicate: Callable[[Acc], bool]) -> TimedGSS[T, Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.prune(predicate)
+                  self._collector_ref.record('prune', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              def merge(self: TimedGSS, other: GSS[T, Acc]) -> TimedGSS[T, Acc]:
+                  # Unwrap the other GSS if it's also a TimedGSS
+                  other_wrapped = other._wrapped if isinstance(other, TimedGSS) else other
+                  start_ms = _now_ms()
+                  result = self._wrapped.merge(other_wrapped)
+                  self._collector_ref.record('merge', _now_ms() - start_ms)
+                  return TimedGSS(result)
+
+              @classmethod
+              def merge_many(cls: Type, gss_list: Iterable[GSS[T, Acc]]) -> TimedGSS[T, Acc]:
+                  # Unwrap all GSS instances in the list
+                  unwrapped_list = [g._wrapped if isinstance(g, TimedGSS) else g for g in gss_list]
+                  start_ms = _now_ms()
+                  result = cls._wrapped_class_ref.merge_many(unwrapped_list)
+                  cls._collector_ref.record('merge_many', _now_ms() - start_ms)
+                  return cls(result)
+
+              def peek(self) -> Set[T]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.peek()
+                  self._collector_ref.record('peek', _now_ms() - start_ms)
+                  return result
+
+              def reduce_acc(self) -> Optional[Acc]:
+                  start_ms = _now_ms()
+                  result = self._wrapped.reduce_acc()
+                  self._collector_ref.record('reduce_acc', _now_ms() - start_ms)
+                  return result
+                  
+          return TimedGSS
+
+
       @dataclass
       class Workload:
           """
@@ -1287,7 +1452,7 @@ local_system:
           name: str
           description: str
           param_presets: Dict[str, Dict[str, Any]]
-          runner: Callable[[Type[GSS], Dict[str, Any], str, int, bool], WorkloadResult]
+          runner: Callable[[Type[GSS], Dict[str, Any], str, int, BenchmarkContext], WorkloadResult]
 
 
       # Registry for discovery/filtering
@@ -1445,102 +1610,65 @@ local_system:
           params: Dict[str, Any],
           preset: str,
           seed: int,
-          mem_profile: bool,
+          context: BenchmarkContext,
       ) -> WorkloadResult:
           """
           Build a wide DAG with substantial sharing, then create k shallowly-modified clones and merge them all.
           The shallow modification is a single push with a per-clone tag. This should exercise the ability to
           merge variants without revisiting the entire base structure if sharing is preserved.
-
-          Params:
-            depth: number of levels for _build_wide_dag
-            branching: number of clones per level for _build_wide_dag
-            clones: number of clones to create from the base
-            measure_counts: whether to compute to_stacks() size (expensive)
-            max_ms: soft budget for the whole workload
           """
           max_ms = params.get("max_ms", None)
           measure_counts = params.get("measure_counts", False)
           depth = int(params["depth"])
           branching = int(params["branching"])
           clones_n = int(params["clones"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
           totals: Dict[str, Any] = {}
 
           try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Phase 1: Build base
-                  phase = {"phase": "build_base"}
-                  p0 = _now_ms()
-                  base, build_info = _build_wide_dag(gss_class, depth, branching, seed)
-                  phase["ms"] = _now_ms() - p0
-                  phase["detail"] = build_info
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phase["base_stack_count"] = _count_stacks_safely(base)
-                      phase["count_ms"] = _now_ms() - c0
-                  phases.append(phase)
-                  memctx.checkpoint()
-                  if _maybe_timeout(start_ms, max_ms):
-                      timed_out = True
-
-                  # Phase 2: Shallow modifications on clones
-                  if not timed_out:
-                      phase = {"phase": "create_modified_clones", "num_clones": clones_n}
-                      clone_start = _now_ms()
-                      clones: List[GSS] = []
-                      for i in range(clones_n):
-                          # push a per-clone tag value shallowly
-                          tag = (depth + 1) << 20 | i  # distinct top labels
-                          clones.append(base.push(tag))
-                          if _maybe_timeout(start_ms, max_ms):
-                              timed_out = True
-                              break
-                      phase["ms"] = _now_ms() - clone_start
-                      phases.append(phase)
-                      memctx.checkpoint()
-
-                  # Phase 3: merge_many clones
-                  if not timed_out:
-                      phase = {"phase": "merge_clones"}
-                      m0 = _now_ms()
-                      merged = _merge_many(gss_class, clones)
-                      phase["ms"] = _now_ms() - m0
+              with context:
+                  with context.phase("build_base") as phase:
+                      base, build_info = _build_wide_dag(gss_class, depth, branching, seed)
+                      phase["detail"] = build_info
                       if measure_counts:
                           c0 = _now_ms()
-                          phase["merged_stack_count"] = _count_stacks_safely(merged)
+                          phase["base_stack_count"] = _count_stacks_safely(base)
                           phase["count_ms"] = _now_ms() - c0
-                      phases.append(phase)
-                      memctx.checkpoint()
+                      if _maybe_timeout(context.start_ms, max_ms):
+                          context.timed_out = True
 
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
+                  if not context.timed_out:
+                      with context.phase("create_modified_clones", num_clones=clones_n) as phase:
+                          clones: List[GSS] = []
+                          for i in range(clones_n):
+                              tag = (depth + 1) << 20 | i
+                              clones.append(base.push(tag))
+                              if _maybe_timeout(context.start_ms, max_ms):
+                                  context.timed_out = True
+                                  break
+
+                  if not context.timed_out:
+                      with context.phase("merge_clones") as phase:
+                          merged = _merge_many(gss_class, clones)
+                          if measure_counts:
+                              c0 = _now_ms()
+                              phase["merged_stack_count"] = _count_stacks_safely(merged)
+                              phase["count_ms"] = _now_ms() - c0
+
+                  totals["total_ms"] = _now_ms() - context.start_ms
+                  totals["peak_mem_bytes"] = context.peak_mem_bytes
+                  totals["timed_out"] = context.timed_out
                   totals["base_depth"] = depth
                   totals["base_branching"] = branching
                   totals["num_clones"] = clones_n
 
               return WorkloadResult(
-                  name="split_modify_merge_shared",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
+                  name="split_modify_merge_shared", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
               )
           except Exception as e:
               return WorkloadResult(
-                  name="split_modify_merge_shared",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
+                  name="split_modify_merge_shared", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
               )
 
 
@@ -1549,99 +1677,57 @@ local_system:
           params: Dict[str, Any],
           preset: str,
           seed: int,
-          mem_profile: bool,
+          context: BenchmarkContext,
       ) -> WorkloadResult:
           """
           Build a moderately wide base, then produce several pairs of shallowly different clones,
-          merge each pair, and immediately pop. This stresses both merge performance on shared
-          parents and correctness of pop-to-shared-parent at scale.
-
-          Params:
-            depth: depth for base builder
-            branching: branching for base builder
-            pairs: number of pairs to create
-            measure_counts: whether to compute to_stacks() counts
-            max_ms: time budget (soft)
+          merge each pair, and immediately pop.
           """
           max_ms = params.get("max_ms", None)
           measure_counts = params.get("measure_counts", False)
           depth = int(params["depth"])
           branching = int(params["branching"])
           pairs = int(params["pairs"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
           totals: Dict[str, Any] = {}
 
           try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  phase = {"phase": "build_base"}
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  phase["ms"] = _now_ms() - p0
-                  phase["detail"] = info
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phase["base_stack_count"] = _count_stacks_safely(base)
-                      phase["count_ms"] = _now_ms() - c0
-                  phases.append(phase)
-                  memctx.checkpoint()
+              with context:
+                  with context.phase("build_base") as phase:
+                      base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                      phase["detail"] = info
+                      if measure_counts:
+                          c0 = _now_ms()
+                          phase["base_stack_count"] = _count_stacks_safely(base)
+                          phase["count_ms"] = _now_ms() - c0
 
-                  # Create and merge pairs
-                  merged_times_ms: List[float] = []
-                  popped_times_ms: List[float] = []
-                  for i in range(pairs):
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                      tag_a = (depth + 1) << 20 | (2 * i)
-                      tag_b = (depth + 1) << 20 | (2 * i + 1)
-                      g_a = base.push(tag_a)
-                      g_b = base.push(tag_b)
+                  with context.phase("pairwise_merge_and_pop") as phase:
+                      for i in range(pairs):
+                          if _maybe_timeout(context.start_ms, max_ms):
+                              context.timed_out = True
+                              break
+                          tag_a = (depth + 1) << 20 | (2 * i)
+                          tag_b = (depth + 1) << 20 | (2 * i + 1)
+                          g_a = base.push(tag_a)
+                          g_b = base.push(tag_b)
+                          merged = g_a.merge(g_b)
+                          popped = merged.pop()
+                      phase['num_pairs'] = i + 1
 
-                      m0 = _now_ms()
-                      merged = g_a.merge(g_b)
-                      merged_times_ms.append(_now_ms() - m0)
-
-                      p0 = _now_ms()
-                      popped = merged.pop()
-                      popped_times_ms.append(_now_ms() - p0)
-
-                  phases.append({
-                      "phase": "pairwise_merge_and_pop",
-                      "num_pairs": len(merged_times_ms),
-                      "merge_ms_stats": _stats(merged_times_ms),
-                      "pop_ms_stats": _stats(popped_times_ms),
-                  })
-                  memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
+                  totals["total_ms"] = _now_ms() - context.start_ms
+                  totals["peak_mem_bytes"] = context.peak_mem_bytes
+                  totals["timed_out"] = context.timed_out
                   totals["base_depth"] = depth
                   totals["base_branching"] = branching
                   totals["pairs"] = pairs
 
               return WorkloadResult(
-                  name="pairwise_merge_pop",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
+                  name="pairwise_merge_pop", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
               )
           except Exception as e:
               return WorkloadResult(
-                  name="pairwise_merge_pop",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
+                  name="pairwise_merge_pop", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
               )
 
 
@@ -1650,19 +1736,11 @@ local_system:
           params: Dict[str, Any],
           preset: str,
           seed: int,
-          mem_profile: bool,
+          context: BenchmarkContext,
       ) -> WorkloadResult:
           """
           Build a wide base with many distinct top-of-stack values, then isolate on a value
           that is present in only a tiny fraction of stacks.
-
-          Params:
-            depth: number of levels
-            branching: number of clones per level
-            target_index: pick which branch value to isolate at the last level (rare)
-            repeats: how many isolate repetitions (averaged)
-            measure_counts: if True, count stacks before/after
-            max_ms: soft budget
           """
           max_ms = params.get("max_ms", None)
           measure_counts = params.get("measure_counts", False)
@@ -1670,82 +1748,46 @@ local_system:
           branching = int(params["branching"])
           repeats = int(params["repeats"])
           target_index = int(params.get("target_index", 0))
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
           totals: Dict[str, Any] = {}
 
           try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  build_ms = _now_ms() - p0
-                  phases.append({
-                      "phase": "build_base",
-                      "ms": build_ms,
-                      "detail": info,
-                  })
-                  memctx.checkpoint()
-                  if measure_counts:
-                      c0 = _now_ms()
-                      base_count = _count_stacks_safely(base)
-                      phases[-1]["base_stack_count"] = base_count
-                      phases[-1]["count_ms"] = _now_ms() - c0
-
-                  # Determine a rare top value. We know last level used tags (depth-1, b)
-                  rare_val = ((depth - 1) << 20) | target_index
-
-                  # Repeat isolates
-                  iso_times: List[float] = []
-                  post_counts: List[int] = []
-                  for _ in range(repeats):
-                      i0 = _now_ms()
-                      isolated = base.isolate(rare_val)
-                      iso_times.append(_now_ms() - i0)
+              with context:
+                  with context.phase("build_base") as phase:
+                      base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                      phase["detail"] = info
                       if measure_counts:
-                          post_counts.append(_count_stacks_safely(isolated))
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
+                          c0 = _now_ms()
+                          phase["base_stack_count"] = _count_stacks_safely(base)
+                          phase["count_ms"] = _now_ms() - c0
 
-                  phase = {
-                      "phase": "isolate_rare_top",
-                      "repeats": len(iso_times),
-                      "isolate_ms_stats": _stats(iso_times),
-                      "rare_val": rare_val,
-                  }
-                  if measure_counts:
-                      phase["isolated_stack_count_stats"] = _stats(post_counts)
-                  phases.append(phase)
-                  memctx.checkpoint()
+                  rare_val = ((depth - 1) << 20) | target_index
+                  with context.phase("isolate_rare_top", repeats=repeats, rare_val=rare_val) as phase:
+                      post_counts = []
+                      for i in range(repeats):
+                          isolated = base.isolate(rare_val)
+                          if measure_counts:
+                              post_counts.append(_count_stacks_safely(isolated))
+                          if _maybe_timeout(context.start_ms, max_ms):
+                              context.timed_out = True
+                              break
+                      if measure_counts:
+                          phase["isolated_stack_count_stats"] = _stats(post_counts)
 
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
+                  totals["total_ms"] = _now_ms() - context.start_ms
+                  totals["peak_mem_bytes"] = context.peak_mem_bytes
+                  totals["timed_out"] = context.timed_out
                   totals["base_depth"] = depth
                   totals["base_branching"] = branching
                   totals["rare_val"] = rare_val
 
               return WorkloadResult(
-                  name="isolate_rare_top",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
+                  name="isolate_rare_top", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
               )
           except Exception as e:
               return WorkloadResult(
-                  name="isolate_rare_top",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
+                  name="isolate_rare_top", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
               )
 
 
@@ -1754,21 +1796,11 @@ local_system:
           params: Dict[str, Any],
           preset: str,
           seed: int,
-          mem_profile: bool,
+          context: BenchmarkContext,
       ) -> WorkloadResult:
           """
           Build a wide base; then measure apply() over the whole structure,
           followed by peek() and reduce_acc().
-
-          The accumulator work is uniform due to interface constraints, but this still measures
-          per-stack iteration costs. This is helpful to compare naive list-based vs. optimized DAG.
-
-          Params:
-            depth, branching
-            apply_steps: number of times to call apply
-            apply_increment: the increment each apply() adds to the accumulator
-            measure_counts: if True, count stacks once
-            max_ms: soft budget
           """
           max_ms = params.get("max_ms", None)
           measure_counts = params.get("measure_counts", False)
@@ -1776,83 +1808,45 @@ local_system:
           branching = int(params["branching"])
           apply_steps = int(params["apply_steps"])
           apply_inc = int(params["apply_increment"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
           totals: Dict[str, Any] = {}
 
           try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  build_ms = _now_ms() - p0
-                  phases.append({"phase": "build_base", "ms": build_ms, "detail": info})
-                  memctx.checkpoint()
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phases[-1]["base_stack_count"] = _count_stacks_safely(base)
-                      phases[-1]["count_ms"] = _now_ms() - c0
-
-                  # Apply steps
+              with context:
+                  with context.phase("build_base") as phase:
+                      base, info = _build_wide_dag(gss_class, depth, branching, seed)
+                      phase["detail"] = info
+                      if measure_counts:
+                          c0 = _now_ms()
+                          phase["base_stack_count"] = _count_stacks_safely(base)
+                          phase["count_ms"] = _now_ms() - c0
+                  
                   g = base
-                  apply_times: List[float] = []
-                  for _ in range(apply_steps):
-                      a0 = _now_ms()
-                      g = g.apply(lambda acc, inc=apply_inc: MergeableInt(int(acc) + inc))
-                      apply_times.append(_now_ms() - a0)
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                  phases.append({
-                      "phase": "apply_steps",
-                      "steps": len(apply_times),
-                      "apply_ms_stats": _stats(apply_times),
-                  })
-                  memctx.checkpoint()
+                  with context.phase("apply_steps", steps=apply_steps) as phase:
+                      for _ in range(apply_steps):
+                          g = g.apply(lambda acc, inc=apply_inc: MergeableInt(int(acc) + inc))
+                          if _maybe_timeout(context.start_ms, max_ms):
+                              context.timed_out = True
+                              break
 
-                  # peek and reduce_acc
-                  if not timed_out:
-                      k0 = _now_ms()
-                      peek_result = g.peek()
-                      peek_ms = _now_ms() - k0
+                  if not context.timed_out:
+                      with context.phase("peek_and_reduce") as phase:
+                          peek_result = g.peek()
+                          red = g.reduce_acc()
+                          phase["peek_cardinality"] = len(peek_result)
+                          phase["reduce_result"] = int(red) if red is not None else None
 
-                      r0 = _now_ms()
-                      red = g.reduce_acc()
-                      reduce_ms = _now_ms() - r0
-
-                      phases.append({
-                          "phase": "peek_and_reduce",
-                          "peek_ms": peek_ms,
-                          "peek_cardinality": len(peek_result),
-                          "reduce_ms": reduce_ms,
-                          "reduce_result": int(red) if red is not None else None,
-                      })
-                      memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
+                  totals["total_ms"] = _now_ms() - context.start_ms
+                  totals["peak_mem_bytes"] = context.peak_mem_bytes
+                  totals["timed_out"] = context.timed_out
 
               return WorkloadResult(
-                  name="apply_peek_reduce",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
+                  name="apply_peek_reduce", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
               )
           except Exception as e:
               return WorkloadResult(
-                  name="apply_peek_reduce",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
+                  name="apply_peek_reduce", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
               )
 
 
@@ -1861,101 +1855,61 @@ local_system:
           params: Dict[str, Any],
           preset: str,
           seed: int,
-          mem_profile: bool,
+          context: BenchmarkContext,
       ) -> WorkloadResult:
           """
           Build several chains of different depths merged together, then measure popn(k) for various k.
-          In an efficient structure with sharing, popn(k) should be roughly O(k) and not the total depth.
-
-          Params:
-            chain_depths: list of ints
-            popn_values: list of ints
-            measure_counts: whether to count stacks occasionally
-            max_ms: time budget (soft)
           """
           max_ms = params.get("max_ms", None)
           measure_counts = params.get("measure_counts", False)
           chain_depths: List[int] = list(params["chain_depths"])
           popn_values: List[int] = list(params["popn_values"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
           totals: Dict[str, Any] = {}
 
           try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build chains
-                  chains: List[GSS] = []
-                  build_stats: List[Dict[str, Any]] = []
-                  for d in chain_depths:
-                      b0 = _now_ms()
-                      g = gss_class.from_stacks([([], MergeableInt(0))])
-                      for i in range(d):
-                          g = g.push(i)
-                      build_stats.append({"depth": d, "ms": _now_ms() - b0})
-                      chains.append(g)
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                  phases.append({"phase": "build_chains", "chains": build_stats})
-                  memctx.checkpoint()
-
-                  if not timed_out:
-                      # Merge chains into a single GSS with many stacks of varying lengths
-                      m0 = _now_ms()
-                      merged = _merge_many(gss_class, chains)
-                      m_ms = _now_ms() - m0
-                      ph = {"phase": "merge_chains", "ms": m_ms}
-                      if measure_counts:
-                          c0 = _now_ms()
-                          ph["stack_count"] = _count_stacks_safely(merged)
-                          ph["count_ms"] = _now_ms() - c0
-                      phases.append(ph)
-                      memctx.checkpoint()
-
-                      # popn for various k
-                      popn_stats: List[Dict[str, Any]] = []
-                      for k in popn_values:
-                          p0 = _now_ms()
-                          res = merged.popn(k)
-                          popn_ms = _now_ms() - p0
-                          item = {"k": k, "ms": popn_ms}
+              with context:
+                  with context.phase("build_chains") as phase:
+                      chains: List[GSS] = []
+                      for d in chain_depths:
+                          g = gss_class.from_stacks([([], MergeableInt(0))])
+                          for i in range(d):
+                              g = g.push(i)
+                          chains.append(g)
+                          if _maybe_timeout(context.start_ms, max_ms):
+                              context.timed_out = True
+                              break
+                  
+                  merged = None
+                  if not context.timed_out:
+                      with context.phase("merge_chains") as phase:
+                          merged = _merge_many(gss_class, chains)
                           if measure_counts:
                               c0 = _now_ms()
-                              item["stack_count"] = _count_stacks_safely(res)
-                              item["count_ms"] = _now_ms() - c0
-                          popn_stats.append(item)
-                          if _maybe_timeout(start_ms, max_ms):
-                              timed_out = True
-                              break
-                      phases.append({"phase": "popn_runs", "runs": popn_stats})
-                      memctx.checkpoint()
+                              phase["stack_count"] = _count_stacks_safely(merged)
+                              phase["count_ms"] = _now_ms() - c0
 
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
+                  if not context.timed_out and merged is not None:
+                      with context.phase("popn_runs") as phase:
+                          for k in popn_values:
+                              res = merged.popn(k)
+                              if _maybe_timeout(context.start_ms, max_ms):
+                                  context.timed_out = True
+                                  break
+
+                  totals["total_ms"] = _now_ms() - context.start_ms
+                  totals["peak_mem_bytes"] = context.peak_mem_bytes
+                  totals["timed_out"] = context.timed_out
                   totals["chain_depths"] = chain_depths
                   totals["popn_values"] = popn_values
 
               return WorkloadResult(
-                  name="popn_scaling",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
+                  name="popn_scaling", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=None, timed_out=context.timed_out,
               )
           except Exception as e:
               return WorkloadResult(
-                  name="popn_scaling",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
+                  name="popn_scaling", preset=preset, params=params,
+                  phases=context.phases, totals=totals, error=f"{type(e).__name__}: {e}", timed_out=context.timed_out,
               )
 
 
@@ -1964,7 +1918,7 @@ local_system:
               return {"count": 0, "min": None, "max": None, "mean": None, "stdev": None}
           n = len(values)
           mean = sum(values) / n
-          var = sum((v - mean) ** 2 for v in values) / n
+          var = sum((v - mean) ** 2 for v in values) / n if n > 0 else 0
           stdev = math.sqrt(var)
           return {
               "count": n,
@@ -4390,9 +4344,385 @@ local_system:
       echo "Reference: $REFERENCE_IMPL"
       echo "Summary printed above."
       echo "Full JSON results are in: $RESULTS_DIR"
+    python/gss_tester/implementations/leveled_impl.py: |
+      from __future__ import annotations
+      from dataclasses import dataclass, field
+      from functools import reduce
+      import json
+      from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
+
+      from ..interface import GSS, T, Acc
+
+      # Using tuples for nodes to make them hashable and immutable.
+      # A node is defined by its value and a pointer to its parent.
+      # The parent pointer is an index into the previous level's node list.
+      _Node = Tuple[T, Optional[int]]
+
+      # A level is a tuple of unique nodes. The tuple provides a canonical ordering and indexing.
+      _Level = Tuple[_Node, ...]
+
+
+      @dataclass(frozen=True, eq=False)
+      class LeveledGSS(GSS[T, Acc]):
+          """
+          A GSS implementation that organizes the graph into levels by stack depth.
+          This allows for structural sharing of stack prefixes.
+
+          - `_levels`: A tuple of levels. `_levels[i]` contains all unique nodes at depth `i+1`.
+          - `_heads`: A dictionary mapping a head node identifier to its accumulator.
+            The key `(level_idx, node_idx)` points to `_levels[level_idx][node_idx]`.
+          - `_empty_acc`: An optional accumulator for the single empty stack.
+          """
+          _levels: Tuple[_Level, ...] = field(default_factory=tuple)
+          _heads: Dict[Tuple[int, int], Acc] = field(default_factory=dict)
+          _empty_acc: Optional[Acc] = None
+
+          @classmethod
+          def from_stacks(cls: Type['LeveledGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+              levels_builder: List[Dict[_Node, int]] = []
+              heads_builder: Dict[Tuple[int, int], Acc] = {}
+              empty_acc: Optional[Acc] = None
+
+              sorted_stacks = sorted(stacks, key=lambda s: len(s[0]))
+
+              for vals, acc in sorted_stacks:
+                  if not vals:
+                      if empty_acc is None:
+                          empty_acc = acc
+                      else:
+                          empty_acc = empty_acc.merge(acc)
+                      continue
+
+                  parent_idx: Optional[int] = None
+                  for i, val in enumerate(vals):
+                      if len(levels_builder) <= i:
+                          levels_builder.append({})
+                      
+                      node = (val, parent_idx)
+                      
+                      if node not in levels_builder[i]:
+                          new_idx = len(levels_builder[i])
+                          levels_builder[i][node] = new_idx
+                      
+                      parent_idx = levels_builder[i][node]
+
+                  level_idx = len(vals) - 1
+                  node_idx = parent_idx
+                  head_key = (level_idx, node_idx)
+                  if head_key in heads_builder:
+                      heads_builder[head_key] = heads_builder[head_key].merge(acc)
+                  else:
+                      heads_builder[head_key] = acc
+              
+              final_levels = tuple(
+                  tuple(node for node, _ in sorted(level_map.items(), key=lambda item: item[1]))
+                  for level_map in levels_builder
+              )
+
+              return cls(_levels=final_levels, _heads=heads_builder, _empty_acc=empty_acc)
+
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              stacks = []
+              if self._empty_acc is not None:
+                  stacks.append(([], self._empty_acc))
+
+              for (level_idx, node_idx), acc in self._heads.items():
+                  stack = []
+                  curr_level_idx = level_idx
+                  curr_node_idx = node_idx
+                  while curr_level_idx >= 0:
+                      node = self._levels[curr_level_idx][curr_node_idx]
+                      value, parent_idx = node
+                      stack.append(value)
+                      if parent_idx is None:
+                          break
+                      curr_level_idx -= 1
+                      curr_node_idx = parent_idx
+                  stacks.append((stack[::-1], acc))
+              
+              def _encode_for_sort(obj: Any) -> str:
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      return repr(obj)
+
+              stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return stacks
+
+          def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+              new_stacks = [
+                  (vals + [value], acc) for vals, acc in self.to_stacks()
+              ]
+              return self.from_stacks(new_stacks)
+
+          def pop(self) -> 'LeveledGSS[T, Acc]':
+              new_stacks = [
+                  (vals[:-1], acc) for vals, acc in self.to_stacks() if vals
+              ]
+              return self.from_stacks(new_stacks)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+              return self.from_stacks([(vals, func(acc)) for vals, acc in self.to_stacks()])
+
+          def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+              return self.from_stacks([(vals, acc) for vals, acc in self.to_stacks() if predicate(acc)])
+
+          def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+              return self.from_stacks(self.to_stacks() + other.to_stacks())
+
+          def is_empty(self) -> bool:
+              return not self._heads and self._empty_acc is None
+
+          def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+              if value is None:
+                  return self.__class__(_empty_acc=self._empty_acc)
+
+              new_heads = {
+                  head: acc for head, acc in self._heads.items()
+                  if self._levels[head[0]][head[1]][0] == value
+              }
+              return self.__class__(_levels=self._levels, _heads=new_heads)
+
+          def peek(self) -> Set[T]:
+              return {self._levels[level_idx][node_idx][0] for level_idx, node_idx in self._heads}
+
+          def reduce_acc(self) -> Optional[Acc]:
+              all_accs = list(self._heads.values())
+              if self._empty_acc is not None:
+                  all_accs.append(self._empty_acc)
+
+              if not all_accs:
+                  return None
+              
+              return reduce(lambda a, b: a.merge(b), all_accs)
+
+          def __eq__(self, other: object) -> bool:
+              if not isinstance(other, GSS):
+                  return NotImplemented
+              return self.to_stacks() == other.to_stacks()
+      from __future__ import annotations
+
+      from dataclasses import dataclass
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      from collections import defaultdict
+
+      from ..interface import GSS, T, Acc
+
+
+      # ------------------------------
+      # Internal node classes
+      # ------------------------------
+
+      @dataclass(frozen=True, eq=True)
+      class Upper(Generic[T, Acc]):
+          inner: UpperBranch[T, Acc] | Interface[T, Acc]
+
+
+      @dataclass(frozen=True, eq=True)
+      class UpperBranch(Generic[T, Acc]):
+          children: Dict[T, Dict[int, Upper[T, Acc]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
+
+
+      @dataclass(frozen=True, eq=True)
+      class Lower(Generic[T]):
+          inner: LowerBranch[T] | Leaf
+
+
+      @dataclass(frozen=True, eq=True)
+      class LowerBranch(Generic[T]):
+          children: Dict[T, Dict[int, Lower[T]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Leaf:
+          pass
+
+
+      # A shared, canonical leaf node
+      _LOWER_LEAF = Lower(Leaf())
+
+
+      @dataclass(frozen=True, eq=True)
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          inner: Upper[T, Acc]
+          empty: Optional[Acc]
+
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+              # Canonicalize first using the reference implementation
+              from .reference_impl import ReferenceGSS
+              merged = ReferenceGSS(stacks).to_stacks()
+
+              empty_acc: Optional[Acc] = None
+              # A simple trie: { val: { "i": [acc, ...], "b": <subtrie> } }
+              trie: Dict[T, Dict[str, Any]] = {}
+
+              for vals, acc in merged:
+                  if not vals:
+                      empty_acc = acc
+                      continue
+                  node = trie
+                  for i, v in enumerate(vals):
+                      entry = node.setdefault(v, {"i": [], "b": {}})
+                      if i == len(vals) - 1:
+                          entry["i"].append(acc)
+                      else:
+                          node = entry["b"]
+
+              def build(d: Dict[T, Dict[str, Any]]) -> Upper[T, Acc]:
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for v, e in d.items():
+                      nodes: List[Upper[T, Acc]] = [Upper(Interface(_LOWER_LEAF, a)) for a in e["i"]]
+                      # Always add a branch node (empty or not) to keep structure uniform and avoid edge invariants.
+                      branch_child = build(e["b"]) if e["b"] else Upper(UpperBranch({}))
+                      nodes.append(branch_child)
+                      children[v] = {i: n for i, n in enumerate(nodes)}
+                  return Upper(UpperBranch(children))
+
+              return LeveledGSS(build(trie), empty_acc)
+
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              res: List[Tuple[List[T], Acc]] = []
+              if self.empty is not None:
+                  res.append(([], self.empty))
+
+              def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+                  if isinstance(u.inner, Interface):
+                      res.append((pref, u.inner.acc))
+                      return
+                  for v, kids in u.inner.children.items():
+                      for child in kids.values():
+                          dfs(child, pref + [v])
+
+              dfs(self.inner, [])
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS(res).to_stacks()
+
+          def push(self, value: T) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+          def pop(self) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+          def is_empty(self) -> bool:
+              # The GSS is empty if there's no accumulator for the empty stack, and
+              # the inner trie has no children. from_stacks ensures inner is an UpperBranch.
+              return self.empty is None and not self.inner.inner.children
+
+          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+              if value is None:
+                  return LeveledGSS(Upper(UpperBranch({})), self.empty)
+
+              def filter_node(u: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+                  if isinstance(u.inner, Interface):
+                      return None
+
+                  # It's an UpperBranch
+                  new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for v, children_map in u.inner.children.items():
+                      new_v_children: Dict[int, Upper[T, Acc]] = {}
+
+                      # If v is the value we're looking for, keep its interface children.
+                      if v == value:
+                          for i, child in children_map.items():
+                              if isinstance(child.inner, Interface):
+                                  new_v_children[i] = child
+
+                      # For all branch children, recurse.
+                      for i, child in children_map.items():
+                          if isinstance(child.inner, UpperBranch):
+                              filtered_child = filter_node(child)
+                              if filtered_child:
+                                  new_v_children[i] = filtered_child
+
+                      if new_v_children:
+                          new_children[v] = new_v_children
+
+                  if not new_children:
+                      return None
+                  return Upper(UpperBranch(new_children))
+
+              new_inner = filter_node(self.inner)
+              if not new_inner:
+                  new_inner = Upper(UpperBranch({}))
+
+              return LeveledGSS(new_inner, None)
+
+          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
+          def peek(self) -> Set[T]:
+              tops: Set[T] = set()
+
+              def dfs(u: Upper[T, Acc]):
+                  if isinstance(u.inner, UpperBranch):
+                      for v, children_map in u.inner.children.items():
+                          if any(isinstance(child.inner, Interface) for child in children_map.values()):
+                              tops.add(v)
+
+                          for child in children_map.values():
+                              dfs(child)
+
+              dfs(self.inner)
+              return tops
+
+          def reduce_acc(self) -> Optional[Acc]:
+              from functools import reduce
+              accs: List[Acc] = []
+              if self.empty is not None:
+                  accs.append(self.empty)
+
+              def collect_accs(u: Upper[T, Acc]):
+                  if isinstance(u.inner, Interface):
+                      accs.append(u.inner.acc)
+                  elif isinstance(u.inner, UpperBranch):
+                      for children_map in u.inner.children.values():
+                          for child in children_map.values():
+                              collect_accs(child)
+
+              collect_accs(self.inner)
+
+              if not accs:
+                  return None
+
+              return reduce(lambda a, b: a.merge(b), accs)
+
+      def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+          """Helper to get all children from an UpperBranch."""
+          return [child for children_by_val in branch.children.values() for child in children_by_val.values()]
+
+
+      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+          """
+          Checks internal invariants of the LeveledGSS structure.
+          Raises AssertionError if an invariant is violated.
+          """
+          def _validate_upper(node: Upper[T, Acc]):
+              """Recursively validates invariants on Upper nodes."""
+              if not isinstance(node.inner, UpperBranch):
+                  return  # Base case: node is an Interface.
+              all_children = _get_upper_children(node.inner)
+              # Invariant 1: If all children are interfaces, there must be more than one unique acc.
+              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+                  if len({child.inner.acc for child in all_children}) > 1:
+                      raise AssertionError("Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs.")
+              # Recurse into children
+              for child in all_children:
+                  _validate_upper(child)
+          _validate_upper(gss.inner)
+          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+          if isinstance(gss.inner, Interface) and gss.empty is not None and gss.inner.acc == gss.empty:
+              raise AssertionError("Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator.")
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -4412,7 +4742,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -5347,7 +5677,7 @@ messages:
       import json
       from pathlib import Path
       from typing import Any, Dict, List, Tuple
-      from datetime import datetime
+      from datetime import datetime, timezone
 
       from .plotting import Plotter
 
@@ -5372,37 +5702,64 @@ messages:
 
 
       def _pretty_ms(ms: float) -> str:
+          if ms < 1:
+              return f"{ms:,.3f} ms"
           return f"{ms:,.2f} ms"
+
+
+      def _format_summary_lines(impl_map: Dict[str, List[Dict[str, Any]]]) -> List[str]:
+          """Generates formatted lines for both console and file output."""
+          lines = []
+          for impl, runs in sorted(impl_map.items()):
+              lines.append(f"Implementation: {impl}")
+              
+              per_preset: Dict[str, List[Dict[str, Any]]] = {}
+              for r in runs:
+                  per_preset.setdefault(r.get("preset", "?"), []).append(r)
+
+              for preset, preset_runs in sorted(per_preset.items()):
+                  lines.append(f"  Preset: {preset}")
+                  
+                  # All runs for a given preset should have the same summary structure. Take the first.
+                  summary = preset_runs[0].get("summary", {})
+                  
+                  for wname, w_summary in sorted(summary.items()):
+                      t_mean = w_summary.get("total_ms_mean", 0.0)
+                      mem_mean = w_summary.get("peak_mem_bytes_mean", 0.0)
+                      mem_str = f"{mem_mean/1024.0:,.1f} KiB"
+                      lines.append(f"    Workload: {wname} (Total: {_pretty_ms(t_mean)}, Peak Mem: {mem_str})")
+
+                      phases_mean = w_summary.get("phases_mean", [])
+                      if not phases_mean:
+                          lines.append("      - No phase data available.")
+                          continue
+
+                      for phase in phases_mean:
+                          phase_name = phase.get("phase", "unknown")
+                          phase_ms = phase.get("ms_mean", 0.0)
+                          lines.append(f"      - Phase '{phase_name}' ({_pretty_ms(phase_ms)})")
+                          
+                          method_stats = phase.get("method_stats_mean", {})
+                          if not method_stats:
+                              lines.append("          - No method stats.")
+                              continue
+                          
+                          lines.append("          Methods:")
+                          for method, stats in sorted(method_stats.items()):
+                              calls = stats.get('calls_mean', 0.0)
+                              total_ms = stats.get('total_ms_mean', 0.0)
+                              avg_ms = total_ms / calls if calls > 0 else 0.0
+                              calls_str = f"{calls:,.1f}" if not calls.is_integer() else f"{int(calls)}"
+                              lines.append(f"            - {method:<15}: {calls_str} calls, {_pretty_ms(total_ms)} total, {_pretty_ms(avg_ms)} avg")
+              lines.append("")
+          return lines
 
 
       def _print_summary(impl_map: Dict[str, List[Dict[str, Any]]]):
           print("--- Benchmark Summary ---")
-          for impl, runs in impl_map.items():
-              presets = ", ".join(sorted({r.get("preset", "?") for r in runs}))
-              print(f"Implementation: {impl} (presets: {presets})")
-              # Gather per-workload summaries across runs (potentially different presets)
-              per_workload: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-              for r in runs:
-                  summ = r.get("summary", {})
-                  for wname, agg in summ.items():
-                      per_workload.setdefault(wname, []).append((r.get("preset", "?"), agg))
-
-              for wname, lst in sorted(per_workload.items()):
-                  # Print basic metrics
-                  # Choose a few key fields
-                  # Use total_ms_mean if present
-                  metrics_lines = []
-                  for preset, agg in sorted(lst, key=lambda x: x[0]):
-                      t_mean = agg.get("total_ms_mean", None)
-                      mem_mean = agg.get("peak_mem_bytes_mean", None)
-                      t_str = _pretty_ms(t_mean) if t_mean is not None else "n/a"
-                      if mem_mean is not None:
-                          mem_str = f"{mem_mean/1024.0:,.1f} KiB"
-                      else:
-                          mem_str = "n/a"
-                      metrics_lines.append(f"[{preset}] time={t_str}, peak_mem={mem_str}")
-                  print(f"  - {wname}: " + "; ".join(metrics_lines))
-              print()
+          lines = _format_summary_lines(impl_map)
+          for line in lines:
+              print(line)
 
 
       def _collect_for_plotting(files: List[Path]) -> Tuple[List[str], Dict[str, Dict[str, Dict[str, float]]]]:
@@ -5454,25 +5811,14 @@ messages:
                                                     filename=f"{w}__{preset}.png")
               # Combined summary index.json
               index = {
-                  "generated_at": datetime.utcnow().isoformat() + "Z",
+                  "generated_at": datetime.now(timezone.utc).isoformat(),
                   "artifacts": sorted([p.name for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"]),
               }
               (out_dir / "index.json").write_text(json.dumps(index, indent=2))
 
           # Write a textual summary file
-          summary_txt = []
-          for impl, runs in impl_map.items():
-              summary_txt.append(f"Implementation: {impl}")
-              for r in runs:
-                  summary_txt.append(f"  Preset: {r.get('preset')}")
-                  for wname, agg in r.get("summary", {}).items():
-                      t_mean = agg.get("total_ms_mean", None)
-                      mem_mean = agg.get("peak_mem_bytes_mean", None)
-                      t_str = f"{t_mean:.2f} ms" if t_mean is not None else "n/a"
-                      mem_str = f"{mem_mean/1024.0:.1f} KiB" if mem_mean is not None else "n/a"
-                      summary_txt.append(f"    - {wname}: time={t_str}, peak_mem={mem_str}")
-              summary_txt.append("")
-          (out_dir / "summary.txt").write_text("\n".join(summary_txt))
+          summary_lines = _format_summary_lines(impl_map)
+          (out_dir / "summary.txt").write_text("\n".join(summary_lines))
 
           print(f"\nAnalysis artifacts saved to: {out_dir}")
 
@@ -5729,1442 +6075,6 @@ messages:
       filename: python/gss_tester/benchmarks/runner.py
   - user: |-
       ```python 'python/gss_tester/benchmarks/workloads.py'
-      from __future__ import annotations
-
-      import time
-      import tracemalloc
-      import math
-      import random
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Any, List, Tuple, Optional, Type, Iterable
-
-      from ..interface import GSS, MergeableInt, T, Acc
-
-
-      @dataclass
-      class WorkloadResult:
-          name: str
-          preset: str
-          params: Dict[str, Any]
-          phases: List[Dict[str, Any]]
-          totals: Dict[str, Any]
-          error: Optional[str] = None
-          timed_out: bool = False
-
-
-      @dataclass
-      class Workload:
-          """
-          Represents a benchmark workload.
-
-          - name: stable name used in filtering and reports
-          - description: human-readable description
-          - param_presets: mapping preset name -> param dict
-          - runner: callable that executes the workload and returns WorkloadResult
-          """
-          name: str
-          description: str
-          param_presets: Dict[str, Dict[str, Any]]
-          runner: Callable[[Type[GSS], Dict[str, Any], str, int, bool], WorkloadResult]
-
-
-      # Registry for discovery/filtering
-      WORKLOADS: Dict[str, Workload] = {}
-
-
-      def register_workload(w: Workload):
-          if w.name in WORKLOADS:
-              raise ValueError(f"Duplicate workload name: {w.name}")
-          WORKLOADS[w.name] = w
-
-
-      def _now_ms() -> float:
-          return time.perf_counter() * 1000.0
-
-
-      def _with_mem_tracking(enabled: bool):
-          class MemCtx:
-              def __enter__(self):
-                  if enabled:
-                      tracemalloc.start()
-                      self._start = tracemalloc.get_traced_memory()[1]  # peak so far
-                  else:
-                      self._start = 0
-                  self._peak = 0
-                  return self
-
-              def checkpoint(self):
-                  if enabled:
-                      current, peak = tracemalloc.get_traced_memory()
-                      self._peak = max(self._peak, peak)
-                      return current, peak
-                  return 0, 0
-
-              def __exit__(self, exc_type, exc, tb):
-                  if enabled:
-                      _, peak = tracemalloc.get_traced_memory()
-                      self._peak = max(self._peak, peak)
-                      tracemalloc.stop()
-                  return False
-
-              @property
-              def peak_bytes(self):
-                  return int(self._peak)
-
-          return MemCtx()
-
-
-      def _maybe_timeout(start_ms: float, max_ms: Optional[float]) -> bool:
-          if max_ms is None:
-              return False
-          return (_now_ms() - start_ms) > max_ms
-
-
-      def _merge_many(cls: Type[GSS], lst: Iterable[GSS]) -> GSS:
-          # use provided interface method
-          return cls.merge_many(lst)
-
-
-      def _count_stacks_safely(gss: GSS) -> int:
-          """
-          Counts stacks via to_stacks. This can be expensive; use sparingly.
-          """
-          try:
-              stacks = gss.to_stacks()
-              return len(stacks)
-          except Exception:
-              return -1
-
-
-      def _default_presets(
-          tiny: Dict[str, Any],
-          small: Dict[str, Any],
-          medium: Dict[str, Any],
-          large: Dict[str, Any],
-          max_ms_tiny: float = 2_000,
-          max_ms_small: float = 10_000,
-          max_ms_medium: float = 30_000,
-          max_ms_large: float = 120_000,
-      ) -> Dict[str, Dict[str, Any]]:
-          """
-          Utility to add per-preset defaults including max_ms budget.
-          """
-          tiny = dict(tiny)
-          small = dict(small)
-          medium = dict(medium)
-          large = dict(large)
-          tiny.setdefault("max_ms", max_ms_tiny)
-          small.setdefault("max_ms", max_ms_small)
-          medium.setdefault("max_ms", max_ms_medium)
-          large.setdefault("max_ms", max_ms_large)
-          return {
-              "tiny": tiny,
-              "small": small,
-              "medium": medium,
-              "large": large,
-          }
-
-
-      def _build_wide_dag(
-          gss_class: Type[GSS],
-          depth: int,
-          branching: int,
-          seed: int,
-          acc0: MergeableInt = MergeableInt(0),
-      ) -> Tuple[GSS, Dict[str, Any]]:
-          """
-          Builds a wide DAG via repeated push and merge_many on clones.
-
-          At each level l, produce 'branching' clones of the current GSS, each pushed with a distinct
-          value that encodes (level, branch). Then merge_many these clones.
-          The number of stacks grows like branching**depth; the underlying structure should share heavily.
-
-          Returns:
-            gss: constructed GSS
-            info: dict with per-level timing and totals
-          """
-          rng = random.Random(seed)
-          info: Dict[str, Any] = {
-              "levels": [],
-              "depth": depth,
-              "branching": branching
-          }
-
-          t0 = _now_ms()
-          g = gss_class.from_stacks([([], acc0)])
-          t1 = _now_ms()
-          info["init_ms"] = t1 - t0
-
-          for lvl in range(depth):
-              level_info: Dict[str, Any] = {"level": lvl}
-              push_start = _now_ms()
-              clones: List[GSS] = []
-              # Use integer labels to keep lightweight values
-              for b in range(branching):
-                  val = (lvl << 20) | b
-                  clones.append(g.push(val))
-              push_ms = _now_ms() - push_start
-              level_info["push_clones_ms"] = push_ms
-              level_info["num_clones"] = len(clones)
-
-              merge_start = _now_ms()
-              g = _merge_many(gss_class, clones)
-              merge_ms = _now_ms() - merge_start
-              level_info["merge_many_ms"] = merge_ms
-
-              info["levels"].append(level_info)
-
-          info["total_ms"] = _now_ms() - t0
-          return g, info
-
-
-      def _workload_split_modify_merge_shared(
-          gss_class: Type[GSS],
-          params: Dict[str, Any],
-          preset: str,
-          seed: int,
-          mem_profile: bool,
-      ) -> WorkloadResult:
-          """
-          Build a wide DAG with substantial sharing, then create k shallowly-modified clones and merge them all.
-          The shallow modification is a single push with a per-clone tag. This should exercise the ability to
-          merge variants without revisiting the entire base structure if sharing is preserved.
-
-          Params:
-            depth: number of levels for _build_wide_dag
-            branching: number of clones per level for _build_wide_dag
-            clones: number of clones to create from the base
-            measure_counts: whether to compute to_stacks() size (expensive)
-            max_ms: soft budget for the whole workload
-          """
-          max_ms = params.get("max_ms", None)
-          measure_counts = params.get("measure_counts", False)
-          depth = int(params["depth"])
-          branching = int(params["branching"])
-          clones_n = int(params["clones"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
-          totals: Dict[str, Any] = {}
-
-          try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Phase 1: Build base
-                  phase = {"phase": "build_base"}
-                  p0 = _now_ms()
-                  base, build_info = _build_wide_dag(gss_class, depth, branching, seed)
-                  phase["ms"] = _now_ms() - p0
-                  phase["detail"] = build_info
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phase["base_stack_count"] = _count_stacks_safely(base)
-                      phase["count_ms"] = _now_ms() - c0
-                  phases.append(phase)
-                  memctx.checkpoint()
-                  if _maybe_timeout(start_ms, max_ms):
-                      timed_out = True
-
-                  # Phase 2: Shallow modifications on clones
-                  if not timed_out:
-                      phase = {"phase": "create_modified_clones", "num_clones": clones_n}
-                      clone_start = _now_ms()
-                      clones: List[GSS] = []
-                      for i in range(clones_n):
-                          # push a per-clone tag value shallowly
-                          tag = (depth + 1) << 20 | i  # distinct top labels
-                          clones.append(base.push(tag))
-                          if _maybe_timeout(start_ms, max_ms):
-                              timed_out = True
-                              break
-                      phase["ms"] = _now_ms() - clone_start
-                      phases.append(phase)
-                      memctx.checkpoint()
-
-                  # Phase 3: merge_many clones
-                  if not timed_out:
-                      phase = {"phase": "merge_clones"}
-                      m0 = _now_ms()
-                      merged = _merge_many(gss_class, clones)
-                      phase["ms"] = _now_ms() - m0
-                      if measure_counts:
-                          c0 = _now_ms()
-                          phase["merged_stack_count"] = _count_stacks_safely(merged)
-                          phase["count_ms"] = _now_ms() - c0
-                      phases.append(phase)
-                      memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
-                  totals["base_depth"] = depth
-                  totals["base_branching"] = branching
-                  totals["num_clones"] = clones_n
-
-              return WorkloadResult(
-                  name="split_modify_merge_shared",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
-              )
-          except Exception as e:
-              return WorkloadResult(
-                  name="split_modify_merge_shared",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
-              )
-
-
-      def _workload_pairwise_merge_pop(
-          gss_class: Type[GSS],
-          params: Dict[str, Any],
-          preset: str,
-          seed: int,
-          mem_profile: bool,
-      ) -> WorkloadResult:
-          """
-          Build a moderately wide base, then produce several pairs of shallowly different clones,
-          merge each pair, and immediately pop. This stresses both merge performance on shared
-          parents and correctness of pop-to-shared-parent at scale.
-
-          Params:
-            depth: depth for base builder
-            branching: branching for base builder
-            pairs: number of pairs to create
-            measure_counts: whether to compute to_stacks() counts
-            max_ms: time budget (soft)
-          """
-          max_ms = params.get("max_ms", None)
-          measure_counts = params.get("measure_counts", False)
-          depth = int(params["depth"])
-          branching = int(params["branching"])
-          pairs = int(params["pairs"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
-          totals: Dict[str, Any] = {}
-
-          try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  phase = {"phase": "build_base"}
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  phase["ms"] = _now_ms() - p0
-                  phase["detail"] = info
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phase["base_stack_count"] = _count_stacks_safely(base)
-                      phase["count_ms"] = _now_ms() - c0
-                  phases.append(phase)
-                  memctx.checkpoint()
-
-                  # Create and merge pairs
-                  merged_times_ms: List[float] = []
-                  popped_times_ms: List[float] = []
-                  for i in range(pairs):
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                      tag_a = (depth + 1) << 20 | (2 * i)
-                      tag_b = (depth + 1) << 20 | (2 * i + 1)
-                      g_a = base.push(tag_a)
-                      g_b = base.push(tag_b)
-
-                      m0 = _now_ms()
-                      merged = g_a.merge(g_b)
-                      merged_times_ms.append(_now_ms() - m0)
-
-                      p0 = _now_ms()
-                      popped = merged.pop()
-                      popped_times_ms.append(_now_ms() - p0)
-
-                  phases.append({
-                      "phase": "pairwise_merge_and_pop",
-                      "num_pairs": len(merged_times_ms),
-                      "merge_ms_stats": _stats(merged_times_ms),
-                      "pop_ms_stats": _stats(popped_times_ms),
-                  })
-                  memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
-                  totals["base_depth"] = depth
-                  totals["base_branching"] = branching
-                  totals["pairs"] = pairs
-
-              return WorkloadResult(
-                  name="pairwise_merge_pop",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
-              )
-          except Exception as e:
-              return WorkloadResult(
-                  name="pairwise_merge_pop",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
-              )
-
-
-      def _workload_isolate_rare_top(
-          gss_class: Type[GSS],
-          params: Dict[str, Any],
-          preset: str,
-          seed: int,
-          mem_profile: bool,
-      ) -> WorkloadResult:
-          """
-          Build a wide base with many distinct top-of-stack values, then isolate on a value
-          that is present in only a tiny fraction of stacks.
-
-          Params:
-            depth: number of levels
-            branching: number of clones per level
-            target_index: pick which branch value to isolate at the last level (rare)
-            repeats: how many isolate repetitions (averaged)
-            measure_counts: if True, count stacks before/after
-            max_ms: soft budget
-          """
-          max_ms = params.get("max_ms", None)
-          measure_counts = params.get("measure_counts", False)
-          depth = int(params["depth"])
-          branching = int(params["branching"])
-          repeats = int(params["repeats"])
-          target_index = int(params.get("target_index", 0))
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
-          totals: Dict[str, Any] = {}
-
-          try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  build_ms = _now_ms() - p0
-                  phases.append({
-                      "phase": "build_base",
-                      "ms": build_ms,
-                      "detail": info,
-                  })
-                  memctx.checkpoint()
-                  if measure_counts:
-                      c0 = _now_ms()
-                      base_count = _count_stacks_safely(base)
-                      phases[-1]["base_stack_count"] = base_count
-                      phases[-1]["count_ms"] = _now_ms() - c0
-
-                  # Determine a rare top value. We know last level used tags (depth-1, b)
-                  rare_val = ((depth - 1) << 20) | target_index
-
-                  # Repeat isolates
-                  iso_times: List[float] = []
-                  post_counts: List[int] = []
-                  for _ in range(repeats):
-                      i0 = _now_ms()
-                      isolated = base.isolate(rare_val)
-                      iso_times.append(_now_ms() - i0)
-                      if measure_counts:
-                          post_counts.append(_count_stacks_safely(isolated))
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-
-                  phase = {
-                      "phase": "isolate_rare_top",
-                      "repeats": len(iso_times),
-                      "isolate_ms_stats": _stats(iso_times),
-                      "rare_val": rare_val,
-                  }
-                  if measure_counts:
-                      phase["isolated_stack_count_stats"] = _stats(post_counts)
-                  phases.append(phase)
-                  memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
-                  totals["base_depth"] = depth
-                  totals["base_branching"] = branching
-                  totals["rare_val"] = rare_val
-
-              return WorkloadResult(
-                  name="isolate_rare_top",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
-              )
-          except Exception as e:
-              return WorkloadResult(
-                  name="isolate_rare_top",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
-              )
-
-
-      def _workload_apply_peek_reduce(
-          gss_class: Type[GSS],
-          params: Dict[str, Any],
-          preset: str,
-          seed: int,
-          mem_profile: bool,
-      ) -> WorkloadResult:
-          """
-          Build a wide base; then measure apply() over the whole structure,
-          followed by peek() and reduce_acc().
-
-          The accumulator work is uniform due to interface constraints, but this still measures
-          per-stack iteration costs. This is helpful to compare naive list-based vs. optimized DAG.
-
-          Params:
-            depth, branching
-            apply_steps: number of times to call apply
-            apply_increment: the increment each apply() adds to the accumulator
-            measure_counts: if True, count stacks once
-            max_ms: soft budget
-          """
-          max_ms = params.get("max_ms", None)
-          measure_counts = params.get("measure_counts", False)
-          depth = int(params["depth"])
-          branching = int(params["branching"])
-          apply_steps = int(params["apply_steps"])
-          apply_inc = int(params["apply_increment"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
-          totals: Dict[str, Any] = {}
-
-          try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build base
-                  p0 = _now_ms()
-                  base, info = _build_wide_dag(gss_class, depth, branching, seed)
-                  build_ms = _now_ms() - p0
-                  phases.append({"phase": "build_base", "ms": build_ms, "detail": info})
-                  memctx.checkpoint()
-                  if measure_counts:
-                      c0 = _now_ms()
-                      phases[-1]["base_stack_count"] = _count_stacks_safely(base)
-                      phases[-1]["count_ms"] = _now_ms() - c0
-
-                  # Apply steps
-                  g = base
-                  apply_times: List[float] = []
-                  for _ in range(apply_steps):
-                      a0 = _now_ms()
-                      g = g.apply(lambda acc, inc=apply_inc: MergeableInt(int(acc) + inc))
-                      apply_times.append(_now_ms() - a0)
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                  phases.append({
-                      "phase": "apply_steps",
-                      "steps": len(apply_times),
-                      "apply_ms_stats": _stats(apply_times),
-                  })
-                  memctx.checkpoint()
-
-                  # peek and reduce_acc
-                  if not timed_out:
-                      k0 = _now_ms()
-                      peek_result = g.peek()
-                      peek_ms = _now_ms() - k0
-
-                      r0 = _now_ms()
-                      red = g.reduce_acc()
-                      reduce_ms = _now_ms() - r0
-
-                      phases.append({
-                          "phase": "peek_and_reduce",
-                          "peek_ms": peek_ms,
-                          "peek_cardinality": len(peek_result),
-                          "reduce_ms": reduce_ms,
-                          "reduce_result": int(red) if red is not None else None,
-                      })
-                      memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
-
-              return WorkloadResult(
-                  name="apply_peek_reduce",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
-              )
-          except Exception as e:
-              return WorkloadResult(
-                  name="apply_peek_reduce",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
-              )
-
-
-      def _workload_popn_scaling(
-          gss_class: Type[GSS],
-          params: Dict[str, Any],
-          preset: str,
-          seed: int,
-          mem_profile: bool,
-      ) -> WorkloadResult:
-          """
-          Build several chains of different depths merged together, then measure popn(k) for various k.
-          In an efficient structure with sharing, popn(k) should be roughly O(k) and not the total depth.
-
-          Params:
-            chain_depths: list of ints
-            popn_values: list of ints
-            measure_counts: whether to count stacks occasionally
-            max_ms: time budget (soft)
-          """
-          max_ms = params.get("max_ms", None)
-          measure_counts = params.get("measure_counts", False)
-          chain_depths: List[int] = list(params["chain_depths"])
-          popn_values: List[int] = list(params["popn_values"])
-
-          phases: List[Dict[str, Any]] = []
-          timed_out = False
-          start_ms = _now_ms()
-          totals: Dict[str, Any] = {}
-
-          try:
-              with _with_mem_tracking(mem_profile) as memctx:
-                  # Build chains
-                  chains: List[GSS] = []
-                  build_stats: List[Dict[str, Any]] = []
-                  for d in chain_depths:
-                      b0 = _now_ms()
-                      g = gss_class.from_stacks([([], MergeableInt(0))])
-                      for i in range(d):
-                          g = g.push(i)
-                      build_stats.append({"depth": d, "ms": _now_ms() - b0})
-                      chains.append(g)
-                      if _maybe_timeout(start_ms, max_ms):
-                          timed_out = True
-                          break
-                  phases.append({"phase": "build_chains", "chains": build_stats})
-                  memctx.checkpoint()
-
-                  if not timed_out:
-                      # Merge chains into a single GSS with many stacks of varying lengths
-                      m0 = _now_ms()
-                      merged = _merge_many(gss_class, chains)
-                      m_ms = _now_ms() - m0
-                      ph = {"phase": "merge_chains", "ms": m_ms}
-                      if measure_counts:
-                          c0 = _now_ms()
-                          ph["stack_count"] = _count_stacks_safely(merged)
-                          ph["count_ms"] = _now_ms() - c0
-                      phases.append(ph)
-                      memctx.checkpoint()
-
-                      # popn for various k
-                      popn_stats: List[Dict[str, Any]] = []
-                      for k in popn_values:
-                          p0 = _now_ms()
-                          res = merged.popn(k)
-                          popn_ms = _now_ms() - p0
-                          item = {"k": k, "ms": popn_ms}
-                          if measure_counts:
-                              c0 = _now_ms()
-                              item["stack_count"] = _count_stacks_safely(res)
-                              item["count_ms"] = _now_ms() - c0
-                          popn_stats.append(item)
-                          if _maybe_timeout(start_ms, max_ms):
-                              timed_out = True
-                              break
-                      phases.append({"phase": "popn_runs", "runs": popn_stats})
-                      memctx.checkpoint()
-
-                  totals["total_ms"] = _now_ms() - start_ms
-                  totals["peak_mem_bytes"] = memctx.peak_bytes
-                  totals["timed_out"] = timed_out
-                  totals["chain_depths"] = chain_depths
-                  totals["popn_values"] = popn_values
-
-              return WorkloadResult(
-                  name="popn_scaling",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=None,
-                  timed_out=timed_out,
-              )
-          except Exception as e:
-              return WorkloadResult(
-                  name="popn_scaling",
-                  preset=preset,
-                  params=params,
-                  phases=phases,
-                  totals=totals,
-                  error=f"{type(e).__name__}: {e}",
-                  timed_out=timed_out,
-              )
-
-
-      def _stats(values: List[float]) -> Dict[str, Any]:
-          if not values:
-              return {"count": 0, "min": None, "max": None, "mean": None, "stdev": None}
-          n = len(values)
-          mean = sum(values) / n
-          var = sum((v - mean) ** 2 for v in values) / n
-          stdev = math.sqrt(var)
-          return {
-              "count": n,
-              "min": min(values),
-              "max": max(values),
-              "mean": mean,
-              "stdev": stdev,
-          }
-
-
-      # Register workloads with presets designed to be reasonable on ReferenceGSS for tiny/small,
-      # and increasingly larger for medium/large presets intended for optimized implementations.
-
-      register_workload(Workload(
-          name="split_modify_merge_shared",
-          description=(
-              "Build a wide DAG, create multiple clones with a single additional push (shallow change), "
-              "then merge all clones together. This probes whether merges can exploit structural sharing."
-          ),
-          param_presets=_default_presets(
-              tiny={"depth": 3, "branching": 6, "clones": 8, "measure_counts": False},
-              small={"depth": 4, "branching": 6, "clones": 16, "measure_counts": False},
-              medium={"depth": 5, "branching": 8, "clones": 40, "measure_counts": False},
-              large={"depth": 6, "branching": 10, "clones": 200, "measure_counts": False},
-              max_ms_tiny=4_000,
-              max_ms_small=15_000,
-              max_ms_medium=60_000,
-              max_ms_large=240_000,
-          ),
-          runner=_workload_split_modify_merge_shared
-      ))
-
-      register_workload(Workload(
-          name="pairwise_merge_pop",
-          description=(
-              "From a common base, produce pairs of shallowly different clones, merge each pair, and pop. "
-              "Stresses many merges to a shared parent and subsequent pops."
-          ),
-          param_presets=_default_presets(
-              tiny={"depth": 2, "branching": 8, "pairs": 20, "measure_counts": False},
-              small={"depth": 3, "branching": 8, "pairs": 40, "measure_counts": False},
-              medium={"depth": 4, "branching": 10, "pairs": 100, "measure_counts": False},
-              large={"depth": 5, "branching": 12, "pairs": 300, "measure_counts": False},
-              max_ms_tiny=3_000,
-              max_ms_small=10_000,
-              max_ms_medium=45_000,
-              max_ms_large=180_000,
-          ),
-          runner=_workload_pairwise_merge_pop
-      ))
-
-      register_workload(Workload(
-          name="isolate_rare_top",
-          description=(
-              "Construct many distinct top-of-stack values then isolate a single rare value, "
-              "repeatedly. Detects isolate performance and indexing."
-          ),
-          param_presets=_default_presets(
-              tiny={"depth": 3, "branching": 10, "repeats": 10, "target_index": 0, "measure_counts": False},
-              small={"depth": 4, "branching": 10, "repeats": 20, "target_index": 1, "measure_counts": False},
-              medium={"depth": 5, "branching": 12, "repeats": 40, "target_index": 2, "measure_counts": False},
-              large={"depth": 6, "branching": 14, "repeats": 80, "target_index": 3, "measure_counts": False},
-              max_ms_tiny=3_000,
-              max_ms_small=10_000,
-              max_ms_medium=30_000,
-              max_ms_large=120_000,
-          ),
-          runner=_workload_isolate_rare_top
-      ))
-
-      register_workload(Workload(
-          name="apply_peek_reduce",
-          description=(
-              "Apply a small accumulator increment multiple times across a wide base, then run peek() and reduce_acc(). "
-              "Measures iteration costs over the active stacks."
-          ),
-          param_presets=_default_presets(
-              tiny={"depth": 3, "branching": 8, "apply_steps": 3, "apply_increment": 1, "measure_counts": False},
-              small={"depth": 4, "branching": 8, "apply_steps": 5, "apply_increment": 2, "measure_counts": False},
-              medium={"depth": 5, "branching": 10, "apply_steps": 6, "apply_increment": 3, "measure_counts": False},
-              large={"depth": 6, "branching": 12, "apply_steps": 8, "apply_increment": 4, "measure_counts": False},
-              max_ms_tiny=3_000,
-              max_ms_small=12_000,
-              max_ms_medium=30_000,
-              max_ms_large=90_000,
-          ),
-          runner=_workload_apply_peek_reduce
-      ))
-
-      register_workload(Workload(
-          name="popn_scaling",
-          description=(
-              "Merge multiple chains of varying depths and then benchmark popn(k) for several k values. "
-              "Targets sensitivity of popn to k vs total depth/size."
-          ),
-          param_presets=_default_presets(
-              tiny={"chain_depths": [20, 40, 80], "popn_values": [0, 1, 5, 10], "measure_counts": False},
-              small={"chain_depths": [32, 64, 96, 128], "popn_values": [0, 1, 8, 16, 24], "measure_counts": False},
-              medium={"chain_depths": [64, 128, 192, 256], "popn_values": [0, 2, 16, 32, 64], "measure_counts": False},
-              large={"chain_depths": [128, 256, 384, 512], "popn_values": [0, 4, 32, 64, 128], "measure_counts": False},
-              max_ms_tiny=2_500,
-              max_ms_small=8_000,
-              max_ms_medium=24_000,
-              max_ms_large=80_000,
-          ),
-          runner=_workload_popn_scaling
-      ))
-
-
-      def list_workloads() -> List[Tuple[str, str]]:
-          """Returns [(name, description), ...]"""
-          return [(w.name, w.description) for w in WORKLOADS.values()]
-
-
-      def resolve_workloads(include: Optional[List[str]], exclude: Optional[List[str]]) -> List[Workload]:
-          names = sorted(WORKLOADS.keys())
-          selected = names
-
-          if include:
-              incl_set = set(name.strip() for name in include if name.strip())
-              selected = [n for n in names if n in incl_set]
-
-          if exclude:
-              excl_set = set(name.strip() for name in exclude if name.strip())
-              selected = [n for n in selected if n not in excl_set]
-
-          return [WORKLOADS[n] for n in selected]
-
-      ```
-    metadata:
-      filename: python/gss_tester/benchmarks/workloads.py
-  - user: |-
-      ```shell 'python/gss_tester/run_tests.sh'
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_tests.sh
-      #
-      # A script to automate running the GSS test specification against multiple
-      # implementations, generating JSON results, and analyzing them for consistency.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./gss_tester/run_tests.sh <reference_impl> <impl1> [impl2 ...]
-      #
-      # Example:
-      #   ./gss_tester/run_tests.sh gss_tester.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
-      #
-      # Each implementation is specified as 'path.to.module.ClassName'.
-      # ==============================================================================
-
-      # --- Setup PYTHONPATH to find gss_tester ---
-      # The script is in 'python/gss_tester', so the python source root is one level up.
-      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
-      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
-
-      # --- Argument Validation ---
-      if [ "$#" -lt 1 ]; then
-          echo "Usage: $0 <reference_impl> <impl1> [impl2 ...]"
-          echo "Error: At least one implementation is required. The first is treated as the reference."
-          exit 1
-      fi
-
-      REFERENCE_IMPL="$1"
-      shift
-      COMPETITORS=("$@")
-
-      ALL_IMPLS=("$REFERENCE_IMPL" "${COMPETITORS[@]}")
-
-      # --- Setup ---
-      # Create a unique directory for this test run's results.
-      RESULTS_DIR="gss_test_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      echo "Test results will be saved in: $RESULTS_DIR"
-      echo "---"
-      echo "Reference Implementation: $REFERENCE_IMPL"
-      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
-        echo "Other Implementations: ${COMPETITORS[*]}"
-      else
-        echo "Other Implementations: (none)"
-      fi
-      echo "---"
-
-      # --- Run Tests ---
-      echo "Starting test runs..."
-      REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
-      for full_impl_path in "${ALL_IMPLS[@]}"; do
-          echo
-          echo ">>> Running test spec for: $full_impl_path"
-
-          # --- Convert file path to module and class names ---
-          # This logic handles both module paths (e.g., gss_tester.ref.RefGSS) and
-          # file paths (e.g., python/gss_tester/reference_impl.py).
-          if [[ "$full_impl_path" == *.py ]]; then
-              # Handle file path: derive module and class name by convention.
-              # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
-              module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
-              # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
-              # Use sed to robustly strip one or more '.py' suffixes.
-              base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
-              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
-              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
-              full_impl_name="${module_name}.${class_name}"
-          else
-              # Handle module.ClassName format
-              full_impl_name="$full_impl_path"
-              module_name="${full_impl_name%.*}"
-              class_name="${full_impl_name##*.}"
-          fi
-
-          # The first implementation is the reference; capture its canonical name.
-          if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
-              REFERENCE_IMPL_CANONICAL="$full_impl_name"
-          fi
-
-          output_file="${RESULTS_DIR}/${full_impl_name}.json"
-
-          cmd=(python -m gss_tester.tests.runner
-              "$module_name"
-              "$class_name"
-              --output "$output_file")
-          echo "${cmd[*]}"
-          if "${cmd[@]}"; then
-              echo ">>> Finished test spec for: $full_impl_path"
-          else
-              exit_code=$?
-              # Exit code 130 is from SIGINT (Ctrl+C)
-              if [ $exit_code -eq 130 ]; then
-                  echo
-                  echo ">>> Test for $full_impl_path interrupted. Skipping."
-              else
-                  echo
-                  echo ">>> Test for $full_impl_path failed with exit code $exit_code. Skipping."
-              fi
-          fi
-      done
-      echo
-      echo "All test runs completed."
-      echo "---"
-
-      # --- Analyze Results ---
-      echo "Analyzing results for consistency..."
-      REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
-
-      # Check if the reference file was actually created
-      if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
-          echo "Error: Reference result file was not generated: $REFERENCE_RESULT_FILE"
-          echo "Skipping analysis."
-          exit 1
-      fi
-
-      cmd=(python -m gss_tester.tests.analyzer
-          "${RESULTS_DIR}"/*.json
-          --reference "$REFERENCE_RESULT_FILE")
-      echo "${cmd[*]}"
-      "${cmd[@]}"
-
-      echo
-      echo "---"
-      echo "Consistency analysis complete."
-      echo "Reference: $REFERENCE_IMPL"
-      echo "Summary printed above."
-      echo "Full JSON results are in: $RESULTS_DIR"
-
-      ```
-    metadata:
-      filename: python/gss_tester/run_tests.sh
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      bash gss_tester/run_benchmarks.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py -p small --only split_modify_merge_shared
-      Benchmark results will be saved in: gss_bench_results/2025-09-20_14-33-05
-      ---
-      Implementations: gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Presets: small
-      Only workloads: split_modify_merge_shared
-      Exclude workloads: <none>
-      Repeat: 1
-      Memory profiling: no
-      ---
-
-      >>> Running benchmarks for: gss_tester.implementations.reference_impl.ReferenceGSS [small]
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.reference_impl.ReferenceGSS__small.json --preset small --repeat 1 --only split_modify_merge_shared
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:41: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "time": datetime.utcnow().isoformat() + "Z",
-      Wrote benchmark results to: gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.reference_impl.ReferenceGSS__small.json
-      >>> Completed: gss_tester.implementations.reference_impl.ReferenceGSS [small]
-
-      >>> Running benchmarks for: gss_tester.implementations.leveled_impl.LeveledGSS [small]
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.leveled_impl.LeveledGSS__small.json --preset small --repeat 1 --only split_modify_merge_shared
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:41: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "time": datetime.utcnow().isoformat() + "Z",
-      Wrote benchmark results to: gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.leveled_impl.LeveledGSS__small.json
-      >>> Completed: gss_tester.implementations.leveled_impl.LeveledGSS [small]
-
-      All benchmarks completed.
-      ---
-      Analyzing results...
-      python -m gss_tester.benchmarks.analysis gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.reference_impl.ReferenceGSS__small.json gss_bench_results/2025-09-20_14-33-05/gss_tester.implementations.leveled_impl.LeveledGSS__small.json --out-dir gss_bench_analysis/2025-09-20_14-33-05
-      --- Benchmark Summary ---
-      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS (presets: small)
-        - split_modify_merge_shared: [small] time=91.09 ms, peak_mem=0.0 KiB
-
-      Implementation: gss_tester.implementations.leveled_impl.LeveledGSS (presets: small)
-        - split_modify_merge_shared: [small] time=4,341.62 ms, peak_mem=0.0 KiB
-
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/analysis.py:114: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-
-      Analysis artifacts saved to: gss_bench_analysis/2025-09-20_14-33-05
-
-      ---
-      Analysis complete.
-      Summary and plots (if enabled) in: gss_bench_analysis/2025-09-20_14-33-05
-      Raw JSON results in: gss_bench_results/2025-09-20_14-33-05
-      ```
-
-      `````
-
-      Improve the benchmark code. Make the output cleaner and more informative. I'm interested in per-phase stats. I'm also interested in per-method stats. ie there are a finite number of methods on a GSS interface, we should be able to see which ones were involved in a phase and what the timings for those were.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you improve your benchmark code. Providing more detailed, structured output with per-phase and per-method statistics is a great way to gain deeper insights into your GSS implementations' performance.
-
-      I'll make the necessary modifications across the benchmark suite to introduce a timing wrapper, update the workloads to capture detailed statistics, and enhance the analysis script to present this information clearly.
-
-      Here are the full contents of the updated files:
-
-      ```python "python/gss_tester/benchmarks/analysis.py"
-      from __future__ import annotations
-
-      import argparse
-      import json
-      from pathlib import Path
-      from typing import Any, Dict, List, Tuple
-      from datetime import datetime, timezone
-
-      from .plotting import Plotter
-
-
-      def _load_json(path: Path) -> Dict[str, Any]:
-          return json.loads(path.read_text())
-
-
-      def _coalesce(files: List[Path]) -> Dict[str, List[Dict[str, Any]]]:
-          """
-          Returns mapping implementation -> list of run dicts (one per file).
-          """
-          impl_map: Dict[str, List[Dict[str, Any]]] = {}
-          for p in files:
-              try:
-                  data = _load_json(p)
-                  impl = data.get("implementation", str(p))
-                  impl_map.setdefault(impl, []).append(data)
-              except Exception as e:
-                  print(f"Warning: Skipping invalid bench file {p}: {e}")
-          return impl_map
-
-
-      def _pretty_ms(ms: float) -> str:
-          if ms < 1:
-              return f"{ms:,.3f} ms"
-          return f"{ms:,.2f} ms"
-
-
-      def _format_summary_lines(impl_map: Dict[str, List[Dict[str, Any]]]) -> List[str]:
-          """Generates formatted lines for both console and file output."""
-          lines = []
-          for impl, runs in sorted(impl_map.items()):
-              lines.append(f"Implementation: {impl}")
-              
-              per_preset: Dict[str, List[Dict[str, Any]]] = {}
-              for r in runs:
-                  per_preset.setdefault(r.get("preset", "?"), []).append(r)
-
-              for preset, preset_runs in sorted(per_preset.items()):
-                  lines.append(f"  Preset: {preset}")
-                  
-                  # All runs for a given preset should have the same summary structure. Take the first.
-                  summary = preset_runs[0].get("summary", {})
-                  
-                  for wname, w_summary in sorted(summary.items()):
-                      t_mean = w_summary.get("total_ms_mean", 0.0)
-                      mem_mean = w_summary.get("peak_mem_bytes_mean", 0.0)
-                      mem_str = f"{mem_mean/1024.0:,.1f} KiB"
-                      lines.append(f"    Workload: {wname} (Total: {_pretty_ms(t_mean)}, Peak Mem: {mem_str})")
-
-                      phases_mean = w_summary.get("phases_mean", [])
-                      if not phases_mean:
-                          lines.append("      - No phase data available.")
-                          continue
-
-                      for phase in phases_mean:
-                          phase_name = phase.get("phase", "unknown")
-                          phase_ms = phase.get("ms_mean", 0.0)
-                          lines.append(f"      - Phase '{phase_name}' ({_pretty_ms(phase_ms)})")
-                          
-                          method_stats = phase.get("method_stats_mean", {})
-                          if not method_stats:
-                              lines.append("          - No method stats.")
-                              continue
-                          
-                          lines.append("          Methods:")
-                          for method, stats in sorted(method_stats.items()):
-                              calls = stats.get('calls_mean', 0.0)
-                              total_ms = stats.get('total_ms_mean', 0.0)
-                              avg_ms = total_ms / calls if calls > 0 else 0.0
-                              calls_str = f"{calls:,.1f}" if not calls.is_integer() else f"{int(calls)}"
-                              lines.append(f"            - {method:<15}: {calls_str} calls, {_pretty_ms(total_ms)} total, {_pretty_ms(avg_ms)} avg")
-              lines.append("")
-          return lines
-
-
-      def _print_summary(impl_map: Dict[str, List[Dict[str, Any]]]):
-          print("--- Benchmark Summary ---")
-          lines = _format_summary_lines(impl_map)
-          for line in lines:
-              print(line)
-
-
-      def _collect_for_plotting(files: List[Path]) -> Tuple[List[str], Dict[str, Dict[str, Dict[str, float]]]]:
-          """
-          Returns:
-            - workloads list
-            - metrics dict: metrics[workload][preset][impl] -> total_ms_mean
-          """
-          impl_map = _coalesce(files)
-          workloads: set = set()
-          metrics: Dict[str, Dict[str, Dict[str, float]]] = {}
-          for impl, runs in impl_map.items():
-              for r in runs:
-                  preset = r.get("preset", "?")
-                  for wname, agg in r.get("summary", {}).items():
-                      workloads.add(wname)
-                      metrics.setdefault(wname, {}).setdefault(preset, {})[impl] = float(agg.get("total_ms_mean", 0.0))
-          return sorted(workloads), metrics
-
-
-      def main():
-          parser = argparse.ArgumentParser(description="Analyze GSS benchmark results and generate summaries/plots.")
-          parser.add_argument("bench_files", nargs='+', type=Path, help="Paths to benchmark JSON result files.")
-          parser.add_argument("-o", "--out-dir", type=Path, default=None, help="Directory for analysis artifacts (plots, summaries).")
-          parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
-          args = parser.parse_args()
-
-          files = [p for p in args.bench_files if p.exists() and p.is_file()]
-          if not files:
-              print("Error: No valid benchmark result files provided.")
-              return
-
-          impl_map = _coalesce(files)
-          _print_summary(impl_map)
-
-          out_dir = args.out_dir
-          if out_dir is None:
-              out_dir = Path("gss_bench_analysis") / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-          out_dir.mkdir(parents=True, exist_ok=True)
-
-          if not args.no_plots:
-              workloads, metrics = _collect_for_plotting(files)
-              plotter = Plotter(out_dir)
-              for w in workloads:
-                  # one bar plot per preset for this workload
-                  for preset, impl_to_time in metrics.get(w, {}).items():
-                      plotter.plot_bar_for_workload(workload=w, preset=preset, impl_to_value=impl_to_time,
-                                                    metric_name="total_ms_mean", title=f"{w} [{preset}] total time (mean)",
-                                                    filename=f"{w}__{preset}.png")
-              # Combined summary index.json
-              index = {
-                  "generated_at": datetime.now(timezone.utc).isoformat(),
-                  "artifacts": sorted([p.name for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"]),
-              }
-              (out_dir / "index.json").write_text(json.dumps(index, indent=2))
-
-          # Write a textual summary file
-          summary_lines = _format_summary_lines(impl_map)
-          (out_dir / "summary.txt").write_text("\n".join(summary_lines))
-
-          print(f"\nAnalysis artifacts saved to: {out_dir}")
-
-
-      if __name__ == "__main__":
-          main()
-      ``````python "python/gss_tester/benchmarks/runner.py"
-      from __future__ import annotations
-
-      import argparse
-      import importlib
-      import json
-      import os
-      import platform
-      import sys
-      import time
-      from datetime import datetime, timezone
-      from pathlib import Path
-      from typing import Any, Dict, List, Optional, Tuple, Type
-
-      from .workloads import resolve_workloads, list_workloads, WorkloadResult, WORKLOADS, BenchmarkContext, create_timed_gss_class
-      from ..interface import GSS
-
-
-      def _load_impl(module_name: str, class_name: str) -> Type[GSS]:
-          module = importlib.import_module(module_name)
-          gss_class = getattr(module, class_name)
-          return gss_class
-
-
-      def _parse_workload_filters(only: Optional[str], exclude: Optional[str]) -> Tuple[Optional[List[str]], Optional[List[str]]]:
-          incl = [s for s in only.split(",")] if only else None
-          excl = [s for s in exclude.split(",")] if exclude else None
-          if incl:
-              incl = [s.strip() for s in incl if s.strip()]
-          if excl:
-              excl = [s.strip() for s in excl if s.strip()]
-          return incl, excl
-
-
-      def _env_metadata() -> Dict[str, Any]:
-          return {
-              "python_version": sys.version.replace("\n", " "),
-              "platform": platform.platform(),
-              "implementation": platform.python_implementation(),
-              "machine": platform.machine(),
-              "processor": platform.processor(),
-              "time": datetime.now(timezone.utc).isoformat(),
-          }
-
-
-      def _run_for_impl(
-          gss_class: Type[GSS],
-          impl_name: str,
-          preset: str,
-          workloads_to_run: List[str],
-          seed: int,
-          mem: bool,
-          repeat: int,
-      ) -> Dict[str, Any]:
-          results: List[WorkloadResult] = []
-
-          for wname in workloads_to_run:
-              w = WORKLOADS[wname]
-              params = dict(w.param_presets[preset])
-              # repeat each workload and capture all repeats
-              for rep in range(repeat):
-                  # Variation of seed per repeat for deterministic variety
-                  rep_seed = seed + rep
-                  
-                  context = BenchmarkContext(mem)
-                  timed_gss_class = create_timed_gss_class(gss_class, context.collector)
-                  
-                  res = w.runner(timed_gss_class, params, preset, rep_seed, context)
-                  results.append(res)
-
-          # Summarize totals by workload name (averaging across repeats)
-          summary = {}
-          tmp_agg: Dict[Tuple[str, str], List[WorkloadResult]] = {}
-          for r in results:
-              tmp_agg.setdefault((r.name, r.preset), []).append(r)
-
-          for (wname, preset_name), runs in tmp_agg.items():
-              # Aggregate totals
-              totals_list = [r.totals for r in runs]
-              keys = set().union(*(d.keys() for d in totals_list))
-              agg: Dict[str, Any] = {"count": len(totals_list)}
-              for k in keys:
-                  vals = [d[k] for d in totals_list if k in d and isinstance(d[k], (int, float))]
-                  if vals:
-                      agg[k + "_mean"] = sum(vals) / len(vals)
-                      agg[k + "_min"] = min(vals)
-                      agg[k + "_max"] = max(vals)
-              
-              # Aggregate phases by name, assuming order is consistent for a given workload
-              phases_by_name: Dict[str, List[Dict[str, Any]]] = {}
-              for r in runs:
-                  for p in r.phases:
-                      phases_by_name.setdefault(p['phase'], []).append(p)
-
-              avg_phases = []
-              # Use the phase order from the first run as the canonical order
-              phase_order = [p['phase'] for p in runs[0].phases]
-
-              for phase_name in phase_order:
-                  phase_runs = phases_by_name.get(phase_name)
-                  if not phase_runs:
-                      continue
-
-                  avg_phase_data = {'phase': phase_name}
-                  
-                  # Average 'ms'
-                  ms_vals = [p['ms'] for p in phase_runs if 'ms' in p]
-                  if ms_vals:
-                      avg_phase_data['ms_mean'] = sum(ms_vals) / len(ms_vals)
-
-                  # Aggregate and average method stats
-                  method_stats_agg: Dict[str, List[Dict[str, Any]]] = {}
-                  for p in phase_runs:
-                      if 'method_stats' in p:
-                          for method, stats in p['method_stats'].items():
-                              method_stats_agg.setdefault(method, []).append(stats)
-                  
-                  avg_method_stats = {}
-                  for method, stats_list in method_stats_agg.items():
-                      calls = [s['calls'] for s in stats_list]
-                      total_ms = [s['total_ms'] for s in stats_list]
-                      avg_method_stats[method] = {
-                          'calls_mean': sum(calls) / len(calls),
-                          'total_ms_mean': sum(total_ms) / len(total_ms),
-                      }
-                  if avg_method_stats:
-                      avg_phase_data['method_stats_mean'] = avg_method_stats
-                  
-                  avg_phases.append(avg_phase_data)
-
-              agg['phases_mean'] = avg_phases
-              summary[wname] = agg
-
-
-          # Construct JSON data
-          json_results = []
-          # Convert WorkloadResult objects to plain dicts
-          for r in results:
-              json_results.append({
-                  "name": r.name,
-                  "preset": r.preset,
-                  "params": r.params,
-                  "phases": r.phases,
-                  "totals": r.totals,
-                  "error": r.error,
-                  "timed_out": r.timed_out,
-              })
-
-          return {
-              "implementation": impl_name,
-              "preset": preset,
-              "metadata": _env_metadata(),
-              "runner_config": {
-                  "seed": seed,
-                  "memory_profiled": mem,
-                  "repeat": repeat,
-                  "workloads": workloads_to_run,
-              },
-              "results": json_results,
-              "summary": summary,
-              "version": "1.1.0", # Version bump for new structure
-          }
-
-
-      def main():
-          parser = argparse.ArgumentParser(description="Run GSS benchmarks against an implementation.")
-          parser.add_argument("implementation_module", help="Python module path for the GSS implementation (e.g., 'gss_tester.implementations.reference_impl').")
-          parser.add_argument("implementation_class", help="Class name of the GSS implementation (e.g., 'ReferenceGSS').")
-          parser.add_argument("-o", "--output", type=Path, required=True, help="Output JSON file path.")
-          parser.add_argument("-p", "--preset", choices=["tiny", "small", "medium", "large"], default="tiny", help="Size preset.")
-          parser.add_argument("--only", type=str, default=None, help="Comma-separated list of workload names to include.")
-          parser.add_argument("--exclude", type=str, default=None, help="Comma-separated list of workload names to exclude.")
-          parser.add_argument("--list-workloads", action="store_true", help="List available workloads and exit.")
-          parser.add_argument("--seed", type=int, default=12345, help="Random seed baseline.")
-          parser.add_argument("--mem", action="store_true", help="Enable memory profiling using tracemalloc.")
-          parser.add_argument("--repeat", type=int, default=1, help="Repeat each workload this many times and aggregate.")
-          args = parser.parse_args()
-
-          if args.list_workloads:
-              print("Available workloads:")
-              for name, desc in list_workloads():
-                  print(f"  - {name}: {desc}")
-              return
-
-          try:
-              gss_class = _load_impl(args.implementation_module, args.implementation_class)
-          except Exception as e:
-              print(f"Error: Could not load implementation: {e}", file=sys.stderr)
-              sys.exit(1)
-
-          incl, excl = _parse_workload_filters(args.only, args.exclude)
-          workloads = resolve_workloads(incl, excl)
-          if not workloads:
-              print("No workloads selected. Use --list-workloads to see options.", file=sys.stderr)
-              sys.exit(1)
-
-          workload_names = [w.name for w in workloads]
-          impl_name = f"{args.implementation_module}.{args.implementation_class}"
-
-          data = _run_for_impl(
-              gss_class=gss_class,
-              impl_name=impl_name,
-              preset=args.preset,
-              workloads_to_run=workload_names,
-              seed=args.seed,
-              mem=args.mem,
-              repeat=args.repeat,
-          )
-
-          args.output.parent.mkdir(parents=True, exist_ok=True)
-          with open(args.output, "w") as f:
-              json.dump(data, f, indent=2)
-          print(f"Wrote benchmark results to: {args.output}")
-
-
-      if __name__ == "__main__":
-          main()
-      ``````python "python/gss_tester/benchmarks/workloads.py"
       from __future__ import annotations
 
       import time
@@ -7944,38 +6854,537 @@ messages:
               selected = [n for n in selected if n not in excl_set]
 
           return [WORKLOADS[n] for n in selected]
+
+      ```
+    metadata:
+      filename: python/gss_tester/benchmarks/workloads.py
+  - user: |-
+      ```shell 'python/gss_tester/run_tests.sh'
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_tests.sh
+      #
+      # A script to automate running the GSS test specification against multiple
+      # implementations, generating JSON results, and analyzing them for consistency.
+      #
+      # This script should be run from the `python` directory.
+      #
+      # Usage:
+      #   ./gss_tester/run_tests.sh <reference_impl> <impl1> [impl2 ...]
+      #
+      # Example:
+      #   ./gss_tester/run_tests.sh gss_tester.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+      #
+      # Each implementation is specified as 'path.to.module.ClassName'.
+      # ==============================================================================
+
+      # --- Setup PYTHONPATH to find gss_tester ---
+      # The script is in 'python/gss_tester', so the python source root is one level up.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <reference_impl> <impl1> [impl2 ...]"
+          echo "Error: At least one implementation is required. The first is treated as the reference."
+          exit 1
+      fi
+
+      REFERENCE_IMPL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_IMPLS=("$REFERENCE_IMPL" "${COMPETITORS[@]}")
+
+      # --- Setup ---
+      # Create a unique directory for this test run's results.
+      RESULTS_DIR="gss_test_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Test results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Reference Implementation: $REFERENCE_IMPL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Implementations: ${COMPETITORS[*]}"
+      else
+        echo "Other Implementations: (none)"
+      fi
+      echo "---"
+
+      # --- Run Tests ---
+      echo "Starting test runs..."
+      REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl
+      for full_impl_path in "${ALL_IMPLS[@]}"; do
+          echo
+          echo ">>> Running test spec for: $full_impl_path"
+
+          # --- Convert file path to module and class names ---
+          # This logic handles both module paths (e.g., gss_tester.ref.RefGSS) and
+          # file paths (e.g., python/gss_tester/reference_impl.py).
+          if [[ "$full_impl_path" == *.py ]]; then
+              # Handle file path: derive module and class name by convention.
+              # Module name: strip path up to 'python/', remove '.py' suffix(es), replace '/' with '.'
+              module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+              # Class name: e.g., 'reference_impl' -> 'ReferenceGSS'
+              # Use sed to robustly strip one or more '.py' suffixes.
+              base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
+              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+              full_impl_name="${module_name}.${class_name}"
+          else
+              # Handle module.ClassName format
+              full_impl_name="$full_impl_path"
+              module_name="${full_impl_name%.*}"
+              class_name="${full_impl_name##*.}"
+          fi
+
+          # The first implementation is the reference; capture its canonical name.
+          if [ -z "$REFERENCE_IMPL_CANONICAL" ]; then
+              REFERENCE_IMPL_CANONICAL="$full_impl_name"
+          fi
+
+          output_file="${RESULTS_DIR}/${full_impl_name}.json"
+
+          cmd=(python -m gss_tester.tests.runner
+              "$module_name"
+              "$class_name"
+              --output "$output_file")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished test spec for: $full_impl_path"
+          else
+              exit_code=$?
+              # Exit code 130 is from SIGINT (Ctrl+C)
+              if [ $exit_code -eq 130 ]; then
+                  echo
+                  echo ">>> Test for $full_impl_path interrupted. Skipping."
+              else
+                  echo
+                  echo ">>> Test for $full_impl_path failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All test runs completed."
+      echo "---"
+
+      # --- Analyze Results ---
+      echo "Analyzing results for consistency..."
+      REFERENCE_RESULT_FILE="${RESULTS_DIR}/${REFERENCE_IMPL_CANONICAL}.json"
+
+      # Check if the reference file was actually created
+      if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
+          echo "Error: Reference result file was not generated: $REFERENCE_RESULT_FILE"
+          echo "Skipping analysis."
+          exit 1
+      fi
+
+      cmd=(python -m gss_tester.tests.analyzer
+          "${RESULTS_DIR}"/*.json
+          --reference "$REFERENCE_RESULT_FILE")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Consistency analysis complete."
+      echo "Reference: $REFERENCE_IMPL"
+      echo "Summary printed above."
+      echo "Full JSON results are in: $RESULTS_DIR"
+
+      ```
+    metadata:
+      filename: python/gss_tester/run_tests.sh
+  - user: |-
+      - is_empty
+      - isolate
+      - peek
+      - reduce_acc
+
+      Make the implementations of the above methods in leveled_impl.py as elegant and concise as possible.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to create a new `LeveledGSS` implementation with elegant and concise versions of `is_empty`, `isolate`, `peek`, and `reduce_acc`, followed by the corresponding git diffs.
+
+      This new implementation uses a graph structure organized by levels to enable structural sharing of stack prefixes. To make it testable, other required methods are given simple, correct (but not necessarily performant) implementations that delegate to `to_stacks` and `from_stacks`.
+
+      ### Step-by-step Instructions
+
+      1.  **Create a package directory for implementations:**
+          To ensure Python can find the new implementation module, create an empty `__init__.py` file in `python/gss_tester/implementations/`.
+
+      2.  **Create the `leveled_impl.py` file:**
+          Create a new file named `leveled_impl.py` inside the `python/gss_tester/implementations/` directory.
+
+      3.  **Add the `LeveledGSS` implementation:**
+          Copy and paste the following code into the newly created `python/gss_tester/implementations/leveled_impl.py` file.
+
+          ```python
+          from __future__ import annotations
+          from dataclasses import dataclass, field
+          from functools import reduce
+          import json
+          from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
+
+          from ..interface import GSS, T, Acc
+
+          # Using tuples for nodes to make them hashable and immutable.
+          # A node is defined by its value and a pointer to its parent.
+          # The parent pointer is an index into the previous level's node list.
+          _Node = Tuple[T, Optional[int]]
+
+          # A level is a tuple of unique nodes. The tuple provides a canonical ordering and indexing.
+          _Level = Tuple[_Node, ...]
+
+
+          @dataclass(frozen=True, eq=False)
+          class LeveledGSS(GSS[T, Acc]):
+              """
+              A GSS implementation that organizes the graph into levels by stack depth.
+              This allows for structural sharing of stack prefixes.
+
+              - `_levels`: A tuple of levels. `_levels[i]` contains all unique nodes at depth `i+1`.
+              - `_heads`: A dictionary mapping a head node identifier to its accumulator.
+                The key `(level_idx, node_idx)` points to `_levels[level_idx][node_idx]`.
+              - `_empty_acc`: An optional accumulator for the single empty stack.
+              """
+              _levels: Tuple[_Level, ...] = field(default_factory=tuple)
+              _heads: Dict[Tuple[int, int], Acc] = field(default_factory=dict)
+              _empty_acc: Optional[Acc] = None
+
+              @classmethod
+              def from_stacks(cls: Type['LeveledGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+                  levels_builder: List[Dict[_Node, int]] = []
+                  heads_builder: Dict[Tuple[int, int], Acc] = {}
+                  empty_acc: Optional[Acc] = None
+
+                  sorted_stacks = sorted(stacks, key=lambda s: len(s[0]))
+
+                  for vals, acc in sorted_stacks:
+                      if not vals:
+                          if empty_acc is None:
+                              empty_acc = acc
+                          else:
+                              empty_acc = empty_acc.merge(acc)
+                          continue
+
+                      parent_idx: Optional[int] = None
+                      for i, val in enumerate(vals):
+                          if len(levels_builder) <= i:
+                              levels_builder.append({})
+                          
+                          node = (val, parent_idx)
+                          
+                          if node not in levels_builder[i]:
+                              new_idx = len(levels_builder[i])
+                              levels_builder[i][node] = new_idx
+                          
+                          parent_idx = levels_builder[i][node]
+
+                      level_idx = len(vals) - 1
+                      node_idx = parent_idx
+                      head_key = (level_idx, node_idx)
+                      if head_key in heads_builder:
+                          heads_builder[head_key] = heads_builder[head_key].merge(acc)
+                      else:
+                          heads_builder[head_key] = acc
+                  
+                  final_levels = tuple(
+                      tuple(node for node, _ in sorted(level_map.items(), key=lambda item: item[1]))
+                      for level_map in levels_builder
+                  )
+
+                  return cls(_levels=final_levels, _heads=heads_builder, _empty_acc=empty_acc)
+
+              def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+                  stacks = []
+                  if self._empty_acc is not None:
+                      stacks.append(([], self._empty_acc))
+
+                  for (level_idx, node_idx), acc in self._heads.items():
+                      stack = []
+                      curr_level_idx = level_idx
+                      curr_node_idx = node_idx
+                      while curr_level_idx >= 0:
+                          node = self._levels[curr_level_idx][curr_node_idx]
+                          value, parent_idx = node
+                          stack.append(value)
+                          if parent_idx is None:
+                              break
+                          curr_level_idx -= 1
+                          curr_node_idx = parent_idx
+                      stacks.append((stack[::-1], acc))
+                  
+                  def _encode_for_sort(obj: Any) -> str:
+                      try:
+                          return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                      except Exception:
+                          return repr(obj)
+
+                  stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+                  return stacks
+
+              def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+                  new_stacks = [
+                      (vals + [value], acc) for vals, acc in self.to_stacks()
+                  ]
+                  return self.from_stacks(new_stacks)
+
+              def pop(self) -> 'LeveledGSS[T, Acc]':
+                  new_stacks = [
+                      (vals[:-1], acc) for vals, acc in self.to_stacks() if vals
+                  ]
+                  return self.from_stacks(new_stacks)
+
+              def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+                  return self.from_stacks([(vals, func(acc)) for vals, acc in self.to_stacks()])
+
+              def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+                  return self.from_stacks([(vals, acc) for vals, acc in self.to_stacks() if predicate(acc)])
+
+              def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+                  return self.from_stacks(self.to_stacks() + other.to_stacks())
+
+              def is_empty(self) -> bool:
+                  return not self._heads and self._empty_acc is None
+
+              def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+                  if value is None:
+                      return self.__class__(_empty_acc=self._empty_acc)
+
+                  new_heads = {
+                      head: acc for head, acc in self._heads.items()
+                      if self._levels[head[0]][head[1]][0] == value
+                  }
+                  return self.__class__(_levels=self._levels, _heads=new_heads)
+
+              def peek(self) -> Set[T]:
+                  return {self._levels[level_idx][node_idx][0] for level_idx, node_idx in self._heads}
+
+              def reduce_acc(self) -> Optional[Acc]:
+                  all_accs = list(self._heads.values())
+                  if self._empty_acc is not None:
+                      all_accs.append(self._empty_acc)
+
+                  if not all_accs:
+                      return None
+                  
+                  return reduce(lambda a, b: a.merge(b), all_accs)
+
+              def __eq__(self, other: object) -> bool:
+                  if not isinstance(other, GSS):
+                      return NotImplemented
+                  return self.to_stacks() == other.to_stacks()
+
+          ```
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes.
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/__init__.py b/python/gss_tester/implementations/__init__.py
+      new file mode 100644
+      index 0000000..e69de29
+      ```
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      new file mode 100644
+      index 0000000..6179339
+      --- /dev/null
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -0,0 +1,146 @@
+      +from __future__ import annotations
+      +from dataclasses import dataclass, field
+      +from functools import reduce
+      +import json
+      +from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
+      +
+      +from ..interface import GSS, T, Acc
+      +
+      +# Using tuples for nodes to make them hashable and immutable.
+      +# A node is defined by its value and a pointer to its parent.
+      +# The parent pointer is an index into the previous level's node list.
+      +_Node = Tuple[T, Optional[int]]
+      +
+      +# A level is a tuple of unique nodes. The tuple provides a canonical ordering and indexing.
+      +_Level = Tuple[_Node, ...]
+      +
+      +
+      +@dataclass(frozen=True, eq=False)
+      +class LeveledGSS(GSS[T, Acc]):
+      +    """
+      +    A GSS implementation that organizes the graph into levels by stack depth.
+      +    This allows for structural sharing of stack prefixes.
+      +
+      +    - `_levels`: A tuple of levels. `_levels[i]` contains all unique nodes at depth `i+1`.
+      +    - `_heads`: A dictionary mapping a head node identifier to its accumulator.
+      +      The key `(level_idx, node_idx)` points to `_levels[level_idx][node_idx]`.
+      +    - `_empty_acc`: An optional accumulator for the single empty stack.
+      +    """
+      +    _levels: Tuple[_Level, ...] = field(default_factory=tuple)
+      +    _heads: Dict[Tuple[int, int], Acc] = field(default_factory=dict)
+      +    _empty_acc: Optional[Acc] = None
+      +
+      +    @classmethod
+      +    def from_stacks(cls: Type['LeveledGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'LeveledGSS[T, Acc]':
+      +        levels_builder: List[Dict[_Node, int]] = []
+      +        heads_builder: Dict[Tuple[int, int], Acc] = {}
+      +        empty_acc: Optional[Acc] = None
+      +
+      +        sorted_stacks = sorted(stacks, key=lambda s: len(s[0]))
+      +
+      +        for vals, acc in sorted_stacks:
+      +            if not vals:
+      +                if empty_acc is None:
+      +                    empty_acc = acc
+      +                else:
+      +                    empty_acc = empty_acc.merge(acc)
+      +                continue
+      +
+      +            parent_idx: Optional[int] = None
+      +            for i, val in enumerate(vals):
+      +                if len(levels_builder) <= i:
+      +                    levels_builder.append({})
+      +                
+      +                node = (val, parent_idx)
+      +                
+      +                if node not in levels_builder[i]:
+      +                    new_idx = len(levels_builder[i])
+      +                    levels_builder[i][node] = new_idx
+      +                
+      +                parent_idx = levels_builder[i][node]
+      +
+      +            level_idx = len(vals) - 1
+      +            node_idx = parent_idx
+      +            head_key = (level_idx, node_idx)
+      +            if head_key in heads_builder:
+      +                heads_builder[head_key] = heads_builder[head_key].merge(acc)
+      +            else:
+      +                heads_builder[head_key] = acc
+      +        
+      +        final_levels = tuple(
+      +            tuple(node for node, _ in sorted(level_map.items(), key=lambda item: item[1]))
+      +            for level_map in levels_builder
+      +        )
+      +
+      +        return cls(_levels=final_levels, _heads=heads_builder, _empty_acc=empty_acc)
+      +
+      +    def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+      +        stacks = []
+      +        if self._empty_acc is not None:
+      +            stacks.append(([], self._empty_acc))
+      +
+      +        for (level_idx, node_idx), acc in self._heads.items():
+      +            stack = []
+      +            curr_level_idx = level_idx
+      +            curr_node_idx = node_idx
+      +            while curr_level_idx >= 0:
+      +                node = self._levels[curr_level_idx][curr_node_idx]
+      +                value, parent_idx = node
+      +                stack.append(value)
+      +                if parent_idx is None:
+      +                    break
+      +                curr_level_idx -= 1
+      +                curr_node_idx = parent_idx
+      +            stacks.append((stack[::-1], acc))
+      +        
+      +        def _encode_for_sort(obj: Any) -> str:
+      +            try:
+      +                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+      +            except Exception:
+      +                return repr(obj)
+      +
+      +        stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+      +        return stacks
+      +
+      +    def push(self, value: T) -> 'LeveledGSS[T, Acc]':
+      +        new_stacks = [
+      +            (vals + [value], acc) for vals, acc in self.to_stacks()
+      +        ]
+      +        return self.from_stacks(new_stacks)
+      +
+      +    def pop(self) -> 'LeveledGSS[T, Acc]':
+      +        new_stacks = [
+      +            (vals[:-1], acc) for vals, acc in self.to_stacks() if vals
+      +        ]
+      +        return self.from_stacks(new_stacks)
+      +
+      +    def apply(self, func: Callable[[Acc], Acc]) -> 'LeveledGSS[T, Acc]':
+      +        return self.from_stacks([(vals, func(acc)) for vals, acc in self.to_stacks()])
+      +
+      +    def prune(self, predicate: Callable[[Acc], bool]) -> 'LeveledGSS[T, Acc]':
+      +        return self.from_stacks([(vals, acc) for vals, acc in self.to_stacks() if predicate(acc)])
+      +
+      +    def merge(self, other: GSS[T, Acc]) -> 'LeveledGSS[T, Acc]':
+      +        return self.from_stacks(self.to_stacks() + other.to_stacks())
+      +
+      +    def is_empty(self) -> bool:
+      +        return not self._heads and self._empty_acc is None
+      +
+      +    def isolate(self, value: Optional[T]) -> 'LeveledGSS[T, Acc]':
+      +        if value is None:
+      +            return self.__class__(_empty_acc=self._empty_acc)
+      +
+      +        new_heads = {
+      +            head: acc for head, acc in self._heads.items()
+      +            if self._levels[head[0]][head[1]][0] == value
+      +        }
+      +        return self.__class__(_levels=self._levels, _heads=new_heads)
+      +
+      +    def peek(self) -> Set[T]:
+      +        return {self._levels[level_idx][node_idx][0] for level_idx, node_idx in self._heads}
+      +
+      +    def reduce_acc(self) -> Optional[Acc]:
+      +        all_accs = list(self._heads.values())
+      +        if self._empty_acc is not None:
+      +            all_accs.append(self._empty_acc)
+      +
+      +        if not all_accs:
+      +            return None
+      +        
+      +        return reduce(lambda a, b: a.merge(b), all_accs)
+      +
+      +    def __eq__(self, other: object) -> bool:
+      +        if not isinstance(other, GSS):
+      +            return NotImplemented
+      +        return self.to_stacks() == other.to_stacks()
+
       ```
     metadata:
   - user: |
-      Identified target file 'python/gss_tester/benchmarks/analysis.py' on fence open line 1:
-      ```python "python/gss_tester/benchmarks/analysis.py"
-      Identified target file 'python/gss_tester/benchmarks/workloads.py' on fence open line 2:
-      ``````python "python/gss_tester/benchmarks/workloads.py"
-      Found 2 code blocks.
-      Matching against available files:
-        1: python/gss_tester/benchmarks/__init__.py
-        2: python/gss_tester/benchmarks/runner.py
-        3: python/gss_tester/implementations/reference_impl.py
-        4: python/gss_tester/tests/fuzzer.py
-        5: python/gss_tester/benchmarks/plotting.py
-        6: python/gss_tester/tests/runner.py
-        7: python/gss_tester/tests/analyzer.py
-        8: python/gss_tester/tests/__init__.py
-        9: python/gss_tester/interface.py
-        10: python/gss_tester/benchmarks/workloads.py
-        11: python/gss_tester/__init__.py
-        12: python/gss_tester/run_tests.sh
-        13: python/gss_tester/benchmarks/analysis.py
-        14: python/gss_tester/tests/test_spec.py
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to python/gss_tester/benchmarks/analysis.py based on explicit fence path.
-      Assigned block to python/gss_tester/benchmarks/workloads.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 12
-      --- Phase 6: Applying changes to assigned files ---
-      Successfully updated file: python/gss_tester/benchmarks/analysis.py
-      Successfully updated file: python/gss_tester/benchmarks/workloads.py
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Warning: Diff block 1 parsed with no hunks. Skipping.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Detected new file (--- /dev/null or missing --- line).
+      Detected 'new file mode'.
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Enhance benchmark reporting with
-      detailed phase and method timings"'
+  - user: 'Changes committed with message: "feat: Add LeveledGSS implementation skeleton"'
     metadata:
 ...
