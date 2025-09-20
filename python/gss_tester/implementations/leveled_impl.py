@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 
@@ -138,9 +139,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-        # Canonicalize first using the reference implementation
-        from .reference_impl import ReferenceGSS
-        merged = ReferenceGSS.from_stacks(stacks).to_stacks()
+        # Canonicalize stacks by merging accumulators for identical value lists.
+        merged_map: Dict[Tuple[T, ...], Acc] = {}
+        for vals, acc in stacks:
+            key = tuple(vals)
+            if key in merged_map:
+                merged_map[key] = merged_map[key].merge(acc)
+            else:
+                merged_map[key] = acc
+
+        merged = [(list(key), acc) for key, acc in merged_map.items()]
 
         empty_acc: Optional[Acc] = None
         # A simple trie: { val: { "end": Optional[Acc], "sub": <subtrie> } }
@@ -250,8 +258,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         dfs_upper(self.inner, [])
 
-        from .reference_impl import ReferenceGSS
-        return ReferenceGSS.from_stacks(res).to_stacks()
+        # The internal representation is canonical, so we only need to sort for
+        # a deterministic output.
+        def _encode_for_sort(obj: Any) -> str:
+            try:
+                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+            except Exception:
+                return repr(obj)
+
+        res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+        return res
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         if isinstance(self.inner, Interface):
