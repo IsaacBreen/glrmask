@@ -910,6 +910,16 @@ local_system:
           children: Dict[T, Dict[int, Upper[T, Acc]]]
           empty: Optional[Acc]
 
+          def _max_depth(self) -> int:
+              """Computes the max depth of the subtree rooted at this node."""
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
+
 
       @dataclass(frozen=True, eq=True)
       class Interface(Generic[T, Acc]):
@@ -917,11 +927,34 @@ local_system:
           acc: Acc
           empty: Optional[Acc]
 
+          def _max_depth(self) -> int:
+              """
+              Computes the max depth of the subtree. For an Interface, this is based
+              on the Lower children. An Interface is a leaf in the Upper tree.
+              """
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
+
 
       @dataclass(frozen=True, eq=True)
       class Lower(Generic[T]):
           children: Dict[T, Dict[int, Lower[T]]]
           empty: bool
+
+          def _max_depth(self) -> int:
+              """Computes the max depth of the subtree rooted at this node."""
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
 
 
       @dataclass(frozen=True, eq=True)
@@ -964,7 +997,7 @@ local_system:
                       if sub:
                           nodes.append(build(sub))
                       if nodes:
-                          children[v] = {i: n for i, n in enumerate(nodes)}
+                          children[v] = {n._max_depth(): n for n in nodes}
                   return UpperBranch(children=children, empty=root_empty)
 
               return LeveledGSS(build(trie, empty_acc))
@@ -987,9 +1020,13 @@ local_system:
               return ReferenceGSS.from_stacks(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+              return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+              all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+              new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+              if isinstance(new_inner, Interface):
+                  new_inner = _convert_interface_to_upper_brach(new_inner)
+              return LeveledGSS(new_inner)
           def is_empty(self) -> bool:
               return len(self.to_stacks()) == 0
 
@@ -2134,7 +2171,7 @@ local_system:
 
       @dataclass(frozen=True, eq=True)
       class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: UpperBranch[T, Acc]
+          inner: Upper[T, Acc]
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -2179,25 +2216,36 @@ local_system:
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
               res: List[Tuple[List[T], Acc]] = []
-              if self.inner.empty is not None:
-                  res.append(([], self.inner.empty))
+              if isinstance(self.inner, Interface):
+                  res.append(([], self.inner.acc))
+                  if self.inner.empty is not None:
+                      res.append(([], self.inner.empty))
+              elif isinstance(self.inner, UpperBranch):
+                  if self.inner.empty is not None:
+                      res.append(([], self.inner.empty))
 
-              def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-                  for v, kids in u.children.items():
-                      for child in kids.values():
-                          if isinstance(child, Interface):
-                              res.append((pref + [v], child.acc))
-                          else:
-                              dfs(child, pref + [v])
+                  def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                      for v, kids in u.children.items():
+                          for child in kids.values():
+                              if isinstance(child, Interface):
+                                  res.append((pref + [v], child.acc))
+                              else:
+                                  dfs(child, pref + [v])
 
-              dfs(self.inner, [])
+                  dfs(self.inner, [])
               from .reference_impl import ReferenceGSS
               return ReferenceGSS.from_stacks(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+              return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+              if isinstance(self.inner, Interface):
+                  return LeveledGSS(UpperBranch(children={}, empty=None))
+              all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+              new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+              if isinstance(new_inner, Interface):
+                  new_inner = _convert_interface_to_upper_brach(new_inner)
+              return LeveledGSS(new_inner)
           def is_empty(self) -> bool:
               return len(self.to_stacks()) == 0
 
@@ -3357,6 +3405,16 @@ messages:
           children: Dict[T, Dict[int, Upper[T, Acc]]]
           empty: Optional[Acc]
 
+          def _max_depth(self) -> int:
+              """Computes the max depth of the subtree rooted at this node."""
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
+
 
       @dataclass(frozen=True, eq=True)
       class Interface(Generic[T, Acc]):
@@ -3364,11 +3422,34 @@ messages:
           acc: Acc
           empty: Optional[Acc]
 
+          def _max_depth(self) -> int:
+              """
+              Computes the max depth of the subtree. For an Interface, this is based
+              on the Lower children. An Interface is a leaf in the Upper tree.
+              """
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
+
 
       @dataclass(frozen=True, eq=True)
       class Lower(Generic[T]):
           children: Dict[T, Dict[int, Lower[T]]]
           empty: bool
+
+          def _max_depth(self) -> int:
+              """Computes the max depth of the subtree rooted at this node."""
+              if not self.children:
+                  return 0
+              max_child_depth = 0
+              for v_children in self.children.values():
+                  if v_children:
+                      max_child_depth = max(max_child_depth, max(v_children.keys()))
+              return 1 + max_child_depth
 
 
       @dataclass(frozen=True, eq=True)
@@ -3411,7 +3492,7 @@ messages:
                       if sub:
                           nodes.append(build(sub))
                       if nodes:
-                          children[v] = {i: n for i, n in enumerate(nodes)}
+                          children[v] = {n._max_depth(): n for n in nodes}
                   return UpperBranch(children=children, empty=root_empty)
 
               return LeveledGSS(build(trie, empty_acc))
@@ -3434,9 +3515,13 @@ messages:
               return ReferenceGSS.from_stacks(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+              return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+              all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+              new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+              if isinstance(new_inner, Interface):
+                  new_inner = _convert_interface_to_upper_brach(new_inner)
+              return LeveledGSS(new_inner)
           def is_empty(self) -> bool:
               return len(self.to_stacks()) == 0
 
@@ -3639,8 +3724,7 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: 'Note: the int in children is mean to be max depth: the maximum of child
-      depths. Add a method `_max_depth` and ensure its set correctly on construction.'
+  - user: Make LeveledGSS.inner instead Upper, not just UpperBranch.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3659,140 +3743,106 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course, I can help with that. Here are the step-by-step instructions and the corresponding git diff to apply the changes.
+      Of course. Here are the step-by-step instructions to make the requested change, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      You'll need to edit one file: `python/gss_tester/implementations/leveled_impl.py`.
+      Here are the edits for `python/gss_tester/implementations/leveled_impl.py`:
 
-      1.  **Open `python/gss_tester/implementations/leveled_impl.py`**.
+      1.  **Update `LeveledGSS.inner` type hint:**
+          In the `LeveledGSS` class definition (around line 94), modify the type hint for the `inner` attribute to allow it to be an `Interface` as well as an `UpperBranch`.
 
-      2.  **Add the `_max_depth` method to the `UpperBranch` class.** Insert the following method inside the `UpperBranch` class definition, right after the `empty` field:
+          -   Change this line:
+              ```python
+              inner: UpperBranch[T, Acc]
+              ```
+          -   To this:
+              ```python
+              inner: Upper[T, Acc]
+              ```
 
-          ```python
-          def _max_depth(self) -> int:
-              """Computes the max depth of the subtree rooted at this node."""
-              if not self.children:
-                  return 0
-              max_child_depth = 0
-              for v_children in self.children.values():
-                  if v_children:
-                      max_child_depth = max(max_child_depth, max(v_children.keys()))
-              return 1 + max_child_depth
-          ```
+      2.  **Update the `to_stacks` method:**
+          Replace the implementation of the `to_stacks` method (around line 138) to handle cases where `self.inner` can be an `Interface`.
 
-      3.  **Add the `_max_depth` method to the `Interface` class.** Insert the following method inside the `Interface` class definition, after the `empty` field:
+          -   The new method will check if `self.inner` is an `Interface` and handle it as a GSS with a single empty stack. If it's an `UpperBranch`, it will use the existing traversal logic.
 
-          ```python
-          def _max_depth(self) -> int:
-              """
-              Computes the max depth of the subtree. For an Interface, this is based
-              on the Lower children. An Interface is a leaf in the Upper tree.
-              """
-              if not self.children:
-                  return 0
-              max_child_depth = 0
-              for v_children in self.children.values():
-                  if v_children:
-                      max_child_depth = max(max_child_depth, max(v_children.keys()))
-              return 1 + max_child_depth
-          ```
+      3.  **Update the `pop` method:**
+          Replace the implementation of the `pop` method (around line 157) to handle the case where `self.inner` is an `Interface`.
 
-      4.  **Add the `_max_depth` method to the `Lower` class.** Insert the following method inside the `Lower` class definition, after the `empty` field:
+          -   The updated method will check if `self.inner` is an `Interface`. If so, it returns an empty `LeveledGSS`, as popping from a GSS with only an empty stack results in an empty GSS. Otherwise, it proceeds with the original logic for an `UpperBranch`.
 
-          ```python
-          def _max_depth(self) -> int:
-              """Computes the max depth of the subtree rooted at this node."""
-              if not self.children:
-                  return 0
-              max_child_depth = 0
-              for v_children in self.children.values():
-                  if v_children:
-                      max_child_depth = max(max_child_depth, max(v_children.keys()))
-              return 1 + max_child_depth
-          ```
+      ### Git Diffs
 
-      5.  **Update the `build` function in `LeveledGSS.from_stacks`.** Inside the `from_stacks` method of the `LeveledGSS` class, find the `build` function. Modify the last line inside the `for` loop to use the new `_max_depth` method for dictionary keys.
-
-          Change this line:
-          ```python
-                          children[v] = {i: n for i, n in enumerate(nodes)}
-          ```
-          to this:
-          ```python
-                          children[v] = {n._max_depth(): n for n in nodes}
-          ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes automatically.
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 2854955..65529f8 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -17,6 +17,17 @@
-       class UpperBranch(Generic[T, Acc]):
-           children: Dict[T, Dict[int, Upper[T, Acc]]]
-           empty: Optional[Acc]
-      +
-      +    def _max_depth(self) -> int:
-      +        """Computes the max depth of the subtree rooted at this node."""
-      +        if not self.children:
-      +            return 0
-      +        max_child_depth = 0
-      +        for v_children in self.children.values():
-      +            if v_children:
-      +                max_child_depth = max(max_child_depth, max(v_children.keys()))
-      +        return 1 + max_child_depth
-       
-       
-       @dataclass(frozen=True, eq=True)
-      @@ -25,12 +36,34 @@
-           acc: Acc
-           empty: Optional[Acc]
-       
-      +    def _max_depth(self) -> int:
-      +        """
-      +        Computes the max depth of the subtree. For an Interface, this is based
-      +        on the Lower children. An Interface is a leaf in the Upper tree.
-      +        """
-      +        if not self.children:
-      +            return 0
-      +        max_child_depth = 0
-      +        for v_children in self.children.values():
-      +            if v_children:
-      +                max_child_depth = max(max_child_depth, max(v_children.keys()))
-      +        return 1 + max_child_depth
-      +
-       
-       @dataclass(frozen=True, eq=True)
-       class Lower(Generic[T]):
-           children: Dict[T, Dict[int, Lower[T]]]
-           empty: bool
-       
-      +    def _max_depth(self) -> int:
-      +        """Computes the max depth of the subtree rooted at this node."""
-      +        if not self.children:
-      +            return 0
-      +        max_child_depth = 0
-      +        for v_children in self.children.values():
-      +            if v_children:
-      +                max_child_depth = max(max_child_depth, max(v_children.keys()))
-      +        return 1 + max_child_depth
-      +
+      @@ -92,7 +92,7 @@
        
        @dataclass(frozen=True, eq=True)
        class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-      @@ -73,7 +106,7 @@
-                       if sub:
-                           nodes.append(build(sub))
-                       if nodes:
-      -                    children[v] = {i: n for i, n in enumerate(nodes)}
-      +                    children[v] = {n._max_depth(): n for n in nodes}
-                   return UpperBranch(children=children, empty=root_empty)
+      -    inner: UpperBranch[T, Acc]
+      +    inner: Upper[T, Acc]
        
-               return LeveledGSS(build(trie, empty_acc))
+           @classmethod
+           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+      @@ -135,29 +135,31 @@
+       
+           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+               res: List[Tuple[List[T], Acc]] = []
+      -        if self.inner.empty is not None:
+      -            res.append(([], self.inner.empty))
+      -
+      -        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+      -            for v, kids in u.children.items():
+      -                for child in kids.values():
+      -                    if isinstance(child, Interface):
+      -                        res.append((pref + [v], child.acc))
+      -                    else:
+      -                        dfs(child, pref + [v])
+      -
+      -        dfs(self.inner, [])
+      +        if isinstance(self.inner, Interface):
+      +            res.append(([], self.inner.acc))
+      +            if self.inner.empty is not None:
+      +                res.append(([], self.inner.empty))
+      +        elif isinstance(self.inner, UpperBranch):
+      +            if self.inner.empty is not None:
+      +                res.append(([], self.inner.empty))
+      +
+      +            def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+      +                for v, kids in u.children.items():
+      +                    for child in kids.values():
+      +                        if isinstance(child, Interface):
+      +                            res.append((pref + [v], child.acc))
+      +                        else:
+      +                            dfs(child, pref + [v])
+      +
+      +            dfs(self.inner, [])
+               from .reference_impl import ReferenceGSS
+               return ReferenceGSS.from_stacks(res).to_stacks()
+       
+           def push(self, value: T) -> LeveledGSS[T, Acc]:
+               return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
+           def pop(self) -> LeveledGSS[T, Acc]:
+      -        all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+      -        new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+      -        if isinstance(new_inner, Interface):
+      -            new_inner = _convert_interface_to_upper_brach(new_inner)
+      -        return LeveledGSS(new_inner)
+      +        if isinstance(self.inner, Interface):
+      +            return LeveledGSS(UpperBranch(children={}, empty=None))
+      +        all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
+      +        new_inner: Upper[T, Acc] = _merge_uppers(all_children)
+      +        if isinstance(new_inner, Interface):
+      +            new_inner = _convert_interface_to_upper_brach(new_inner)
+      +        return LeveledGSS(new_inner)
+           def is_empty(self) -> bool:
+               return len(self.to_stacks()) == 0
+       
 
       ```
     metadata:
@@ -3805,7 +3855,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "refactor: Implement _max_depth for LeveledGSS
-      nodes and update child indexing"'
+  - user: 'Changes committed with message: "Refactor LeveledGSS: Allow Interface nodes
+      for inner attribute and update methods"'
     metadata:
 ...

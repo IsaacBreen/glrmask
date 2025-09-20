@@ -67,7 +67,7 @@ class Lower(Generic[T]):
 
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-    inner: UpperBranch[T, Acc]
+    inner: Upper[T, Acc]
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -112,24 +112,31 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         res: List[Tuple[List[T], Acc]] = []
-        if self.inner.empty is not None:
-            res.append(([], self.inner.empty))
+        if isinstance(self.inner, Interface):
+            res.append(([], self.inner.acc))
+            if self.inner.empty is not None:
+                res.append(([], self.inner.empty))
+        elif isinstance(self.inner, UpperBranch):
+            if self.inner.empty is not None:
+                res.append(([], self.inner.empty))
 
-        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-            for v, kids in u.children.items():
-                for child in kids.values():
-                    if isinstance(child, Interface):
-                        res.append((pref + [v], child.acc))
-                    else:
-                        dfs(child, pref + [v])
+            def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
+                for v, kids in u.children.items():
+                    for child in kids.values():
+                        if isinstance(child, Interface):
+                            res.append((pref + [v], child.acc))
+                        else:
+                            dfs(child, pref + [v])
 
-        dfs(self.inner, [])
+            dfs(self.inner, [])
         from .reference_impl import ReferenceGSS
         return ReferenceGSS.from_stacks(res).to_stacks()
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
+        if isinstance(self.inner, Interface):
+            return LeveledGSS(UpperBranch(children={}, empty=None))
         all_children: List[Upper] = [child for _, max_depth_to_children in self.inner.children.items() for child in max_depth_to_children.values()]
         new_inner: Upper[T, Acc] = _merge_uppers(all_children)
         if isinstance(new_inner, Interface):
