@@ -266,37 +266,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # Pushing to an UpperBranch (or an empty GSS) creates a new UpperBranch on top.
             return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
-        # Efficient pop: remove the top element from all non-empty stacks.
-        # Implementation strategy:
-        # - For an UpperBranch root: drop the root empty, and merge all child Upper nodes together.
-        # - For an Interface root: each lower child corresponds to stacks with some top value.
-        #   Popping maps each lower child to an Upper subtree. Merge all these Upper subtrees.
-        #
-        # Compute pop on the current root
-        root = self.inner
-        if isinstance(root, UpperBranch):
-            # Merge all children across all top values; drop root.empty
-            nodes: List[Upper[T, Acc]] = []
-            for kids in root.children.values():
-                nodes.extend(kids.values())
-            if not nodes:
-                return LeveledGSS(UpperBranch(children={}, empty=None))
-            acc_upper = nodes[0]
-            for n in nodes[1:]:
-                acc_upper = merge_upper(acc_upper, n)
-            return LeveledGSS(acc_upper)
+        if isinstance(self.inner, Interface):
+            upper_branch = interface_to_upperbranch(self.inner)
         else:
-            # Interface: each lower child becomes an Upper, then merge them; drop root.empty
-            nodes: List[Upper[T, Acc]] = []
-            for kids in root.children.values():
-                for lchild in kids.values():
-                    nodes.append(lower_to_upper(lchild, root.acc))
-            if not nodes:
-                return LeveledGSS(UpperBranch(children={}, empty=None))
-            acc_upper = nodes[0]
-            for n in nodes[1:]:
-                acc_upper = merge_upper(acc_upper, n)
-            return LeveledGSS(acc_upper)
+            upper_branch = self.inner
+        all_children: List[Upper[T, Acc]] = []
+        for _, max_depth_to_child in upper_branch.children.items():
+            all_children.extend(max_depth_to_child.values())
+        merged = all_children[0]
+        for c in all_children[1:]:
+            merged = merge_upper(merged, c)
+        return LeveledGSS(merged)
     def is_empty(self) -> bool:
         return len(self.to_stacks()) == 0
 
