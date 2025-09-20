@@ -31,6 +31,11 @@ class GSS(ABC, Generic[T, Acc]):
     """Abstract Base Class for a Graph-Structured Stack (GSS)."""
 
     @classmethod
+    def empty(cls: Type[GSSType]) -> GSSType:
+        """Creates an empty GSS with no active stacks."""
+        return cls.from_stacks([])
+
+    @classmethod
     @abstractmethod
     def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
         """Creates a GSS from a list of explicit stacks."""
@@ -48,6 +53,14 @@ class GSS(ABC, Generic[T, Acc]):
     def push(self: GSSType, value: T) -> GSSType:
         """Pushes a value onto all active stack heads, returning a new GSS state."""
         pass
+
+    @classmethod
+    def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
+        """Pushes multiple values onto all active stack heads, returning a new GSS state."""
+        dest = cls.empty()
+        for gss_item, value in items:
+            dest = dest.merge(gss_item.push(value))
+        return dest
 
     @abstractmethod
     def pop(self: GSSType) -> GSSType:
@@ -107,7 +120,7 @@ class GSS(ABC, Generic[T, Acc]):
         """
         # Start with an empty GSS of the target class `cls` to ensure the correct
         # return type and to handle an empty gss_list.
-        initial = cls.from_stacks([])
+        initial = cls.empty()
         return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
 
     @abstractmethod
