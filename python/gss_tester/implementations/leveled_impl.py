@@ -207,40 +207,46 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             prev = merged.get(key)
             merged[key] = acc if prev is None else prev.merge(acc)
 
-        # 2) Build a simple top-of-stack-first trie in Python dicts:
-        # Each entry: { value: {"end": Optional[Acc], "sub": <subtrie> } }
+        # 2) Build a simple top-of-stack-first trie:
         trie: Dict[T, Dict[str, Any]] = {}
         root_empty: Optional[Acc] = None
 
-        for key, acc in merged.items():
-            if not key:
+        def insert(seq: Tuple[T, ...], acc: Acc) -> None:
+            nonlocal root_empty
+            if not seq:
                 root_empty = _merge_opt(root_empty, acc)
-                continue
+                return
             node = trie
-            rev = list(reversed(key))
+            rev = list(reversed(seq))
             for i, v in enumerate(rev):
                 entry = node.setdefault(v, {"end": None, "sub": {}})
                 if i == len(rev) - 1:
                     entry["end"] = _merge_opt(entry["end"], acc)
                 else:
-                    node = entry["sub"]
+                    node = entry["sub"]  # descend
+
+        for key, acc in merged.items():
+            insert(key, acc)
 
         def build_upper(subtrie: Dict[T, Dict[str, Any]], empty_acc: Optional[Acc]) -> Upper[T, Acc]:
             # Compile children first
             built_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-            for v, e in subtrie.items():
-                nodes_for_v: List[Upper[T, Acc]] = []
 
+            def add_child(v: T, child: Upper[T, Acc]) -> None:
+                bucket = built_children.get(v)
+                if bucket is None:
+                    built_children[v] = {child._max_depth: child}
+                else:
+                    bucket[child._max_depth] = child
+
+            for v, e in subtrie.items():
                 end_acc: Optional[Acc] = e.get("end")
                 sub = e.get("sub", {})
 
                 if end_acc is not None:
-                    nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
+                    add_child(v, UpperBranch(children={}, empty=end_acc))
                 if sub:
-                    nodes_for_v.append(build_upper(sub, None))
-
-                if nodes_for_v:
-                    built_children[v] = {n._max_depth: n for n in nodes_for_v}
+                    add_child(v, build_upper(sub, None))
 
             # Assemble as UpperBranch then try to promote if possible
             ub = UpperBranch(children=built_children, empty=empty_acc)
@@ -296,8 +302,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self
 
         if isinstance(self.inner, Interface):
-            # Wrap the existing lower structure under the new top value.
-            # 'empty' on the new lower node indicates whether any prior stack could end here.
             had_empty_stack = (self.inner.empty is not None) or (not self.inner.children)
             lower_node = Lower(children=self.inner.children, empty=had_empty_stack)
             new_children: Dict[T, Dict[int, Lower[T]]] = {value: {lower_node._max_depth: lower_node}}
@@ -315,13 +319,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         ub = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
 
         # Merge all direct children (across all top-of-stack values).
-        merged: Upper[T, Acc] = UpperBranch(children={}, empty=None)
-        for child in ub._all_children():
+        children = list(ub._all_children())
+        if not children:
+            return LeveledGSS(UpperBranch(children={}, empty=None))
+
+        merged: Upper[T, Acc] = children[0]
+        for child in children[1:]:
             merged = merge_upper(merged, child)
 
         # Ensure canonical form at the new root
-        merged = try_promote(merged if isinstance(merged, UpperBranch) else interface_to_upperbranch(merged))
-        return LeveledGSS(merged)
+        merged_ub = merged if isinstance(merged, UpperBranch) else interface_to_upperbranch(merged)
+        return LeveledGSS(try_promote(merged_ub))
 
     def is_empty(self) -> bool:
         if isinstance(self.inner, UpperBranch):
@@ -335,14 +343,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if value is None:
             if isinstance(self.inner, UpperBranch):
                 return LeveledGSS(UpperBranch(children={}, empty=self.inner.empty))
-            # Interface: preserve empty stacks. If it's a leaf Interface with implicit empty,
-            # capture that as an empty accumulator.
-            if self.inner.empty is not None:
-                empty_acc: Optional[Acc] = self.inner.empty
-            elif not self.inner.children:
-                empty_acc = self.inner.acc
-            else:
-                empty_acc = None
+            empty_acc = _interface_empty_acc(self.inner)
             return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
 
         if isinstance(self.inner, UpperBranch):
@@ -479,9 +480,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if isinstance(node, UpperBranch):
                 if node.empty is not None:
                     yield node.empty
-                for children_at_depth in node.children.values():
-                    for child in children_at_depth.values():
-                        yield from emit(child)
+                for child in node._all_children():
+                    yield from emit(child)
             else:
                 if node.empty is not None:
                     yield node.empty
@@ -670,6 +670,19 @@ def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
             children[v] = bucket
     ub = UpperBranch(children=children, empty=(acc if l.empty else None))
     return try_promote(ub)
+
+
+def _interface_empty_acc(it: Interface[T, Acc]) -> Optional[Acc]:
+    """
+    Determine the accumulator for empty stacks at an Interface boundary.
+    If explicit empty exists, return it; if no children exist and no explicit empty,
+    the leaf represents an empty stack with 'acc'.
+    """
+    if it.empty is not None:
+        return it.empty
+    if not it.children:
+        return it.acc
+    return None
 
 
 # ------------------------------------------------------------------------------
