@@ -662,33 +662,33 @@ def default_specs(preset: str = "tiny") -> Dict[str, List[Dict[str, Any]]]:
     if preset == "small":
         return {
             "linear_push": [{"length": 500}, {"length": 2_000}],
-            "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
-            "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
             "product_tree": [{"depth": 3, "k": 3}, {"depth": 4, "k": 2}],
             "diamond_repeat": [{"repeats": 300}],
             "merge_many": [{"count": 50, "stack_len": 8}],
             "pop_collapse": [{"base_depth": 20, "branch_count": 200}],
             "apply_prune": [{"breadth": 4, "depth": 4, "apply_amount": 7, "prune_threshold": 20}],
+            "split_surface_merge": [{"depth": 4, "k": 3, "top_k": 32, "clones": 4, "mod_per_clone": 1, "apply_amount": 1, "seed": 1234}],
+            "clone_push_merge": [{"depth": 4, "k": 3, "clones": 8}],
         }
     elif preset == "medium":
         return {
-            "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
-            "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
             "linear_push": [{"length": 5_000}, {"length": 20_000}],
             "product_tree": [{"depth": 5, "k": 3}],
             "diamond_repeat": [{"repeats": 2_000}],
             "merge_many": [{"count": 200, "stack_len": 16}],
             "pop_collapse": [{"base_depth": 60, "branch_count": 1_000}],
             "apply_prune": [{"breadth": 6, "depth": 5, "apply_amount": 11, "prune_threshold": 50}],
+            "split_surface_merge": [{"depth": 5, "k": 4, "top_k": 128, "clones": 8, "mod_per_clone": 2, "apply_amount": 7, "seed": 2025}],
+            "clone_push_merge": [{"depth": 5, "k": 4, "clones": 32}],
         }
     else:  # large
         return {
-            "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
-            "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
             "linear_push": [{"length": 50_000}],
             "product_tree": [{"depth": 6, "k": 4}],
             "diamond_repeat": [{"repeats": 10_000}],
             "merge_many": [{"count": 1_000, "stack_len": 24}],
             "pop_collapse": [{"base_depth": 150, "branch_count": 5_000}],
             "apply_prune": [{"breadth": 8, "depth": 6, "apply_amount": 17, "prune_threshold": 200}],
+            "split_surface_merge": [{"depth": 6, "k": 4, "top_k": 512, "clones": 16, "mod_per_clone": 2, "apply_amount": 11, "seed": 4242}],
+            "clone_push_merge": [{"depth": 6, "k": 4, "clones": 64}],
         }
