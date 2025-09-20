@@ -14,8 +14,7 @@ local_system:
     - python/gss_tester/runner.py
     - python/gss_tester/test_spec.py
     - python/gss_tester/run_tests.sh
-    - python/gss_tester/run_benchmarks.sh
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/gss_tester/__init__.py: |
@@ -2275,100 +2274,6 @@ local_system:
       echo "Reference: $REFERENCE_IMPL"
       echo "Summary printed above."
       echo "Full JSON results are in: $RESULTS_DIR"
-    python/gss_tester/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running GSS benchmarks against multiple implementations.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./gss_tester/run_benchmarks.sh [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]
-      #
-      # Example:
-      #   ./gss_tester/run_benchmarks.sh --preset medium gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
-      #
-      # Each implementation is specified as 'path.to.module:ClassName'.
-      # ==============================================================================
-
-      # --- Setup PYTHONPATH to find gss_tester ---
-      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
-      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
-
-      # --- Argument Parsing ---
-      PRESET="small"
-      REPEATS=1
-      IMPLS=()
-
-      while [[ $# -gt 0 ]]; do
-          case "$1" in
-              --preset)
-                  PRESET="$2"
-                  shift 2
-                  ;;
-              --repeats)
-                  REPEATS="$2"
-                  shift 2
-                  ;;
-              -*)
-                  echo "Unknown option: $1"
-                  exit 1
-                  ;;
-              *)
-                  IMPLS+=("$1")
-                  shift
-                  ;;
-          esac
-      done
-
-      if [ "${#IMPLS[@]}" -eq 0 ]; then
-          echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
-          echo "Error: At least one implementation is required."
-          exit 1
-      fi
-
-      # --- Setup ---
-      RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      OUTPUT_FILE="${RESULTS_DIR}/results.json"
-
-      echo "Benchmark results will be saved in: $OUTPUT_FILE"
-      echo "---"
-      echo "Implementations: ${IMPLS[*]}"
-      echo "Preset: $PRESET"
-      echo "Repeats: $REPEATS"
-      echo "---"
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark run..."
-
-      cmd=(python -m gss_tester.benchmarks.runner
-          --implementations "${IMPLS[@]}"
-          --preset "$PRESET"
-          --repeats "$REPEATS"
-          --output "$OUTPUT_FILE"
-      )
-
-      echo "${cmd[*]}"
-      if "${cmd[@]}"; then
-          echo
-          echo ">>> Benchmark run finished successfully."
-      else
-          exit_code=$?
-          echo
-          echo ">>> Benchmark run failed with exit code $exit_code."
-          exit $exit_code
-      fi
-
-      echo
-      echo "---"
-      echo "Benchmark complete."
-      echo "Full JSON results are in: $OUTPUT_FILE"
   prev_file_contents:
     python/gss_tester/__init__.py: |
       # This file makes 'gss_tester' a Python package.
@@ -3959,15 +3864,19 @@ local_system:
               if self.empty is not None:
                   res.append(([], self.empty))
 
-              def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+              # Iterative DFS to avoid recursion depth limits
+              q: List[Tuple[Upper[T, Acc], List[T]]] = [(self.inner, [])]
+              while q:
+                  u, pref = q.pop()
+
                   if isinstance(u.inner, Interface):
                       res.append((pref, u.inner.acc))
-                      return
-                  for v, kids in u.inner.children.items():
-                      for child in kids.values():
-                          dfs(child, pref + [v])
+                      continue
 
-              dfs(self.inner, [])
+                  if isinstance(u.inner, UpperBranch):
+                      for v, kids in u.inner.children.items():
+                          for child in kids.values():
+                              q.append((child, pref + [v]))
               from .reference_impl import ReferenceGSS
               return ReferenceGSS(res).to_stacks()
 
@@ -4627,121 +4536,6 @@ local_system:
       echo "Reference: $REFERENCE_IMPL"
       echo "Summary printed above."
       echo "Full JSON results are in: $RESULTS_DIR"
-    python/gss_tester/run_benchmarks.sh: |
-      #!/bin/bash
-      set -euo pipefail
-
-      # ==============================================================================
-      # run_benchmarks.sh
-      #
-      # A script to automate running GSS benchmarks against multiple implementations.
-      #
-      # This script should be run from the `python` directory.
-      #
-      # Usage:
-      #   ./gss_tester/run_benchmarks.sh [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]
-      #
-      # Example:
-      #   ./gss_tester/run_benchmarks.sh --preset medium gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
-      #
-      # Each implementation is specified as 'path.to.module:ClassName'.
-      # ==============================================================================
-
-      # --- Setup PYTHONPATH to find gss_tester ---
-      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-      PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
-      export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
-
-      # --- Argument Parsing ---
-      PRESET="small"
-      REPEATS=1
-      RAW_IMPLS=()
-
-      while [[ $# -gt 0 ]]; do
-          case "$1" in
-              --preset)
-                  PRESET="$2"
-                  shift 2
-                  ;;
-              --repeats)
-                  REPEATS="$2"
-                  shift 2
-                  ;;
-              -*)
-                  echo "Unknown option: $1"
-                  exit 1
-                  ;;
-              *)
-                  RAW_IMPLS+=("$1")
-                  shift
-                  ;;
-          esac
-      done
-
-      if [ "${#RAW_IMPLS[@]}" -eq 0 ]; then
-          echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
-          echo "Error: At least one implementation is required."
-          exit 1
-      fi
-
-      # --- Implementation Path Parsing ---
-      # Convert file paths (e.g., gss_tester/leveled_impl.py) to module:class format.
-      PARSED_IMPLS=()
-      for impl_path in "${RAW_IMPLS[@]}"; do
-          if [[ "$impl_path" == *.py ]]; then
-              # Handle file path: derive module and class name by convention.
-              # Module name: strip path up to 'python/', remove '.py' suffix, replace '/' with '.'
-              module_name=$(echo "$impl_path" | sed -e 's#^.*python/##' -e 's/\.py$//' -e 's#/#.#g')
-              # Class name: e.g., 'leveled_impl' -> 'LeveledGSS'
-              base_name=$(basename "$impl_path" .py)
-              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
-              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
-              # The benchmark runner prefers module:Class format
-              PARSED_IMPLS+=("${module_name}:${class_name}")
-          else
-              # Assume it's already in module:Class or module.Class format
-              PARSED_IMPLS+=("$impl_path")
-          fi
-      done
-
-
-      # --- Setup ---
-      RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      mkdir -p "$RESULTS_DIR"
-      OUTPUT_FILE="${RESULTS_DIR}/results.json"
-
-      echo "Benchmark results will be saved in: $OUTPUT_FILE"
-      echo "---"
-      echo "Implementations: ${PARSED_IMPLS[*]}"
-      echo "Preset: $PRESET"
-      echo "Repeats: $REPEATS"
-      echo "---"
-
-      # --- Run Benchmarks ---
-      echo "Starting benchmark run..."
-
-      cmd=(python -m gss_tester.benchmarks.runner
-          --implementations "${PARSED_IMPLS[@]}"
-          --preset "$PRESET"
-          --repeats "$REPEATS"
-          --output "$OUTPUT_FILE"
-      )
-
-      echo "${cmd[*]}"
-      if "${cmd[@]}"; then
-          echo
-          echo ">>> Benchmark run finished successfully."
-      else
-          exit_code=$?
-          echo
-          echo ">>> Benchmark run failed with exit code $exit_code."
-          exit $exit_code
-      fi
-
-      echo
-      echo "---"
-      echo "Benchmark complete."
-      echo "Full JSON results are in: $OUTPUT_FILE"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -7113,8 +6907,68 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/run_tests.sh
-  - user: Make it possible to run the benchmarks like we do the tests via .sh. Add
-      a script for running benches.
+  - user: |-
+      bash gss_tester/run_benchmarks.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
+      Benchmark results will be saved in: gss_bench_results/2025-09-20_11-28-44/results.json
+      ---
+      Implementations: gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
+      Preset: small
+      Repeats: 1
+      ---
+      Starting benchmark run...
+      python -m gss_tester.benchmarks.runner --implementations gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS --preset small --repeats 1 --output gss_bench_results/2025-09-20_11-28-44/results.json
+      [gss_tester.reference_impl.ReferenceGSS] Running linear_push params={'length': 500} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running linear_push params={'length': 2000} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running product_tree params={'depth': 3, 'k': 3} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running product_tree params={'depth': 4, 'k': 2} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running diamond_repeat params={'repeats': 300} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running merge_many params={'count': 50, 'stack_len': 8} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running pop_collapse params={'base_depth': 20, 'branch_count': 200} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running apply_prune params={'breadth': 4, 'depth': 4, 'apply_amount': 7, 'prune_threshold': 20} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running split_surface_merge params={'depth': 4, 'k': 3, 'top_k': 32, 'clones': 4, 'mod_per_clone': 1, 'apply_amount': 1, 'seed': 1234} repeat=1/1 ...
+      [gss_tester.reference_impl.ReferenceGSS] Running clone_push_merge params={'depth': 4, 'k': 3, 'clones': 8} repeat=1/1 ...
+      [gss_tester.leveled_impl.LeveledGSS] Running linear_push params={'length': 500} repeat=1/1 ...
+      [gss_tester.leveled_impl.LeveledGSS] Running linear_push params={'length': 2000} repeat=1/1 ...
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py", line 209, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py", line 194, in main
+          impl_out = _run_workloads_for_impl(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py", line 83, in _run_workloads_for_impl
+          wl_result: WorkloadResult = workload_fn(impl_class, **params)
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/workloads.py", line 86, in workload_linear_push
+          final_state, peak_kib, elapsed = _measure_peak_memory(run)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/workloads.py", line 60, in _measure_peak_memory
+          result = fn()
+                   ^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/workloads.py", line 79, in run
+          state = state.push(i)
+                  ^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 106, in push
+          return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/interface.py", line 132, in to_reference_impl
+          return ReferenceGSS.from_stacks(self.to_stacks())
+                                          ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 101, in to_stacks
+          dfs(self.inner, [])
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 99, in dfs
+          dfs(child, pref + [v])
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 99, in dfs
+          dfs(child, pref + [v])
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/leveled_impl.py", line 99, in dfs
+          dfs(child, pref + [v])
+        [Previous line repeated 986 more times]
+      RecursionError: maximum recursion depth exceeded
+
+      >>> Benchmark run failed with exit code 1.
+    metadata:
+  - user: Fix this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7133,219 +6987,86 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add a benchmark runner script, followed by the corresponding git diff.
+      Of course. The benchmark for `LeveledGSS` is failing with a `RecursionError` because its `to_stacks` method uses a recursive depth-first search that exceeds Python's recursion limit on deep stacks, such as those created by the `linear_push` workload.
 
-      ### Step-by-step Instructions
+      The fix is to replace the recursive traversal with an iterative one using an explicit stack. Here are the steps to resolve the issue.
 
-      1.  **Create a new script file named `run_benchmarks.sh`** inside the `python/gss_tester/` directory.
+      ### Step-by-Step Instructions
 
-      2.  **Populate the new script** with the following content. This script will handle parsing command-line arguments for benchmark presets and implementation lists, and then execute the Python benchmark runner.
+      1.  **Open the file `python/gss_tester/leveled_impl.py`**.
 
-          ```bash
-          #!/bin/bash
-          set -euo pipefail
+      2.  **Navigate to the `to_stacks` method** inside the `LeveledGSS` class.
+
+      3.  **Replace the recursive `dfs` implementation**. Delete the following code block:
+
+          ```python
+                  def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+                      if isinstance(u.inner, Interface):
+                          res.append((pref, u.inner.acc))
+                          return
+                      for v, kids in u.inner.children.items():
+                          for child in kids.values():
+                              dfs(child, pref + [v])
           
-          # ==============================================================================
-          # run_benchmarks.sh
-          #
-          # A script to automate running GSS benchmarks against multiple implementations.
-          #
-          # This script should be run from the `python` directory.
-          #
-          # Usage:
-          #   ./gss_tester/run_benchmarks.sh [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]
-          #
-          # Example:
-          #   ./gss_tester/run_benchmarks.sh --preset medium gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
-          #
-          # Each implementation is specified as 'path.to.module:ClassName'.
-          # ==============================================================================
-          
-          # --- Setup PYTHONPATH to find gss_tester ---
-          SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-          PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
-          export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
-          
-          # --- Argument Parsing ---
-          PRESET="small"
-          REPEATS=1
-          IMPLS=()
-          
-          while [[ $# -gt 0 ]]; do
-              case "$1" in
-                  --preset)
-                      PRESET="$2"
-                      shift 2
-                      ;;
-                  --repeats)
-                      REPEATS="$2"
-                      shift 2
-                      ;;
-                  -*)
-                      echo "Unknown option: $1"
-                      exit 1
-                      ;;
-                  *)
-                      IMPLS+=("$1")
-                      shift
-                      ;;
-              esac
-          done
-          
-          if [ "${#IMPLS[@]}" -eq 0 ]; then
-              echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
-              echo "Error: At least one implementation is required."
-              exit 1
-          fi
-          
-          # --- Setup ---
-          RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-          mkdir -p "$RESULTS_DIR"
-          OUTPUT_FILE="${RESULTS_DIR}/results.json"
-          
-          echo "Benchmark results will be saved in: $OUTPUT_FILE"
-          echo "---"
-          echo "Implementations: ${IMPLS[*]}"
-          echo "Preset: $PRESET"
-          echo "Repeats: $REPEATS"
-          echo "---"
-          
-          # --- Run Benchmarks ---
-          echo "Starting benchmark run..."
-          
-          cmd=(python -m gss_tester.benchmarks.runner
-              --implementations "${IMPLS[@]}"
-              --preset "$PRESET"
-              --repeats "$REPEATS"
-              --output "$OUTPUT_FILE"
-          )
-          
-          echo "${cmd[*]}"
-          if "${cmd[@]}"; then
-              echo
-              echo ">>> Benchmark run finished successfully."
-          else
-              exit_code=$?
-              echo
-              echo ">>> Benchmark run failed with exit code $exit_code."
-              exit $exit_code
-          fi
-          
-          echo
-          echo "---"
-          echo "Benchmark complete."
-          echo "Full JSON results are in: $OUTPUT_FILE"
+                  dfs(self.inner, [])
           ```
 
-      3.  **Make the new script executable** by running the following command in your terminal from the project's root directory:
-          ```sh
-          chmod +x python/gss_tester/run_benchmarks.sh
+      4.  **In its place, insert the new iterative implementation**:
+
+          ```python
+                  # Iterative DFS to avoid recursion depth limits
+                  q: List[Tuple[Upper[T, Acc], List[T]]] = [(self.inner, [])]
+                  while q:
+                      u, pref = q.pop()
+          
+                      if isinstance(u.inner, Interface):
+                          res.append((pref, u.inner.acc))
+                          continue
+          
+                      if isinstance(u.inner, UpperBranch):
+                          for v, kids in u.inner.children.items():
+                              for child in kids.values():
+                                  q.append((child, pref + [v]))
           ```
 
-      ### Git Diff
+      This change ensures that converting the `LeveledGSS` to a list of stacks will work correctly even for structures with great depth, allowing the benchmark to complete successfully.
 
-      Here is the git diff to create the new benchmark runner script.
+      ### Git Diffs
+
+      Here is the git diff for the change:
 
       ```diff
-      diff --git a/python/gss_tester/run_benchmarks.sh b/python/gss_tester/run_benchmarks.sh
-      new file mode 100755
-      index 0000000..8b665c8
-      --- /dev/null
-      +++ b/python/gss_tester/run_benchmarks.sh
-      @@ -0,0 +1,78 @@
-      +#!/bin/bash
-      +set -euo pipefail
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -91,16 +91,19 @@
+               if self.empty is not None:
+                   res.append(([], self.empty))
+       
+      -        def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+      -            if isinstance(u.inner, Interface):
+      -                res.append((pref, u.inner.acc))
+      -                return
+      -            for v, kids in u.inner.children.items():
+      -                for child in kids.values():
+      -                    dfs(child, pref + [v])
+      +        # Iterative DFS to avoid recursion depth limits
+      +        q: List[Tuple[Upper[T, Acc], List[T]]] = [(self.inner, [])]
+      +        while q:
+      +            u, pref = q.pop()
+       
+      -        dfs(self.inner, [])
+      +            if isinstance(u.inner, Interface):
+      +                res.append((pref, u.inner.acc))
+      +                continue
       +
-      +# ==============================================================================
-      +# run_benchmarks.sh
-      +#
-      +# A script to automate running GSS benchmarks against multiple implementations.
-      +#
-      +# This script should be run from the `python` directory.
-      +#
-      +# Usage:
-      +#   ./gss_tester/run_benchmarks.sh [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]
-      +#
-      +# Example:
-      +#   ./gss_tester/run_benchmarks.sh --preset medium gss_tester.reference_impl:ReferenceGSS gss_tester.leveled_impl:LeveledGSS
-      +#
-      +# Each implementation is specified as 'path.to.module:ClassName'.
-      +# ==============================================================================
-      +
-      +# --- Setup PYTHONPATH to find gss_tester ---
-      +SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-      +PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
-      +export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
-      +
-      +# --- Argument Parsing ---
-      +PRESET="small"
-      +REPEATS=1
-      +IMPLS=()
-      +
-      +while [[ $# -gt 0 ]]; do
-      +    case "$1" in
-      +        --preset)
-      +            PRESET="$2"
-      +            shift 2
-      +            ;;
-      +        --repeats)
-      +            REPEATS="$2"
-      +            shift 2
-      +            ;;
-      +        -*)
-      +            echo "Unknown option: $1"
-      +            exit 1
-      +            ;;
-      +        *)
-      +            IMPLS+=("$1")
-      +            shift
-      +            ;;
-      +    esac
-      +done
-      +
-      +if [ "${#IMPLS[@]}" -eq 0 ]; then
-      +    echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
-      +    echo "Error: At least one implementation is required."
-      +    exit 1
-      +fi
-      +
-      +# --- Setup ---
-      +RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-      +mkdir -p "$RESULTS_DIR"
-      +OUTPUT_FILE="${RESULTS_DIR}/results.json"
-      +
-      +echo "Benchmark results will be saved in: $OUTPUT_FILE"
-      +echo "---"
-      +echo "Implementations: ${IMPLS[*]}"
-      +echo "Preset: $PRESET"
-      +echo "Repeats: $REPEATS"
-      +echo "---"
-      +
-      +# --- Run Benchmarks ---
-      +echo "Starting benchmark run..."
-      +
-      +cmd=(python -m gss_tester.benchmarks.runner
-      +    --implementations "${IMPLS[@]}"
-      +    --preset "$PRESET"
-      +    --repeats "$REPEATS"
-      +    --output "$OUTPUT_FILE"
-      +)
-      +
-      +echo "${cmd[*]}"
-      +if "${cmd[@]}"; then
-      +    echo
-      +    echo ">>> Benchmark run finished successfully."
-      +else
-      +    exit_code=$?
-      +    echo
-      +    echo ">>> Benchmark run failed with exit code $exit_code."
-      +    exit $exit_code
-      +fi
-      +
-      +echo
-      +echo "---"
-      +echo "Benchmark complete."
-      +echo "Full JSON results are in: $OUTPUT_FILE"
+      +            if isinstance(u.inner, UpperBranch):
+      +                for v, kids in u.inner.children.items():
+      +                    for child in kids.values():
+      +                        q.append((child, pref + [v]))
+               from .reference_impl import ReferenceGSS
+               return ReferenceGSS(res).to_stacks()
+       
 
       ```
     metadata:
@@ -7354,297 +7075,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/run_benchmarks.sh
-      Detected new file (--- /dev/null or missing --- line).
-      Detected 'new file mode'.
-      Applying patch to 'python/gss_tester/run_benchmarks.sh' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/run_benchmarks.sh.
-      Confirmed creation of python/gss_tester/run_benchmarks.sh.
-      Added newly created file python/gss_tester/run_benchmarks.sh to attached files state.
+      Identified target file: python/gss_tester/leveled_impl.py
+      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add script to run GSS benchmarks"'
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/introspect.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/fuzzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/leveled_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/reference_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/test_spec.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_tests.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_benchmarks.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      bash gss_tester/run_tests.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-20_11-27-54
-      ---
-      Reference Implementation: gss_tester/reference_impl.py
-      Other Implementations: gss_tester/leveled_impl.py
-      ---
-      Starting test runs...
-
-      >>> Running test spec for: gss_tester/reference_impl.py
-      python -m gss_tester.runner gss_tester.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_11-27-54/gss_tester.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.reference_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_11-27-54/gss_tester.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/reference_impl.py
-
-      >>> Running test spec for: gss_tester/leveled_impl.py
-      python -m gss_tester.runner gss_tester.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_11-27-54/gss_tester.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.leveled_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_11-27-54/gss_tester.leveled_impl.LeveledGSS.json
-      >>> Finished test spec for: gss_tester/leveled_impl.py
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.analyzer gss_test_results/2025-09-20_11-27-54/gss_tester.leveled_impl.LeveledGSS.json gss_test_results/2025-09-20_11-27-54/gss_tester.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_11-27-54/gss_tester.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 1 equivalence class(es) among 2 implementations.
-
-      Reference implementation: gss_tester.reference_impl.ReferenceGSS
-
-      Class 1 (2 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.leveled_impl.LeveledGSS
-        - gss_tester.reference_impl.ReferenceGSS
-
-
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-20_11-27-54
-      bash gss_tester/run_benchmarks.sh gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Benchmark results will be saved in: gss_bench_results/2025-09-20_11-27-56/results.json
-      ---
-      Implementations: gss_tester/reference_impl.py gss_tester/leveled_impl.py
-      Preset: small
-      Repeats: 1
-      ---
-      Starting benchmark run...
-      python -m gss_tester.benchmarks.runner --implementations gss_tester/reference_impl.py gss_tester/leveled_impl.py --preset small --repeats 1 --output gss_bench_results/2025-09-20_11-27-56/results.json
-      Error loading implementation 'gss_tester/reference_impl.py': No module named 'gss_tester/reference_impl'
-      Error loading implementation 'gss_tester/leveled_impl.py': No module named 'gss_tester/leveled_impl'
-      No valid implementations loaded. Exiting.
-
-      >>> Benchmark run failed with exit code 1.
-    metadata:
-  - assistant: |-
-      It looks like the `run_benchmarks.sh` script is passing file paths directly to the Python benchmark runner, which expects Python module paths in the format `module:Class` or `module.Class`. The `run_tests.sh` script has logic to handle this conversion, but `run_benchmarks.sh` does not.
-
-      I will add the necessary logic to `run_benchmarks.sh` to convert file paths into the correct format before calling the Python script.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the file `python/gss_tester/run_benchmarks.sh`**.
-
-      2.  In the "Argument Parsing" section, rename the `IMPLS` array to `RAW_IMPLS`. This will make it clear that these are the unprocessed arguments.
-
-      3.  After the argument parsing `if` block, insert a new section called "Implementation Path Parsing". This new code block will loop through the `RAW_IMPLS` array, convert any file paths into the `module:Class` format, and store the results in a new `PARSED_IMPLS` array.
-
-      4.  In the "Setup" section, update the `echo` command to print the contents of the new `PARSED_IMPLS` array.
-
-      5.  Finally, in the "Run Benchmarks" section, update the `cmd` definition to pass the `PARSED_IMPLS` array to the `--implementations` argument.
-
-      Here is the code block to insert after the argument parsing section:
-
-      ```bash
-      # --- Implementation Path Parsing ---
-      # Convert file paths (e.g., gss_tester/leveled_impl.py) to module:class format.
-      PARSED_IMPLS=()
-      for impl_path in "${RAW_IMPLS[@]}"; do
-          if [[ "$impl_path" == *.py ]]; then
-              # Handle file path: derive module and class name by convention.
-              # Module name: strip path up to 'python/', remove '.py' suffix, replace '/' with '.'
-              module_name=$(echo "$impl_path" | sed -e 's#^.*python/##' -e 's/\.py$//' -e 's#/#.#g')
-              # Class name: e.g., 'leveled_impl' -> 'LeveledGSS'
-              base_name=$(basename "$impl_path" .py)
-              class_name_base=$(echo "$base_name" | sed 's/_impl$//')
-              class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
-              # The benchmark runner prefers module:Class format
-              PARSED_IMPLS+=("${module_name}:${class_name}")
-          else
-              # Assume it's already in module:Class or module.Class format
-              PARSED_IMPLS+=("$impl_path")
-          fi
-      done
-      ```
-
-      ### Git Diff
-
-      Here is the git diff to apply the changes to `python/gss_tester/run_benchmarks.sh`.
-
-      ```diff
-      diff --git a/python/gss_tester/run_benchmarks.sh b/python/gss_tester/run_benchmarks.sh
-      --- a/python/gss_tester/run_benchmarks.sh
-      +++ b/python/gss_tester/run_benchmarks.sh
-      @@ -19,8 +19,8 @@
-       # --- Argument Parsing ---
-       PRESET="small"
-       REPEATS=1
-      -IMPLS=()
-      +RAW_IMPLS=()
-       
-       while [[ $# -gt 0 ]]; do
-           case "$1" in
-      @@ -37,18 +37,40 @@
-                   exit 1
-                   ;;
-               *)
-      -            IMPLS+=("$1")
-      +            RAW_IMPLS+=("$1")
-                   shift
-                   ;;
-           esac
-       done
-       
-      -if [ "${#IMPLS[@]}" -eq 0 ]; then
-      +if [ "${#RAW_IMPLS[@]}" -eq 0 ]; then
-           echo "Usage: $0 [--preset small|medium|large] [--repeats N] <impl1> [impl2 ...]"
-           echo "Error: At least one implementation is required."
-           exit 1
-       fi
-       
-      +# --- Implementation Path Parsing ---
-      +# Convert file paths (e.g., gss_tester/leveled_impl.py) to module:class format.
-      +PARSED_IMPLS=()
-      +for impl_path in "${RAW_IMPLS[@]}"; do
-      +    if [[ "$impl_path" == *.py ]]; then
-      +        # Handle file path: derive module and class name by convention.
-      +        # Module name: strip path up to 'python/', remove '.py' suffix, replace '/' with '.'
-      +        module_name=$(echo "$impl_path" | sed -e 's#^.*python/##' -e 's/\.py$//' -e 's#/#.#g')
-      +        # Class name: e.g., 'leveled_impl' -> 'LeveledGSS'
-      +        base_name=$(basename "$impl_path" .py)
-      +        class_name_base=$(echo "$base_name" | sed 's/_impl$//')
-      +        class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
-      +        # The benchmark runner prefers module:Class format
-      +        PARSED_IMPLS+=("${module_name}:${class_name}")
-      +    else
-      +        # Assume it's already in module:Class or module.Class format
-      +        PARSED_IMPLS+=("$impl_path")
-      +    fi
-      +done
-      +
-      +
-       # --- Setup ---
-       RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
-       mkdir -p "$RESULTS_DIR"
-      @@ -56,7 +78,7 @@
-       
-       echo "Benchmark results will be saved in: $OUTPUT_FILE"
-       echo "---"
-      -echo "Implementations: ${IMPLS[*]}"
-      +echo "Implementations: ${PARSED_IMPLS[*]}"
-       echo "Preset: $PRESET"
-       echo "Repeats: $REPEATS"
-       echo "---"
-      @@ -65,7 +87,7 @@
-       echo "Starting benchmark run..."
-       
-       cmd=(python -m gss_tester.benchmarks.runner
-      -    --implementations "${IMPLS[@]}"
-      +    --implementations "${PARSED_IMPLS[@]}"
-           --preset "$PRESET"
-           --repeats "$REPEATS"
-           --output "$OUTPUT_FILE"
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/run_benchmarks.sh
-      Applying patch to 'python/gss_tester/run_benchmarks.sh' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/run_benchmarks.sh.
-    metadata:
-  - user: 'Changes committed with message: "feat: Correctly parse implementation paths
-      for benchmark runner"'
+  - user: 'Changes committed with message: "Fix: Use iterative DFS in LeveledGSS.to_stacks
+      to prevent RecursionError"'
     metadata:
 ...

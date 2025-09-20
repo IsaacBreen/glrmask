@@ -90,15 +90,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if self.empty is not None:
             res.append(([], self.empty))
 
-        def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+        # Iterative DFS to avoid recursion depth limits
+        q: List[Tuple[Upper[T, Acc], List[T]]] = [(self.inner, [])]
+        while q:
+            u, pref = q.pop()
+
             if isinstance(u.inner, Interface):
                 res.append((pref, u.inner.acc))
-                return
-            for v, kids in u.inner.children.items():
-                for child in kids.values():
-                    dfs(child, pref + [v])
+                continue
 
-        dfs(self.inner, [])
+            if isinstance(u.inner, UpperBranch):
+                for v, kids in u.inner.children.items():
+                    for child in kids.values():
+                        q.append((child, pref + [v]))
         from .reference_impl import ReferenceGSS
         return ReferenceGSS(res).to_stacks()
 
