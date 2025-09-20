@@ -76,6 +76,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def __post_init__(self):
         self._validate_no_promotions()
+        self._validate_populated_nodes()
 
     def _validate_no_promotions(self) -> None:
         """
@@ -136,6 +137,47 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
                 f"indicating a non-canonical structure. Node: {node}"
             )
+
+    def _validate_populated_nodes(self) -> None:
+        """
+        Validates that every node represents at least one stack, with the
+        exception of the root UpperBranch for an empty GSS.
+        """
+        # The root can be an empty UpperBranch, which represents an empty GSS.
+        if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
+            return
+
+        self._validate_node_is_populated(self.inner)
+
+    def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
+        """Recursive helper for validation."""
+        if isinstance(node, UpperBranch):
+            if not node.children and node.empty is None:
+                raise ValueError(
+                    "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
+                    f"found in a non-root position. Node: {node}"
+                )
+            for children_at_depth in node.children.values():
+                for child in children_at_depth.values():
+                    self._validate_node_is_populated(child)
+        elif isinstance(node, Interface):
+            if not node.children and node.empty is None:
+                raise ValueError(
+                    "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
+                    f"Node: {node}"
+                )
+            for children_at_depth in node.children.values():
+                for child in children_at_depth.values():
+                    self._validate_node_is_populated(child)
+        elif isinstance(node, Lower):
+            if not node.children and not node.empty:
+                raise ValueError(
+                    "LeveledGSS validation failed: Lower node with no children and empty=False found. "
+                    f"Node: {node}"
+                )
+            for children_at_depth in node.children.values():
+                for child in children_at_depth.values():
+                    self._validate_node_is_populated(child)
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
@@ -271,6 +313,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         merged = UpperBranch(children={}, empty=None)
         for c in all_children:
             merged = merge_upper(merged, c)
+        merged = try_promote(merged)
         return LeveledGSS(merged)
 
     def is_empty(self) -> bool:
