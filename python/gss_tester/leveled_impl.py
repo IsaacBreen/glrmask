@@ -124,30 +124,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
     """Helper to get all children from an UpperBranch."""
-    return [
-        child
-        for children_by_val in branch.children.values()
-        for child in children_by_val.values()
-    ]
-
-
-def _validate_upper(node: Upper[T, Acc]):
-    """Recursively validates invariants on Upper nodes."""
-    if not isinstance(node.inner, UpperBranch):
-        return  # Base case: node is an Interface.
-
-    all_children = _get_upper_children(node.inner)
-
-    # Invariant 1: If all children are interfaces, there must be more than one unique acc.
-    if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-        if len({child.inner.acc for child in all_children}) > 1:
-            raise AssertionError(
-                "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-            )
-
-    # Recurse into children
-    for child in all_children:
-        _validate_upper(child)
+    return [child for children_by_val in branch.children.values() for child in children_by_val.values()]
 
 
 def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
@@ -155,10 +132,19 @@ def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
     Checks internal invariants of the LeveledGSS structure.
     Raises AssertionError if an invariant is violated.
     """
+    def _validate_upper(node: Upper[T, Acc]):
+        """Recursively validates invariants on Upper nodes."""
+        if not isinstance(node.inner, UpperBranch):
+            return  # Base case: node is an Interface.
+        all_children = _get_upper_children(node.inner)
+        # Invariant 1: If all children are interfaces, there must be more than one unique acc.
+        if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+            if len({child.inner.acc for child in all_children}) > 1:
+                raise AssertionError("Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs.")
+        # Recurse into children
+        for child in all_children:
+            _validate_upper(child)
     _validate_upper(gss.inner)
-
     # Invariant 2: If inner is an interface and empty exists, their accs must differ.
     if isinstance(gss.inner, Interface) and gss.empty is not None and gss.inner.acc == gss.empty:
-        raise AssertionError(
-            "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-        )
+        raise AssertionError("Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator.")
