@@ -9,7 +9,7 @@ import platform
 import socket
 
 from .instrumentation import TimingRecorder, GSSFactory
-from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig
+from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig, get_preset_sweeps
 from copy import deepcopy
 
 
@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
     parser.add_argument("--sweep-axis", default=None, help="Parameter name to sweep (e.g., prefix_depth).")
     parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
+    parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
     args = parser.parse_args()
 
     # Load implementation
@@ -43,6 +44,14 @@ def main():
     except (ImportError, AttributeError) as e:
         print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
         sys.exit(1)
+
+    if args.list_sweeps:
+        sweeps = get_preset_sweeps(args.preset)
+        for s in sweeps:
+            # Format: workload;axis;v1 v2 v3...
+            values_str = " ".join(map(str, s.values))
+            print(f"{s.workload};{s.axis};{values_str}")
+        return
 
     # Build workload list based on preset
     preset_func = PRESETS[args.preset]

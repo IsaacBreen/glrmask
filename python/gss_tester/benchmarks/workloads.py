@@ -4,7 +4,7 @@ import math
 import random
 import time
 import tracemalloc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..interface import MergeableInt, GSS  # Type hints only
@@ -609,6 +609,46 @@ WORKLOAD_FUNCS: Dict[str, Callable[[GSSFactory, WorkloadConfig], JsonDict]] = {
     "apply_prune": workload_apply_prune,
     "fuzz": workload_fuzz,
 }
+
+# ----------------------------
+# Sweep Presets
+# ----------------------------
+
+@dataclass
+class SweepConfig:
+    workload: str
+    axis: str
+    values: List[Any] = field(default_factory=list)
+
+
+SWEEP_PRESETS: Dict[str, List[SweepConfig]] = {
+    "tiny": [
+        SweepConfig("push_scaling", "prefix_depth", [10, 25, 50, 75]),
+        SweepConfig("pop_common_parent", "parent_prefix_depth", [10, 25, 50, 75]),
+    ],
+    "small": [
+        SweepConfig("push_scaling", "prefix_depth", [20, 50, 100, 150]),
+        SweepConfig("pop_common_parent", "parent_prefix_depth", [20, 50, 100, 150]),
+        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [20, 50, 100, 150]),
+    ],
+    "medium": [
+        SweepConfig("push_scaling", "prefix_depth", [100, 250, 500, 800]),
+        SweepConfig("pop_common_parent", "parent_prefix_depth", [100, 250, 500, 800]),
+        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [100, 250, 500, 800]),
+        SweepConfig("merge_surface_changes", "depth", [4, 5, 6, 7]),
+    ],
+    "large": [
+        SweepConfig("push_scaling", "prefix_depth", [500, 1000, 2000, 3000]),
+        SweepConfig("pop_common_parent", "parent_prefix_depth", [500, 1000, 2000, 3000]),
+        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [500, 1000, 2000, 3000]),
+        SweepConfig("merge_surface_changes", "depth", [5, 6, 7, 8]),
+    ],
+}
+
+def get_preset_sweeps(preset: str) -> List[SweepConfig]:
+    """Returns the list of predefined SweepConfigs for a given preset name."""
+    return SWEEP_PRESETS.get(preset, [])
+
 
 # ---------------------------------------------------------------------------
 # Ideal scaling expectations registry

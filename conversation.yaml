@@ -3662,7 +3662,7 @@ local_system:
       import random
       import time
       import tracemalloc
-      from dataclasses import dataclass
+      from dataclasses import dataclass, field
       from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
       from ..interface import MergeableInt, GSS  # Type hints only
@@ -4268,6 +4268,46 @@ local_system:
           "fuzz": workload_fuzz,
       }
 
+      # ----------------------------
+      # Sweep Presets
+      # ----------------------------
+
+      @dataclass
+      class SweepConfig:
+          workload: str
+          axis: str
+          values: List[Any] = field(default_factory=list)
+
+
+      SWEEP_PRESETS: Dict[str, List[SweepConfig]] = {
+          "tiny": [
+              SweepConfig("push_scaling", "prefix_depth", [10, 25, 50, 75]),
+              SweepConfig("pop_common_parent", "parent_prefix_depth", [10, 25, 50, 75]),
+          ],
+          "small": [
+              SweepConfig("push_scaling", "prefix_depth", [20, 50, 100, 150]),
+              SweepConfig("pop_common_parent", "parent_prefix_depth", [20, 50, 100, 150]),
+              SweepConfig("merge_after_prefix_mutations", "prefix_depth", [20, 50, 100, 150]),
+          ],
+          "medium": [
+              SweepConfig("push_scaling", "prefix_depth", [100, 250, 500, 800]),
+              SweepConfig("pop_common_parent", "parent_prefix_depth", [100, 250, 500, 800]),
+              SweepConfig("merge_after_prefix_mutations", "prefix_depth", [100, 250, 500, 800]),
+              SweepConfig("merge_surface_changes", "depth", [4, 5, 6, 7]),
+          ],
+          "large": [
+              SweepConfig("push_scaling", "prefix_depth", [500, 1000, 2000, 3000]),
+              SweepConfig("pop_common_parent", "parent_prefix_depth", [500, 1000, 2000, 3000]),
+              SweepConfig("merge_after_prefix_mutations", "prefix_depth", [500, 1000, 2000, 3000]),
+              SweepConfig("merge_surface_changes", "depth", [5, 6, 7, 8]),
+          ],
+      }
+
+      def get_preset_sweeps(preset: str) -> List[SweepConfig]:
+          """Returns the list of predefined SweepConfigs for a given preset name."""
+          return SWEEP_PRESETS.get(preset, [])
+
+
       # ---------------------------------------------------------------------------
       # Ideal scaling expectations registry
       # ---------------------------------------------------------------------------
@@ -4336,7 +4376,7 @@ local_system:
       import socket
 
       from .instrumentation import TimingRecorder, GSSFactory
-      from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig
+      from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig, get_preset_sweeps
       from copy import deepcopy
 
 
@@ -4361,6 +4401,7 @@ local_system:
           parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
           parser.add_argument("--sweep-axis", default=None, help="Parameter name to sweep (e.g., prefix_depth).")
           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
+          parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
           args = parser.parse_args()
 
           # Load implementation
@@ -4370,6 +4411,14 @@ local_system:
           except (ImportError, AttributeError) as e:
               print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
               sys.exit(1)
+
+          if args.list_sweeps:
+              sweeps = get_preset_sweeps(args.preset)
+              for s in sweeps:
+                  # Format: workload;axis;v1 v2 v3...
+                  values_str = " ".join(map(str, s.values))
+                  print(f"{s.workload};{s.axis};{values_str}")
+              return
 
           # Build workload list based on preset
           preset_func = PRESETS[args.preset]
@@ -4783,10 +4832,10 @@ local_system:
       # saving JSON results, and producing comparative analyses and plots.
       #
       # Usage (Preset Mode):
-      #   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [filter_args]]
+      #   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [runner_args]]
       #
       # Usage (Sweep Mode for scaling analysis):
-      #   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> --sweep-axis <param> --sweep-values <v1> <v2> ...
+      #   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> ...
       #
       # Notes:
       #   - Each implementation is specified as 'module.ClassName' or a .py path.
@@ -4794,13 +4843,13 @@ local_system:
       #     directly to the benchmark runner script.
       #
       # Examples:
-      #   # Run the 'small' preset for two implementations
+      #   # Run 'small' preset workloads AND all predefined 'small' sweeps
       #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
       #
       #   # Run only the 'push_scaling' workload from the 'tiny' preset
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
       #
-      #   # Run a scaling sweep for 'push_scaling' by varying 'prefix_depth'
+      #   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
       # ==============================================================================
 
@@ -4834,6 +4883,15 @@ local_system:
         exit 1
       fi
 
+      # Check if the user is asking for a manual sweep.
+      is_manual_sweep=false
+      for arg in "${EXTRA_ARGS[@]}"; do
+        if [[ "$arg" == "--sweep-workload" ]]; then
+          is_manual_sweep=true
+          break
+        fi
+      done
+
       RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
       mkdir -p "$RESULTS_DIR"
       echo "Benchmark results will be saved in: $RESULTS_DIR"
@@ -4846,9 +4904,6 @@ local_system:
       echo "---"
 
       for full_impl_path in "${IMPLS[@]}"; do
-        echo
-        echo ">>> Running benches for: $full_impl_path"
-
         if [[ "$full_impl_path" == *.py ]]; then
           module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
           base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
@@ -4861,22 +4916,93 @@ local_system:
           class_name="${full_impl_name##*.}"
         fi
 
-        output_file="${RESULTS_DIR}/${full_impl_name}.json"
-        cmd=(python -m gss_tester.benchmarks.runner
-            "$module_name"
-            "$class_name"
-            --preset "$PRESET"
-            --output "$output_file"
-            "${EXTRA_ARGS[@]}"
-        )
-        echo "${cmd[*]}"
-        if "${cmd[@]}"; then
-            echo ">>> Finished benches for: $full_impl_path"
+        if $is_manual_sweep; then
+          # --- Run Manual Sweep ---
+          echo
+          echo ">>> Running manual sweep for: $full_impl_path"
+          output_file="${RESULTS_DIR}/${full_impl_name}.manual_sweep.json"
+          cmd=(python -m gss_tester.benchmarks.runner
+              "$module_name" "$class_name" --preset "$PRESET" --output "$output_file" "${EXTRA_ARGS[@]}")
+          echo "${cmd[*]}"
+          if "${cmd[@]}"; then
+              echo ">>> Finished manual sweep for: $full_impl_path"
+          else
+              exit_code=$?
+              [ $exit_code -eq 130 ] && echo ">>> Sweep for $full_impl_path interrupted." || echo ">>> Sweep for $full_impl_path failed."
+          fi
         else
-            exit_code=$?
-            if [ $exit_code -eq 130 ]; then
-                echo
-                echo ">>> Bench for $full_impl_path interrupted. Skipping."
+          # --- Run Preset Workloads ---
+          echo
+          echo ">>> Running preset workloads for: $full_impl_path"
+          output_file_preset="${RESULTS_DIR}/${full_impl_name}.preset.json"
+          preset_cmd=(python -m gss_tester.benchmarks.runner
+              "$module_name" "$class_name" --preset "$PRESET" --output "$output_file_preset" "${EXTRA_ARGS[@]}")
+          echo "${preset_cmd[*]}"
+          if "${preset_cmd[@]}"; then
+              echo ">>> Finished preset workloads for: $full_impl_path"
+          else
+              exit_code=$?
+              [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
+          fi
+
+          # --- Run Preset Sweeps ---
+          echo
+          echo ">>> Checking for preset sweeps for preset '$PRESET'..."
+          sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
+
+          if [ -z "$sweeps_to_run" ]; then
+            echo "No predefined sweeps for preset '$PRESET'."
+          else
+            # Use a while loop to read line by line (in case of multiple sweeps)
+            while IFS=';' read -r workload axis values; do
+              echo
+              echo ">>> Running preset sweep for '$workload' on axis '$axis'"
+              output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+
+              sweep_cmd=(python -m gss_tester.benchmarks.runner
+                  "$module_name"
+                  "$class_name"
+                  --preset "$PRESET"
+                  --output "$output_file_sweep"
+                  --sweep-workload "$workload"
+                  --sweep-axis "$axis"
+                  --sweep-values $values # No quotes to allow word splitting
+              )
+              echo "${sweep_cmd[*]}"
+              if "${sweep_cmd[@]}"; then
+                  echo ">>> Finished sweep for: $workload"
+              else
+                  exit_code=$?
+                  [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
+              fi
+            done <<< "$sweeps_to_run"
+          fi
+        fi
+      done
+
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+      # Analyze and plot
+      echo "Analyzing results..."
+
+      # Check if any result files were created before analyzing
+      if [ -z "$(find "$RESULTS_DIR" -maxdepth 1 -name '*.json' -print -quit)" ]; then
+          echo "No result files were generated. Skipping analysis."
+      else
+          cmd=(python -m gss_tester.benchmarks.analyzer
+              "${RESULTS_DIR}"/*.json
+              --outdir "${RESULTS_DIR}/analysis")
+          echo "${cmd[*]}"
+          "${cmd[@]}"
+
+          echo
+          echo "---"
+          echo "Benchmark analysis complete."
+          echo "Summary printed above. Plots saved to: ${RESULTS_DIR}/analysis/plots"
+          echo "Full JSON results are in: $RESULTS_DIR"
+      fi
             else
                 echo
                 echo ">>> Bench for $full_impl_path failed with exit code $exit_code. Skipping."
@@ -8298,5 +8424,431 @@ messages:
     metadata:
   - user: 'Changes committed with message: "docs: Update run_benches.sh for sweep
       mode and scaling analysis"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      I liked having these tiny, small, medium, large presets. I want to be able to do that with everything. ie I should be able to run
+      ```bash
+      bash ./gss_tester/run_benches.sh tiny gss_tester/implementations/reference_impl.py
+      ```
+      and just go, do all kinds of analysis this whole benchmark supports, incl sweeps.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to integrate predefined scaling sweeps into the benchmark presets, allowing a single command to run both the standard workloads and a comprehensive scaling analysis. The git diffs follow.
+
+      ### Step-by-step Instructions
+
+      1.  **Define Preset Sweeps (`workloads.py`)**
+          *   Open `python/gss_tester/benchmarks/workloads.py`.
+          *   Import the `dataclass` decorator.
+          *   Define a new `SweepConfig` dataclass to structure sweep parameters (`workload`, `axis`, `values`).
+          *   Create a `SWEEP_PRESETS` dictionary that maps preset names (`tiny`, `small`, etc.) to a list of `SweepConfig` instances, defining which scaling analyses to run for each preset.
+          *   Add a helper function `get_preset_sweeps` to retrieve these configurations.
+
+      2.  **Expose Preset Sweeps via CLI (`runner.py`)**
+          *   Open `python/gss_tester/benchmarks/runner.py`.
+          *   Import the new `get_preset_sweeps` function.
+          *   Add a new command-line argument, `--list-sweeps`, which will instruct the runner to print the predefined sweeps for a given preset in a machine-readable format and then exit.
+          *   Implement the logic for this new flag in the `main` function.
+
+      3.  **Orchestrate Preset and Sweep Runs (`run_benches.sh`)**
+          *   Open `python/gss_tester/run_benches.sh`.
+          *   The script will be updated to distinguish between three modes:
+              1.  **Manual Sweep:** If the user provides `--sweep-workload` arguments, the script runs only that specific sweep (existing behavior).
+              2.  **Preset Workloads:** If no manual sweep is specified, the script first runs the standard preset workloads (e.g., `merge_surface_changes`, `fuzz`, etc.) and saves the results to a `.preset.json` file.
+              3.  **Automatic Preset Sweeps:** After the preset workloads, the script calls the runner with `--list-sweeps` to get the predefined sweeps for that preset. It then loops through each defined sweep, running it and saving the results to a uniquely named `.sweep.<workload>.<axis>.json` file.
+          *   The final analysis step will automatically collect all generated JSON files (`*.json`), ensuring that both preset and sweep results are analyzed together.
+
+      These changes create a powerful, single-command workflow for comprehensive benchmarking.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
+      index d61fd5f..9676e27 100644
+      --- a/python/gss_tester/benchmarks/workloads.py
+      +++ b/python/gss_tester/benchmarks/workloads.py
+      @@ -1,7 +1,7 @@
+       from __future__ import annotations
+       
+       import math
+       import random
+       import time
+       import tracemalloc
+      -from dataclasses import dataclass
+      +from dataclasses import dataclass, field
+       from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+       
+       from ..interface import MergeableInt, GSS  # Type hints only
+      @@ -321,6 +321,54 @@ WORKLOAD_FUNCS: Dict[str, Callable[[GSSFactory, WorkloadConfig], JsonDict]] = {
+           "apply_prune": workload_apply_prune,
+           "fuzz": workload_fuzz,
+       }
+      +
+      +# ----------------------------
+      +# Sweep Presets
+      +# ----------------------------
+      +
+      +@dataclass
+      +class SweepConfig:
+      +    workload: str
+      +    axis: str
+      +    values: List[Any] = field(default_factory=list)
+      +
+      +
+      +SWEEP_PRESETS: Dict[str, List[SweepConfig]] = {
+      +    "tiny": [
+      +        SweepConfig("push_scaling", "prefix_depth", [10, 25, 50, 75]),
+      +        SweepConfig("pop_common_parent", "parent_prefix_depth", [10, 25, 50, 75]),
+      +    ],
+      +    "small": [
+      +        SweepConfig("push_scaling", "prefix_depth", [20, 50, 100, 150]),
+      +        SweepConfig("pop_common_parent", "parent_prefix_depth", [20, 50, 100, 150]),
+      +        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [20, 50, 100, 150]),
+      +    ],
+      +    "medium": [
+      +        SweepConfig("push_scaling", "prefix_depth", [100, 250, 500, 800]),
+      +        SweepConfig("pop_common_parent", "parent_prefix_depth", [100, 250, 500, 800]),
+      +        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [100, 250, 500, 800]),
+      +        SweepConfig("merge_surface_changes", "depth", [4, 5, 6, 7]),
+      +    ],
+      +    "large": [
+      +        SweepConfig("push_scaling", "prefix_depth", [500, 1000, 2000, 3000]),
+      +        SweepConfig("pop_common_parent", "parent_prefix_depth", [500, 1000, 2000, 3000]),
+      +        SweepConfig("merge_after_prefix_mutations", "prefix_depth", [500, 1000, 2000, 3000]),
+      +        SweepConfig("merge_surface_changes", "depth", [5, 6, 7, 8]),
+      +    ],
+      +}
+      +
+      +def get_preset_sweeps(preset: str) -> List[SweepConfig]:
+      +    """Returns the list of predefined SweepConfigs for a given preset name."""
+      +    return SWEEP_PRESETS.get(preset, [])
+      +
+       
+       # ---------------------------------------------------------------------------
+       # Ideal scaling expectations registry
+
+      ``````diff
+      diff --git a/python/gss_tester/benchmarks/runner.py b/python/gss_tester/benchmarks/runner.py
+      index f3a2527..5a550d5 100644
+      --- a/python/gss_tester/benchmarks/runner.py
+      +++ b/python/gss_tester/benchmarks/runner.py
+      @@ -6,7 +6,7 @@
+       import socket
+       
+       from .instrumentation import TimingRecorder, GSSFactory
+      -from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig
+      +from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig, get_preset_sweeps
+       from copy import deepcopy
+       
+       
+      @@ -26,6 +26,7 @@
+           parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
+           parser.add_argument("--sweep-axis", default=None, help="Parameter name to sweep (e.g., prefix_depth).")
+           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
+      +    parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
+           args = parser.parse_args()
+       
+           # Load implementation
+      @@ -36,6 +37,14 @@
+               print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+               sys.exit(1)
+       
+      +    if args.list_sweeps:
+      +        sweeps = get_preset_sweeps(args.preset)
+      +        for s in sweeps:
+      +            # Format: workload;axis;v1 v2 v3...
+      +            values_str = " ".join(map(str, s.values))
+      +            print(f"{s.workload};{s.axis};{values_str}")
+      +        return
+      +
+           # Build workload list based on preset
+           preset_func = PRESETS[args.preset]
+           base_preset = preset_func()
+
+      ``````diff
+      diff --git a/python/gss_tester/run_benches.sh b/python/gss_tester/run_benches.sh
+      index 00c2423..389201f 100755
+      --- a/python/gss_tester/run_benches.sh
+      +++ b/python/gss_tester/run_benches.sh
+      @@ -5,10 +5,10 @@
+       # saving JSON results, and producing comparative analyses and plots.
+       #
+       # Usage (Preset Mode):
+      -#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [filter_args]]
+      +#   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [runner_args]]
+       #
+       # Usage (Sweep Mode for scaling analysis):
+      -#   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> --sweep-axis <param> --sweep-values <v1> <v2> ...
+      +#   ./gss_tester/run_benches.sh <preset> <impl> -- --sweep-workload <name> ...
+       #
+       # Notes:
+       #   - Each implementation is specified as 'module.ClassName' or a .py path.
+      @@ -16,13 +16,13 @@
+       #     directly to the benchmark runner script.
+       #
+       # Examples:
+      -#   # Run the 'small' preset for two implementations
+      +#   # Run 'small' preset workloads AND all predefined 'small' sweeps
+       #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+       #
+       #   # Run only the 'push_scaling' workload from the 'tiny' preset
+       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+       #
+      -#   # Run a scaling sweep for 'push_scaling' by varying 'prefix_depth'
+      +#   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
+       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
+       # ==============================================================================
+       
+      @@ -53,6 +53,14 @@
+         exit 1
+       fi
+       
+      +# Check if the user is asking for a manual sweep.
+      +is_manual_sweep=false
+      +for arg in "${EXTRA_ARGS[@]}"; do
+      +  if [[ "$arg" == "--sweep-workload" ]]; then
+      +    is_manual_sweep=true
+      +    break
+      +  fi
+      +done
+      +
+       RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+       mkdir -p "$RESULTS_DIR"
+       echo "Benchmark results will be saved in: $RESULTS_DIR"
+      @@ -65,50 +73,89 @@
+       echo "---"
+       
+       for full_impl_path in "${IMPLS[@]}"; do
+      -  echo
+      -  echo ">>> Running benches for: $full_impl_path"
+      -
+         if [[ "$full_impl_path" == *.py ]]; then
+           module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+           base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
+           class_name_base=$(echo "$base_name" | sed 's/_impl$//')
+           class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
+           full_impl_name="${module_name}.${class_name}"
+         else
+           full_impl_name="$full_impl_path"
+           module_name="${full_impl_name%.*}"
+           class_name="${full_impl_name##*.}"
+         fi
+       
+      -  output_file="${RESULTS_DIR}/${full_impl_name}.json"
+      -  cmd=(python -m gss_tester.benchmarks.runner
+      -      "$module_name"
+      -      "$class_name"
+      -      --preset "$PRESET"
+      -      --output "$output_file"
+      -      "${EXTRA_ARGS[@]}"
+      -  )
+      -  echo "${cmd[*]}"
+      -  if "${cmd[@]}"; then
+      -      echo ">>> Finished benches for: $full_impl_path"
+      +  if $is_manual_sweep; then
+      +    # --- Run Manual Sweep ---
+      +    echo
+      +    echo ">>> Running manual sweep for: $full_impl_path"
+      +    output_file="${RESULTS_DIR}/${full_impl_name}.manual_sweep.json"
+      +    cmd=(python -m gss_tester.benchmarks.runner
+      +        "$module_name" "$class_name" --preset "$PRESET" --output "$output_file" "${EXTRA_ARGS[@]}")
+      +    echo "${cmd[*]}"
+      +    if "${cmd[@]}"; then
+      +        echo ">>> Finished manual sweep for: $full_impl_path"
+      +    else
+      +        exit_code=$?
+      +        [ $exit_code -eq 130 ] && echo ">>> Sweep for $full_impl_path interrupted." || echo ">>> Sweep for $full_impl_path failed."
+      +    fi
+         else
+      -      exit_code=$?
+      -      if [ $exit_code -eq 130 ]; then
+      -          echo
+      -          echo ">>> Bench for $full_impl_path interrupted. Skipping."
+      +    # --- Run Preset Workloads ---
+      +    echo
+      +    echo ">>> Running preset workloads for: $full_impl_path"
+      +    output_file_preset="${RESULTS_DIR}/${full_impl_name}.preset.json"
+      +    preset_cmd=(python -m gss_tester.benchmarks.runner
+      +        "$module_name" "$class_name" --preset "$PRESET" --output "$output_file_preset" "${EXTRA_ARGS[@]}")
+      +    echo "${preset_cmd[*]}"
+      +    if "${preset_cmd[@]}"; then
+      +        echo ">>> Finished preset workloads for: $full_impl_path"
+      +    else
+      +        exit_code=$?
+      +        [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
+      +    fi
+      +
+      +    # --- Run Preset Sweeps ---
+      +    echo
+      +    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
+      +    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
+      +
+      +    if [ -z "$sweeps_to_run" ]; then
+      +      echo "No predefined sweeps for preset '$PRESET'."
+      +    else
+      +      # Use a while loop to read line by line (in case of multiple sweeps)
+      +      while IFS=';' read -r workload axis values; do
+      +        echo
+      +        echo ">>> Running preset sweep for '$workload' on axis '$axis'"
+      +        output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+      +
+      +        sweep_cmd=(python -m gss_tester.benchmarks.runner
+      +            "$module_name"
+      +            "$class_name"
+      +            --preset "$PRESET"
+      +            --output "$output_file_sweep"
+      +            --sweep-workload "$workload"
+      +            --sweep-axis "$axis"
+      +            --sweep-values $values # No quotes to allow word splitting
+      +        )
+      +        echo "${sweep_cmd[*]}"
+      +        if "${sweep_cmd[@]}"; then
+      +            echo ">>> Finished sweep for: $workload"
+      +        else
+      +            exit_code=$?
+      +            [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
+      +        fi
+      +      done <<< "$sweeps_to_run"
+      +    fi
+      +  fi
+      +done
+      +
+      +echo
+      +echo "All benchmark runs completed."
+      +echo "---"
+      +
+      +# Analyze and plot
+      +echo "Analyzing results..."
+      +
+      +# Check if any result files were created before analyzing
+      +if [ -z "$(find "$RESULTS_DIR" -maxdepth 1 -name '*.json' -print -quit)" ]; then
+      +    echo "No result files were generated. Skipping analysis."
+      +else
+      +    cmd=(python -m gss_tester.benchmarks.analyzer
+      +        "${RESULTS_DIR}"/*.json
+      +        --outdir "${RESULTS_DIR}/analysis")
+      +    echo "${cmd[*]}"
+      +    "${cmd[@]}"
+      +
+      +    echo
+      +    echo "---"
+      +    echo "Benchmark analysis complete."
+      +    echo "Summary printed above. Plots saved to: ${RESULTS_DIR}/analysis/plots"
+      +    echo "Full JSON results are in: $RESULTS_DIR"
+      +fi
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/benchmarks/workloads.py
+      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/benchmarks/workloads.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/benchmarks/runner.py
+      Applying patch to 'python/gss_tester/benchmarks/runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/benchmarks/runner.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/gss_tester/run_benches.sh
+      Applying patch to 'python/gss_tester/run_benches.sh' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/run_benches.sh.
+    metadata:
+  - user: 'Changes committed with message: "feat: Integrate preset scaling sweeps
+      into benchmark runner and script"'
     metadata:
 ...
