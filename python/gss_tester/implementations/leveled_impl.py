@@ -84,12 +84,29 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def _validate_node(self, node: Upper[T, Acc]) -> None:
         """Recursive helper for validation."""
         if isinstance(node, Interface):
+            # An Interface node has Lower children. We need to validate their depths recursively.
+            def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
+                for children_at_depth in n.children.values():
+                    for depth, child in children_at_depth.items():
+                        if depth != child._max_depth():
+                            raise ValueError(
+                                "LeveledGSS validation failed: incorrect max_depth for Lower child. "
+                                f"Expected {depth}, got {child._max_depth()}. Node: {n}"
+                            )
+                        _validate_lower_recursively(child)
+
+            _validate_lower_recursively(node)
             return  # Leaf of the upper tree
 
         # It must be an UpperBranch
-        # First, recurse on children
+        # First, recurse on children and check their depths
         for children_at_depth in node.children.values():
-            for child in children_at_depth.values():
+            for depth, child in children_at_depth.items():
+                if depth != child._max_depth():
+                    raise ValueError(
+                        "LeveledGSS validation failed: incorrect max_depth for Upper child. "
+                        f"Expected {depth}, got {child._max_depth()}. Node: {node}"
+                    )
                 self._validate_node(child)
 
         # Now, check for promotion condition on the current node
