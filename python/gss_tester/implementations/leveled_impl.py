@@ -197,39 +197,37 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         Steps:
           1) Merge duplicate stacks (same values) by merging their accumulators.
-          2) Compile the result into a trie of Upper/Lower nodes.
-          3) Perform local promotions where possible.
+          2) Compile the result into an Upper trie (top-of-stack first).
+          3) Optionally promote local regions to Interface where possible.
         """
-        # 1) Merge duplicates (without sorting overhead)
+        # 1) Merge duplicates
         merged: Dict[Tuple[T, ...], Acc] = {}
         for vals, acc in stacks:
             key = tuple(vals)
             prev = merged.get(key)
             merged[key] = acc if prev is None else prev.merge(acc)
 
-        # 2) Build a simple top-of-stack-first trie:
-        trie: Dict[T, Dict[str, Any]] = {}
-        root_empty: Optional[Acc] = None
-
-        def insert(seq: Tuple[T, ...], acc: Acc) -> None:
-            nonlocal root_empty
-            if not seq:
-                root_empty = _merge_opt(root_empty, acc)
-                return
-            node = trie
-            rev = list(reversed(seq))
-            for i, v in enumerate(rev):
-                entry = node.setdefault(v, {"end": None, "sub": {}})
-                if i == len(rev) - 1:
-                    entry["end"] = _merge_opt(entry["end"], acc)
-                else:
-                    node = entry["sub"]  # descend
-
+        # Separate root-empty and reversed sequences (top-of-stack first)
+        root_empty: Optional[Acc] = merged.pop((), None) if () in merged else None
+        rev_items: List[Tuple[Tuple[T, ...], Acc]] = []
         for key, acc in merged.items():
-            insert(key, acc)
+            rev_items.append((tuple(reversed(key)), acc))
 
-        def build_upper(subtrie: Dict[T, Dict[str, Any]], empty_acc: Optional[Acc]) -> Upper[T, Acc]:
-            # Compile children first
+        def build_from_rev(items: List[Tuple[Tuple[T, ...], Acc]], empty_acc: Optional[Acc]) -> Upper[T, Acc]:
+            if not items:
+                return UpperBranch(children={}, empty=empty_acc)
+
+            # Group by first element; collect ends and recursive tails
+            ends: Dict[T, Acc] = {}
+            tails: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
+            for seq, acc in items:
+                v = seq[0]
+                if len(seq) == 1:
+                    prev = ends.get(v)
+                    ends[v] = acc if prev is None else prev.merge(acc)
+                else:
+                    tails.setdefault(v, []).append((seq[1:], acc))
+
             built_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
 
             def add_child(v: T, child: Upper[T, Acc]) -> None:
@@ -239,20 +237,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 else:
                     bucket[child._max_depth] = child
 
-            for v, e in subtrie.items():
-                end_acc: Optional[Acc] = e.get("end")
-                sub = e.get("sub", {})
+            # Add child for "end" stacks and for recursive tails (if any)
+            for v, acc in ends.items():
+                add_child(v, UpperBranch(children={}, empty=acc))
+            for v, group in tails.items():
+                child = build_from_rev(group, None)
+                add_child(v, child)
 
-                if end_acc is not None:
-                    add_child(v, UpperBranch(children={}, empty=end_acc))
-                if sub:
-                    add_child(v, build_upper(sub, None))
+            return try_promote(UpperBranch(children=built_children, empty=empty_acc))
 
-            # Assemble as UpperBranch then try to promote if possible
-            ub = UpperBranch(children=built_children, empty=empty_acc)
-            return try_promote(ub)
-
-        return LeveledGSS(build_upper(trie, root_empty))
+        return LeveledGSS(build_from_rev(rev_items, root_empty))
 
     # ------------------------------
     # Public API
@@ -284,12 +278,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 if node.empty is not None:
                     emit_stack(pref_tos, node.empty)
+                # Leaf Interface with no children and no explicit empty represents a stack ending here with `acc`.
                 if not node.children and node.empty is None:
                     emit_stack(pref_tos, node.acc)
-                else:
-                    for v, kids in node.children.items():
-                        for child in kids.values():
-                            dfs_lower(child, pref_tos + [v], node.acc)
+                for v, kids in node.children.items():
+                    for child in kids.values():
+                        dfs_lower(child, pref_tos + [v], node.acc)
 
         dfs_upper(self.inner, [])
         return _canonicalize_and_sort(out)
@@ -303,6 +297,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self
 
         if isinstance(self.inner, Interface):
+            # The interface pins acc for everything underneath. After push, the Interface remains,
+            # and its lower children become a single lower child under `value`.
             had_empty_stack = (self.inner.empty is not None) or (not self.inner.children)
             lower_node = Lower(children=self.inner.children, empty=had_empty_stack)
             new_children: Dict[T, Dict[int, Lower[T]]] = {value: {lower_node._max_depth: lower_node}}
@@ -318,20 +314,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         Empty stacks are discarded.
         """
         ub = _as_upperbranch(self.inner)
-
-        # Merge all direct children (across all top-of-stack values).
         all_children = [child for kids in ub.children.values() for child in kids.values()]
         if not all_children:
             return LeveledGSS(UpperBranch(children={}, empty=None))
-        if len(all_children) == 1:
-            merged: Upper[T, Acc] = all_children[0]
-        else:
-            it = iter(all_children)
-            merged = next(it)
-            for child in it:
-                merged = merge_upper(merged, child)
-
-        # Ensure canonical form at the new root
+        it = iter(all_children)
+        merged: Upper[T, Acc] = next(it)
+        for child in it:
+            merged = merge_upper(merged, child)
         merged_ub = _as_upperbranch(merged)
         return LeveledGSS(try_promote(merged_ub))
 
