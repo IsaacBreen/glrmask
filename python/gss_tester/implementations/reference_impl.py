@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import reduce
 from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
 
-from .interface import GSS, T, Acc
+from ..interface import GSS, T, Acc
 
 
 @dataclass(eq=False)

@@ -1,6 +1,6 @@
 import inspect
 from typing import Generator, Tuple, Any, Type
-from .interface import GSS, MergeableInt
+from ..interface import GSS, MergeableInt
 from .fuzzer import run_fuzz_test
 
 def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:

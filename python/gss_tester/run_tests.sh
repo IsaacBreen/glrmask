@@ -85,7 +85,7 @@ for full_impl_path in "${ALL_IMPLS[@]}"; do
 
     output_file="${RESULTS_DIR}/${full_impl_name}.json"
 
-    cmd=(python -m gss_tester.runner
+    cmd=(python -m gss_tester.tests.runner
         "$module_name"
         "$class_name"
         --output "$output_file")
@@ -119,7 +119,7 @@ if [ ! -f "$REFERENCE_RESULT_FILE" ]; then
     exit 1
 fi
 
-cmd=(python -m gss_tester.analyzer
+cmd=(python -m gss_tester.tests.analyzer
     "${RESULTS_DIR}"/*.json
     --reference "$REFERENCE_RESULT_FILE")
 echo "${cmd[*]}"

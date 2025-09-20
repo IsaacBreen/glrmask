@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 from collections import defaultdict
 
-from .interface import GSS, T, Acc
+from ..interface import GSS, T, Acc
 
 
 # ------------------------------

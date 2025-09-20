@@ -1,7 +1,7 @@
 import random
 from typing import Generator, Any, Type, List, Callable
 
-from .interface import GSS, MergeableInt
+from ..interface import GSS, MergeableInt
 
 
 def run_fuzz_test(

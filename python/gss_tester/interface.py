@@ -128,7 +128,7 @@ class GSS(ABC, Generic[T, Acc]):
         Converts the GSS to its canonical ReferenceGSS representation.
         This involves merging accumulators for identical stacks.
         """
-        from .reference_impl import ReferenceGSS
+        from .implementations.reference_impl import ReferenceGSS
         return ReferenceGSS.from_stacks(self.to_stacks())
 
     def __str__(self) -> str:
