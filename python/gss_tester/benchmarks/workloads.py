@@ -63,10 +63,10 @@ def mutate_apply(g: TimedGSS, amount: int) -> TimedGSS:
     func = lambda acc, amt=amount: acc + amt
     return g.apply(func)
 
-def mutate_prune_half(g: TimedGSS) -> TimedGSS:
-    # Keep roughly half: threshold randomized to prune about half for MergeableInt accumulators that start at 0.
-    # We annotate stacks randomly by applying a function first
-    rng = random.Random(12345)
+def mutate_prune_half(g: TimedGSS, salt: int) -> TimedGSS:
+    # Keep roughly half: threshold pseudo-randomly to prune about half for MergeableInt accumulators that start at 0.
+    # We annotate stacks by applying a function first, using a salted RNG for deterministic variance.
+    rng = random.Random(12345 + salt)
     # Apply: add small random to acc to create some variance
     g = g.apply(lambda acc: acc + rng.randint(0, 1))
     threshold = 0  # keep those > 0
@@ -139,7 +139,7 @@ def workload_merge_surface_changes(factory: GSSFactory, cfg: WorkloadConfig) -> 
             elif mutation == "apply":
                 mutated.append(mutate_apply(g, apply_amount))
             elif mutation == "prune_half":
-                mutated.append(mutate_prune_half(g))
+                mutated.append(mutate_prune_half(g, i))
             elif mutation == "isolate_none":
                 mutated.append(g.isolate(None))
             else:
@@ -293,12 +293,11 @@ def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConf
 
         # Mutate clones
         recorder.start_phase("mutate_clones")
-        rng = random.Random(prefix_depth * clones) # Deterministic seed
         mutated = []
         for i in range(clones):
-            # Apply a different pop/push sequence to each clone
-            pops = rng.randint(0, pop_n)
-            pushes = rng.randint(1, push_n) # Ensure at least one push
+            # Apply a different pop/push sequence to each clone, deterministically based on index
+            pops = i % (pop_n + 1)
+            pushes = (i % push_n) + 1  # Ensure at least one push
             mutated_g = base.popn(pops)
             for j in range(pushes):
                 mutated_g = mutated_g.push(("mut", i, j))

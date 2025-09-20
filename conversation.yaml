@@ -1540,6 +1540,7 @@ local_system:
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
+      import os
       from dataclasses import dataclass, field
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
 
@@ -1605,9 +1606,10 @@ local_system:
           inner: Upper[T, Acc]
 
           def __post_init__(self):
-              self._validate_max_depths()
-              self._validate_no_promotions()
-              self._validate_populated_nodes()
+              if os.environ.get("GSS_TESTER_VALIDATE"):
+                  self._validate_max_depths()
+                  self._validate_no_promotions()
+                  self._validate_populated_nodes()
 
           def _validate_max_depths(self) -> None:
               """Recursively validates that the `_max_depth` of each node is correct."""
@@ -2768,6 +2770,7 @@ local_system:
       import json
       from pathlib import Path
       import sys
+      import os
 
       from .test_spec import run_test_spec
 
@@ -2788,6 +2791,9 @@ local_system:
               help="Path to the output JSON file for the results."
           )
           args = parser.parse_args()
+
+          # Enable expensive validation checks in LeveledGSS for testing.
+          os.environ['GSS_TESTER_VALIDATE'] = '1'
 
           try:
               print(f"Importing {args.implementation_class} from {args.implementation_module}...")
@@ -3933,10 +3939,10 @@ local_system:
           func = lambda acc, amt=amount: acc + amt
           return g.apply(func)
 
-      def mutate_prune_half(g: TimedGSS) -> TimedGSS:
-          # Keep roughly half: threshold randomized to prune about half for MergeableInt accumulators that start at 0.
-          # We annotate stacks randomly by applying a function first
-          rng = random.Random(12345)
+      def mutate_prune_half(g: TimedGSS, salt: int) -> TimedGSS:
+          # Keep roughly half: threshold pseudo-randomly to prune about half for MergeableInt accumulators that start at 0.
+          # We annotate stacks by applying a function first, using a salted RNG for deterministic variance.
+          rng = random.Random(12345 + salt)
           # Apply: add small random to acc to create some variance
           g = g.apply(lambda acc: acc + rng.randint(0, 1))
           threshold = 0  # keep those > 0
@@ -4009,7 +4015,7 @@ local_system:
                   elif mutation == "apply":
                       mutated.append(mutate_apply(g, apply_amount))
                   elif mutation == "prune_half":
-                      mutated.append(mutate_prune_half(g))
+                      mutated.append(mutate_prune_half(g, i))
                   elif mutation == "isolate_none":
                       mutated.append(g.isolate(None))
                   else:
@@ -4163,12 +4169,11 @@ local_system:
 
               # Mutate clones
               recorder.start_phase("mutate_clones")
-              rng = random.Random(prefix_depth * clones) # Deterministic seed
               mutated = []
               for i in range(clones):
-                  # Apply a different pop/push sequence to each clone
-                  pops = rng.randint(0, pop_n)
-                  pushes = rng.randint(1, push_n) # Ensure at least one push
+                  # Apply a different pop/push sequence to each clone, deterministically based on index
+                  pops = i % (pop_n + 1)
+                  pushes = (i % push_n) + 1  # Ensure at least one push
                   mutated_g = base.popn(pops)
                   for j in range(pushes):
                       mutated_g = mutated_g.push(("mut", i, j))
@@ -7733,6 +7738,7 @@ messages:
       ```python 'python/gss_tester/implementations/leveled_impl.py'
       from __future__ import annotations
 
+      import os
       from dataclasses import dataclass, field
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
 
@@ -7798,9 +7804,10 @@ messages:
           inner: Upper[T, Acc]
 
           def __post_init__(self):
-              self._validate_max_depths()
-              self._validate_no_promotions()
-              self._validate_populated_nodes()
+              if os.environ.get("GSS_TESTER_VALIDATE"):
+                  self._validate_max_depths()
+                  self._validate_no_promotions()
+                  self._validate_populated_nodes()
 
           def _validate_max_depths(self) -> None:
               """Recursively validates that the `_max_depth` of each node is correct."""
@@ -8991,6 +8998,7 @@ messages:
       import json
       from pathlib import Path
       import sys
+      import os
 
       from .test_spec import run_test_spec
 
@@ -9011,6 +9019,9 @@ messages:
               help="Path to the output JSON file for the results."
           )
           args = parser.parse_args()
+
+          # Enable expensive validation checks in LeveledGSS for testing.
+          os.environ['GSS_TESTER_VALIDATE'] = '1'
 
           try:
               print(f"Importing {args.implementation_class} from {args.implementation_module}...")
@@ -9303,14 +9314,7 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/tests/test_spec.py
-  - user: |-
-      ```python
-          def __post_init__(self):
-              self._validate_max_depths()
-              self._validate_no_promotions()
-              self._validate_populated_nodes()
-      ```
-      Only run these validation functions when we're testing, ie doing those things in python/gss_tester/tests/
+  - user: There's too much random noise in the benches.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9329,117 +9333,118 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to make the validation in `LeveledGSS` conditional, followed by the corresponding git diffs.
+      Of course. To reduce the random noise in the benchmarks and improve predictability, I'll guide you through a few targeted changes. We will adjust one workload to use a simple, deterministic pattern for its mutations instead of a pseudo-random one, and we will fix a bug in another workload that was causing all "randomized" mutations to be identical.
+
+      These changes will be confined to the file `python/gss_tester/benchmarks/workloads.py`.
 
       ### Step-by-step Instructions
 
-      I will modify the system so that the expensive validation checks inside `LeveledGSS` are only run when executing the test suite. This is achieved by setting an environment variable in the test runner and checking for it in the `LeveledGSS` implementation.
+      1.  **Open the file `python/gss_tester/benchmarks/workloads.py`** in your editor.
 
-      **1. Modify `LeveledGSS` to Check for an Environment Variable**
+      2.  **Modify the `mutate_prune_half` function** to ensure it generates different mutations for different inputs, which is crucial for the benchmark it's used in.
+          *   Find the function definition around line 84, which looks like this:
+              ```python
+              def mutate_prune_half(g: TimedGSS) -> TimedGSS:
+                  # ...
+                  rng = random.Random(12345)
+                  # ...
+              ```
+          *   Change the function signature to accept a new integer argument called `salt`:
+              ```python
+              def mutate_prune_half(g: TimedGSS, salt: int) -> TimedGSS:
+              ```
+          *   Update the `random.Random` initialization to incorporate this `salt`, making the random sequence unique for each salt value:
+              ```python
+              rng = random.Random(12345 + salt)
+              ```
+          *   It's also good practice to update the comments to reflect this change.
 
-      First, I'll edit `python/gss_tester/implementations/leveled_impl.py` to make the validation methods in `__post_init__` conditional.
+      3.  **Update the call to `mutate_prune_half`** within the `workload_merge_surface_changes` function.
+          *   Navigate to the `workload_merge_surface_changes` function (around line 153).
+          *   Locate the `elif` block for the `"prune_half"` mutation.
+          *   Change the line `mutated.append(mutate_prune_half(g))` to pass the clone index `i` as the salt:
+              ```python
+              mutated.append(mutate_prune_half(g, i))
+              ```
 
-      *   **Open the file:** `python/gss_tester/implementations/leveled_impl.py`
-      *   **Add an import:** At the top of the file, add `import os`.
-      *   **Update `__post_init__`:** In the `LeveledGSS` class, wrap the calls to the validation methods inside an `if` statement that checks for the `GSS_TESTER_VALIDATE` environment variable.
+      4.  **Remove randomness from the `workload_merge_after_prefix_mutations` function** by replacing the pseudo-random number generator with deterministic modulo arithmetic.
+          *   Find the `workload_merge_after_prefix_mutations` function (around line 283).
+          *   Delete the line that initializes the random number generator:
+              ```python
+              rng = random.Random(prefix_depth * clones) # Deterministic seed
+              ```
+          *   Replace the lines that generate `pops` and `pushes` with versions that use the loop index `i`:
+              *   Change `pops = rng.randint(0, pop_n)` to `pops = i % (pop_n + 1)`.
+              *   Change `pushes = rng.randint(1, push_n) # Ensure at least one push` to `pushes = (i % push_n) + 1  # Ensure at least one push`.
 
-      The `__post_init__` method will change from this:
-      ```python
-          def __post_init__(self):
-              self._validate_max_depths()
-              self._validate_no_promotions()
-              self._validate_populated_nodes()
-      ```
-      to this:
-      ```python
-          def __post_init__(self):
-              if os.environ.get("GSS_TESTER_VALIDATE"):
-                  self._validate_max_depths()
-                  self._validate_no_promotions()
-                  self._validate_populated_nodes()
-      ```
-
-      **2. Set the Environment Variable in the Test Runner**
-
-      Next, I'll modify the test runner script to set the environment variable before any tests are run.
-
-      *   **Open the file:** `python/gss_tester/tests/runner.py`
-      *   **Add an import:** Add `import os` to the import section at the top.
-      *   **Set the variable:** In the `main` function, immediately after the command-line arguments are parsed, add the line `os.environ['GSS_TESTER_VALIDATE'] = '1'`.
-
-      This ensures the check in `LeveledGSS` will pass whenever you run the tests via this runner script.
+      After applying these edits, the benchmarks will produce more stable and interpretable results.
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes.
+      Here is the git diff that corresponds to the instructions above. You can apply this patch directly.
 
       ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1,5 +1,6 @@
-       from __future__ import annotations
+      diff --git a/python/gss_tester/benchmarks/workloads.py b/python/gss_tester/benchmarks/workloads.py
+      --- a/python/gss_tester/benchmarks/workloads.py
+      +++ b/python/gss_tester/benchmarks/workloads.py
+      @@ -84,16 +84,15 @@
+           func = lambda acc, amt=amount: acc + amt
+           return g.apply(func)
        
-      +import os
-       from dataclasses import dataclass, field
-       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
+      -def mutate_prune_half(g: TimedGSS) -> TimedGSS:
+      -    # Keep roughly half: threshold randomized to prune about half for MergeableInt accumulators that start at 0.
+      -    # We annotate stacks randomly by applying a function first
+      -    rng = random.Random(12345)
+      +def mutate_prune_half(g: TimedGSS, salt: int) -> TimedGSS:
+      +    # Keep roughly half: threshold pseudo-randomly to prune about half for MergeableInt accumulators that start at 0.
+      +    # We annotate stacks by applying a function first, using a salted RNG for deterministic variance.
+      +    rng = random.Random(12345 + salt)
+           # Apply: add small random to acc to create some variance
+           g = g.apply(lambda acc: acc + rng.randint(0, 1))
+           threshold = 0  # keep those > 0
+           predicate = lambda acc, thr=threshold: acc.real > thr
+           return g.prune(predicate)
        
-      @@ -62,9 +63,10 @@
-           inner: Upper[T, Acc]
+       def mutate_isolate_nonexistent(g: TimedGSS) -> TimedGSS:
+           # Isolate a value that's almost surely not present at the top; should return empty.
+      @@ -150,7 +149,7 @@
+                   elif mutation == "apply":
+                       mutated.append(mutate_apply(g, apply_amount))
+                   elif mutation == "prune_half":
+      -                mutated.append(mutate_prune_half(g))
+      +                mutated.append(mutate_prune_half(g, i))
+                   elif mutation == "isolate_none":
+                       mutated.append(g.isolate(None))
+                   else:
+      @@ -298,13 +297,12 @@
        
-           def __post_init__(self):
-      -        self._validate_max_depths()
-      -        self._validate_no_promotions()
-      -        self._validate_populated_nodes()
-      +        if os.environ.get("GSS_TESTER_VALIDATE"):
-      +            self._validate_max_depths()
-      +            self._validate_no_promotions()
-      +            self._validate_populated_nodes()
-       
-           def _validate_max_depths(self) -> None:
-               """Recursively validates that the `_max_depth` of each node is correct."""
-
-      ``````diff
-      diff --git a/python/gss_tester/tests/runner.py b/python/gss_tester/tests/runner.py
-      --- a/python/gss_tester/tests/runner.py
-      +++ b/python/gss_tester/tests/runner.py
-      @@ -2,6 +2,7 @@
-       import importlib
-       import json
-       from pathlib import Path
-       import sys
-      +import os
-       
-       from .test_spec import run_test_spec
-       
-      @@ -23,6 +24,9 @@
-           )
-           args = parser.parse_args()
-       
-      +    # Enable expensive validation checks in LeveledGSS for testing.
-      +    os.environ['GSS_TESTER_VALIDATE'] = '1'
-      +
-           try:
-               print(f"Importing {args.implementation_class} from {args.implementation_module}...")
-               module = importlib.import_module(args.implementation_module)
+               # Mutate clones
+               recorder.start_phase("mutate_clones")
+      -        rng = random.Random(prefix_depth * clones) # Deterministic seed
+               mutated = []
+               for i in range(clones):
+      -            # Apply a different pop/push sequence to each clone
+      -            pops = rng.randint(0, pop_n)
+      -            pushes = rng.randint(1, push_n) # Ensure at least one push
+      +            # Apply a different pop/push sequence to each clone, deterministically based on index
+      +            pops = i % (pop_n + 1)
+      +            pushes = (i % push_n) + 1  # Ensure at least one push
+                   mutated_g = base.popn(pops)
+                   for j in range(pushes):
+                       mutated_g = mutated_g.push(("mut", i, j))
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/tests/runner.py
-      Applying patch to 'python/gss_tester/tests/runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/runner.py.
+      Identified target file: python/gss_tester/benchmarks/workloads.py
+      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/benchmarks/workloads.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Conditionally enable LeveledGSS
-      validation during tests"'
+  - user: 'Changes committed with message: "benchmarks: Make workloads more deterministic
+      by removing random number generation in favor of seeded or index-based logic."'
     metadata:
 ...
