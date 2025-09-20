@@ -3022,22 +3022,22 @@ local_system:
               return LeveledGSS(upper_node)
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Any] = {}
+              memo: Dict[int, Any] = {}
 
               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       new_acc = func(node.acc)
                       new_empty = func(node.empty) if node.empty is not None else None
 
                       if new_acc == node.acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -3063,22 +3063,22 @@ local_system:
                           new_children[v] = kids  # Reuse child dict
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               return LeveledGSS(transform(self.inner))
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+              memo: Dict[int, Optional[Upper[T, Acc]]] = {}
 
               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-                  if node in memo:
-                      return memo[node]
+                  if id(node) in memo:
+                      return memo[id(node)]
 
                   if isinstance(node, Interface):
                       keep_acc = predicate(node.acc)
@@ -3086,21 +3086,21 @@ local_system:
                       new_empty = node.empty if keep_empty else None
 
                       if keep_acc and new_empty == node.empty:
-                          memo[node] = node
+                          memo[id(node)] = node
                           return node
 
                       if not keep_acc and not keep_empty:
-                          memo[node] = None
+                          memo[id(node)] = None
                           return None
 
                       if not keep_acc and keep_empty:
                           res = UpperBranch(children={}, empty=new_empty)
-                          memo[node] = res
+                          memo[id(node)] = res
                           return res
 
                       # keep_acc is True, but empty might have been pruned.
                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                      memo[node] = res
+                      memo[id(node)] = res
                       return res
 
                   # It's an UpperBranch
@@ -3129,16 +3129,16 @@ local_system:
                           new_children[v] = kids  # Reuse
 
                   if not changed:
-                      memo[node] = node
+                      memo[id(node)] = node
                       return node
 
                   if not new_children and new_empty is None:
-                      memo[node] = None
+                      memo[id(node)] = None
                       return None
 
                   res = UpperBranch(children=new_children, empty=new_empty)
                   promoted = try_promote(res)
-                  memo[node] = promoted
+                  memo[id(node)] = promoted
                   return promoted
 
               res_inner = transform(self.inner)
@@ -5330,7 +5330,7 @@ messages:
       filename: python/gss_tester/implementations/reference_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-20_21-03-40
+      Test results will be saved in: gss_test_results/2025-09-20_21-06-37
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -5338,15 +5338,15 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_21-03-40/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_21-03-40/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_21-03-40/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Traceback (most recent call last):
@@ -5373,7 +5373,7 @@ messages:
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_21-03-40/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_21-03-40/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_21-06-37/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 1 equivalence class(es) among 1 implementations.
 
@@ -5388,7 +5388,9 @@ messages:
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-20_21-03-40
+      Full JSON results are in: gss_test_results/2025-09-20_21-06-37
+    metadata:
+  - user: Fix this. Use id(node)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5407,636 +5409,170 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I can help you with your coding questions. Based on the test failure, it looks like there's a `TypeError` in `leveled_impl.py` because the internal dataclasses are defined as `frozen=True` (and are thus expected to be hashable) but contain mutable `dict` attributes, which are not hashable.
+      The `TypeError: unhashable type: 'dict'` occurs because the memoization cache in the `apply` and `prune` methods of `LeveledGSS` attempts to use the node objects as keys. These node objects are dataclasses that contain dictionaries (`children`), which are not hashable.
 
-      I'll guide you through fixing this by introducing an immutable, hashable `frozendict` class and using it for the `children` attributes in your node definitions.
+      To fix this, we will modify the memoization logic to use the unique ID of each node object (`id(node)`) as the key instead. This is a safe approach because the nodes are immutable, and we are memoizing results for specific object instances during a traversal.
+
+      Here are the step-by-step instructions to apply the fix:
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/gss_tester/implementations/leveled_impl.py`:
+      You will need to edit one file: `python/gss_tester/implementations/leveled_impl.py`.
 
-      1.  **Import `Mapping` and `Iterator`:**
-          In `python/gss_tester/implementations/leveled_impl.py`, update the `typing` import to include `Mapping` and `Iterator`.
+      #### 1. Modify `LeveledGSS.apply`
 
-          ```python
-          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Mapping, Iterator
-          ```
+      In `python/gss_tester/implementations/leveled_impl.py`, locate the `apply` method and its nested `transform` function. You will update the memoization logic to use object IDs.
 
-      2.  **Add the `frozendict` class:**
-          Insert the following `frozendict` class definition right after the imports.
+      1.  **Change the memoization dictionary type:**
+          -   Find: `memo: Dict[Any, Any] = {}`
+          -   Replace with: `memo: Dict[int, Any] = {}`
 
-          ```python
-          K = TypeVar('K')
-          V = TypeVar('V')
-          
-          class frozendict(Mapping[K, V]):
-              """An immutable, hashable dictionary."""
-              _d: Dict[K, V]
-              _hash: Optional[int]
-          
-              def __init__(self, *args: Any, **kwargs: Any):
-                  self._d = dict(*args, **kwargs)
-                  self._hash = None
-          
-              def __getitem__(self, key: K) -> V:
-                  return self._d[key]
-          
-              def __iter__(self) -> Iterator[K]:
-                  return iter(self._d)
-          
-              def __len__(self) -> int:
-                  return len(self._d)
-          
-              def __repr__(self) -> str:
-                  return f"{self.__class__.__name__}({self._d})"
-          
-              def __hash__(self) -> int:
-                  if self._hash is None:
-                      self._hash = hash(frozenset(self._d.items()))
-                  return self._hash
-          
-              def __eq__(self, other: object) -> bool:
-                  if isinstance(other, frozendict):
-                      return self._d == other._d
-                  if isinstance(other, dict):
-                      return self._d == other
-                  return NotImplemented
-          ```
+      2.  **Update memoization checks and assignments:**
+          -   Find: `if node in memo:`
+          -   Replace with: `if id(node) in memo:`
+          -   Find: `return memo[node]`
+          -   Replace with: `return memo[id(node)]`
+          -   In the four places where a value is assigned to `memo[node]`, change the key to `id(node)`. For example, `memo[node] = node` becomes `memo[id(node)] = node`.
 
-      3.  **Update Node Dataclasses:**
-          Modify the `children` attribute in `UpperBranch`, `Interface`, and `Lower` to use `frozendict`.
+      #### 2. Modify `LeveledGSS.prune`
 
-          -   For `UpperBranch`:
-              ```diff
-              -    children: Dict[T, Dict[int, Upper[T, Acc]]]
-              +    children: frozendict[T, frozendict[int, Upper[T, Acc]]]
-              ```
-          -   For `Interface`:
-              ```diff
-              -    children: Dict[T, Dict[int, Lower[T]]]
-              +    children: frozendict[T, frozendict[int, Lower[T]]]
-              ```
-          -   For `Lower`:
-              ```diff
-              -    children: Dict[T, Dict[int, Lower[T]]]
-              +    children: frozendict[T, frozendict[int, Lower[T]]]
-              ```
+      Next, apply the same changes to the `prune` method in the same file.
 
-      4.  **Update Dataclass Instantiations:**
-          Now, update all places where these dataclasses are created to wrap the `children` dictionaries with `frozendict`.
+      1.  **Change the memoization dictionary type:**
+          -   Find: `memo: Dict[Any, Optional[Upper[T, Acc]]] = {}`
+          -   Replace with: `memo: Dict[int, Optional[Upper[T, Acc]]] = {}`
 
-          -   In `from_stacks` (inside the `build` nested function):
-              ```diff
-              -                if end_acc is not None:
-              -                    nodes_for_v.append(Interface(children={}, acc=end_acc, empty=None))
-              +                if end_acc is not None:
-              +                    nodes_for_v.append(Interface(children=frozendict(), acc=end_acc, empty=None))
-              ```
-              ```diff
-              -                if len(accs) <= 1:
-              -                    the_acc = accs.pop() if accs else None
-              -                    if the_acc is None:
-              -                        # This is a truly empty GSS.
-              -                        return UpperBranch(children={}, empty=None)
-              -
-              -                    def build_lower(sub_d: Dict[T, Dict[str, Any]]) -> Lower[T]:
-              -                        l_children: Dict[T, Dict[int, Lower[T]]] = {}
-              -                        for v_l, e_l in sub_d.items():
-              -                            sub_l = e_l.get("sub", {})
-              -                            has_end = e_l.get("end") is not None
-              -                            sub_lower = build_lower(sub_l) if sub_l else Lower(children={}, empty=False)
-              -                            node_for_v = Lower(children=sub_lower.children, empty=has_end)
-              -                            l_children[v_l] = {node_for_v._max_depth(): node_for_v}
-              -                        return Lower(children=l_children, empty=False)
-              -
-              -                    lower_tree = build_lower(d)
-              -                    return Interface(
-              -                        children=lower_tree.children,
-              -                        acc=the_acc,
-              -                        empty=root_empty
-              -                    )
-              -
-              -            return UpperBranch(children=children, empty=root_empty)
-              +                if len(accs) <= 1:
-              +                    the_acc = accs.pop() if accs else None
-              +                    if the_acc is None:
-              +                        # This is a truly empty GSS.
-              +                        return UpperBranch(children=frozendict(), empty=None)
-              +
-              +                    def build_lower(sub_d: Dict[T, Dict[str, Any]]) -> Lower[T]:
-              +                        l_children: Dict[T, Dict[int, Lower[T]]] = {}
-              +                        for v_l, e_l in sub_d.items():
-              +                            sub_l = e_l.get("sub", {})
-              +                            has_end = e_l.get("end") is not None
-              +                            sub_lower = build_lower(sub_l) if sub_l else Lower(children=frozendict(), empty=False)
-              +                            node_for_v = Lower(children=sub_lower.children, empty=has_end)
-              +                            l_children[v_l] = {node_for_v._max_depth(): node_for_v}
-              +                        return Lower(children=frozendict({k: frozendict(v) for k, v in l_children.items()}), empty=False)
-              +
-              +                    lower_tree = build_lower(d)
-              +                    return Interface(
-              +                        children=lower_tree.children,
-              +                        acc=the_acc,
-              +                        empty=root_empty
-              +                    )
-              +
-              +            return UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=root_empty)
-              ```
-          -   In `push`:
-              ```diff
-              -        if isinstance(self.inner, Interface):
-              -            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-              -            new_children = {value: {lower_node._max_depth(): lower_node}}
-              -            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-              -        else:
-              -            return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
-              +        if isinstance(self.inner, Interface):
-              +            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-              +            new_children = frozendict({value: frozendict({lower_node._max_depth(): lower_node})})
-              +            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-              +        else:
-              +            new_children = frozendict({value: frozendict({self.inner._max_depth(): self.inner})})
-              +            return LeveledGSS(UpperBranch(children=new_children, empty=None))
-              ```
-          -   In `pop`:
-              ```diff
-              -        all_children = list(upper_branch._all_children())
-              -        merged = UpperBranch(children={}, empty=None)
-              -        for c in all_children:
-              +        all_children = list(upper_branch._all_children())
-              +        merged: Upper[T, Acc] = UpperBranch(children=frozendict(), empty=None)
-              +        for c in all_children:
-              ```
-          -   In `isolate`:
-              ```diff
-              -    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              -        empty_gss_inner = UpperBranch(children={}, empty=None)
-              -
-              -        if value is None:
-              +    def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              +        empty_gss_inner = UpperBranch(children=frozendict(), empty=None)
-              +
-              +        if value is None:
-              ```
-              ```diff
-              -            if empty_acc is not None:
-              -                return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-              -            return LeveledGSS(empty_gss_inner)
-              +            if empty_acc is not None:
-              +                return LeveledGSS(UpperBranch(children=frozendict(), empty=empty_acc))
-              +            return LeveledGSS(empty_gss_inner)
-              ```
-          -   In `apply`:
-              ```diff
-              -            res = UpperBranch(children=new_children, empty=new_empty)
-              +            res_children = frozendict({
-              +                k: v if isinstance(v, frozendict) else frozendict(v)
-              +                for k, v in new_children.items()
-              +            })
-              +            res = UpperBranch(children=res_children, empty=new_empty)
-              ```
-          -   In `prune`:
-              ```diff
-              -                if not keep_acc and keep_empty:
-              -                    res = UpperBranch(children={}, empty=new_empty)
-              -                    memo[node] = res
-              -                    return res
-              +                if not keep_acc and keep_empty:
-              +                    res = UpperBranch(children=frozendict(), empty=new_empty)
-              +                    memo[node] = res
-              +                    return res
-              ```
-              ```diff
-              -            if not new_children and new_empty is None:
-              -                memo[node] = None
-              -                return None
-              -
-              -            res = UpperBranch(children=new_children, empty=new_empty)
-              -            promoted = try_promote(res)
-              -            memo[node] = promoted
-              -            return promoted
-              +            if not new_children and new_empty is None:
-              +                memo[node] = None
-              +                return None
-              +
-              +            res = UpperBranch(children=frozendict({k: frozendict(v) for k, v in new_children.items()}), empty=new_empty)
-              +            promoted = try_promote(res)
-              +            memo[node] = promoted
-              +            return promoted
-              ```
-              ```diff
-              -        res_inner = transform(self.inner)
-              -        if res_inner is None:
-              -            return LeveledGSS(UpperBranch(children={}, empty=None))
-              -        return LeveledGSS(res_inner)
-              +        res_inner = transform(self.inner)
-              +        if res_inner is None:
-              +            return LeveledGSS(UpperBranch(children=frozendict(), empty=None))
-              +        return LeveledGSS(res_inner)
-              ```
-          -   In `_merge_children_by_depth`:
-              ```diff
-              -def _merge_children_by_depth(
-              -    c1: Dict[T, Dict[int, Node]],
-              -    c2: Dict[T, Dict[int, Node]],
-              -    merge_func: Callable[[Node, Node], Node],
-              -) -> Dict[T, Dict[int, Node]]:
-              +def _merge_children_by_depth(
-              +    c1: Mapping[T, Mapping[int, Node]],
-              +    c2: Mapping[T, Mapping[int, Node]],
-              +    merge_func: Callable[[Node, Node], Node],
-              +) -> Dict[T, Dict[int, Node]]:
-              ```
-          -   In `try_promote`:
-              ```diff
-              -        the_acc: Optional[Acc] = next(iter(accs)) if accs else None
-              -        if the_acc is None:
-              -            return UpperBranch(children={}, empty=None)
-              -        l_children: Dict[T, Dict[int, Lower[T]]] = {}
-              -        for v, kids in node.children.items():
-              -            v_map: Dict[int, Lower[T]] = {}
-              -            for child in kids.values():
-              -                ci: Interface[T, Acc] = child  # type: ignore[assignment]
-              -                lower = Lower(children=ci.children, empty=(ci.empty is not None))
-              -                v_map[lower._max_depth()] = lower
-              -            if v_map:
-              -                l_children[v] = v_map
-              -        return Interface(children=l_children, acc=the_acc, empty=node.empty)
-              +        the_acc: Optional[Acc] = next(iter(accs)) if accs else None
-              +        if the_acc is None:
-              +            return UpperBranch(children=frozendict(), empty=None)
-              +        l_children: Dict[T, Dict[int, Lower[T]]] = {}
-              +        for v, kids in node.children.items():
-              +            v_map: Dict[int, Lower[T]] = {}
-              +            for child in kids.values():
-              +                ci: Interface[T, Acc] = child  # type: ignore[assignment]
-              +                lower = Lower(children=ci.children, empty=(ci.empty is not None))
-              +                v_map[lower._max_depth()] = lower
-              +            if v_map:
-              +                l_children[v] = v_map
-              +        return Interface(children=frozendict({k: frozendict(v) for k, v in l_children.items()}), acc=the_acc, empty=node.empty)
-              ```
-          -   In `interface_to_upperbranch`:
-              ```diff
-              -    new_empty = it.empty
-              -    if not it.children and new_empty is None:
-              -        new_empty = it.acc
-              -    return UpperBranch(children=children, empty=new_empty)
-              +    new_empty = it.empty
-              +    if not it.children and new_empty is None:
-              +        new_empty = it.acc
-              +    return UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=new_empty)
-              ```
-          -   In `merge_upperbranches`:
-              ```diff
-              -    merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
-              -    return try_promote(UpperBranch(children=merged_children, empty=new_empty))
-              +    merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
-              +    res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-              +    return try_promote(UpperBranch(children=res_children, empty=new_empty))
-              ```
-          -   In `merge_interfaces`:
-              ```diff
-              -        else:
-              -            new_empty = a.empty.merge(b.empty)
-              -        merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
-              -        return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-              +        else:
-              +            new_empty = a.empty.merge(b.empty)
-              +        merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
-              +        res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-              +        return Interface(children=res_children, acc=a.acc, empty=new_empty)
-              ```
-          -   In `merge_lower`:
-              ```diff
-              -    new_empty = l1.empty or l2.empty
-              -
-              -    merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
-              -    return Lower(children=merged_children, empty=new_empty)
-              +    new_empty = l1.empty or l2.empty
-              +
-              +    merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
-              +    res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-              +    return Lower(children=res_children, empty=new_empty)
-              ```
-          -   In `lower_to_upper`:
-              ```diff
-              -        if v_map:
-              -            children[v] = v_map
-              -    ub = UpperBranch(children=children, empty=(acc if l.empty else None))
-              -    return try_promote(ub)
-              +        if v_map:
-              +            children[v] = v_map
-              +    ub = UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=(acc if l.empty else None))
-              +    return try_promote(ub)
-              ```
+      2.  **Update memoization checks and assignments:**
+          -   Find: `if node in memo:`
+          -   Replace with: `if id(node) in memo:`
+          -   Find: `return memo[node]`
+          -   Replace with: `return memo[id(node)]`
+          -   In the six places where a value is assigned to `memo[node]`, change the key to `id(node)`. For example, `memo[node] = node` becomes `memo[id(node)] = node`.
 
       ### Git Diffs
 
-      Here is the git diff for the changes described above.
+      Here is the git diff that applies the changes described above.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 45b8807..88e404f 100644
+      index 10246a1..8741366 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1,10 +1,42 @@
-       from __future__ import annotations
+      @@ -430,22 +430,22 @@
+               return LeveledGSS(upper_node)
        
-       from dataclasses import dataclass
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Mapping, Iterator
+           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+      -        memo: Dict[Any, Any] = {}
+      +        memo: Dict[int, Any] = {}
        
-       from ..interface import GSS, T, Acc
-       from .reference_impl import ReferenceGSS
+               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
+      -            if node in memo:
+      -                return memo[node]
+      +            if id(node) in memo:
+      +                return memo[id(node)]
        
-      +K = TypeVar('K')
-      +V = TypeVar('V')
-      +
-      +class frozendict(Mapping[K, V]):
-      +    """An immutable, hashable dictionary."""
-      +    _d: Dict[K, V]
-      +    _hash: Optional[int]
-      +
-      +    def __init__(self, *args: Any, **kwargs: Any):
-      +        self._d = dict(*args, **kwargs)
-      +        self._hash = None
-      +
-      +    def __getitem__(self, key: K) -> V:
-      +        return self._d[key]
-      +
-      +    def __iter__(self) -> Iterator[K]:
-      +        return iter(self._d)
-      +
-      +    def __len__(self) -> int:
-      +        return len(self._d)
-      +
-      +    def __repr__(self) -> str:
-      +        return f"{self.__class__.__name__}({self._d})"
-      +
-      +    def __hash__(self) -> int:
-      +        if self._hash is None:
-      +            self._hash = hash(frozenset(self._d.items()))
-      +        return self._hash
-      +
-      +    def __eq__(self, other: object) -> bool:
-      +        if isinstance(other, frozendict):
-      +            return self._d == other._d
-      +        if isinstance(other, dict):
-      +            return self._d == other
-      +        return NotImplemented
-      +
-       # ------------------------------
-       # Internal node classes
-       # ------------------------------
-      @@ -14,7 +46,7 @@
+                   if isinstance(node, Interface):
+                       new_acc = func(node.acc)
+                       new_empty = func(node.empty) if node.empty is not None else None
        
-       @dataclass(frozen=True, eq=True)
-       class UpperBranch(Generic[T, Acc]):
-      -    children: Dict[T, Dict[int, Upper[T, Acc]]]
-      +    children: frozendict[T, frozendict[int, Upper[T, Acc]]]
-           empty: Optional[Acc]
+                       if new_acc == node.acc and new_empty == node.empty:
+      -                    memo[node] = node
+      +                    memo[id(node)] = node
+                           return node
        
-           def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
-      @@ -35,7 +67,7 @@
+                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
+      -                memo[node] = res
+      +                memo[id(node)] = res
+                       return res
        
-       @dataclass(frozen=True, eq=True)
-       class Interface(Generic[T, Acc]):
-      -    children: Dict[T, Dict[int, Lower[T]]]
-      +    children: frozendict[T, frozendict[int, Lower[T]]]
-           acc: Acc
-           empty: Optional[Acc]
+                   # It's an UpperBranch
+      @@ -472,27 +472,27 @@
+                           new_children[v] = kids  # Reuse child dict
        
-      @@ -56,7 +88,7 @@
-       
-       @dataclass(frozen=True, eq=True)
-       class Lower(Generic[T]):
-      -    children: Dict[T, Dict[int, Lower[T]]]
-      +    children: frozendict[T, frozendict[int, Lower[T]]]
-           empty: bool
-       
-           def _max_depth(self) -> int:
-      @@ -253,9 +285,9 @@
-                       nodes_for_v: List[Upper[T, Acc]] = []
-                       end_acc = e.get("end")
-                       sub = e.get("sub", {})
-      -                if end_acc is not None:
-      -                    nodes_for_v.append(Interface(children={}, acc=end_acc, empty=None))
-                       if sub:
-                           nodes_for_v.append(build(sub))
-      +                if end_acc is not None:
-      +                    nodes_for_v.append(Interface(children=frozendict(), acc=end_acc, empty=None))
-                       if nodes_for_v:
-                           children[v] = {n._max_depth(): n for n in nodes_for_v}
-                           all_child_nodes.extend(nodes_for_v)
-      @@ -274,27 +306,27 @@
-                           the_acc = accs.pop() if accs else None
-                           if the_acc is None:
-                               # This is a truly empty GSS.
-      -                        return UpperBranch(children={}, empty=None)
-      +                        return UpperBranch(children=frozendict(), empty=None)
-       
-                           def build_lower(sub_d: Dict[T, Dict[str, Any]]) -> Lower[T]:
-                               l_children: Dict[T, Dict[int, Lower[T]]] = {}
-                               for v_l, e_l in sub_d.items():
-                                   sub_l = e_l.get("sub", {})
-                                   has_end = e_l.get("end") is not None
-      -                            sub_lower = build_lower(sub_l) if sub_l else Lower(children={}, empty=False)
-      +                            sub_lower = build_lower(sub_l) if sub_l else Lower(children=frozendict(), empty=False)
-                                   node_for_v = Lower(children=sub_lower.children, empty=has_end)
-                                   l_children[v_l] = {node_for_v._max_depth(): node_for_v}
-      -                        return Lower(children=l_children, empty=False)
-      +                        return Lower(children=frozendict({k: frozendict(v) for k, v in l_children.items()}), empty=False)
-       
-                           lower_tree = build_lower(d)
-                           return Interface(
-                               children=lower_tree.children,
-                               acc=the_acc,
-                               empty=root_empty
-                           )
-       
-      -            return UpperBranch(children=children, empty=root_empty)
-      +            return UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=root_empty)
-       
-               return LeveledGSS(build(trie, empty_acc))
-       
-      @@ -339,25 +371,26 @@
-       
-           def push(self, value: T) -> LeveledGSS[T, Acc]:
-               if isinstance(self.inner, Interface):
-      -            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-      -            new_children = {value: {lower_node._max_depth(): lower_node}}
-      -            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-      -        else:
-      -            return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
-      +            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-      +            new_children = frozendict({value: frozendict({lower_node._max_depth(): lower_node})})
-      +            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-      +        else:
-      +            new_children = frozendict({value: frozendict({self.inner._max_depth(): self.inner})})
-      +            return LeveledGSS(UpperBranch(children=new_children, empty=None))
-           def pop(self) -> LeveledGSS[T, Acc]:
-               if isinstance(self.inner, Interface):
-                   upper_branch = interface_to_upperbranch(self.inner)
-               else:
-                   upper_branch = self.inner
-               all_children = list(upper_branch._all_children())
-      -        merged = UpperBranch(children={}, empty=None)
-      +        merged: Upper[T, Acc] = UpperBranch(children=frozendict(), empty=None)
-               for c in all_children:
-                   merged = merge_upper(merged, c)
-               merged = try_promote(merged)
-               return LeveledGSS(merged)
-       
-           def is_empty(self) -> bool:
-      -        # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
-      +        # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
-               if isinstance(self.inner, UpperBranch):
-                   return not self.inner.children and self.inner.empty is None
-               # An Interface always represents at least one stack, as it has an accumulator.
-      @@ -365,7 +398,7 @@
-       
-           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-      -        empty_gss_inner = UpperBranch(children={}, empty=None)
-      +        empty_gss_inner = UpperBranch(children=frozendict(), empty=None)
-       
-               if value is None:
-                   # Keep only empty stacks.
-      @@ -376,7 +409,7 @@
-                       empty_acc = self.inner.empty
-       
-                   if empty_acc is not None:
-      -                return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-      +                return LeveledGSS(UpperBranch(children=frozendict(), empty=empty_acc))
-                   return LeveledGSS(empty_gss_inner)
-       
-               # Keep stacks with `value` at the top.
-      @@ -448,7 +481,12 @@
-                       memo[node] = node
+                   if not changed:
+      -                memo[node] = node
+      +                memo[id(node)] = node
                        return node
        
-      -            res = UpperBranch(children=new_children, empty=new_empty)
-      +            res_children = frozendict({
-      +                k: v if isinstance(v, frozendict) else frozendict(v)
-      +                for k, v in new_children.items()
-      +            })
-      +            res = UpperBranch(children=res_children, empty=new_empty)
+                   res = UpperBranch(children=new_children, empty=new_empty)
                    promoted = try_promote(res)
-                   memo[node] = promoted
+      -            memo[node] = promoted
+      +            memo[id(node)] = promoted
                    return promoted
-      @@ -476,7 +514,7 @@
+       
+               return LeveledGSS(transform(self.inner))
+       
+           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+      -        memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+      +        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
+       
+               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+      -            if node in memo:
+      -                return memo[node]
+      +            if id(node) in memo:
+      +                return memo[id(node)]
+       
+                   if isinstance(node, Interface):
+                       keep_acc = predicate(node.acc)
+                       keep_empty = node.empty is not None and predicate(node.empty)
+                       new_empty = node.empty if keep_empty else None
+       
+                       if keep_acc and new_empty == node.empty:
+      -                    memo[node] = node
+      +                    memo[id(node)] = node
+                           return node
+       
+                       if not keep_acc and not keep_empty:
+      -                    memo[node] = None
+      +                    memo[id(node)] = None
                            return None
        
                        if not keep_acc and keep_empty:
-      -                    res = UpperBranch(children={}, empty=new_empty)
-      +                    res = UpperBranch(children=frozendict(), empty=new_empty)
-                           memo[node] = res
+                           res = UpperBranch(children={}, empty=new_empty)
+      -                    memo[node] = res
+      +                    memo[id(node)] = res
                            return res
        
-      @@ -516,14 +554,14 @@
-                       memo[node] = None
+                       # keep_acc is True, but empty might have been pruned.
+                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
+      -                memo[node] = res
+      +                memo[id(node)] = res
+                       return res
+       
+                   # It's an UpperBranch
+      @@ -519,17 +519,17 @@
+                           new_children[v] = kids  # Reuse
+       
+                   if not changed:
+      -                memo[node] = node
+      +                memo[id(node)] = node
+                       return node
+       
+                   if not new_children and new_empty is None:
+      -                memo[node] = None
+      +                memo[id(node)] = None
                        return None
        
-      -            res = UpperBranch(children=new_children, empty=new_empty)
-      +            res = UpperBranch(children=frozendict({k: frozendict(v) for k, v in new_children.items()}), empty=new_empty)
+                   res = UpperBranch(children=new_children, empty=new_empty)
                    promoted = try_promote(res)
-                   memo[node] = promoted
+      -            memo[node] = promoted
+      +            memo[id(node)] = promoted
                    return promoted
        
                res_inner = transform(self.inner)
-               if res_inner is None:
-      -            return LeveledGSS(UpperBranch(children={}, empty=None))
-      +            return LeveledGSS(UpperBranch(children=frozendict(), empty=None))
-               return LeveledGSS(res_inner)
-       
-           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-      @@ -570,9 +608,9 @@
-       Node = TypeVar("Node")
-       
-       def _merge_children_by_depth(
-      -    c1: Dict[T, Dict[int, Node]],
-      -    c2: Dict[T, Dict[int, Node]],
-      +    c1: Mapping[T, Mapping[int, Node]],
-      +    c2: Mapping[T, Mapping[int, Node]],
-           merge_func: Callable[[Node, Node], Node],
-       ) -> Dict[T, Dict[int, Node]]:
-           """Merges two dictionaries of children, grouping by value and then by depth."""
-      @@ -614,7 +652,7 @@
-           if len(accs) <= 1:
-               the_acc: Optional[Acc] = next(iter(accs)) if accs else None
-               if the_acc is None:
-      -            return UpperBranch(children={}, empty=None)
-      +            return UpperBranch(children=frozendict(), empty=None)
-               l_children: Dict[T, Dict[int, Lower[T]]] = {}
-               for v, kids in node.children.items():
-                   v_map: Dict[int, Lower[T]] = {}
-      @@ -624,7 +662,7 @@
-                       v_map[lower._max_depth()] = lower
-                   if v_map:
-                       l_children[v] = v_map
-      -        return Interface(children=l_children, acc=the_acc, empty=node.empty)
-      +        return Interface(children=frozendict({k: frozendict(v) for k, v in l_children.items()}), acc=the_acc, empty=node.empty)
-           return node
-       
-       def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
-      @@ -642,7 +680,7 @@
-           new_empty = it.empty
-           if not it.children and new_empty is None:
-               new_empty = it.acc
-      -    return UpperBranch(children=children, empty=new_empty)
-      +    return UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=new_empty)
-       
-       def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
-           if u1 is u2:
-      @@ -668,7 +706,8 @@
-               new_empty = a.empty.merge(b.empty)
-       
-           merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
-      -    return try_promote(UpperBranch(children=merged_children, empty=new_empty))
-      +    res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-      +    return try_promote(UpperBranch(children=res_children, empty=new_empty))
-       
-       def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
-           if a.acc == b.acc:
-      @@ -679,7 +718,8 @@
-               else:
-                   new_empty = a.empty.merge(b.empty)
-               merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
-      -        return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-      +        res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-      +        return Interface(children=res_children, acc=a.acc, empty=new_empty)
-           return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
-       
-       def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
-      @@ -693,7 +733,8 @@
-           new_empty = l1.empty or l2.empty
-       
-           merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
-      -    return Lower(children=merged_children, empty=new_empty)
-      +    res_children = frozendict({k: frozendict(v) for k, v in merged_children.items()})
-      +    return Lower(children=res_children, empty=new_empty)
-       
-       
-       def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
-      @@ -707,5 +748,5 @@
-                   v_map[up_child._max_depth()] = up_child
-               if v_map:
-                   children[v] = v_map
-      -    ub = UpperBranch(children=children, empty=(acc if l.empty else None))
-      +    ub = UpperBranch(children=frozendict({k: frozendict(v) for k, v in children.items()}), empty=(acc if l.empty else None))
-           return try_promote(ub)
 
       ```
-
-      These changes should resolve the `TypeError` by ensuring that the internal node structures are properly hashable. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Warning: Diff block 1 parsed with no hunks. Skipping.
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "No changes to commit"'
+  - user: 'Changes committed with message: "Fix: Use object IDs for memoization keys
+      in LeveledGSS apply/prune"'
     metadata:
 ...

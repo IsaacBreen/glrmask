@@ -381,22 +381,22 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(upper_node)
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        memo: Dict[Any, Any] = {}
+        memo: Dict[int, Any] = {}
 
         def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-            if node in memo:
-                return memo[node]
+            if id(node) in memo:
+                return memo[id(node)]
 
             if isinstance(node, Interface):
                 new_acc = func(node.acc)
                 new_empty = func(node.empty) if node.empty is not None else None
 
                 if new_acc == node.acc and new_empty == node.empty:
-                    memo[node] = node
+                    memo[id(node)] = node
                     return node
 
                 res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-                memo[node] = res
+                memo[id(node)] = res
                 return res
 
             # It's an UpperBranch
@@ -422,22 +422,22 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_children[v] = kids  # Reuse child dict
 
             if not changed:
-                memo[node] = node
+                memo[id(node)] = node
                 return node
 
             res = UpperBranch(children=new_children, empty=new_empty)
             promoted = try_promote(res)
-            memo[node] = promoted
+            memo[id(node)] = promoted
             return promoted
 
         return LeveledGSS(transform(self.inner))
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-        memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
 
         def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-            if node in memo:
-                return memo[node]
+            if id(node) in memo:
+                return memo[id(node)]
 
             if isinstance(node, Interface):
                 keep_acc = predicate(node.acc)
@@ -445,21 +445,21 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_empty = node.empty if keep_empty else None
 
                 if keep_acc and new_empty == node.empty:
-                    memo[node] = node
+                    memo[id(node)] = node
                     return node
 
                 if not keep_acc and not keep_empty:
-                    memo[node] = None
+                    memo[id(node)] = None
                     return None
 
                 if not keep_acc and keep_empty:
                     res = UpperBranch(children={}, empty=new_empty)
-                    memo[node] = res
+                    memo[id(node)] = res
                     return res
 
                 # keep_acc is True, but empty might have been pruned.
                 res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                memo[node] = res
+                memo[id(node)] = res
                 return res
 
             # It's an UpperBranch
@@ -488,16 +488,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_children[v] = kids  # Reuse
 
             if not changed:
-                memo[node] = node
+                memo[id(node)] = node
                 return node
 
             if not new_children and new_empty is None:
-                memo[node] = None
+                memo[id(node)] = None
                 return None
 
             res = UpperBranch(children=new_children, empty=new_empty)
             promoted = try_promote(res)
-            memo[node] = promoted
+            memo[id(node)] = promoted
             return promoted
 
         res_inner = transform(self.inner)
