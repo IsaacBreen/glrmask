@@ -82,14 +82,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
             return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
 
-        # 1. Merge stacks with identical values.
-        merged: Dict[Tuple[T, ...], Acc] = {}
-        for vals, acc in stacks:
-            key = tuple(vals)
-            if key in merged:
-                merged[key] = merged[key].merge(acc)
-            else:
-                merged[key] = acc
+        # 1. Merge stacks with identical values using the reference implementation.
+        from .reference_impl import ReferenceGSS
+        merged = {tuple(s): a for s, a in ReferenceGSS(stacks)._stacks}
 
         # 2. Build the structure from the merged stacks.
         return _build_recursively(merged)
@@ -114,17 +109,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         traverse(self.inner, [])
 
-        # Sort for a canonical representation, as required by the interface.
-        import json
-
-        def _encode_for_sort(obj: Any) -> str:
-            try:
-                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-            except Exception:
-                return repr(obj)
-
-        all_stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-        return all_stacks
+        # Delegate canonicalization (sorting) to the reference implementation.
+        from .reference_impl import ReferenceGSS
+        return ReferenceGSS(all_stacks).to_stacks()
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
