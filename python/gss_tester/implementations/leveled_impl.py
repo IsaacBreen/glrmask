@@ -348,8 +348,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return False
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        empty_gss_inner = UpperBranch(children={}, empty=None)
-
         if value is None:
             # Keep only empty stacks.
             if isinstance(self.inner, UpperBranch):
@@ -363,11 +361,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
             return LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
         else:
-            if value in self.inner.children:
-                return LeveledGSS(empty_gss_inner)
+            if value not in self.inner.children:
+                return LeveledGSS(UpperBranch(children={}, empty=None))
             else:
                 filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
-                return LeveledGSS(self.inner)
+                return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
 
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
