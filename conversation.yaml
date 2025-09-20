@@ -3,11 +3,11 @@ local_system:
     - python/gss_tester/__init__.py
     - python/gss_tester/analyzer.py
     - python/gss_tester/fuzzer.py
-    - python/gss_tester/interface.py
-    - python/gss_tester/leveled_impl.py
     - python/gss_tester/reference_impl.py
     - python/gss_tester/runner.py
     - python/gss_tester/test_spec.py
+    - python/gss_tester/interface.py
+    - python/gss_tester/leveled_impl.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -242,259 +242,6 @@ local_system:
                   # Some operations might fail on some implementations if invariants are broken.
                   # We'll just skip the step and continue fuzzing.
                   continue
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.from_stacks([])
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
-    python/gss_tester/leveled_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple
-
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------
-      # Internal node classes
-      # ------------------------------
-
-      @dataclass(frozen=True, eq=True)
-      class Upper(Generic[T, Acc]):
-          inner: UpperBranch[T, Acc] | Interface[T, Acc]
-
-
-      @dataclass(frozen=True, eq=True)
-      class UpperBranch(Generic[T, Acc]):
-          children: Dict[T, Dict[int, Upper[T, Acc]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Interface(Generic[T, Acc]):
-          node: Lower[T]
-          acc: Acc
-
-
-      @dataclass(frozen=True, eq=True)
-      class Lower(Generic[T]):
-          inner: LowerBranch[T] | Leaf
-
-
-      @dataclass(frozen=True, eq=True)
-      class LowerBranch(Generic[T]):
-          children: Dict[T, Dict[int, Lower[T]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      @dataclass(frozen=True, eq=True)
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Upper[T, Acc]
-          empty: Optional[Acc]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              raise NotImplementedError
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              raise NotImplementedError
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
-          def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
-          def is_empty(self) -> bool:
-              return self.to_reference_impl().is_empty()
-          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
-          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
-          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
-          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
-          def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
-          def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
-
-
-      def _validate_upper(node: Upper[T, Acc]):
-          """Recursively validates invariants on Upper nodes."""
-          if isinstance(node.inner, UpperBranch):
-              branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
-
-              # Invariant 1: If all children are interfaces, their accs must be unique.
-              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-                  accs = [child.inner.acc for child in all_children]
-                  if len(set(accs)) != len(accs):
-                      raise AssertionError(
-                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-                      )
-
-              # Recurse into children
-              for child in all_children:
-                  _validate_upper(child)
-          # Base case: node.inner is an Interface, do nothing further down this path.
-
-
-      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-          """
-          Checks internal invariants of the LeveledGSS structure.
-          Raises AssertionError if an invariant is violated.
-          """
-          # Check recursive invariants on the inner structure.
-          _validate_upper(gss.inner)
-
-          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-          if isinstance(gss.inner, Interface) and gss.empty is not None:
-              if gss.inner.acc == gss.empty:
-                  raise AssertionError(
-                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-                  )
     python/gss_tester/reference_impl.py: |
       from __future__ import annotations
       import json
@@ -971,6 +718,344 @@ local_system:
           fuzz_steps = 100
           for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
               yield from _yield_state(gss_state)
+    python/gss_tester/interface.py: |
+      from __future__ import annotations
+      from abc import ABC, abstractmethod
+      from functools import reduce
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+
+
+      class Mergeable(Protocol):
+          """Protocol for accumulator types that can be merged."""
+          @abstractmethod
+          def merge(self, other: 'Mergeable') -> 'Mergeable':
+              ...
+
+      class MergeableInt(int):
+          """
+          An integer that is mergeable (for testing `Acc` typevars) and
+          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+          """
+          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+              return MergeableInt(super().__add__(other))
+
+          def __add__(self, other: int) -> 'MergeableInt':
+              if isinstance(other, int):
+                  return MergeableInt(super().__add__(other))
+              return NotImplemented
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              """
+              Converts the GSS to its canonical representation as a sorted list of stacks.
+              This involves merging accumulators for identical stacks and sorting.
+              """
+              pass
+
+          @abstractmethod
+          def push(self: GSSType, value: T) -> GSSType:
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self: GSSType) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self: GSSType, n: int) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains no active stacks."""
+              pass
+
+          @abstractmethod
+          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
+              """
+              Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def merge(self: GSSType, other: GSSType) -> GSSType:
+              """Merges this GSS with another, combining accumulators for identical stacks."""
+              pass
+
+          @classmethod
+          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
+              """
+              Merges multiple GSS instances into one.
+              This default implementation uses functools.reduce with the instance `merge` method.
+              """
+              # Start with an empty GSS of the target class `cls` to ensure the correct
+              # return type and to handle an empty gss_list.
+              initial = cls.from_stacks([])
+              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def reduce_acc(self) -> Optional[Acc]:
+              """
+              Merges the accumulators of all active stacks into a single optional value.
+              Returns None if there are no active stacks.
+              """
+              pass
+
+          def to_reference_impl(self) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS.from_stacks(self.to_stacks())
+
+          def __str__(self) -> str:
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_stacks()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_stacks()!r})"
+    python/gss_tester/leveled_impl.py: |
+      from __future__ import annotations
+
+      from dataclasses import dataclass
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+
+      from .interface import GSS, T, Acc
+
+
+      # ------------------------------
+      # Internal node classes
+      # ------------------------------
+
+      @dataclass(frozen=True, eq=True)
+      class Upper(Generic[T, Acc]):
+          inner: UpperBranch[T, Acc] | Interface[T, Acc]
+
+
+      @dataclass(frozen=True, eq=True)
+      class UpperBranch(Generic[T, Acc]):
+          children: Dict[T, Dict[int, Upper[T, Acc]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
+
+
+      @dataclass(frozen=True, eq=True)
+      class Lower(Generic[T]):
+          inner: LowerBranch[T] | Leaf
+
+
+      @dataclass(frozen=True, eq=True)
+      class LowerBranch(Generic[T]):
+          children: Dict[T, Dict[int, Lower[T]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Leaf:
+          pass
+
+
+      # A shared, canonical leaf node
+      _LOWER_LEAF = Lower(Leaf())
+
+
+      @dataclass(frozen=True, eq=True)
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          inner: Upper[T, Acc]
+          empty: Optional[Acc]
+
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+              def _build_leveled_gss_recursively(
+                      stacks: Dict[Tuple[T, ...], Acc]
+              ) -> LeveledGSS[T, Acc]:
+                  """
+                  Recursively builds a LeveledGSS from a dictionary of stacks.
+                  This approach correctly handles the prefix problem by treating terminations
+                  (empty stacks in the recursive context) and branches distinctly.
+                  """
+                  empty_acc = stacks.pop((), None)
+
+                  groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
+                  for stack_tuple, acc in stacks.items():
+                      val = stack_tuple[0]
+                      if val not in groups:
+                          groups[val] = []
+                      groups[val].append((stack_tuple[1:], acc))
+
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for val, sub_stacks_list in groups.items():
+                      sub_stacks_dict = dict(sub_stacks_list)
+                      sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
+
+                      # If the sub-GSS has an accumulator for the empty stack, it means
+                      # a stack in the parent context terminated at `val`. We represent this
+                      # with an Interface node.
+                      if sub_gss.empty is not None:
+                          interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
+                          if val not in children:
+                              children[val] = {}
+                          children[val][len(children[val])] = interface_node
+
+                      # If the sub-GSS has branches, it means there are stacks longer than `val`.
+                      # We embed the inner structure of the sub-GSS as another child.
+                      if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+                          if val not in children:
+                              children[val] = {}
+                          children[val][len(children[val])] = sub_gss.inner
+
+                  return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+
+              # 1. Merge stacks with identical values into a dictionary.
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in stacks:
+                  key = tuple(vals)
+                  if key in merged:
+                      merged[key] = merged[key].merge(acc)
+                  else:
+                      merged[key] = acc
+
+              # 2. Build the LeveledGSS structure recursively.
+              return _build_leveled_gss_recursively(merged)
+
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              if self.empty is not None:
+                  all_stacks.append(([], self.empty))
+
+              def traverse(node: Upper[T, Acc], prefix: List[T]):
+                  """Recursively traverses the tree structure to reconstruct stacks."""
+                  if isinstance(node.inner, Interface):
+                      # An Interface node signifies the end of a stack.
+                      # In this implementation, the Lower part is always a Leaf,
+                      # so the tail is empty.
+                      all_stacks.append((prefix, node.inner.acc))
+                  else:  # UpperBranch
+                      branch = node.inner
+                      for val, children_by_id in branch.children.items():
+                          for child_node in children_by_id.values():
+                              traverse(child_node, prefix + [val])
+
+              traverse(self.inner, [])
+
+              # Sort for a canonical representation, as required by the interface.
+              import json
+
+              def _encode_for_sort(obj: Any) -> str:
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      return repr(obj)
+
+              all_stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return all_stacks
+
+          def push(self, value: T) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+          def pop(self) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+          def is_empty(self) -> bool:
+              return self.to_reference_impl().is_empty()
+          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
+          def peek(self) -> Set[T]:
+              return self.to_reference_impl().peek()
+          def reduce_acc(self) -> Optional[Acc]:
+              return self.to_reference_impl().reduce_acc()
+
+
+      def _validate_upper(node: Upper[T, Acc]):
+          """Recursively validates invariants on Upper nodes."""
+          if isinstance(node.inner, UpperBranch):
+              branch = node.inner
+              all_children = [
+                  child
+                  for children_by_val in branch.children.values()
+                  for child in children_by_val.values()
+              ]
+
+              # Invariant 1: If all children are interfaces, their accs must be unique.
+              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+                  accs = [child.inner.acc for child in all_children]
+                  if len(set(accs)) != len(accs):
+                      raise AssertionError(
+                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+                      )
+
+              # Recurse into children
+              for child in all_children:
+                  _validate_upper(child)
+          # Base case: node.inner is an Interface, do nothing further down this path.
+
+
+      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+          """
+          Checks internal invariants of the LeveledGSS structure.
+          Raises AssertionError if an invariant is violated.
+          """
+          # Check recursive invariants on the inner structure.
+          _validate_upper(gss.inner)
+
+          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+          if isinstance(gss.inner, Interface) and gss.empty is not None:
+              if gss.inner.acc == gss.empty:
+                  raise AssertionError(
+                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+                  )
   prev_file_contents:
     python/gss_tester/__init__.py: |
       # This file makes 'gss_tester' a Python package.
@@ -1203,346 +1288,6 @@ local_system:
                   # Some operations might fail on some implementations if invariants are broken.
                   # We'll just skip the step and continue fuzzing.
                   continue
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.from_stacks([])
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
-    python/gss_tester/leveled_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
-
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------
-      # Internal node classes
-      # ------------------------------
-
-      @dataclass(frozen=True, eq=True)
-      class Upper(Generic[T, Acc]):
-          inner: UpperBranch[T, Acc] | Interface[T, Acc]
-
-
-      @dataclass(frozen=True, eq=True)
-      class UpperBranch(Generic[T, Acc]):
-          children: Dict[T, Dict[int, Upper[T, Acc]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Interface(Generic[T, Acc]):
-          node: Lower[T]
-          acc: Acc
-
-
-      @dataclass(frozen=True, eq=True)
-      class Lower(Generic[T]):
-          inner: LowerBranch[T] | Leaf
-
-
-      @dataclass(frozen=True, eq=True)
-      class LowerBranch(Generic[T]):
-          children: Dict[T, Dict[int, Lower[T]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      # A shared, canonical leaf node for the Lower trie, as this implementation
-      # does not require complex Lower structures.
-      _LOWER_LEAF = Lower(Leaf())
-
-
-      def _build_leveled_gss_recursively(
-          stacks: Dict[Tuple[T, ...], Acc]
-      ) -> LeveledGSS[T, Acc]:
-          """
-          Recursively builds a LeveledGSS from a dictionary of stacks.
-          This approach correctly handles the prefix problem by treating terminations
-          (empty stacks in the recursive context) and branches distinctly.
-          """
-          empty_acc = stacks.pop((), None)
-
-          groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
-          for stack_tuple, acc in stacks.items():
-              val = stack_tuple[0]
-              if val not in groups:
-                  groups[val] = []
-              groups[val].append((stack_tuple[1:], acc))
-
-          children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-          for val, sub_stacks_list in groups.items():
-              sub_stacks_dict = dict(sub_stacks_list)
-              sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
-
-              # If the sub-GSS has an accumulator for the empty stack, it means
-              # a stack in the parent context terminated at `val`. We represent this
-              # with an Interface node.
-              if sub_gss.empty is not None:
-                  interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
-                  if val not in children:
-                      children[val] = {}
-                  children[val][len(children[val])] = interface_node
-
-              # If the sub-GSS has branches, it means there are stacks longer than `val`.
-              # We embed the inner structure of the sub-GSS as another child.
-              if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-                  if val not in children:
-                      children[val] = {}
-                  children[val][len(children[val])] = sub_gss.inner
-
-          return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
-
-
-      @dataclass(frozen=True, eq=True)
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Upper[T, Acc]
-          empty: Optional[Acc]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              # 1. Merge stacks with identical values into a dictionary.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-
-              # 2. Build the LeveledGSS structure recursively.
-              return _build_leveled_gss_recursively(merged)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              if self.empty is not None:
-                  all_stacks.append(([], self.empty))
-
-              def traverse(node: Upper[T, Acc], prefix: List[T]):
-                  """Recursively traverses the tree structure to reconstruct stacks."""
-                  if isinstance(node.inner, Interface):
-                      # An Interface node signifies the end of a stack.
-                      # In this implementation, the Lower part is always a Leaf,
-                      # so the tail is empty.
-                      all_stacks.append((prefix, node.inner.acc))
-                  else:  # UpperBranch
-                      branch = node.inner
-                      for val, children_by_id in branch.children.items():
-                          for child_node in children_by_id.values():
-                              traverse(child_node, prefix + [val])
-
-              traverse(self.inner, [])
-
-              # Sort for a canonical representation, as required by the interface.
-              import json
-
-              def _encode_for_sort(obj: Any) -> str:
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      return repr(obj)
-
-              all_stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              return all_stacks
-
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
-          def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
-          def is_empty(self) -> bool:
-              return self.to_reference_impl().is_empty()
-          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
-          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
-          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
-          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
-          def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
-          def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
-
-
-      def _validate_upper(node: Upper[T, Acc]):
-          """Recursively validates invariants on Upper nodes."""
-          if isinstance(node.inner, UpperBranch):
-              branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
-
-              # Invariant 1: If all children are interfaces, their accs must be unique.
-              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-                  accs = [child.inner.acc for child in all_children]
-                  if len(set(accs)) != len(accs):
-                      raise AssertionError(
-                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-                      )
-
-              # Recurse into children
-              for child in all_children:
-                  _validate_upper(child)
-          # Base case: node.inner is an Interface, do nothing further down this path.
-
-
-      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-          """
-          Checks internal invariants of the LeveledGSS structure.
-          Raises AssertionError if an invariant is violated.
-          """
-          # Check recursive invariants on the inner structure.
-          _validate_upper(gss.inner)
-
-          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-          if isinstance(gss.inner, Interface) and gss.empty is not None:
-              if gss.inner.acc == gss.empty:
-                  raise AssertionError(
-                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-                  )
     python/gss_tester/reference_impl.py: |
       from __future__ import annotations
       import json
@@ -2019,9 +1764,337 @@ local_system:
           fuzz_steps = 100
           for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
               yield from _yield_state(gss_state)
+    python/gss_tester/interface.py: |
+      from __future__ import annotations
+      from abc import ABC, abstractmethod
+      from functools import reduce
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+
+
+      class Mergeable(Protocol):
+          """Protocol for accumulator types that can be merged."""
+          @abstractmethod
+          def merge(self, other: 'Mergeable') -> 'Mergeable':
+              ...
+
+      class MergeableInt(int):
+          """
+          An integer that is mergeable (for testing `Acc` typevars) and
+          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+          """
+          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+              return MergeableInt(super().__add__(other))
+
+          def __add__(self, other: int) -> 'MergeableInt':
+              if isinstance(other, int):
+                  return MergeableInt(super().__add__(other))
+              return NotImplemented
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              """
+              Converts the GSS to its canonical representation as a sorted list of stacks.
+              This involves merging accumulators for identical stacks and sorting.
+              """
+              pass
+
+          @abstractmethod
+          def push(self: GSSType, value: T) -> GSSType:
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self: GSSType) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self: GSSType, n: int) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains no active stacks."""
+              pass
+
+          @abstractmethod
+          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
+              """
+              Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def merge(self: GSSType, other: GSSType) -> GSSType:
+              """Merges this GSS with another, combining accumulators for identical stacks."""
+              pass
+
+          @classmethod
+          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
+              """
+              Merges multiple GSS instances into one.
+              This default implementation uses functools.reduce with the instance `merge` method.
+              """
+              # Start with an empty GSS of the target class `cls` to ensure the correct
+              # return type and to handle an empty gss_list.
+              initial = cls.from_stacks([])
+              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def reduce_acc(self) -> Optional[Acc]:
+              """
+              Merges the accumulators of all active stacks into a single optional value.
+              Returns None if there are no active stacks.
+              """
+              pass
+
+          def to_reference_impl(self) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS.from_stacks(self.to_stacks())
+
+          def __str__(self) -> str:
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_stacks()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_stacks()!r})"
+    python/gss_tester/leveled_impl.py: |
+      from __future__ import annotations
+
+      from dataclasses import dataclass
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      from collections import defaultdict
+
+      from .interface import GSS, T, Acc
+
+
+      # ------------------------------
+      # Internal node classes
+      # ------------------------------
+
+      @dataclass(frozen=True, eq=True)
+      class Upper(Generic[T, Acc]):
+          inner: UpperBranch[T, Acc] | Interface[T, Acc]
+
+
+      @dataclass(frozen=True, eq=True)
+      class UpperBranch(Generic[T, Acc]):
+          children: Dict[T, Dict[int, Upper[T, Acc]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Interface(Generic[T, Acc]):
+          node: Lower[T]
+          acc: Acc
+
+
+      @dataclass(frozen=True, eq=True)
+      class Lower(Generic[T]):
+          inner: LowerBranch[T] | Leaf
+
+
+      @dataclass(frozen=True, eq=True)
+      class LowerBranch(Generic[T]):
+          children: Dict[T, Dict[int, Lower[T]]]
+
+
+      @dataclass(frozen=True, eq=True)
+      class Leaf:
+          pass
+
+
+      # A shared, canonical leaf node
+      _LOWER_LEAF = Lower(Leaf())
+
+
+      @dataclass(frozen=True, eq=True)
+      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+          inner: Upper[T, Acc]
+          empty: Optional[Acc]
+
+          @classmethod
+          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+              def _build_recursively(
+                  stacks_dict: Dict[Tuple[T, ...], Acc]
+              ) -> LeveledGSS[T, Acc]:
+                  """Recursively builds the LeveledGSS from a dictionary of stacks."""
+                  empty_acc = stacks_dict.pop((), None)
+
+                  # Group stacks by their first element
+                  groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = defaultdict(list)
+                  for stack, acc in stacks_dict.items():
+                      groups[stack[0]].append((stack[1:], acc))
+
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for val, sub_stacks in groups.items():
+                      sub_gss = _build_recursively(dict(sub_stacks))
+                      
+                      nodes = []
+                      # A sub-GSS with an `empty` acc means a stack terminated at `val`.
+                      if sub_gss.empty is not None:
+                          nodes.append(Upper(Interface(_LOWER_LEAF, sub_gss.empty)))
+                      
+                      # A sub-GSS with children means some stacks continue deeper.
+                      if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+                          nodes.append(sub_gss.inner)
+
+                      if nodes:
+                          children[val] = {i: node for i, node in enumerate(nodes)}
+
+                  return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+
+              # 1. Merge stacks with identical values.
+              merged: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in stacks:
+                  key = tuple(vals)
+                  if key in merged:
+                      merged[key] = merged[key].merge(acc)
+                  else:
+                      merged[key] = acc
+
+              # 2. Build the structure from the merged stacks.
+              return _build_recursively(merged)
+
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              all_stacks: List[Tuple[List[T], Acc]] = []
+              if self.empty is not None:
+                  all_stacks.append(([], self.empty))
+
+              def traverse(node: Upper[T, Acc], prefix: List[T]):
+                  """Recursively traverses the tree structure to reconstruct stacks."""
+                  if isinstance(node.inner, Interface):
+                      # An Interface node signifies the end of a stack.
+                      # In this implementation, the Lower part is always a Leaf,
+                      # so the tail is empty.
+                      all_stacks.append((prefix, node.inner.acc))
+                  else:  # UpperBranch
+                      branch = node.inner
+                      for val, children_by_id in branch.children.items():
+                          for child_node in children_by_id.values():
+                              traverse(child_node, prefix + [val])
+
+              traverse(self.inner, [])
+
+              # Sort for a canonical representation, as required by the interface.
+              import json
+
+              def _encode_for_sort(obj: Any) -> str:
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      return repr(obj)
+
+              all_stacks.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return all_stacks
+
+          def push(self, value: T) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+          def pop(self) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
+          def is_empty(self) -> bool:
+              return self.to_reference_impl().is_empty()
+          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
+          def peek(self) -> Set[T]:
+              return self.to_reference_impl().peek()
+          def reduce_acc(self) -> Optional[Acc]:
+              return self.to_reference_impl().reduce_acc()
+
+
+      def _validate_upper(node: Upper[T, Acc]):
+          """Recursively validates invariants on Upper nodes."""
+          if isinstance(node.inner, UpperBranch):
+              branch = node.inner
+              all_children = [
+                  child
+                  for children_by_val in branch.children.values()
+                  for child in children_by_val.values()
+              ]
+
+              # Invariant 1: If all children are interfaces, their accs must be unique.
+              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+                  accs = [child.inner.acc for child in all_children]
+                  if len(set(accs)) != len(accs):
+                      raise AssertionError(
+                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+                      )
+
+              # Recurse into children
+              for child in all_children:
+                  _validate_upper(child)
+          # Base case: node.inner is an Interface, do nothing further down this path.
+
+
+      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+          """
+          Checks internal invariants of the LeveledGSS structure.
+          Raises AssertionError if an invariant is violated.
+          """
+          # Check recursive invariants on the inner structure.
+          _validate_upper(gss.inner)
+
+          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+          if isinstance(gss.inner, Interface) and gss.empty is not None:
+              if gss.inner.acc == gss.empty:
+                  raise AssertionError(
+                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+                  )
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -2041,7 +2114,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -2309,269 +2382,6 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/fuzzer.py
-  - user: |-
-      ```python 'python/gss_tester/interface.py'
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.from_stacks([])
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
-
-      ```
-    metadata:
-      filename: python/gss_tester/interface.py
-  - user: |-
-      ```python 'python/gss_tester/leveled_impl.py'
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple
-
-      from .interface import GSS, T, Acc
-
-
-      # ------------------------------
-      # Internal node classes
-      # ------------------------------
-
-      @dataclass(frozen=True, eq=True)
-      class Upper(Generic[T, Acc]):
-          inner: UpperBranch[T, Acc] | Interface[T, Acc]
-
-
-      @dataclass(frozen=True, eq=True)
-      class UpperBranch(Generic[T, Acc]):
-          children: Dict[T, Dict[int, Upper[T, Acc]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Interface(Generic[T, Acc]):
-          node: Lower[T]
-          acc: Acc
-
-
-      @dataclass(frozen=True, eq=True)
-      class Lower(Generic[T]):
-          inner: LowerBranch[T] | Leaf
-
-
-      @dataclass(frozen=True, eq=True)
-      class LowerBranch(Generic[T]):
-          children: Dict[T, Dict[int, Lower[T]]]
-
-
-      @dataclass(frozen=True, eq=True)
-      class Leaf:
-          pass
-
-
-      @dataclass(frozen=True, eq=True)
-      class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          inner: Upper[T, Acc]
-          empty: Optional[Acc]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              raise NotImplementedError
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              raise NotImplementedError
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
-          def pop(self) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
-          def is_empty(self) -> bool:
-              return self.to_reference_impl().is_empty()
-          def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
-          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
-          def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
-          def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().merge(other.to_reference_impl()).to_stacks())
-          def peek(self) -> Set[T]:
-              return self.to_reference_impl().peek()
-          def reduce_acc(self) -> Optional[Acc]:
-              return self.to_reference_impl().reduce_acc()
-
-
-      def _validate_upper(node: Upper[T, Acc]):
-          """Recursively validates invariants on Upper nodes."""
-          if isinstance(node.inner, UpperBranch):
-              branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
-
-              # Invariant 1: If all children are interfaces, their accs must be unique.
-              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-                  accs = [child.inner.acc for child in all_children]
-                  if len(set(accs)) != len(accs):
-                      raise AssertionError(
-                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-                      )
-
-              # Recurse into children
-              for child in all_children:
-                  _validate_upper(child)
-          # Base case: node.inner is an Interface, do nothing further down this path.
-
-
-      def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
-          """
-          Checks internal invariants of the LeveledGSS structure.
-          Raises AssertionError if an invariant is violated.
-          """
-          # Check recursive invariants on the inner structure.
-          _validate_upper(gss.inner)
-
-          # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-          if isinstance(gss.inner, Interface) and gss.empty is not None:
-              if gss.inner.acc == gss.empty:
-                  raise AssertionError(
-                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-                  )
-
-      ```
-    metadata:
-      filename: python/gss_tester/leveled_impl.py
   - user: |-
       ```python 'python/gss_tester/reference_impl.py'
       from __future__ import annotations
@@ -3063,34 +2873,154 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/test_spec.py
-  - user: Implement `from_stacks` and `to_stacks` for `LeveledGSS`.
-    metadata:
   - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+      ```python 'python/gss_tester/interface.py'
+      from __future__ import annotations
+      from abc import ABC, abstractmethod
+      from functools import reduce
+      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+
+
+      class Mergeable(Protocol):
+          """Protocol for accumulator types that can be merged."""
+          @abstractmethod
+          def merge(self, other: 'Mergeable') -> 'Mergeable':
+              ...
+
+      class MergeableInt(int):
+          """
+          An integer that is mergeable (for testing `Acc` typevars) and
+          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
+          """
+          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
+              return MergeableInt(super().__add__(other))
+
+          def __add__(self, other: int) -> 'MergeableInt':
+              if isinstance(other, int):
+                  return MergeableInt(super().__add__(other))
+              return NotImplemented
+
+      T = TypeVar('T')  # Stack item type
+      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+
+      class GSS(ABC, Generic[T, Acc]):
+          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+
+          @classmethod
+          @abstractmethod
+          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
+              """Creates a GSS from a list of explicit stacks."""
+              pass
+
+          @abstractmethod
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              """
+              Converts the GSS to its canonical representation as a sorted list of stacks.
+              This involves merging accumulators for identical stacks and sorting.
+              """
+              pass
+
+          @abstractmethod
+          def push(self: GSSType, value: T) -> GSSType:
+              """Pushes a value onto all active stack heads, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def pop(self: GSSType) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top value.
+              Returns a new GSS state containing the popped stacks.
+              """
+              pass
+
+          def popn(self: GSSType, n: int) -> GSSType:
+              """
+              For all active stacks, creates new stacks by removing the top `n` values.
+              Returns a new GSS state containing the popped stacks.
+              """
+              gss = self
+              for _ in range(n):
+                  gss = gss.pop()
+              return gss
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Checks if the GSS contains no active stacks."""
+              pass
+
+          @abstractmethod
+          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
+              """
+              Keeps only the stacks that have `value` at the top.
+              If `value` is None, it keeps only the empty stacks.
+              Returns a new GSS state containing only these stacks.
+              """
+              pass
+
+          @abstractmethod
+          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
+              """Applies a function to each accumulator, returning a new GSS state."""
+              pass
+
+          @abstractmethod
+          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
+              """
+              Removes stacks from the GSS based on a predicate on their accumulator.
+              If `predicate(acc)` returns False, the stack is removed.
+              """
+              pass
+
+          @abstractmethod
+          def merge(self: GSSType, other: GSSType) -> GSSType:
+              """Merges this GSS with another, combining accumulators for identical stacks."""
+              pass
+
+          @classmethod
+          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
+              """
+              Merges multiple GSS instances into one.
+              This default implementation uses functools.reduce with the instance `merge` method.
+              """
+              # Start with an empty GSS of the target class `cls` to ensure the correct
+              # return type and to handle an empty gss_list.
+              initial = cls.from_stacks([])
+              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+
+          @abstractmethod
+          def peek(self) -> Set[T]:
+              """Returns the set of all values at the top of any stack."""
+              pass
+
+          @abstractmethod
+          def reduce_acc(self) -> Optional[Acc]:
+              """
+              Merges the accumulators of all active stacks into a single optional value.
+              Returns None if there are no active stacks.
+              """
+              pass
+
+          def to_reference_impl(self) -> 'GSS[T, Acc]':
+              """
+              Converts the GSS to its canonical ReferenceGSS representation.
+              This involves merging accumulators for identical stacks.
+              """
+              from .reference_impl import ReferenceGSS
+              return ReferenceGSS.from_stacks(self.to_stacks())
+
+          def __str__(self) -> str:
+              """Provides a human-readable string representation for debugging."""
+              return f"{self.__class__.__name__}({self.to_stacks()})"
+
+          def __repr__(self) -> str:
+              """Provides an unambiguous string representation of the GSS."""
+              return f"{self.__class__.__name__}({self.to_stacks()!r})"
+
+      ```
     metadata:
-      kind: mode-guidance
-      mode: simple
-      phase: default
-  - assistant: |-
-      An elegant and efficient implementation of `from_stacks` and `to_stacks` for the `LeveledGSS` class requires correctly interpreting its sophisticated, layered structure. The key is to handle cases where one stack is a prefix of another, which is achieved by using the integer ID in `UpperBranch`'s children to create distinct paths for stacks that terminate and stacks that continue, even if they share the same value at a given level.
-
-      The `from_stacks` method is implemented using a recursive helper function. This function treats any given set of stacks as a miniature GSS, separating the empty stack (a termination point) from non-empty stacks (branches). This naturally handles the prefix problem by creating `Interface` nodes for terminations and `UpperBranch` nodes for continuations as distinct children.
-
-      The `to_stacks` method performs a straightforward traversal of the `Upper` tree structure, collecting paths and their associated accumulators. Since the current `from_stacks` implementation does not create shared nodes (DAGs), a simple recursive traversal is sufficient. The final list of stacks is sorted to provide the canonical representation required by the interface.
-
-      Here are the complete, updated contents for `python/gss_tester/leveled_impl.py`:
-
-      ```python "python/gss_tester/leveled_impl.py"
+      filename: python/gss_tester/interface.py
+  - user: |-
+      ```python 'python/gss_tester/leveled_impl.py'
       from __future__ import annotations
 
       from dataclasses import dataclass
@@ -3134,50 +3064,8 @@ messages:
           pass
 
 
-      # A shared, canonical leaf node for the Lower trie, as this implementation
-      # does not require complex Lower structures.
+      # A shared, canonical leaf node
       _LOWER_LEAF = Lower(Leaf())
-
-
-      def _build_leveled_gss_recursively(
-          stacks: Dict[Tuple[T, ...], Acc]
-      ) -> LeveledGSS[T, Acc]:
-          """
-          Recursively builds a LeveledGSS from a dictionary of stacks.
-          This approach correctly handles the prefix problem by treating terminations
-          (empty stacks in the recursive context) and branches distinctly.
-          """
-          empty_acc = stacks.pop((), None)
-
-          groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
-          for stack_tuple, acc in stacks.items():
-              val = stack_tuple[0]
-              if val not in groups:
-                  groups[val] = []
-              groups[val].append((stack_tuple[1:], acc))
-
-          children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-          for val, sub_stacks_list in groups.items():
-              sub_stacks_dict = dict(sub_stacks_list)
-              sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
-
-              # If the sub-GSS has an accumulator for the empty stack, it means
-              # a stack in the parent context terminated at `val`. We represent this
-              # with an Interface node.
-              if sub_gss.empty is not None:
-                  interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
-                  if val not in children:
-                      children[val] = {}
-                  children[val][len(children[val])] = interface_node
-
-              # If the sub-GSS has branches, it means there are stacks longer than `val`.
-              # We embed the inner structure of the sub-GSS as another child.
-              if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-                  if val not in children:
-                      children[val] = {}
-                  children[val][len(children[val])] = sub_gss.inner
-
-          return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
 
 
       @dataclass(frozen=True, eq=True)
@@ -3187,6 +3075,46 @@ messages:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+              def _build_leveled_gss_recursively(
+                      stacks: Dict[Tuple[T, ...], Acc]
+              ) -> LeveledGSS[T, Acc]:
+                  """
+                  Recursively builds a LeveledGSS from a dictionary of stacks.
+                  This approach correctly handles the prefix problem by treating terminations
+                  (empty stacks in the recursive context) and branches distinctly.
+                  """
+                  empty_acc = stacks.pop((), None)
+
+                  groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
+                  for stack_tuple, acc in stacks.items():
+                      val = stack_tuple[0]
+                      if val not in groups:
+                          groups[val] = []
+                      groups[val].append((stack_tuple[1:], acc))
+
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for val, sub_stacks_list in groups.items():
+                      sub_stacks_dict = dict(sub_stacks_list)
+                      sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
+
+                      # If the sub-GSS has an accumulator for the empty stack, it means
+                      # a stack in the parent context terminated at `val`. We represent this
+                      # with an Interface node.
+                      if sub_gss.empty is not None:
+                          interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
+                          if val not in children:
+                              children[val] = {}
+                          children[val][len(children[val])] = interface_node
+
+                      # If the sub-GSS has branches, it means there are stacks longer than `val`.
+                      # We embed the inner structure of the sub-GSS as another child.
+                      if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+                          if val not in children:
+                              children[val] = {}
+                          children[val][len(children[val])] = sub_gss.inner
+
+                  return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+
               # 1. Merge stacks with identical values into a dictionary.
               merged: Dict[Tuple[T, ...], Acc] = {}
               for vals, acc in stacks:
@@ -3289,24 +3217,150 @@ messages:
                   raise AssertionError(
                       "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
                   )
+
+      ```
+    metadata:
+      filename: python/gss_tester/leveled_impl.py
+  - user: Simplify `from_stacks`. Make it very succinct.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to simplify the `from_stacks` method, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `python/gss_tester/leveled_impl.py`**
+          *   Add an import for `defaultdict` from the `collections` module at the top of the file.
+          *   Replace the existing `from_stacks` method within the `LeveledGSS` class with a more succinct version. The new implementation refactors the recursive helper function to use `defaultdict` for cleaner grouping of stacks and simplifies the logic for creating child nodes, making the code shorter and easier to understand.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 4554f6c..c45688c 100644
+      --- a/python/gss_tester/leveled_impl.py
+      +++ b/python/gss_tester/leveled_impl.py
+      @@ -1,7 +1,8 @@
+       from __future__ import annotations
+       
+       from dataclasses import dataclass
+      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      +from collections import defaultdict
+       
+       from .interface import GSS, T, Acc
+       
+      @@ -53,61 +54,42 @@
+       
+           @classmethod
+           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
+      -        def _build_leveled_gss_recursively(
+      -                stacks: Dict[Tuple[T, ...], Acc]
+      +        def _build_recursively(
+      +            stacks_dict: Dict[Tuple[T, ...], Acc]
+               ) -> LeveledGSS[T, Acc]:
+      -            """
+      -            Recursively builds a LeveledGSS from a dictionary of stacks.
+      -            This approach correctly handles the prefix problem by treating terminations
+      -            (empty stacks in the recursive context) and branches distinctly.
+      -            """
+      -            empty_acc = stacks.pop((), None)
+      +            """Recursively builds the LeveledGSS from a dictionary of stacks."""
+      +            empty_acc = stacks_dict.pop((), None)
+       
+      -            groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = {}
+      -            for stack_tuple, acc in stacks.items():
+      -                val = stack_tuple[0]
+      -                if val not in groups:
+      -                    groups[val] = []
+      -                groups[val].append((stack_tuple[1:], acc))
+      +            # Group stacks by their first element
+      +            groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = defaultdict(list)
+      +            for stack, acc in stacks_dict.items():
+      +                groups[stack[0]].append((stack[1:], acc))
+       
+                   children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+      -            for val, sub_stacks_list in groups.items():
+      -                sub_stacks_dict = dict(sub_stacks_list)
+      -                sub_gss = _build_leveled_gss_recursively(sub_stacks_dict)
+      +            for val, sub_stacks in groups.items():
+      +                sub_gss = _build_recursively(dict(sub_stacks))
+      +                
+      +                nodes = []
+      +                # A sub-GSS with an `empty` acc means a stack terminated at `val`.
+      +                if sub_gss.empty is not None:
+      +                    nodes.append(Upper(Interface(_LOWER_LEAF, sub_gss.empty)))
+      +                
+      +                # A sub-GSS with children means some stacks continue deeper.
+      +                if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+      +                    nodes.append(sub_gss.inner)
+       
+      -                # If the sub-GSS has an accumulator for the empty stack, it means
+      -                # a stack in the parent context terminated at `val`. We represent this
+      -                # with an Interface node.
+      -                if sub_gss.empty is not None:
+      -                    interface_node = Upper(Interface(_LOWER_LEAF, sub_gss.empty))
+      -                    if val not in children:
+      -                        children[val] = {}
+      -                    children[val][len(children[val])] = interface_node
+      +                if nodes:
+      +                    children[val] = {i: node for i, node in enumerate(nodes)}
+       
+      -                # If the sub-GSS has branches, it means there are stacks longer than `val`.
+      -                # We embed the inner structure of the sub-GSS as another child.
+      -                if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
+      -                    if val not in children:
+      -                        children[val] = {}
+      -                    children[val][len(children[val])] = sub_gss.inner
+      +            return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+       
+      -            return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
+      -
+      -        # 1. Merge stacks with identical values into a dictionary.
+      +        # 1. Merge stacks with identical values.
+               merged: Dict[Tuple[T, ...], Acc] = {}
+               for vals, acc in stacks:
+                   key = tuple(vals)
+                   if key in merged:
+                       merged[key] = merged[key].merge(acc)
+                   else:
+                       merged[key] = acc
+       
+      -        # 2. Build the LeveledGSS structure recursively.
+      -        return _build_leveled_gss_recursively(merged)
+      +        # 2. Build the structure from the merged stacks.
+      +        return _build_recursively(merged)
+       
+           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+               all_stacks: List[Tuple[List[T], Acc]] = []
+
       ```
     metadata:
   - user: |
-      Identified target file 'python/gss_tester/leveled_impl.py' on fence open line 1:
-      ```python "python/gss_tester/leveled_impl.py"
-      Found 1 code blocks.
-      Matching against available files:
-        1: python/gss_tester/interface.py
-        2: python/gss_tester/leveled_impl.py
-        3: python/gss_tester/test_spec.py
-        4: python/gss_tester/__init__.py
-        5: python/gss_tester/analyzer.py
-        6: python/gss_tester/runner.py
-        7: python/gss_tester/reference_impl.py
-        8: python/gss_tester/fuzzer.py
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to python/gss_tester/leveled_impl.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 7
-      --- Phase 6: Applying changes to assigned files ---
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/leveled_impl.py
+      Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "Refactor: Simplify LeveledGSS.from_stacks
+      implementation"'
     metadata:
 ...
