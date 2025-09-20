@@ -892,6 +892,7 @@ local_system:
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
+      import json
       from dataclasses import dataclass
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 
@@ -1030,9 +1031,16 @@ local_system:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              # Canonicalize first using the reference implementation
-              from .reference_impl import ReferenceGSS
-              merged = ReferenceGSS.from_stacks(stacks).to_stacks()
+              # Canonicalize stacks by merging accumulators for identical value lists.
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in stacks:
+                  key = tuple(vals)
+                  if key in merged_map:
+                      merged_map[key] = merged_map[key].merge(acc)
+                  else:
+                      merged_map[key] = acc
+
+              merged = [(list(key), acc) for key, acc in merged_map.items()]
 
               empty_acc: Optional[Acc] = None
               # A simple trie: { val: { "end": Optional[Acc], "sub": <subtrie> } }
@@ -1142,8 +1150,16 @@ local_system:
 
               dfs_upper(self.inner, [])
 
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(res).to_stacks()
+              # The internal representation is canonical, so we only need to sort for
+              # a deterministic output.
+              def _encode_for_sort(obj: Any) -> str:
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      return repr(obj)
+
+              res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return res
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               if isinstance(self.inner, Interface):
@@ -2235,12 +2251,11 @@ local_system:
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
-      import json
       from dataclasses import dataclass
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 
       from ..interface import GSS, T, Acc
-
+      from .reference_impl import ReferenceGSS
 
       # ------------------------------
       # Internal node classes
@@ -2374,22 +2389,15 @@ local_system:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              # Canonicalize stacks by merging accumulators for identical value lists.
-              merged_map: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in stacks:
-                  key = tuple(vals)
-                  if key in merged_map:
-                      merged_map[key] = merged_map[key].merge(acc)
-                  else:
-                      merged_map[key] = acc
-
-              merged = [(list(key), acc) for key, acc in merged_map.items()]
+              # Use ReferenceGSS to canonicalize stacks by merging accumulators.
+              # We access _stacks directly to avoid the sorting done by to_stacks().
+              canonical_stacks = ReferenceGSS(stacks)._stacks
 
               empty_acc: Optional[Acc] = None
               # A simple trie: { val: { "end": Optional[Acc], "sub": <subtrie> } }
               trie: Dict[T, Dict[str, Any]] = {}
 
-              for vals, acc in merged:
+              for vals, acc in canonical_stacks:
                   if not vals:
                       empty_acc = acc
                       continue
@@ -2493,16 +2501,9 @@ local_system:
 
               dfs_upper(self.inner, [])
 
-              # The internal representation is canonical, so we only need to sort for
-              # a deterministic output.
-              def _encode_for_sort(obj: Any) -> str:
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      return repr(obj)
-
-              res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              return res
+              # The internal representation is canonical. We use ReferenceGSS to sort
+              # the stacks into a canonical list representation.
+              return ReferenceGSS(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               if isinstance(self.inner, Interface):
@@ -3658,6 +3659,7 @@ messages:
       ```python 'python/gss_tester/implementations/leveled_impl.py'
       from __future__ import annotations
 
+      import json
       from dataclasses import dataclass
       from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
 
@@ -3796,9 +3798,16 @@ messages:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              # Canonicalize first using the reference implementation
-              from .reference_impl import ReferenceGSS
-              merged = ReferenceGSS.from_stacks(stacks).to_stacks()
+              # Canonicalize stacks by merging accumulators for identical value lists.
+              merged_map: Dict[Tuple[T, ...], Acc] = {}
+              for vals, acc in stacks:
+                  key = tuple(vals)
+                  if key in merged_map:
+                      merged_map[key] = merged_map[key].merge(acc)
+                  else:
+                      merged_map[key] = acc
+
+              merged = [(list(key), acc) for key, acc in merged_map.items()]
 
               empty_acc: Optional[Acc] = None
               # A simple trie: { val: { "end": Optional[Acc], "sub": <subtrie> } }
@@ -3908,8 +3917,16 @@ messages:
 
               dfs_upper(self.inner, [])
 
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(res).to_stacks()
+              # The internal representation is canonical, so we only need to sort for
+              # a deterministic output.
+              def _encode_for_sort(obj: Any) -> str:
+                  try:
+                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+                  except Exception:
+                      return repr(obj)
+
+              res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+              return res
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               if isinstance(self.inner, Interface):
@@ -4129,8 +4146,6 @@ messages:
   - user: Clean up `to_stacks` and `from_stacks` in `LeveledGSS`. Don't touch anything
       else, just simplify these two as much as possible.
     metadata:
-  - user: Fix this.
-    metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
                   - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
@@ -4148,78 +4163,82 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help simplify and clean up the `from_stacks` and `to_stacks` methods in `LeveledGSS`.
-
-      The current implementations rely on `ReferenceGSS` for canonicalization (merging and sorting stacks). This adds a dependency and is less efficient than it could be. I'll refactor these methods to be self-contained by handling the canonicalization directly. This will make the code cleaner and more performant.
+      Of course. I will simplify the `from_stacks` and `to_stacks` methods in `LeveledGSS` by delegating canonicalization and sorting to the existing `ReferenceGSS` implementation. This will reduce code duplication and make the `LeveledGSS` implementation cleaner.
 
       Here are the step-by-step instructions:
 
       ### File: `python/gss_tester/implementations/leveled_impl.py`
 
-      1.  **Add `json` import**: At the top of the file, add `import json` to support the new sorting logic.
+      1.  **Update Imports**: At the top of the file, remove the unused `json` import and add an import for `ReferenceGSS`.
 
-      2.  **Simplify `from_stacks` method**:
-          -   Locate the `from_stacks` class method within the `LeveledGSS` class.
-          -   Remove the lines that use `ReferenceGSS` to merge and canonicalize the input stacks.
-          -   Replace them with a more direct implementation that uses a dictionary to merge accumulators for stacks with identical contents.
+      2.  **Simplify `from_stacks`**: In the `LeveledGSS.from_stacks` class method, replace the manual dictionary-based logic for merging duplicate stacks with a single line that uses `ReferenceGSS` to produce a canonical list of stacks.
 
-      3.  **Simplify `to_stacks` method**:
-          -   Locate the `to_stacks` method.
-          -   The existing traversal logic (`dfs_upper` and `dfs_lower`) correctly extracts the stacks. However, the final step uses `ReferenceGSS` to sort the output.
-          -   Replace the final two lines with code that sorts the results directly for a deterministic output. The sorting key will be based on a JSON representation of the stack contents, similar to how `ReferenceGSS` ensures a canonical order.
+      3.  **Simplify `to_stacks`**: In the `LeveledGSS.to_stacks` method, after the DFS logic has populated the `res` list, remove the custom sorting implementation. Instead, use `ReferenceGSS` to sort the list of stacks into its canonical, sorted form.
 
       Here are the git diffs to apply these changes:
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 455776c..6829b55 100644
+      index 4554868..637651a 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1,5 +1,6 @@
+      @@ -1,10 +1,9 @@
        from __future__ import annotations
        
-      +import json
+      -import json
        from dataclasses import dataclass
        from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
        
-      @@ -155,11 +156,17 @@
+       from ..interface import GSS, T, Acc
+      -
+      +from .reference_impl import ReferenceGSS
+       
+       # ------------------------------
+       # Internal node classes
+      @@ -154,23 +153,14 @@
        
            @classmethod
            def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-      -        # Canonicalize first using the reference implementation
-      -        from .reference_impl import ReferenceGSS
-      -        merged = ReferenceGSS.from_stacks(stacks).to_stacks()
+      -        # Canonicalize stacks by merging accumulators for identical value lists.
+      -        merged_map: Dict[Tuple[T, ...], Acc] = {}
+      -        for vals, acc in stacks:
+      -            key = tuple(vals)
+      -            if key in merged_map:
+      -                merged_map[key] = merged_map[key].merge(acc)
+      -            else:
+      -                merged_map[key] = acc
       -
-      +        # Canonicalize stacks by merging accumulators for identical value lists.
-      +        merged_map: Dict[Tuple[T, ...], Acc] = {}
-      +        for vals, acc in stacks:
-      +            key = tuple(vals)
-      +            if key in merged_map:
-      +                merged_map[key] = merged_map[key].merge(acc)
-      +            else:
-      +                merged_map[key] = acc
-      +
-      +        merged = [(list(key), acc) for key, acc in merged_map.items()]
-      +
+      -        merged = [(list(key), acc) for key, acc in merged_map.items()]
+      +        # Use ReferenceGSS to canonicalize stacks by merging accumulators.
+      +        # We access _stacks directly to avoid the sorting done by to_stacks().
+      +        canonical_stacks = ReferenceGSS(stacks)._stacks
+       
                empty_acc: Optional[Acc] = None
                # A simple trie: { val: { "end": Optional[Acc], "sub": <subtrie> } }
                trie: Dict[T, Dict[str, Any]] = {}
-      @@ -248,8 +255,18 @@
+       
+      -        for vals, acc in merged:
+      +        for vals, acc in canonical_stacks:
+                   if not vals:
+                       empty_acc = acc
+                       continue
+      @@ -275,18 +265,9 @@
        
                dfs_upper(self.inner, [])
        
-      -        from .reference_impl import ReferenceGSS
-      -        return ReferenceGSS.from_stacks(res).to_stacks()
-      +        # The internal representation is canonical, so we only need to sort for
-      +        # a deterministic output.
-      +        def _encode_for_sort(obj: Any) -> str:
-      +            try:
-      +                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-      +            except Exception:
-      +                return repr(obj)
-      +
-      +        res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-      +        return res
+      -        # The internal representation is canonical, so we only need to sort for
+      -        # a deterministic output.
+      -        def _encode_for_sort(obj: Any) -> str:
+      -            try:
+      -                return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+      -            except Exception:
+      -                return repr(obj)
+      -
+      -        res.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+      -        return res
+      +        # The internal representation is canonical. We use ReferenceGSS to sort
+      +        # the stacks into a canonical list representation.
+      +        return ReferenceGSS(res).to_stacks()
        
            def push(self, value: T) -> LeveledGSS[T, Acc]:
                if isinstance(self.inner, Interface):
@@ -4235,7 +4254,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor LeveledGSS: Simplify from_stacks
-      and to_stacks"'
+  - user: 'Changes committed with message: "Refactor LeveledGSS: Delegate canonicalization
+      and sorting to ReferenceGSS"'
     metadata:
 ...
