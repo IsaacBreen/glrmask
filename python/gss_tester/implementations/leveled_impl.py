@@ -493,3 +493,17 @@ def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
             merged_children[v] = v_out
 
     return Lower(children=merged_children, empty=new_empty)
+
+
+def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
+    # Convert a Lower subtree to an Upper subtree; the accumulator for all stacks is 'acc'.
+    children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+    for v, kids in l.children.items():
+        v_map: Dict[int, Upper[T, Acc]] = {}
+        for lchild in kids.values():
+            up_child = lower_to_upper(lchild, acc)
+            v_map[up_child._max_depth()] = up_child
+        if v_map:
+            children[v] = v_map
+    ub = UpperBranch(children=children, empty=(acc if l.empty else None))
+    return try_promote(ub)
