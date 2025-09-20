@@ -272,15 +272,20 @@ local_system:
               return self.to_reference_impl().reduce_acc()
 
 
+      def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+          """Helper to get all children from an UpperBranch."""
+          return [
+              child
+              for children_by_val in branch.children.values()
+              for child in children_by_val.values()
+          ]
+
+
       def _validate_upper(node: Upper[T, Acc]):
           """Recursively validates invariants on Upper nodes."""
           if isinstance(node.inner, UpperBranch):
               branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
+              all_children = _get_upper_children(branch)
 
               # Invariant 1: If all children are interfaces, their accs must be unique.
               if all_children and all(isinstance(child.inner, Interface) for child in all_children):
@@ -755,22 +760,21 @@ local_system:
 
       def _validate_upper(node: Upper[T, Acc]):
           """Recursively validates invariants on Upper nodes."""
-          if isinstance(node.inner, UpperBranch):
-              branch = node.inner
-              all_children = _get_upper_children(branch)
+          if not isinstance(node.inner, UpperBranch):
+              return  # Base case: node is an Interface.
 
-              # Invariant 1: If all children are interfaces, their accs must be unique.
-              if all_children and all(isinstance(child.inner, Interface) for child in all_children):
-                  accs = [child.inner.acc for child in all_children]
-                  if len(set(accs)) != len(accs):
-                      raise AssertionError(
-                          "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
-                      )
+          all_children = _get_upper_children(node.inner)
 
-              # Recurse into children
-              for child in all_children:
-                  _validate_upper(child)
-          # Base case: node.inner is an Interface, do nothing further down this path.
+          # Invariant 1: If all children are interfaces, their accs must be unique.
+          if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+              if len({child.inner.acc for child in all_children}) != len(all_children):
+                  raise AssertionError(
+                      "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+                  )
+
+          # Recurse into children
+          for child in all_children:
+              _validate_upper(child)
 
 
       def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
@@ -778,15 +782,13 @@ local_system:
           Checks internal invariants of the LeveledGSS structure.
           Raises AssertionError if an invariant is violated.
           """
-          # Check recursive invariants on the inner structure.
           _validate_upper(gss.inner)
 
           # Invariant 2: If inner is an interface and empty exists, their accs must differ.
-          if isinstance(gss.inner, Interface) and gss.empty is not None:
-              if gss.inner.acc == gss.empty:
-                  raise AssertionError(
-                      "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
-                  )
+          if isinstance(gss.inner, Interface) and gss.empty is not None and gss.inner.acc == gss.empty:
+              raise AssertionError(
+                  "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+              )
     python/gss_tester/reference_impl.py: |
       from __future__ import annotations
       import json
@@ -964,7 +966,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1270,15 +1272,20 @@ messages:
               return self.to_reference_impl().reduce_acc()
 
 
+      def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+          """Helper to get all children from an UpperBranch."""
+          return [
+              child
+              for children_by_val in branch.children.values()
+              for child in children_by_val.values()
+          ]
+
+
       def _validate_upper(node: Upper[T, Acc]):
           """Recursively validates invariants on Upper nodes."""
           if isinstance(node.inner, UpperBranch):
               branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
+              all_children = _get_upper_children(branch)
 
               # Invariant 1: If all children are interfaces, their accs must be unique.
               if all_children and all(isinstance(child.inner, Interface) for child in all_children):
@@ -1484,8 +1491,7 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/reference_impl.py
-  - user: Define a helper that gets all children. Use it to make `_validate_upper`
-      more concise.
+  - user: Make `_validate_upper` and `validate_invariants` as concise as possible.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1504,74 +1510,85 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      To make the `_validate_upper` function more concise, we'll introduce a new helper function, `_get_upper_children`, which will extract all child `Upper` nodes from an `UpperBranch`.
+      Of course. Here are the step-by-step instructions to make the validation functions more concise, followed by the corresponding git diff.
 
-      Here are the step-by-step instructions:
+      ### Step-by-step Instructions
 
-      1.  **Open `python/gss_tester/leveled_impl.py`**.
-      2.  **Insert the `_get_upper_children` helper function**: Locate the `_validate_upper` function. Just above its definition, add the following code:
+      In the file `python/gss_tester/leveled_impl.py`, I'll make the following changes:
 
-          ```python
-          def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
-              """Helper to get all children from an UpperBranch."""
-              return [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
-          ```
+      1.  **In the `_validate_upper` function:**
+          *   I will replace the main `if isinstance(node.inner, UpperBranch):` block with a guard clause: `if not isinstance(node.inner, UpperBranch): return`. This reduces nesting.
+          *   The redundant `branch` variable will be removed.
+          *   The check for unique accumulators will be condensed into a single line by inlining a set comprehension and comparing its length to the number of children.
 
-      3.  **Modify `_validate_upper`**: Inside the `_validate_upper` function, replace the existing list comprehension for `all_children` with a call to the new helper function.
+      2.  **In the `validate_invariants` function:**
+          *   The comment `# Check recursive invariants on the inner structure.` will be removed as it's redundant.
+          *   The nested `if` statements for checking the second invariant will be combined into a single `if` statement using `and`.
 
-          Find these lines:
+      ### Git Diff
 
-          ```python
-                  all_children = [
-                      child
-                      for children_by_val in branch.children.values()
-                      for child in children_by_val.values()
-                  ]
-          ```
-
-          And replace them with:
-
-          ```python
-                  all_children = _get_upper_children(branch)
-          ```
-
-      Here are the git diffs for the changes:
+      Here is the git diff to apply these changes:
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
-      index 455a420..a780447 100644
+      index 4554761..3b9347d 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -107,15 +107,19 @@
-               return self.to_reference_impl().reduce_acc()
+      @@ -165,34 +165,26 @@
        
-       
-      +def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
-      +    """Helper to get all children from an UpperBranch."""
-      +    return [
-      +        child
-      +        for children_by_val in branch.children.values()
-      +        for child in children_by_val.values()
-      +    ]
-      +
-      +
        def _validate_upper(node: Upper[T, Acc]):
            """Recursively validates invariants on Upper nodes."""
-           if isinstance(node.inner, UpperBranch):
-               branch = node.inner
-      -        all_children = [
-      -            child
-      -            for children_by_val in branch.children.values()
-      -            for child in children_by_val.values()
-      -        ]
-      +        all_children = _get_upper_children(branch)
+      -    if isinstance(node.inner, UpperBranch):
+      -        branch = node.inner
+      -        all_children = _get_upper_children(branch)
+      -
+      -        # Invariant 1: If all children are interfaces, their accs must be unique.
+      -        if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+      -            accs = [child.inner.acc for child in all_children]
+      -            if len(set(accs)) != len(accs):
+      -                raise AssertionError(
+      -                    "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+      -                )
+      -
+      -        # Recurse into children
+      -        for child in all_children:
+      -            _validate_upper(child)
+      -    # Base case: node.inner is an Interface, do nothing further down this path.
+      +    if not isinstance(node.inner, UpperBranch):
+      +        return  # Base case: node is an Interface.
+      +
+      +    all_children = _get_upper_children(node.inner)
+      +
+      +    # Invariant 1: If all children are interfaces, their accs must be unique.
+      +    if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+      +        if len({child.inner.acc for child in all_children}) != len(all_children):
+      +            raise AssertionError(
+      +                "Invariant violated: UpperBranch has children that are all Interfaces with duplicate accs."
+      +            )
+      +
+      +    # Recurse into children
+      +    for child in all_children:
+      +        _validate_upper(child)
        
-               # Invariant 1: If all children are interfaces, their accs must be unique.
-               if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+       
+       def validate_invariants(gss: LeveledGSS[T, Acc]) -> None:
+           """
+           Checks internal invariants of the LeveledGSS structure.
+           Raises AssertionError if an invariant is violated.
+           """
+      -    # Check recursive invariants on the inner structure.
+           _validate_upper(gss.inner)
+       
+           # Invariant 2: If inner is an interface and empty exists, their accs must differ.
+      -    if isinstance(gss.inner, Interface) and gss.empty is not None:
+      -        if gss.inner.acc == gss.empty:
+      -            raise AssertionError(
+      -                "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+      -            )
+      +    if isinstance(gss.inner, Interface) and gss.empty is not None and gss.inner.acc == gss.empty:
+      +        raise AssertionError(
+      +            "Invariant violated: LeveledGSS.inner (Interface) and LeveledGSS.empty have the same accumulator."
+      +        )
 
       ```
     metadata:
@@ -1584,7 +1601,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Extract _get_upper_children
-      helper in leveled_impl.py"'
+  - user: 'Changes committed with message: "Refactor(leveled_impl): Make _validate_upper
+      and validate_invariants more concise"'
     metadata:
 ...
