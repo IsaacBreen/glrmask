@@ -122,15 +122,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return self.to_reference_impl().reduce_acc()
 
 
+def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+    """Helper to get all children from an UpperBranch."""
+    return [
+        child
+        for children_by_val in branch.children.values()
+        for child in children_by_val.values()
+    ]
+
+
 def _validate_upper(node: Upper[T, Acc]):
     """Recursively validates invariants on Upper nodes."""
     if isinstance(node.inner, UpperBranch):
         branch = node.inner
-        all_children = [
-            child
-            for children_by_val in branch.children.values()
-            for child in children_by_val.values()
-        ]
+        all_children = _get_upper_children(branch)
 
         # Invariant 1: If all children are interfaces, their accs must be unique.
         if all_children and all(isinstance(child.inner, Interface) for child in all_children):

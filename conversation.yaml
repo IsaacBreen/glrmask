@@ -203,65 +203,54 @@ local_system:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              def _build_recursively(
-                  stacks_dict: Dict[Tuple[T, ...], Acc]
-              ) -> LeveledGSS[T, Acc]:
-                  """Recursively builds the LeveledGSS from a dictionary of stacks."""
-                  empty_acc = stacks_dict.pop((), None)
-
-                  # Group stacks by their first element
-                  groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = defaultdict(list)
-                  for stack, acc in stacks_dict.items():
-                      groups[stack[0]].append((stack[1:], acc))
-
-                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-                  for val, sub_stacks in groups.items():
-                      sub_gss = _build_recursively(dict(sub_stacks))
-
-                      nodes = []
-                      # A sub-GSS with an `empty` acc means a stack terminated at `val`.
-                      if sub_gss.empty is not None:
-                          nodes.append(Upper(Interface(_LOWER_LEAF, sub_gss.empty)))
-
-                      # A sub-GSS with children means some stacks continue deeper.
-                      if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-                          nodes.append(sub_gss.inner)
-
-                      if nodes:
-                          children[val] = {i: node for i, node in enumerate(nodes)}
-
-                  return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
-
-              # 1. Merge stacks with identical values using the reference implementation.
+              # Canonicalize first using the reference implementation
               from .reference_impl import ReferenceGSS
-              merged = {tuple(s): a for s, a in ReferenceGSS(stacks)._stacks}
+              merged = ReferenceGSS(stacks).to_stacks()
 
-              # 2. Build the structure from the merged stacks.
-              return _build_recursively(merged)
+              empty_acc: Optional[Acc] = None
+              # A simple trie: { val: { "i": [acc, ...], "b": <subtrie> } }
+              trie: Dict[T, Dict[str, Any]] = {}
+
+              for vals, acc in merged:
+                  if not vals:
+                      empty_acc = acc
+                      continue
+                  node = trie
+                  for i, v in enumerate(vals):
+                      entry = node.setdefault(v, {"i": [], "b": {}})
+                      if i == len(vals) - 1:
+                          entry["i"].append(acc)
+                      else:
+                          node = entry["b"]
+
+              def build(d: Dict[T, Dict[str, Any]]) -> Upper[T, Acc]:
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for v, e in d.items():
+                      nodes: List[Upper[T, Acc]] = [Upper(Interface(_LOWER_LEAF, a)) for a in e["i"]]
+                      # Always add a branch node (empty or not) to keep structure uniform and avoid edge invariants.
+                      branch_child = build(e["b"]) if e["b"] else Upper(UpperBranch({}))
+                      nodes.append(branch_child)
+                      children[v] = {i: n for i, n in enumerate(nodes)}
+                  return Upper(UpperBranch(children))
+
+              return LeveledGSS(build(trie), empty_acc)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
+              res: List[Tuple[List[T], Acc]] = []
               if self.empty is not None:
-                  all_stacks.append(([], self.empty))
+                  res.append(([], self.empty))
 
-              def traverse(node: Upper[T, Acc], prefix: List[T]):
-                  """Recursively traverses the tree structure to reconstruct stacks."""
-                  if isinstance(node.inner, Interface):
-                      # An Interface node signifies the end of a stack.
-                      # In this implementation, the Lower part is always a Leaf,
-                      # so the tail is empty.
-                      all_stacks.append((prefix, node.inner.acc))
-                  else:  # UpperBranch
-                      branch = node.inner
-                      for val, children_by_id in branch.children.items():
-                          for child_node in children_by_id.values():
-                              traverse(child_node, prefix + [val])
+              def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+                  if isinstance(u.inner, Interface):
+                      res.append((pref, u.inner.acc))
+                      return
+                  for v, kids in u.inner.children.items():
+                      for child in kids.values():
+                          dfs(child, pref + [v])
 
-              traverse(self.inner, [])
-
-              # Delegate canonicalization (sorting) to the reference implementation.
+              dfs(self.inner, [])
               from .reference_impl import ReferenceGSS
-              return ReferenceGSS(all_stacks).to_stacks()
+              return ReferenceGSS(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
@@ -755,15 +744,20 @@ local_system:
               return self.to_reference_impl().reduce_acc()
 
 
+      def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+          """Helper to get all children from an UpperBranch."""
+          return [
+              child
+              for children_by_val in branch.children.values()
+              for child in children_by_val.values()
+          ]
+
+
       def _validate_upper(node: Upper[T, Acc]):
           """Recursively validates invariants on Upper nodes."""
           if isinstance(node.inner, UpperBranch):
               branch = node.inner
-              all_children = [
-                  child
-                  for children_by_val in branch.children.values()
-                  for child in children_by_val.values()
-              ]
+              all_children = _get_upper_children(branch)
 
               # Invariant 1: If all children are interfaces, their accs must be unique.
               if all_children and all(isinstance(child.inner, Interface) for child in all_children):
@@ -970,7 +964,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -1207,65 +1201,54 @@ messages:
 
           @classmethod
           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-              def _build_recursively(
-                  stacks_dict: Dict[Tuple[T, ...], Acc]
-              ) -> LeveledGSS[T, Acc]:
-                  """Recursively builds the LeveledGSS from a dictionary of stacks."""
-                  empty_acc = stacks_dict.pop((), None)
-
-                  # Group stacks by their first element
-                  groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = defaultdict(list)
-                  for stack, acc in stacks_dict.items():
-                      groups[stack[0]].append((stack[1:], acc))
-
-                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-                  for val, sub_stacks in groups.items():
-                      sub_gss = _build_recursively(dict(sub_stacks))
-
-                      nodes = []
-                      # A sub-GSS with an `empty` acc means a stack terminated at `val`.
-                      if sub_gss.empty is not None:
-                          nodes.append(Upper(Interface(_LOWER_LEAF, sub_gss.empty)))
-
-                      # A sub-GSS with children means some stacks continue deeper.
-                      if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-                          nodes.append(sub_gss.inner)
-
-                      if nodes:
-                          children[val] = {i: node for i, node in enumerate(nodes)}
-
-                  return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
-
-              # 1. Merge stacks with identical values using the reference implementation.
+              # Canonicalize first using the reference implementation
               from .reference_impl import ReferenceGSS
-              merged = {tuple(s): a for s, a in ReferenceGSS(stacks)._stacks}
+              merged = ReferenceGSS(stacks).to_stacks()
 
-              # 2. Build the structure from the merged stacks.
-              return _build_recursively(merged)
+              empty_acc: Optional[Acc] = None
+              # A simple trie: { val: { "i": [acc, ...], "b": <subtrie> } }
+              trie: Dict[T, Dict[str, Any]] = {}
+
+              for vals, acc in merged:
+                  if not vals:
+                      empty_acc = acc
+                      continue
+                  node = trie
+                  for i, v in enumerate(vals):
+                      entry = node.setdefault(v, {"i": [], "b": {}})
+                      if i == len(vals) - 1:
+                          entry["i"].append(acc)
+                      else:
+                          node = entry["b"]
+
+              def build(d: Dict[T, Dict[str, Any]]) -> Upper[T, Acc]:
+                  children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for v, e in d.items():
+                      nodes: List[Upper[T, Acc]] = [Upper(Interface(_LOWER_LEAF, a)) for a in e["i"]]
+                      # Always add a branch node (empty or not) to keep structure uniform and avoid edge invariants.
+                      branch_child = build(e["b"]) if e["b"] else Upper(UpperBranch({}))
+                      nodes.append(branch_child)
+                      children[v] = {i: n for i, n in enumerate(nodes)}
+                  return Upper(UpperBranch(children))
+
+              return LeveledGSS(build(trie), empty_acc)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
+              res: List[Tuple[List[T], Acc]] = []
               if self.empty is not None:
-                  all_stacks.append(([], self.empty))
+                  res.append(([], self.empty))
 
-              def traverse(node: Upper[T, Acc], prefix: List[T]):
-                  """Recursively traverses the tree structure to reconstruct stacks."""
-                  if isinstance(node.inner, Interface):
-                      # An Interface node signifies the end of a stack.
-                      # In this implementation, the Lower part is always a Leaf,
-                      # so the tail is empty.
-                      all_stacks.append((prefix, node.inner.acc))
-                  else:  # UpperBranch
-                      branch = node.inner
-                      for val, children_by_id in branch.children.items():
-                          for child_node in children_by_id.values():
-                              traverse(child_node, prefix + [val])
+              def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
+                  if isinstance(u.inner, Interface):
+                      res.append((pref, u.inner.acc))
+                      return
+                  for v, kids in u.inner.children.items():
+                      for child in kids.values():
+                          dfs(child, pref + [v])
 
-              traverse(self.inner, [])
-
-              # Delegate canonicalization (sorting) to the reference implementation.
+              dfs(self.inner, [])
               from .reference_impl import ReferenceGSS
-              return ReferenceGSS(all_stacks).to_stacks()
+              return ReferenceGSS(res).to_stacks()
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
@@ -1501,8 +1484,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/reference_impl.py
-  - user: Simplify `from_stacks` and `to_stacks` in `LeveledGSS`. Make them as succinct
-      as possible. Don't modify anything outside those two methods.
+  - user: Define a helper that gets all children. Use it to make `_validate_upper`
+      more concise.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1521,142 +1504,75 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are the precise steps to simplify LeveledGSS.from_stacks and LeveledGSS.to_stacks while keeping the rest of the file untouched.
+      To make the `_validate_upper` function more concise, we'll introduce a new helper function, `_get_upper_children`, which will extract all child `Upper` nodes from an `UpperBranch`.
 
-      Step-by-step instructions
+      Here are the step-by-step instructions:
 
-      1) Open python/gss_tester/leveled_impl.py.
+      1.  **Open `python/gss_tester/leveled_impl.py`**.
+      2.  **Insert the `_get_upper_children` helper function**: Locate the `_validate_upper` function. Just above its definition, add the following code:
 
-      2) Replace LeveledGSS.from_stacks with a succinct implementation:
-         - Canonicalize input stacks using ReferenceGSS.
-         - Build a simple trie-like dictionary structure where each level groups children by the next symbol.
-         - Convert that trie into the existing Upper/UpperBranch/Interface shape.
-         - Always add a branch node for each value (even if empty) to avoid any potential invariant edge cases about “all children are interfaces”.
+          ```python
+          def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+              """Helper to get all children from an UpperBranch."""
+              return [
+                  child
+                  for children_by_val in branch.children.values()
+                  for child in children_by_val.values()
+              ]
+          ```
 
-      3) Replace LeveledGSS.to_stacks with a compact DFS traversal:
-         - Start with the optional empty accumulator if present.
-         - Recursively traverse the Upper structure; append the stack when encountering Interface nodes.
-         - Canonicalize the result via ReferenceGSS before returning.
+      3.  **Modify `_validate_upper`**: Inside the `_validate_upper` function, replace the existing list comprehension for `all_children` with a call to the new helper function.
 
-      4) Do not modify any other methods or imports.
+          Find these lines:
 
-      Git diff
+          ```python
+                  all_children = [
+                      child
+                      for children_by_val in branch.children.values()
+                      for child in children_by_val.values()
+                  ]
+          ```
+
+          And replace them with:
+
+          ```python
+                  all_children = _get_upper_children(branch)
+          ```
+
+      Here are the git diffs for the changes:
 
       ```diff
       diff --git a/python/gss_tester/leveled_impl.py b/python/gss_tester/leveled_impl.py
+      index 455a420..a780447 100644
       --- a/python/gss_tester/leveled_impl.py
       +++ b/python/gss_tester/leveled_impl.py
-      @@ -54,45 +54,44 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-           inner: Upper[T, Acc]
-           empty: Optional[Acc]
+      @@ -107,15 +107,19 @@
+               return self.to_reference_impl().reduce_acc()
        
-           @classmethod
-           def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
-      -        def _build_recursively(
-      -            stacks_dict: Dict[Tuple[T, ...], Acc]
-      -        ) -> LeveledGSS[T, Acc]:
-      -            """Recursively builds the LeveledGSS from a dictionary of stacks."""
-      -            empty_acc = stacks_dict.pop((), None)
-      -
-      -            # Group stacks by their first element
-      -            groups: Dict[T, List[Tuple[Tuple[T, ...], Acc]]] = defaultdict(list)
-      -            for stack, acc in stacks_dict.items():
-      -                groups[stack[0]].append((stack[1:], acc))
-      -
-      -            children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-      -            for val, sub_stacks in groups.items():
-      -                sub_gss = _build_recursively(dict(sub_stacks))
-      -
-      -                nodes = []
-      -                # A sub-GSS with an `empty` acc means a stack terminated at `val`.
-      -                if sub_gss.empty is not None:
-      -                    nodes.append(Upper(Interface(_LOWER_LEAF, sub_gss.empty)))
-      -
-      -                # A sub-GSS with children means some stacks continue deeper.
-      -                if isinstance(sub_gss.inner.inner, UpperBranch) and sub_gss.inner.inner.children:
-      -                    nodes.append(sub_gss.inner)
-      -
-      -                if nodes:
-      -                    children[val] = {i: node for i, node in enumerate(nodes)}
-      -
-      -            return LeveledGSS(Upper(UpperBranch(children)), empty_acc)
-      -
-      -        # 1. Merge stacks with identical values using the reference implementation.
-      -        from .reference_impl import ReferenceGSS
-      -        merged = {tuple(s): a for s, a in ReferenceGSS(stacks)._stacks}
-      -
-      -        # 2. Build the structure from the merged stacks.
-      -        return _build_recursively(merged)
-      +        # Canonicalize first using the reference implementation
-      +        from .reference_impl import ReferenceGSS
-      +        merged = ReferenceGSS(stacks).to_stacks()
-      +
-      +        empty_acc: Optional[Acc] = None
-      +        # A simple trie: { val: { "i": [acc, ...], "b": <subtrie> } }
-      +        trie: Dict[T, Dict[str, Any]] = {}
-      +
-      +        for vals, acc in merged:
-      +            if not vals:
-      +                empty_acc = acc
-      +                continue
-      +            node = trie
-      +            for i, v in enumerate(vals):
-      +                entry = node.setdefault(v, {"i": [], "b": {}})
-      +                if i == len(vals) - 1:
-      +                    entry["i"].append(acc)
-      +                else:
-      +                    node = entry["b"]
-      +
-      +        def build(d: Dict[T, Dict[str, Any]]) -> Upper[T, Acc]:
-      +            children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-      +            for v, e in d.items():
-      +                nodes: List[Upper[T, Acc]] = [Upper(Interface(_LOWER_LEAF, a)) for a in e["i"]]
-      +                # Always add a branch node (empty or not) to keep structure uniform and avoid edge invariants.
-      +                branch_child = build(e["b"]) if e["b"] else Upper(UpperBranch({}))
-      +                nodes.append(branch_child)
-      +                children[v] = {i: n for i, n in enumerate(nodes)}
-      +            return Upper(UpperBranch(children))
-      +
-      +        return LeveledGSS(build(trie), empty_acc)
        
-           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-      -        all_stacks: List[Tuple[List[T], Acc]] = []
-      -        if self.empty is not None:
-      -            all_stacks.append(([], self.empty))
-      -
-      -        def traverse(node: Upper[T, Acc], prefix: List[T]):
-      -            """Recursively traverses the tree structure to reconstruct stacks."""
-      -            if isinstance(node.inner, Interface):
-      -                # An Interface node signifies the end of a stack.
-      -                # In this implementation, the Lower part is always a Leaf,
-      -                # so the tail is empty.
-      -                all_stacks.append((prefix, node.inner.acc))
-      -            else:  # UpperBranch
-      -                branch = node.inner
-      -                for val, children_by_id in branch.children.items():
-      -                    for child_node in children_by_id.values():
-      -                        traverse(child_node, prefix + [val])
-      -
-      -        traverse(self.inner, [])
-      -
-      -        # Delegate canonicalization (sorting) to the reference implementation.
-      -        from .reference_impl import ReferenceGSS
-      -        return ReferenceGSS(all_stacks).to_stacks()
-      +        res: List[Tuple[List[T], Acc]] = []
-      +        if self.empty is not None:
-      +            res.append(([], self.empty))
+      +def _get_upper_children(branch: UpperBranch[T, Acc]) -> List[Upper[T, Acc]]:
+      +    """Helper to get all children from an UpperBranch."""
+      +    return [
+      +        child
+      +        for children_by_val in branch.children.values()
+      +        for child in children_by_val.values()
+      +    ]
       +
-      +        def dfs(u: Upper[T, Acc], pref: List[T]) -> None:
-      +            if isinstance(u.inner, Interface):
-      +                res.append((pref, u.inner.acc))
-      +                return
-      +            for v, kids in u.inner.children.items():
-      +                for child in kids.values():
-      +                    dfs(child, pref + [v])
       +
-      +        dfs(self.inner, [])
-      +        from .reference_impl import ReferenceGSS
-      +        return ReferenceGSS(res).to_stacks()
+       def _validate_upper(node: Upper[T, Acc]):
+           """Recursively validates invariants on Upper nodes."""
+           if isinstance(node.inner, UpperBranch):
+               branch = node.inner
+      -        all_children = [
+      -            child
+      -            for children_by_val in branch.children.values()
+      -            for child in children_by_val.values()
+      -        ]
+      +        all_children = _get_upper_children(branch)
+       
+               # Invariant 1: If all children are interfaces, their accs must be unique.
+               if all_children and all(isinstance(child.inner, Interface) for child in all_children):
+
       ```
     metadata:
   - user: |
@@ -1668,7 +1584,7 @@ messages:
       Applying patch to 'python/gss_tester/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor LeveledGSS from_stacks and to_stacks
-      for conciseness"'
+  - user: 'Changes committed with message: "Refactor: Extract _get_upper_children
+      helper in leveled_impl.py"'
     metadata:
 ...
