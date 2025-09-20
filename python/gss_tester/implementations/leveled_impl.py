@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
 
 from ..interface import GSS, T, Acc
-from .reference_impl import ReferenceGSS
 
 # ------------------------------------------------------------------------------
 # Internal node classes and type alias
@@ -30,7 +29,7 @@ class UpperBranch(Generic[T, Acc]):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
 
-    def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
+    def _all_children(self) -> Iterator[Upper[T, Acc]]:
         for children_at_depth in self.children.values():
             yield from children_at_depth.values()
 
@@ -195,28 +194,34 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
         """
         Build a canonical LeveledGSS from explicit stacks.
-        We first canonicalize by merging duplicate stacks (without sorting cost),
-        then compile into our trie representation and perform local promotion.
-        """
-        # Canonicalize duplicates while keeping order-free structure; no sorting overhead.
-        canonical_stacks = ReferenceGSS(stacks)._stacks
 
-        # Build a simple trie in Python dicts:
-        # Each node: { value: {"end": Optional[Acc], "sub": <subtrie> } }
+        Steps:
+          1) Merge duplicate stacks (same values) by merging their accumulators.
+          2) Compile the result into a trie of Upper/Lower nodes.
+          3) Perform local promotions where possible.
+        """
+        # 1) Merge duplicates (without sorting overhead)
+        merged: Dict[Tuple[T, ...], Acc] = {}
+        for vals, acc in stacks:
+            key = tuple(vals)
+            prev = merged.get(key)
+            merged[key] = acc if prev is None else prev.merge(acc)
+
+        # 2) Build a simple top-of-stack-first trie in Python dicts:
+        # Each entry: { value: {"end": Optional[Acc], "sub": <subtrie> } }
         trie: Dict[T, Dict[str, Any]] = {}
         root_empty: Optional[Acc] = None
 
-        for vals, acc in canonical_stacks:
-            if not vals:
-                root_empty = acc
+        for key, acc in merged.items():
+            if not key:
+                root_empty = _merge_opt(root_empty, acc)
                 continue
             node = trie
-            # Traverse from top-of-stack downwards
-            rev = list(reversed(vals))
+            rev = list(reversed(key))
             for i, v in enumerate(rev):
                 entry = node.setdefault(v, {"end": None, "sub": {}})
                 if i == len(rev) - 1:
-                    entry["end"] = acc  # leaf (end-of-stack)
+                    entry["end"] = _merge_opt(entry["end"], acc)
                 else:
                     node = entry["sub"]
 
@@ -248,12 +253,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # ------------------------------
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         """
-        Convert back to explicit stacks, merging duplicates and sorting for stability.
+        Convert back to explicit stacks, then canonicalize (merge duplicates) and sort deterministically.
         """
-        res: List[Tuple[List[T], Acc]] = []
+        out: List[Tuple[List[T], Acc]] = []
 
         def emit_stack(pref: List[T], acc: Acc) -> None:
-            res.append((list(reversed(pref)), acc))
+            out.append((list(reversed(pref)), acc))
 
         def dfs_lower(node: Lower[T], pref: List[T], acc: Acc) -> None:
             if node.empty:
@@ -280,8 +285,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                             dfs_lower(child, pref + [v], node.acc)
 
         dfs_upper(self.inner, [])
-        # Canonicalize (merge duplicates) + sort deterministically
-        return ReferenceGSS(res).to_stacks()
+        return _canonicalize_and_sort(out)
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         """
@@ -292,14 +296,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self
 
         if isinstance(self.inner, Interface):
-            # Pushing onto an Interface: wrap its lower subtree under the new top value.
-            # The new Lower node is "empty" if and only if there was an empty stack previously.
+            # Wrap the existing lower structure under the new top value.
+            # 'empty' on the new lower node indicates whether any prior stack could end here.
             had_empty_stack = (self.inner.empty is not None) or (not self.inner.children)
             lower_node = Lower(children=self.inner.children, empty=had_empty_stack)
             new_children: Dict[T, Dict[int, Lower[T]]] = {value: {lower_node._max_depth: lower_node}}
             return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
 
-        # UpperBranch: attach the previous root under the new value.
+        # UpperBranch: wrap the entire structure under 'value'
         child = self.inner
         return LeveledGSS(UpperBranch(children={value: {child._max_depth: child}}, empty=None))
 
@@ -310,11 +314,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         ub = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
 
-        # Combine all children (across all top values) since we pop the top-of-stack.
+        # Merge all direct children (across all top-of-stack values).
         merged: Upper[T, Acc] = UpperBranch(children={}, empty=None)
         for child in ub._all_children():
             merged = merge_upper(merged, child)
 
+        # Ensure canonical form at the new root
         merged = try_promote(merged if isinstance(merged, UpperBranch) else interface_to_upperbranch(merged))
         return LeveledGSS(merged)
 
@@ -331,10 +336,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if isinstance(self.inner, UpperBranch):
                 return LeveledGSS(UpperBranch(children={}, empty=self.inner.empty))
             # Interface: preserve empty stacks. If it's a leaf Interface with implicit empty,
-            # we must capture that as an empty accumulator.
-            empty_acc: Optional[Acc]
+            # capture that as an empty accumulator.
             if self.inner.empty is not None:
-                empty_acc = self.inner.empty
+                empty_acc: Optional[Acc] = self.inner.empty
             elif not self.inner.children:
                 empty_acc = self.inner.acc
             else:
@@ -503,6 +507,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 Node = TypeVar("Node")
 
+
 def _merge_children_by_depth(
     c1: Dict[T, Dict[int, Node]],
     c2: Dict[T, Dict[int, Node]],
@@ -514,23 +519,26 @@ def _merge_children_by_depth(
     """
     merged: Dict[T, Dict[int, Node]] = {}
 
-    for v in set(c1.keys()) | set(c2.keys()):
-        map1 = c1.get(v, {})
-        map2 = c2.get(v, {})
-        if not map1 and not map2:
+    keys = set(c1.keys()) | set(c2.keys())
+    for v in keys:
+        map1 = c1.get(v)
+        map2 = c2.get(v)
+        if map1 is None and map2 is None:
             continue
 
         out_for_v: Dict[int, Node] = {}
 
-        def _accumulate(node: Node) -> None:
-            d = getattr(node, "_max_depth")
-            prev = out_for_v.get(d)
-            out_for_v[d] = node if prev is None else merge_func(prev, node)
+        if map1:
+            for n in map1.values():
+                d = getattr(n, "_max_depth")
+                prev = out_for_v.get(d)
+                out_for_v[d] = n if prev is None else merge_func(prev, n)
 
-        for n in map1.values():
-            _accumulate(n)
-        for n in map2.values():
-            _accumulate(n)
+        if map2:
+            for n in map2.values():
+                d = getattr(n, "_max_depth")
+                prev = out_for_v.get(d)
+                out_for_v[d] = n if prev is None else merge_func(prev, n)
 
         if out_for_v:
             merged[v] = out_for_v
@@ -662,5 +670,37 @@ def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
             children[v] = bucket
     ub = UpperBranch(children=children, empty=(acc if l.empty else None))
     return try_promote(ub)
+
+
+# ------------------------------------------------------------------------------
+# Canonicalization helpers for stacks (keep behavior aligned with ReferenceGSS)
+# ------------------------------------------------------------------------------
+
+def _encode_for_sort(obj: Any) -> str:
+    """
+    Deterministic encoding used to sort stacks. Mirrors ReferenceGSS._get_canonical_sorted_stacks.
+    """
+    import json
+    try:
+        return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
+    except Exception:
+        return repr(obj)
+
+
+def _canonicalize_and_sort(items: List[Tuple[List[T], Acc]]) -> List[Tuple[List[T], Acc]]:
+    """
+    Merge duplicate stacks (by values) by merging their accumulators, then
+    sort deterministically using the same ordering as ReferenceGSS.
+    """
+    merged: Dict[Tuple[T, ...], Acc] = {}
+    for vals, acc in items:
+        key = tuple(vals)
+        prev = merged.get(key)
+        merged[key] = acc if prev is None else prev.merge(acc)
+
+    out = [(list(k), v) for k, v in merged.items()]
+    out.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
+    return out
+
 
 __all__ = ["LeveledGSS"]
