@@ -893,7 +893,7 @@ local_system:
       from __future__ import annotations
 
       from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
 
       from ..interface import GSS, T, Acc
       from .reference_impl import ReferenceGSS
@@ -1184,10 +1184,38 @@ local_system:
                   return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
+              def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
+                  if node.empty:
+                      yield acc
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          yield from generate_accs_lower(child, acc)
+
               def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  ...
+                  if isinstance(node, UpperBranch):
+                      if node.empty is not None:
+                          yield node.empty
+                      for children_at_depth in node.children.values():
+                          for child in children_at_depth.values():
+                              yield from generate_accs(child)
+                  elif isinstance(node, Interface):
+                      if node.empty is not None:
+                          yield node.empty
+
+                      # The case where the interface itself is a stack end.
+                      if not node.children and node.empty is None:
+                          yield node.acc
+
+                      for children_at_depth in node.children.values():
+                          for child in children_at_depth.values():
+                              yield from generate_accs_lower(child, node.acc)
+
               gen = generate_accs(self.inner)
-              reduced_acc = next(gen)
+              try:
+                  reduced_acc = next(gen)
+              except StopIteration:
+                  return None
+
               for acc in gen:
                   reduced_acc = reduced_acc.merge(acc)
               return reduced_acc
@@ -2694,16 +2722,180 @@ local_system:
               for c in all_children[1:]:
                   merged = merge_upper(merged, c)
               return LeveledGSS(merged)
+
           def is_empty(self) -> bool:
-              return len(self.to_stacks()) == 0
+              # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
+              if isinstance(self.inner, UpperBranch):
+                  return not self.inner.children and self.inner.empty is None
+              # An Interface always represents at least one stack, as it has an accumulator.
+              return False
 
           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+              empty_gss_inner = UpperBranch(children={}, empty=None)
+
+              if value is None:
+                  # Keep only empty stacks.
+                  empty_acc: Optional[Acc] = None
+                  if isinstance(self.inner, UpperBranch):
+                      empty_acc = self.inner.empty
+                  elif isinstance(self.inner, Interface):
+                      empty_acc = self.inner.empty
+
+                  if empty_acc is not None:
+                      return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                  return LeveledGSS(empty_gss_inner)
+
+              # Keep stacks with `value` at the top.
+              if isinstance(self.inner, UpperBranch):
+                  children_to_merge = self.inner.children.get(value, {}).values()
+                  if not children_to_merge:
+                      return LeveledGSS(empty_gss_inner)
+
+                  it = iter(children_to_merge)
+                  merged = next(it)
+                  for c in it:
+                      merged = merge_upper(merged, c)
+                  return LeveledGSS(merged)
+
+              # self.inner is an Interface
+              children_to_merge = self.inner.children.get(value, {}).values()
+              if not children_to_merge:
+                  return LeveledGSS(empty_gss_inner)
+
+              it = iter(children_to_merge)
+              merged_lower = next(it)
+              for c in it:
+                  merged_lower = merge_lower(merged_lower, c)
+
+              # Convert the merged Lower subtree back to an Upper tree with the Interface's accumulator.
+              upper_node = lower_to_upper(merged_lower, self.inner.acc)
+              return LeveledGSS(upper_node)
 
           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+              memo: Dict[Any, Any] = {}
+
+              def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
+                  if node in memo:
+                      return memo[node]
+
+                  if isinstance(node, Interface):
+                      new_acc = func(node.acc)
+                      new_empty = func(node.empty) if node.empty is not None else None
+
+                      if new_acc == node.acc and new_empty == node.empty:
+                          memo[node] = node
+                          return node
+
+                      res = Interface(children=node.children, acc=new_acc, empty=new_empty)
+                      memo[node] = res
+                      return res
+
+                  # It's an UpperBranch
+                  new_empty = func(node.empty) if node.empty is not None else None
+
+                  changed = new_empty != node.empty
+                  new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+
+                  for v, kids in node.children.items():
+                      new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+                      any_child_changed_for_v = False
+                      for d, child in kids.items():
+                          new_child = transform(child)
+                          if new_child is not child:
+                              any_child_changed_for_v = True
+                          # Depth does not change in apply, so we can reuse `d`.
+                          new_kids_for_v[d] = new_child
+
+                      if any_child_changed_for_v:
+                          changed = True
+                          new_children[v] = new_kids_for_v
+                      else:
+                          new_children[v] = kids  # Reuse child dict
+
+                  if not changed:
+                      memo[node] = node
+                      return node
+
+                  res = UpperBranch(children=new_children, empty=new_empty)
+                  promoted = try_promote(res)
+                  memo[node] = promoted
+                  return promoted
+
+              return LeveledGSS(transform(self.inner))
+
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-              return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+              memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+
+              def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+                  if node in memo:
+                      return memo[node]
+
+                  if isinstance(node, Interface):
+                      keep_acc = predicate(node.acc)
+                      keep_empty = node.empty is not None and predicate(node.empty)
+                      new_empty = node.empty if keep_empty else None
+
+                      if keep_acc and new_empty == node.empty:
+                          memo[node] = node
+                          return node
+
+                      if not keep_acc and not keep_empty:
+                          memo[node] = None
+                          return None
+
+                      if not keep_acc and keep_empty:
+                          res = UpperBranch(children={}, empty=new_empty)
+                          memo[node] = res
+                          return res
+
+                      # keep_acc is True, but empty might have been pruned.
+                      res = Interface(children=node.children, acc=node.acc, empty=new_empty)
+                      memo[node] = res
+                      return res
+
+                  # It's an UpperBranch
+                  new_empty = node.empty if node.empty is not None and predicate(node.empty) else None
+                  changed = new_empty != node.empty
+
+                  new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                  for v, kids in node.children.items():
+                      new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+                      child_map_changed = False
+                      for d, child in kids.items():
+                          new_child = transform(child)
+                          if new_child is not child:
+                              child_map_changed = True
+                          if new_child is not None:
+                              new_kids_for_v[new_child._max_depth()] = new_child
+
+                      if len(new_kids_for_v) != len(kids):
+                          child_map_changed = True
+
+                      if child_map_changed:
+                          changed = True
+                          if new_kids_for_v:
+                              new_children[v] = new_kids_for_v
+                      else:
+                          new_children[v] = kids  # Reuse
+
+                  if not changed:
+                      memo[node] = node
+                      return node
+
+                  if not new_children and new_empty is None:
+                      memo[node] = None
+                      return None
+
+                  res = UpperBranch(children=new_children, empty=new_empty)
+                  promoted = try_promote(res)
+                  memo[node] = promoted
+                  return promoted
+
+              res_inner = transform(self.inner)
+              if res_inner is None:
+                  return LeveledGSS(UpperBranch(children={}, empty=None))
+              return LeveledGSS(res_inner)
+
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
           def peek(self) -> Set[T]:
@@ -4043,7 +4235,7 @@ messages:
       from __future__ import annotations
 
       from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
 
       from ..interface import GSS, T, Acc
       from .reference_impl import ReferenceGSS
@@ -4334,10 +4526,38 @@ messages:
                   return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
+              def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
+                  if node.empty:
+                      yield acc
+                  for children_at_depth in node.children.values():
+                      for child in children_at_depth.values():
+                          yield from generate_accs_lower(child, acc)
+
               def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  ...
+                  if isinstance(node, UpperBranch):
+                      if node.empty is not None:
+                          yield node.empty
+                      for children_at_depth in node.children.values():
+                          for child in children_at_depth.values():
+                              yield from generate_accs(child)
+                  elif isinstance(node, Interface):
+                      if node.empty is not None:
+                          yield node.empty
+
+                      # The case where the interface itself is a stack end.
+                      if not node.children and node.empty is None:
+                          yield node.acc
+
+                      for children_at_depth in node.children.values():
+                          for child in children_at_depth.values():
+                              yield from generate_accs_lower(child, node.acc)
+
               gen = generate_accs(self.inner)
-              reduced_acc = next(gen)
+              try:
+                  reduced_acc = next(gen)
+              except StopIteration:
+                  return None
+
               for acc in gen:
                   reduced_acc = reduced_acc.merge(acc)
               return reduced_acc
@@ -4696,9 +4916,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: generate_accs
-    metadata:
-  - user: Implement generate_accs
+  - user: Implement `apply` and `prune` efficiently. Use a memo to ensure shared nodes
+      remain shared. Implement `isolate` and `is_empty` more efficiently too.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4717,238 +4936,221 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement `generate_accs` and the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement `apply`, `prune`, `isolate`, and `is_empty` efficiently in your `LeveledGSS` implementation, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
+      I will apply the following changes to `python/gss_tester/implementations/leveled_impl.py` to improve performance by operating directly on the internal tree structure.
 
-      2.  **Update the `typing` import** at the top of the file (around line 4) to include `Generator`.
+      1.  **File: `python/gss_tester/implementations/leveled_impl.py`**
 
-          Change this line:
-          ```python
-          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
-          ```
-          to this:
-          ```python
-          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
-          ```
+          a.  **Efficient `is_empty()`**
+              I will replace the current `is_empty` method. The new version will check the `inner` node's structure. An empty `LeveledGSS` is represented by an `UpperBranch` with no children and no `empty` accumulator. An `Interface` node always represents at least one stack, so it is never empty.
 
-      3.  **Replace the `reduce_acc` method** in the `LeveledGSS` class (around line 348) with the complete implementation. This new version defines the `generate_accs` generator to traverse the internal structure efficiently and correctly reduces the accumulators.
+          b.  **Efficient `isolate()`**
+              I will replace the `isolate` method. The new implementation will:
+              *   For `value is None` (isolating empty stacks), it will check the `empty` slots of the root node.
+              *   For a given `value`, it will look up children corresponding to that value at the top level of the tree and merge them to form the result, avoiding a full tree traversal.
 
-          Replace the existing `reduce_acc` method:
-          ```python
-          def reduce_acc(self) -> Optional[Acc]:
-              def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  ...
-              gen = generate_accs(self.inner)
-              reduced_acc = next(gen)
-              for acc in gen:
-                  reduced_acc = reduced_acc.merge(acc)
-              return reduced_acc
-          ```
-          with the following code:
-          ```python
-          def reduce_acc(self) -> Optional[Acc]:
-              def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-                  if node.empty:
-                      yield acc
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          yield from generate_accs_lower(child, acc)
+          c.  **Efficient `apply()` with Memoization**
+              I will replace the `apply` method with a version that recursively traverses the `Upper` tree. It will apply the given function to all accumulators and use a memoization dictionary to ensure that identical subtrees are processed only once, preserving structural sharing.
 
-              def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  if isinstance(node, UpperBranch):
-                      if node.empty is not None:
-                          yield node.empty
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs(child)
-                  elif isinstance(node, Interface):
-                      if node.empty is not None:
-                          yield node.empty
+          d.  **Efficient `prune()` with Memoization**
+              I will replace the `prune` method. Similar to `apply`, this will be a recursive traversal. It will handle cases where subtrees are partially or completely removed based on the predicate. Memoization will be used to preserve sharing and avoid redundant computations.
 
-                      # The case where the interface itself is a stack end.
-                      if not node.children and node.empty is None:
-                          yield node.acc
+      ### Git Diffs
 
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs_lower(child, node.acc)
-
-              gen = generate_accs(self.inner)
-              try:
-                  reduced_acc = next(gen)
-              except StopIteration:
-                  return None
-
-              for acc in gen:
-                  reduced_acc = reduced_acc.merge(acc)
-              return reduced_acc
-          ```
-
-      ### Git Diff
-
-      Here is the git diff for the changes:
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1,7 +1,7 @@
-       from __future__ import annotations
+      @@ -321,16 +321,111 @@
+               for c in all_children[1:]:
+                   merged = merge_upper(merged, c)
+               return LeveledGSS(merged)
+      +
+           def is_empty(self) -> bool:
+      -        return len(self.to_stacks()) == 0
+      +        # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
+      +        if isinstance(self.inner, UpperBranch):
+      +            return not self.inner.children and self.inner.empty is None
+      +        # An Interface always represents at least one stack, as it has an accumulator.
+      +        return False
        
-       from dataclasses import dataclass
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
+           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
+      -        return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+      +        empty_gss_inner = UpperBranch(children={}, empty=None)
+      +
+      +        if value is None:
+      +            # Keep only empty stacks.
+      +            empty_acc: Optional[Acc] = None
+      +            if isinstance(self.inner, UpperBranch):
+      +                empty_acc = self.inner.empty
+      +            elif isinstance(self.inner, Interface):
+      +                empty_acc = self.inner.empty
+      +
+      +            if empty_acc is not None:
+      +                return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+      +            return LeveledGSS(empty_gss_inner)
+      +
+      +        # Keep stacks with `value` at the top.
+      +        if isinstance(self.inner, UpperBranch):
+      +            children_to_merge = self.inner.children.get(value, {}).values()
+      +            if not children_to_merge:
+      +                return LeveledGSS(empty_gss_inner)
+      +
+      +            it = iter(children_to_merge)
+      +            merged = next(it)
+      +            for c in it:
+      +                merged = merge_upper(merged, c)
+      +            return LeveledGSS(merged)
+      +
+      +        # self.inner is an Interface
+      +        children_to_merge = self.inner.children.get(value, {}).values()
+      +        if not children_to_merge:
+      +            return LeveledGSS(empty_gss_inner)
+      +
+      +        it = iter(children_to_merge)
+      +        merged_lower = next(it)
+      +        for c in it:
+      +            merged_lower = merge_lower(merged_lower, c)
+      +
+      +        # Convert the merged Lower subtree back to an Upper tree with the Interface's accumulator.
+      +        upper_node = lower_to_upper(merged_lower, self.inner.acc)
+      +        return LeveledGSS(upper_node)
        
-       from ..interface import GSS, T, Acc
-       from .reference_impl import ReferenceGSS
-      @@ -348,14 +348,36 @@
-                   return set(self.inner.children.keys())
-       
-           def reduce_acc(self) -> Optional[Acc]:
-      +        def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-      +            if node.empty:
-      +                yield acc
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    yield from generate_accs_lower(child, acc)
+           def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
+      -        return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+      +        memo: Dict[Any, Any] = {}
       +
-               def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-      -            ...
-      +            if isinstance(node, UpperBranch):
-      +                if node.empty is not None:
-      +                    yield node.empty
-      +                for children_at_depth in node.children.values():
-      +                    for child in children_at_depth.values():
-      +                        yield from generate_accs(child)
-      +            elif isinstance(node, Interface):
-      +                if node.empty is not None:
-      +                    yield node.empty
+      +        def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
+      +            if node in memo:
+      +                return memo[node]
       +
-      +                # The case where the interface itself is a stack end.
-      +                if not node.children and node.empty is None:
-      +                    yield node.acc
+      +            if isinstance(node, Interface):
+      +                new_acc = func(node.acc)
+      +                new_empty = func(node.empty) if node.empty is not None else None
       +
-      +                for children_at_depth in node.children.values():
-      +                    for child in children_at_depth.values():
-      +                        yield from generate_accs_lower(child, node.acc)
+      +                if new_acc == node.acc and new_empty == node.empty:
+      +                    memo[node] = node
+      +                    return node
       +
-               gen = generate_accs(self.inner)
-      -        reduced_acc = next(gen)
-      +        try:
-      +            reduced_acc = next(gen)
-      +        except StopIteration:
-      +            return None
+      +                res = Interface(children=node.children, acc=new_acc, empty=new_empty)
+      +                memo[node] = res
+      +                return res
       +
-               for acc in gen:
-                   reduced_acc = reduced_acc.merge(acc)
-               return reduced_acc
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -1,7 +1,7 @@
-       from __future__ import annotations
-       
-       from dataclasses import dataclass
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
-       
-       from ..interface import GSS, T, Acc
-       from .reference_impl import ReferenceGSS
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any
-
-      from ..interface import GSS, T, Acc
-      from .reference_impl import ReferenceGSS
-      ```
-
-      Nearest Match in `python/gss_tester/implementations/leveled_impl.py` (found at line 1 with 85.71% similarity, shown with padding):
-
-      ```python
-      from __future__ import annotations
-
-      from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
-
-      from ..interface import GSS, T, Acc
-      from .reference_impl import ReferenceGSS
-
-      # ------------------------------
-      # Internal node classes
-      # ------------------------------
-      ```
-
-      The git diff hunk above failed to apply to the file `python/gss_tester/implementations/leveled_impl.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1,7 +1,7 @@
-       from __future__ import annotations
-       
-       from dataclasses import dataclass
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
-       
-       from ..interface import GSS, T, Acc
-       from .reference_impl import ReferenceGSS
-      @@ -348,14 +348,36 @@
-                   return set(self.inner.children.keys())
-       
-           def reduce_acc(self) -> Optional[Acc]:
-      +        def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-      +            if node.empty:
-      +                yield acc
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    yield from generate_accs_lower(child, acc)
+      +            # It's an UpperBranch
+      +            new_empty = func(node.empty) if node.empty is not None else None
       +
-               def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-      -            ...
-      +            if isinstance(node, UpperBranch):
-      +                if node.empty is not None:
-      +                    yield node.empty
-      +                for children_at_depth in node.children.values():
-      +                    for child in children_at_depth.values():
-      +                        yield from generate_accs(child)
-      +            elif isinstance(node, Interface):
-      +                if node.empty is not None:
-      +                    yield node.empty
+      +            changed = new_empty != node.empty
+      +            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
       +
-      +                # The case where the interface itself is a stack end.
-      +                if not node.children and node.empty is None:
-      +                    yield node.acc
+      +            for v, kids in node.children.items():
+      +                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+      +                any_child_changed_for_v = False
+      +                for d, child in kids.items():
+      +                    new_child = transform(child)
+      +                    if new_child is not child:
+      +                        any_child_changed_for_v = True
+      +                    # Depth does not change in apply, so we can reuse `d`.
+      +                    new_kids_for_v[d] = new_child
       +
-      +                for children_at_depth in node.children.values():
-      +                    for child in children_at_depth.values():
-      +                        yield from generate_accs_lower(child, node.acc)
+      +                if any_child_changed_for_v:
+      +                    changed = True
+      +                    new_children[v] = new_kids_for_v
+      +                else:
+      +                    new_children[v] = kids  # Reuse child dict
       +
-               gen = generate_accs(self.inner)
-      -        reduced_acc = next(gen)
-      +        try:
-      +            reduced_acc = next(gen)
-      +        except StopIteration:
-      +            return None
+      +            if not changed:
+      +                memo[node] = node
+      +                return node
       +
-               for acc in gen:
-                   reduced_acc = reduced_acc.merge(acc)
-               return reduced_acc
+      +            res = UpperBranch(children=new_children, empty=new_empty)
+      +            promoted = try_promote(res)
+      +            memo[node] = promoted
+      +            return promoted
+      +
+      +        return LeveledGSS(transform(self.inner))
+      +
+           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
+      -        return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+      +        memo: Dict[Any, Optional[Upper[T, Acc]]] = {}
+      +
+      +        def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+      +            if node in memo:
+      +                return memo[node]
+      +
+      +            if isinstance(node, Interface):
+      +                keep_acc = predicate(node.acc)
+      +                keep_empty = node.empty is not None and predicate(node.empty)
+      +                new_empty = node.empty if keep_empty else None
+      +
+      +                if keep_acc and new_empty == node.empty:
+      +                    memo[node] = node
+      +                    return node
+      +
+      +                if not keep_acc and not keep_empty:
+      +                    memo[node] = None
+      +                    return None
+      +
+      +                if not keep_acc and keep_empty:
+      +                    res = UpperBranch(children={}, empty=new_empty)
+      +                    memo[node] = res
+      +                    return res
+      +
+      +                # keep_acc is True, but empty might have been pruned.
+      +                res = Interface(children=node.children, acc=node.acc, empty=new_empty)
+      +                memo[node] = res
+      +                return res
+      +
+      +            # It's an UpperBranch
+      +            new_empty = node.empty if node.empty is not None and predicate(node.empty) else None
+      +            changed = new_empty != node.empty
+      +
+      +            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+      +            for v, kids in node.children.items():
+      +                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+      +                child_map_changed = False
+      +                for d, child in kids.items():
+      +                    new_child = transform(child)
+      +                    if new_child is not child:
+      +                        child_map_changed = True
+      +                    if new_child is not None:
+      +                        new_kids_for_v[new_child._max_depth()] = new_child
+      +
+      +                if len(new_kids_for_v) != len(kids):
+      +                    child_map_changed = True
+      +
+      +                if child_map_changed:
+      +                    changed = True
+      +                    if new_kids_for_v:
+      +                        new_children[v] = new_kids_for_v
+      +                else:
+      +                    new_children[v] = kids  # Reuse
+      +
+      +            if not changed:
+      +                memo[node] = node
+      +                return node
+      +
+      +            if not new_children and new_empty is None:
+      +                memo[node] = None
+      +                return None
+      +
+      +            res = UpperBranch(children=new_children, empty=new_empty)
+      +            promoted = try_promote(res)
+      +            memo[node] = promoted
+      +            return promoted
+      +
+      +        res_inner = transform(self.inner)
+      +        if res_inner is None:
+      +            return LeveledGSS(UpperBranch(children={}, empty=None))
+      +        return LeveledGSS(res_inner)
+      +
+           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+               return LeveledGSS(merge_upper(self.inner, other.inner))
+           def peek(self) -> Set[T]:
 
       ```
     metadata:
@@ -4961,7 +5163,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat(leveled_impl): Implement reduce_acc
-      method"'
+  - user: 'Changes committed with message: "feat: Optimize LeveledGSS.is_empty, isolate,
+      apply, and prune with memoization"'
     metadata:
 ...
