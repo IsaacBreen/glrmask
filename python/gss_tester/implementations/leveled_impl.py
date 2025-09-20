@@ -159,15 +159,106 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(pop_upper(self.inner))
 
     def is_empty(self) -> bool:
-        return len(self.to_stacks()) == 0
+        # True if no stacks: no root empty and no Interface anywhere.
+        if self.inner.empty is not None:
+            return False
+
+        def has_interface(u: UpperBranch[T, Acc]) -> bool:
+            for kids in u.children.values():
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        return True
+                    else:
+                        if has_interface(child):
+                            return True
+            return False
+
+        return not has_interface(self.inner)
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.from_stacks(self.to_reference_impl().isolate(value).to_stacks())
+        # Keep only stacks whose top equals `value`; if value is None, keep only the empty stack.
+        if value is None:
+            return LeveledGSS(UpperBranch(children={}, empty=self.inner.empty))
+
+        def iso_upper(u: UpperBranch[T, Acc]) -> UpperBranch[T, Acc]:
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v, kids in u.children.items():
+                iface_acc: Optional[Acc] = None
+                branches: List[Upper[T, Acc]] = []
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        if v == value:
+                            iface_acc = child.acc if iface_acc is None else iface_acc.merge(child.acc)  # type: ignore[attr-defined]
+                    else:
+                        sub = iso_upper(child)
+                        if sub.children or sub.empty is not None:
+                            branches.append(sub)
+                alts: List[Upper[T, Acc]] = []
+                if iface_acc is not None:
+                    alts.append(Interface(children={}, acc=iface_acc, empty=None))
+                alts.extend(branches)
+                if alts:
+                    new_children[v] = {i: alt for i, alt in enumerate(alts)}
+            return UpperBranch(children=new_children, empty=None)
+
+        return LeveledGSS(iso_upper(self.inner))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.from_stacks(self.to_reference_impl().apply(func).to_stacks())
+        # Apply func to each stack accumulator structurally.
+        def map_upper(u: UpperBranch[T, Acc]) -> UpperBranch[T, Acc]:
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v, kids in u.children.items():
+                iface_acc: Optional[Acc] = None
+                branch_alts: List[Upper[T, Acc]] = []
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        new_acc = func(child.acc)
+                        iface_acc = new_acc if iface_acc is None else iface_acc.merge(new_acc)  # type: ignore[attr-defined]
+                    else:
+                        branch_alts.append(map_upper(child))
+                alts: List[Upper[T, Acc]] = []
+                if iface_acc is not None:
+                    alts.append(Interface(children={}, acc=iface_acc, empty=None))
+                alts.extend(branch_alts)
+                if alts:
+                    new_children[v] = {i: alt for i, alt in enumerate(alts)}
+            # Preserve non-root empties unchanged (they are not stacks); pop recomputes from Interfaces.
+            return UpperBranch(children=new_children, empty=u.empty)
+
+        mapped = map_upper(self.inner)
+        new_empty = self.inner.empty
+        if new_empty is not None:
+            new_empty = func(new_empty)
+        return LeveledGSS(UpperBranch(children=mapped.children, empty=new_empty))
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
+        # Remove stacks whose accumulator does not satisfy predicate.
+        def prune_upper(u: UpperBranch[T, Acc]) -> UpperBranch[T, Acc]:
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v, kids in u.children.items():
+                iface_acc: Optional[Acc] = None
+                branches: List[Upper[T, Acc]] = []
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        if predicate(child.acc):
+                            iface_acc = child.acc if iface_acc is None else iface_acc.merge(child.acc)  # type: ignore[attr-defined]
+                    else:
+                        sub = prune_upper(child)
+                        if sub.children:
+                            branches.append(sub)
+                alts: List[Upper[T, Acc]] = []
+                if iface_acc is not None:
+                    alts.append(Interface(children={}, acc=iface_acc, empty=None))
+                alts.extend(branches)
+                if alts:
+                    new_children[v] = {i: alt for i, alt in enumerate(alts)}
+            # Preserve non-root empties unchanged (they are not stacks).
+            return UpperBranch(children=new_children, empty=u.empty)
+
+        pruned = prune_upper(self.inner)
+        new_empty = self.inner.empty
+        if new_empty is not None and not predicate(new_empty):
+            new_empty = None
+        return LeveledGSS(UpperBranch(children=pruned.children, empty=new_empty))
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         # Structural merge without flattening to full stacks.
         # We keep at most one Interface and one UpperBranch alternative per symbol.
@@ -253,16 +344,38 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
+        # Collect labels `v` for which an Interface exists under `v` anywhere.
         tops: Set[T] = set()
-        for vals, _ in self.to_stacks():
-            if vals:
-                tops.add(vals[-1])
+
+        def dfs(u: UpperBranch[T, Acc]) -> None:
+            for v, kids in u.children.items():
+                any_iface = False
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        any_iface = True
+                    else:
+                        dfs(child)
+                if any_iface:
+                    tops.add(v)
+
+        dfs(self.inner)
         return tops
 
     def reduce_acc(self) -> Optional[Acc]:
-        from functools import reduce
-        items = self.to_stacks()
-        if not items:
-            return None
-        accs = [acc for _, acc in items]
-        return reduce(lambda a, b: a.merge(b), accs)
+        # Merge accumulators from all stacks structurally.
+        acc_res: Optional[Acc] = self.inner.empty
+
+        def dfs(u: UpperBranch[T, Acc]) -> None:
+            nonlocal acc_res
+            for kids in u.children.values():
+                for child in kids.values():
+                    if isinstance(child, Interface):
+                        if acc_res is None:
+                            acc_res = child.acc
+                        else:
+                            acc_res = acc_res.merge(child.acc)  # type: ignore[attr-defined]
+                    else:
+                        dfs(child)
+
+        dfs(self.inner)
+        return acc_res
