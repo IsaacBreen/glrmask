@@ -540,21 +540,31 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
             if a.acc == b.acc:
-                if a.empty:
+                if a.empty is None:
                     new_empty = b.empty
-                elif b.empty:
+                elif b.empty is None:
                     new_empty = a.empty
                 else:
                     new_empty = a.empty.merge(b.empty)
-                new_children = a.children.copy()
-                for k, max_depth_to_child in b.children.items():
-                    for max_depth, child in max_depth_to_child.items():
-                        if max_depth in new_children.setdefault(k, {}):
-                            existing_child = new_children[k][max_depth]
-                            new_children[k][max_depth] = merge_lower(existing_child, child)
-                        else:
-                            new_children[k][max_depth] = child
-                return Interface(children=new_children, acc=a.acc, empty=new_empty)
+                merged_children: Dict[T, Dict[int, Lower[T]]] = {}
+                all_vals = set(a.children.keys()) | set(b.children.keys())
+                for v in all_vals:
+                    amap = a.children.get(v, {})
+                    bmap = b.children.get(v, {})
+                    depth_buckets: Dict[int, List[Lower[T]]] = {}
+                    for child in amap.values():
+                        depth_buckets.setdefault(child._max_depth(), []).append(child)
+                    for child in bmap.values():
+                        depth_buckets.setdefault(child._max_depth(), []).append(child)
+                    v_out: Dict[int, Lower[T]] = {}
+                    for d, nodes in depth_buckets.items():
+                        merged_node = nodes[0]
+                        for n in nodes[1:]:
+                            merged_node = merge_lower(merged_node, n)
+                        v_out[merged_node._max_depth()] = merged_node
+                    if v_out:
+                        merged_children[v] = v_out
+                return Interface(children=merged_children, acc=a.acc, empty=new_empty)
             return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
         def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
