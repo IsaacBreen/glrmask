@@ -236,10 +236,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 if u.empty is not None:
                     res.append((list(reversed(pref)), u.empty))
 
-                # If there are no lower children, this interface represents the end of a stack
-                # with accumulator u.acc.
                 if not u.children:
-                    res.append((list(reversed(pref)), u.acc))
+                    # If there are no lower children, this interface represents the end of a stack
+                    # with accumulator u.acc, but only if a stack for `pref` wasn't already added via `u.empty`.
+                    if u.empty is None:
+                        res.append((list(reversed(pref)), u.acc))
                 else:
                     # The interface's `children` are for stacks extending `pref`.
                     # All these stacks share accumulator `u.acc`.

@@ -1776,11 +1776,16 @@ local_system:
                       if u.empty is not None:
                           res.append((list(reversed(pref)), u.empty))
 
-                      # The interface's `children` are for stacks extending `pref`.
-                      # All these stacks share accumulator `u.acc`.
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              dfs_lower(child, pref + [v], u.acc)
+                      # If there are no lower children, this interface represents the end of a stack
+                      # with accumulator u.acc.
+                      if not u.children:
+                          res.append((list(reversed(pref)), u.acc))
+                      else:
+                          # The interface's `children` are for stacks extending `pref`.
+                          # All these stacks share accumulator `u.acc`.
+                          for v, kids in u.children.items():
+                              for child in kids.values():
+                                  dfs_lower(child, pref + [v], u.acc)
 
               dfs_upper(self.inner, [])
 
@@ -4445,10 +4450,11 @@ local_system:
                       if u.empty is not None:
                           res.append((list(reversed(pref)), u.empty))
 
-                      # If there are no lower children, this interface represents the end of a stack
-                      # with accumulator u.acc.
                       if not u.children:
-                          res.append((list(reversed(pref)), u.acc))
+                          # If there are no lower children, this interface represents the end of a stack
+                          # with accumulator u.acc, but only if a stack for `pref` wasn't already added via `u.empty`.
+                          if u.empty is None:
+                              res.append((list(reversed(pref)), u.acc))
                       else:
                           # The interface's `children` are for stacks extending `pref`.
                           # All these stacks share accumulator `u.acc`.
@@ -7198,11 +7204,16 @@ messages:
                       if u.empty is not None:
                           res.append((list(reversed(pref)), u.empty))
 
-                      # The interface's `children` are for stacks extending `pref`.
-                      # All these stacks share accumulator `u.acc`.
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              dfs_lower(child, pref + [v], u.acc)
+                      # If there are no lower children, this interface represents the end of a stack
+                      # with accumulator u.acc.
+                      if not u.children:
+                          res.append((list(reversed(pref)), u.acc))
+                      else:
+                          # The interface's `children` are for stacks extending `pref`.
+                          # All these stacks share accumulator `u.acc`.
+                          for v, kids in u.children.items():
+                              for child in kids.values():
+                                  dfs_lower(child, pref + [v], u.acc)
 
               dfs_upper(self.inner, [])
 
@@ -8149,7 +8160,7 @@ messages:
       filename: python/gss_tester/tests/test_spec.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-20_19-45-30
+      Test results will be saved in: gss_test_results/2025-09-20_19-48-49
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -8157,25 +8168,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_19-45-30/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-20_19-48-49/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -8193,15 +8204,15 @@ messages:
       --- Divergence Report ---
 
       Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
-        - First divergence at yield index 19:
-          - gss_tester.implementations.leveled_impl.LeveledGSS (L102): []
-          - gss_tester.implementations.reference_impl.ReferenceGSS (L102): [[[1], 5], [[2], 10]]
+        - First divergence at yield index 30:
+          - gss_tester.implementations.leveled_impl.LeveledGSS (L158): [[[10], 2], [[], 2]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS (L158): [[[10], 2], [[], 1]]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-20_19-45-30
+      Full JSON results are in: gss_test_results/2025-09-20_19-48-49
     metadata:
   - user: Fix this.
     metadata:
@@ -8222,29 +8233,22 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the test failure report, there's a divergence between the `LeveledGSS` and `ReferenceGSS` implementations. The root cause appears to be a bug in `LeveledGSS`'s `to_stacks` method, which fails to correctly reconstruct stacks that terminate at an `Interface` node. This incorrect implementation of `to_stacks` causes other methods that rely on it (like `merge` and `prune`) to fail by operating on an empty or incorrect list of stacks.
+      Based on the test failure report, there's a bug in the `LeveledGSS` implementation that causes it to incorrectly calculate accumulator values when merging. The divergence report points to an issue where an empty stack receives an incorrect accumulator value.
 
-      Here are the step-by-step instructions to fix the bug:
+      The root cause is a double-counting issue within the `to_stacks` method of `LeveledGSS`. Specifically, the `dfs_upper` helper function incorrectly handles `Interface` nodes that represent the end of a stack, causing the same stack to be added twice with different accumulators, which are then incorrectly merged.
+
+      Here are the steps to fix the bug:
 
       ### Step-by-step Instructions
 
       1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
 
-      2.  **Navigate to the `to_stacks` method**. Inside this method, there is a nested function `dfs_upper`.
+      2.  **Locate the `to_stacks` method and its inner helper function `dfs_upper`**.
 
-      3.  **Locate the `elif isinstance(u, Interface):` block within `dfs_upper`**. This block incorrectly handles `Interface` nodes that represent the end of a stack but have no children.
+      3.  **Modify the logic for `Interface` nodes inside `dfs_upper`**. The goal is to prevent a stack from being added twice when an `Interface` node has both a non-`None` `empty` attribute and no children.
 
-      4.  **Modify the logic within this block**. The current implementation only recurses into children. You need to add logic to handle the case where an `Interface` node has no children, which signifies the termination of a stack. The accumulator for this terminal stack is the `Interface`'s own `acc` value.
+          You will replace this block of code:
 
-          Replace this code block:
-          ```python
-                      # The interface's `children` are for stacks extending `pref`.
-                      # All these stacks share accumulator `u.acc`.
-                      for v, kids in u.children.items():
-                          for child in kids.values():
-                              dfs_lower(child, pref + [v], u.acc)
-          ```
-          with this new logic:
           ```python
                       # If there are no lower children, this interface represents the end of a stack
                       # with accumulator u.acc.
@@ -8258,35 +8262,50 @@ messages:
                                   dfs_lower(child, pref + [v], u.acc)
           ```
 
-      This change ensures that if an `Interface` node is a leaf in the upper tree (i.e., has no `Lower` children), it is correctly identified as a terminal stack and added to the results. If it does have children, the logic proceeds as before, recursing into the lower tree.
+          with this corrected version:
 
-      ### Git Diff
+          ```python
+                      if not u.children:
+                          # If there are no lower children, this interface represents the end of a stack
+                          # with accumulator u.acc, but only if a stack for `pref` wasn't already added via `u.empty`.
+                          if u.empty is None:
+                              res.append((list(reversed(pref)), u.acc))
+                      else:
+                          # The interface's `children` are for stacks extending `pref`.
+                          # All these stacks share accumulator `u.acc`.
+                          for v, kids in u.children.items():
+                              for child in kids.values():
+                                  dfs_lower(child, pref + [v], u.acc)
+          ```
 
-      Here is the git diff for the required change:
+          This change ensures that if a stack path `pref` has already been accounted for via the `u.empty` attribute, it is not added a second time when `u.children` is empty.
+
+      ### Git Diffs
+
+      Here is the git diff for the required change.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -262,11 +262,17 @@
+      @@ -275,16 +275,19 @@
                        if u.empty is not None:
                            res.append((list(reversed(pref)), u.empty))
        
-      -                # The interface's `children` are for stacks extending `pref`.
-      -                # All these stacks share accumulator `u.acc`.
-      -                for v, kids in u.children.items():
-      -                    for child in kids.values():
-      -                        dfs_lower(child, pref + [v], u.acc)
-      +                # If there are no lower children, this interface represents the end of a stack
-      +                # with accumulator u.acc.
-      +                if not u.children:
-      +                    res.append((list(reversed(pref)), u.acc))
-      +                else:
-      +                    # The interface's `children` are for stacks extending `pref`.
-      +                    # All these stacks share accumulator `u.acc`.
-      +                    for v, kids in u.children.items():
-      +                        for child in kids.values():
-      +                            dfs_lower(child, pref + [v], u.acc)
+      -                # If there are no lower children, this interface represents the end of a stack
+      -                # with accumulator u.acc.
+                       if not u.children:
+      -                    res.append((list(reversed(pref)), u.acc))
+      +                    # If there are no lower children, this interface represents the end of a stack
+      +                    # with accumulator u.acc, but only if a stack for `pref` wasn't already added via `u.empty`.
+      +                    if u.empty is None:
+      +                        res.append((list(reversed(pref)), u.acc))
+                       else:
+                           # The interface's `children` are for stacks extending `pref`.
+                           # All these stacks share accumulator `u.acc`.
+                           for v, kids in u.children.items():
+                               for child in kids.values():
+                                   dfs_lower(child, pref + [v], u.acc)
        
                dfs_upper(self.inner, [])
        
@@ -8302,7 +8321,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly handle terminal Interface
-      nodes in LeveledGSS.to_stacks"'
+  - user: 'Changes committed with message: "Fix(leveled_impl): Correct duplicate stack
+      generation in to_stacks"'
     metadata:
 ...
