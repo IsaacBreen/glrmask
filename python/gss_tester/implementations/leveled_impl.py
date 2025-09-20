@@ -53,6 +53,11 @@ class Interface(Generic[T, Acc]):
                 max_child_depth = max(max_child_depth, max(v_children.keys()))
         return 1 + max_child_depth
 
+    def _all_children(self) -> Iterator[Lower[T]]:
+        for v_children in self.children.values():
+            for child in v_children.values():
+                yield child
+
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
