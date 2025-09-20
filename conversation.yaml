@@ -910,6 +910,11 @@ local_system:
           children: Dict[T, Dict[int, Upper[T, Acc]]]
           empty: Optional[Acc]
 
+          def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
+              """Returns an iterator over all child nodes."""
+              for children_at_depth in self.children.values():
+                  yield from children_at_depth.values()
+
           def _max_depth(self) -> int:
               """Computes the max depth of the subtree rooted at this node."""
               if not self.children:
@@ -1002,11 +1007,7 @@ local_system:
                       self._validate_node(child)
 
               # Now, check for promotion condition on the current node
-              all_children = [
-                  child
-                  for children_at_depth in node.children.values()
-                  for child in children_at_depth.values()
-              ]
+              all_children = list(node._all_children())
 
               if not all_children or not all(isinstance(child, Interface) for child in all_children):
                   return  # Cannot promote
@@ -1158,9 +1159,7 @@ local_system:
                   upper_branch = interface_to_upperbranch(self.inner)
               else:
                   upper_branch = self.inner
-              all_children: List[Upper[T, Acc]] = []
-              for _, max_depth_to_child in upper_branch.children.items():
-                  all_children.extend(max_depth_to_child.values())
+              all_children = list(upper_branch._all_children())
               merged = all_children[0]
               for c in all_children[1:]:
                   merged = merge_upper(merged, c)
@@ -1386,9 +1385,7 @@ local_system:
 
 
       def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-          all_children: List[Upper[T, Acc]] = []
-          for kids in node.children.values():
-              all_children.extend(kids.values())
+          all_children = list(node._all_children())
           if not all_children:
               return node
           if not all(isinstance(c, Interface) for c in all_children):
@@ -2614,7 +2611,7 @@ local_system:
       from __future__ import annotations
 
       from dataclasses import dataclass
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar
 
       from ..interface import GSS, T, Acc
       from .reference_impl import ReferenceGSS
@@ -3105,6 +3102,37 @@ local_system:
               return reduced_acc
 
 
+      Node = TypeVar("Node")
+
+      def _merge_children_by_depth(
+          c1: Dict[T, Dict[int, Node]],
+          c2: Dict[T, Dict[int, Node]],
+          merge_func: Callable[[Node, Node], Node],
+      ) -> Dict[T, Dict[int, Node]]:
+          """Merges two dictionaries of children, grouping by value and then by depth."""
+          merged_children: Dict[T, Dict[int, Node]] = {}
+          all_vals = set(c1.keys()) | set(c2.keys())
+          for v in all_vals:
+              map1 = c1.get(v, {})
+              map2 = c2.get(v, {})
+              depth_buckets: Dict[int, List[Node]] = {}
+              for child in map1.values():
+                  depth_buckets.setdefault(child._max_depth(), []).append(child)
+              for child in map2.values():
+                  depth_buckets.setdefault(child._max_depth(), []).append(child)
+
+              v_out: Dict[int, Node] = {}
+              for _, nodes in depth_buckets.items():
+                  merged_node = nodes[0]
+                  for n in nodes[1:]:
+                      merged_node = merge_func(merged_node, n)
+                  v_out[merged_node._max_depth()] = merged_node
+
+              if v_out:
+                  merged_children[v] = v_out
+
+          return merged_children
+
       def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
           all_children = list(node._all_children())
           if not all_children:
@@ -3180,26 +3208,7 @@ local_system:
           else:
               new_empty = a.empty.merge(b.empty)
 
-          # Merge children grouped by value and depth
-          merged_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-          all_vals = set(a.children.keys()) | set(b.children.keys())
-          for v in all_vals:
-              amap = a.children.get(v, {})
-              bmap = b.children.get(v, {})
-              depth_buckets: Dict[int, List[Upper[T, Acc]]] = {}
-              for child in amap.values():
-                  depth_buckets.setdefault(child._max_depth(), []).append(child)
-              for child in bmap.values():
-                  depth_buckets.setdefault(child._max_depth(), []).append(child)
-              v_out: Dict[int, Upper[T, Acc]] = {}
-              for d, nodes in depth_buckets.items():
-                  merged_node = nodes[0]
-                  for n in nodes[1:]:
-                      merged_node = merge_upper(merged_node, n)
-                  v_out[merged_node._max_depth()] = merged_node
-              if v_out:
-                  merged_children[v] = v_out
-
+          merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
           return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
       def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
@@ -3210,24 +3219,7 @@ local_system:
                   new_empty = a.empty
               else:
                   new_empty = a.empty.merge(b.empty)
-              merged_children: Dict[T, Dict[int, Lower[T]]] = {}
-              all_vals = set(a.children.keys()) | set(b.children.keys())
-              for v in all_vals:
-                  amap = a.children.get(v, {})
-                  bmap = b.children.get(v, {})
-                  depth_buckets: Dict[int, List[Lower[T]]] = {}
-                  for child in amap.values():
-                      depth_buckets.setdefault(child._max_depth(), []).append(child)
-                  for child in bmap.values():
-                      depth_buckets.setdefault(child._max_depth(), []).append(child)
-                  v_out: Dict[int, Lower[T]] = {}
-                  for d, nodes in depth_buckets.items():
-                      merged_node = nodes[0]
-                      for n in nodes[1:]:
-                          merged_node = merge_lower(merged_node, n)
-                      v_out[merged_node._max_depth()] = merged_node
-                  if v_out:
-                      merged_children[v] = v_out
+              merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
               return Interface(children=merged_children, acc=a.acc, empty=new_empty)
           return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
@@ -3241,30 +3233,7 @@ local_system:
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
 
-          # Merge children grouped by value and by child max depth
-          merged_children: Dict[T, Dict[int, Lower[T]]] = {}
-          all_vals = set(l1.children.keys()) | set(l2.children.keys())
-          for v in all_vals:
-              l1map = l1.children.get(v, {})
-              l2map = l2.children.get(v, {})
-
-              depth_buckets: Dict[int, List[Lower[T]]] = {}
-              for child in l1map.values():
-                  depth_buckets.setdefault(child._max_depth(), []).append(child)
-              for child in l2map.values():
-                  depth_buckets.setdefault(child._max_depth(), []).append(child)
-
-              v_out: Dict[int, Lower[T]] = {}
-              for _, nodes in depth_buckets.items():
-                  merged_node = nodes[0]
-                  for n in nodes[1:]:
-                      merged_node = merge_lower(merged_node, n)
-                  # Key by the resulting node's max depth to keep depth-index invariant
-                  v_out[merged_node._max_depth()] = merged_node
-
-              if v_out:
-                  merged_children[v] = v_out
-
+          merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
           return Lower(children=merged_children, empty=new_empty)
 
 
@@ -4413,6 +4382,11 @@ messages:
           children: Dict[T, Dict[int, Upper[T, Acc]]]
           empty: Optional[Acc]
 
+          def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
+              """Returns an iterator over all child nodes."""
+              for children_at_depth in self.children.values():
+                  yield from children_at_depth.values()
+
           def _max_depth(self) -> int:
               """Computes the max depth of the subtree rooted at this node."""
               if not self.children:
@@ -4505,11 +4479,7 @@ messages:
                       self._validate_node(child)
 
               # Now, check for promotion condition on the current node
-              all_children = [
-                  child
-                  for children_at_depth in node.children.values()
-                  for child in children_at_depth.values()
-              ]
+              all_children = list(node._all_children())
 
               if not all_children or not all(isinstance(child, Interface) for child in all_children):
                   return  # Cannot promote
@@ -4661,9 +4631,7 @@ messages:
                   upper_branch = interface_to_upperbranch(self.inner)
               else:
                   upper_branch = self.inner
-              all_children: List[Upper[T, Acc]] = []
-              for _, max_depth_to_child in upper_branch.children.items():
-                  all_children.extend(max_depth_to_child.values())
+              all_children = list(upper_branch._all_children())
               merged = all_children[0]
               for c in all_children[1:]:
                   merged = merge_upper(merged, c)
@@ -4889,9 +4857,7 @@ messages:
 
 
       def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-          all_children: List[Upper[T, Acc]] = []
-          for kids in node.children.values():
-              all_children.extend(kids.values())
+          all_children = list(node._all_children())
           if not all_children:
               return node
           if not all(isinstance(c, Interface) for c in all_children):
@@ -5241,8 +5207,29 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: Define a helper to get an iterator through all children. Use it to simplify
-      some bits of the code, eg anywhere we have all_children.
+  - user: |-
+      There's a bunch of code blocks that looks like this with small variations:
+      ```python
+          merged_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+          all_vals = set(a.children.keys()) | set(b.children.keys())
+          for v in all_vals:
+              amap = a.children.get(v, {})
+              bmap = b.children.get(v, {})
+              depth_buckets: Dict[int, List[Upper[T, Acc]]] = {}
+              for child in amap.values():
+                  depth_buckets.setdefault(child._max_depth(), []).append(child)
+              for child in bmap.values():
+                  depth_buckets.setdefault(child._max_depth(), []).append(child)
+              v_out: Dict[int, Upper[T, Acc]] = {}
+              for d, nodes in depth_buckets.items():
+                  merged_node = nodes[0]
+                  for n in nodes[1:]:
+                      merged_node = merge_upper(merged_node, n)
+                  v_out[merged_node._max_depth()] = merged_node
+              if v_out:
+                  merged_children[v] = v_out
+      ```
+      Implement DRY. Abstract this out.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5261,74 +5248,226 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to make the requested changes, followed by the corresponding git diffs.
+      Of course. It's a good practice to keep your code DRY. Here are the step-by-step instructions to abstract out the repetitive logic for merging children in `leveled_impl.py`, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      I will make edits to one file: `python/gss_tester/implementations/leveled_impl.py`.
+      1.  **Open `python/gss_tester/implementations/leveled_impl.py`**.
 
-      1.  **In `python/gss_tester/implementations/leveled_impl.py`:**
-          *   First, I'll add a new helper method `_all_children` to the `UpperBranch` dataclass. This method will provide a convenient iterator over all of its child nodes.
-          *   Next, I will update three locations in the same file to use this new `_all_children` helper, which will simplify the existing code.
-              *   In the `LeveledGSS._validate_node` method, I will replace a manual list comprehension with a call to `list(node._all_children())`.
-              *   In the `LeveledGSS.pop` method, I will replace a `for` loop that collects children into a list with `all_children = list(upper_branch._all_children())`.
-              *   In the `try_promote` function, I will similarly replace a `for` loop with `all_children = list(node._all_children())`.
+      2.  **Update the imports** at the top of the file to include `TypeVar` from the `typing` module.
 
-      ### Git Diffs
+          Change this line:
+          ```python
+          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
+          ```
+          to this:
+          ```python
+          from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar
+          ```
 
-      Here is the git diff for the file I'll be changing:
+      3.  **Add a new helper function** called `_merge_children_by_depth`. This function will contain the shared logic for merging children from two nodes. Insert the following code after the `LeveledGSS` class definition, just before the `try_promote` function:
+
+          ```python
+          Node = TypeVar("Node")
+
+          def _merge_children_by_depth(
+              c1: Dict[T, Dict[int, Node]],
+              c2: Dict[T, Dict[int, Node]],
+              merge_func: Callable[[Node, Node], Node],
+          ) -> Dict[T, Dict[int, Node]]:
+              """Merges two dictionaries of children, grouping by value and then by depth."""
+              merged_children: Dict[T, Dict[int, Node]] = {}
+              all_vals = set(c1.keys()) | set(c2.keys())
+              for v in all_vals:
+                  map1 = c1.get(v, {})
+                  map2 = c2.get(v, {})
+                  depth_buckets: Dict[int, List[Node]] = {}
+                  for child in map1.values():
+                      depth_buckets.setdefault(child._max_depth(), []).append(child)
+                  for child in map2.values():
+                      depth_buckets.setdefault(child._max_depth(), []).append(child)
+
+                  v_out: Dict[int, Node] = {}
+                  for _, nodes in depth_buckets.items():
+                      merged_node = nodes[0]
+                      for n in nodes[1:]:
+                          merged_node = merge_func(merged_node, n)
+                      v_out[merged_node._max_depth()] = merged_node
+
+                  if v_out:
+                      merged_children[v] = v_out
+
+              return merged_children
+          ```
+
+      4.  **Refactor `merge_upperbranches` function**: Replace the block of code that merges children with a single call to the new helper function.
+
+          *   **Find** the `merge_upperbranches` function.
+          *   **Delete** the code block for merging children (it starts with `# Merge children grouped by value and depth`).
+          *   **Replace** it with this line:
+              ```python
+              merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
+              ```
+
+      5.  **Refactor `merge_interfaces` function**: In the `if a.acc == b.acc:` block, replace the child-merging logic with a call to the helper function.
+
+          *   **Find** the `merge_interfaces` function.
+          *   **Delete** the code block for merging children inside the `if` statement.
+          *   **Replace** it with this line:
+              ```python
+              merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
+              ```
+
+      6.  **Refactor `merge_lower` function**: Replace the child-merging logic with a call to the helper function.
+          *   **Find** the `merge_lower` function.
+          *   **Delete** the code block for merging children (it starts with `# Merge children grouped by value and by child max depth`).
+          *   **Replace** it with this line:
+              ```python
+              merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
+              ```
+
+      ### Git Diff
+
+      Here is the git diff that applies the changes described above.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 4554407..65377f0 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -24,6 +24,11 @@
-           children: Dict[T, Dict[int, Upper[T, Acc]]]
-           empty: Optional[Acc]
+      @@ -1,7 +1,7 @@
+       from __future__ import annotations
        
-      +    def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
-      +        """Returns an iterator over all child nodes."""
-      +        for children_at_depth in self.children.values():
-      +            yield from children_at_depth.values()
+       from dataclasses import dataclass
+      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator
+      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar
+       
+       from ..interface import GSS, T, Acc
+       from .reference_impl import ReferenceGSS
+      @@ -518,6 +518,37 @@
+               return reduced_acc
+       
+       
+      +Node = TypeVar("Node")
       +
-           def _max_depth(self) -> int:
-               """Computes the max depth of the subtree rooted at this node."""
-               if not self.children:
-      @@ -118,12 +123,7 @@
-                       self._validate_node(child)
-       
-               # Now, check for promotion condition on the current node
-      -        all_children = [
-      -            child
-      -            for children_at_depth in node.children.values()
-      -            for child in children_at_depth.values()
-      -        ]
-      +        all_children = list(node._all_children())
-       
-               if not all_children or not all(isinstance(child, Interface) for child in all_children):
-                   return  # Cannot promote
-      @@ -288,10 +288,7 @@
-                   upper_branch = interface_to_upperbranch(self.inner)
-               else:
-                   upper_branch = self.inner
-      -        all_children: List[Upper[T, Acc]] = []
-      -        for _, max_depth_to_child in upper_branch.children.items():
-      -            all_children.extend(max_depth_to_child.values())
-      +        all_children = list(upper_branch._all_children())
-               merged = all_children[0]
-               for c in all_children[1:]:
-                   merged = merge_upper(merged, c)
-      @@ -512,10 +509,7 @@
-       
-       
+      +def _merge_children_by_depth(
+      +    c1: Dict[T, Dict[int, Node]],
+      +    c2: Dict[T, Dict[int, Node]],
+      +    merge_func: Callable[[Node, Node], Node],
+      +) -> Dict[T, Dict[int, Node]]:
+      +    """Merges two dictionaries of children, grouping by value and then by depth."""
+      +    merged_children: Dict[T, Dict[int, Node]] = {}
+      +    all_vals = set(c1.keys()) | set(c2.keys())
+      +    for v in all_vals:
+      +        map1 = c1.get(v, {})
+      +        map2 = c2.get(v, {})
+      +        depth_buckets: Dict[int, List[Node]] = {}
+      +        for child in map1.values():
+      +            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      +        for child in map2.values():
+      +            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      +
+      +        v_out: Dict[int, Node] = {}
+      +        for _, nodes in depth_buckets.items():
+      +            merged_node = nodes[0]
+      +            for n in nodes[1:]:
+      +                merged_node = merge_func(merged_node, n)
+      +            v_out[merged_node._max_depth()] = merged_node
+      +
+      +        if v_out:
+      +            merged_children[v] = v_out
+      +
+      +    return merged_children
+      +
        def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-      -    all_children: List[Upper[T, Acc]] = []
-      -    for kids in node.children.values():
-      -        all_children.extend(kids.values())
-      +    all_children = list(node._all_children())
+           all_children = list(node._all_children())
            if not all_children:
-               return node
-           if not all(isinstance(c, Interface) for c in all_children):
+      @@ -589,28 +620,7 @@
+           else:
+               new_empty = a.empty.merge(b.empty)
+       
+      -    # Merge children grouped by value and depth
+      -    merged_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+      -    all_vals = set(a.children.keys()) | set(b.children.keys())
+      -    for v in all_vals:
+      -        amap = a.children.get(v, {})
+      -        bmap = b.children.get(v, {})
+      -        depth_buckets: Dict[int, List[Upper[T, Acc]]] = {}
+      -        for child in amap.values():
+      -            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -        for child in bmap.values():
+      -            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -        v_out: Dict[int, Upper[T, Acc]] = {}
+      -        for d, nodes in depth_buckets.items():
+      -            merged_node = nodes[0]
+      -            for n in nodes[1:]:
+      -                merged_node = merge_upper(merged_node, n)
+      -            v_out[merged_node._max_depth()] = merged_node
+      -        if v_out:
+      -            merged_children[v] = v_out
+      -
+      +    merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
+           return try_promote(UpperBranch(children=merged_children, empty=new_empty))
+       
+       def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
+      @@ -622,26 +632,7 @@
+                   new_empty = a.empty
+               else:
+                   new_empty = a.empty.merge(b.empty)
+      -        merged_children: Dict[T, Dict[int, Lower[T]]] = {}
+      -        all_vals = set(a.children.keys()) | set(b.children.keys())
+      -        for v in all_vals:
+      -            amap = a.children.get(v, {})
+      -            bmap = b.children.get(v, {})
+      -            depth_buckets: Dict[int, List[Lower[T]]] = {}
+      -            for child in amap.values():
+      -                depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -            for child in bmap.values():
+      -                depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -            v_out: Dict[int, Lower[T]] = {}
+      -            for d, nodes in depth_buckets.items():
+      -                merged_node = nodes[0]
+      -                for n in nodes[1:]:
+      -                    merged_node = merge_lower(merged_node, n)
+      -                v_out[merged_node._max_depth()] = merged_node
+      -            if v_out:
+      -                merged_children[v] = v_out
+      +        merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
+               return Interface(children=merged_children, acc=a.acc, empty=new_empty)
+           return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
+       
+      @@ -656,32 +647,7 @@
+           # Merge 'empty' flags (logical OR)
+           new_empty = l1.empty or l2.empty
+       
+      -    # Merge children grouped by value and by child max depth
+      -    merged_children: Dict[T, Dict[int, Lower[T]]] = {}
+      -    all_vals = set(l1.children.keys()) | set(l2.children.keys())
+      -    for v in all_vals:
+      -        l1map = l1.children.get(v, {})
+      -        l2map = l2.children.get(v, {})
+      -
+      -        depth_buckets: Dict[int, List[Lower[T]]] = {}
+      -        for child in l1map.values():
+      -            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -        for child in l2map.values():
+      -            depth_buckets.setdefault(child._max_depth(), []).append(child)
+      -
+      -        v_out: Dict[int, Lower[T]] = {}
+      -        for _, nodes in depth_buckets.items():
+      -            merged_node = nodes[0]
+      -            for n in nodes[1:]:
+      -                merged_node = merge_lower(merged_node, n)
+      -            # Key by the resulting node's max depth to keep depth-index invariant
+      -            v_out[merged_node._max_depth()] = merged_node
+      -
+      -        if v_out:
+      -            merged_children[v] = v_out
+      -
+      +    merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
+           return Lower(children=merged_children, empty=new_empty)
+       
+       
 
       ```
     metadata:
@@ -5341,7 +5480,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Introduce _all_children helper
-      in LeveledGSS"'
+  - user: 'Changes committed with message: "Refactor: Extract child merging logic
+      into a helper function in leveled_impl.py"'
     metadata:
 ...
