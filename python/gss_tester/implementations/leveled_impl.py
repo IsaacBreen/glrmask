@@ -363,8 +363,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
             return LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
         else:
-            filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
-            return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+            if value in self.inner.children:
+                return LeveledGSS(empty_gss_inner)
+            else:
+                filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
+                return LeveledGSS(self.inner)
+
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         memo: Dict[int, Any] = {}
