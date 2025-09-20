@@ -128,7 +128,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return ReferenceGSS.from_stacks(res).to_stacks()
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
-        return LeveledGSS.from_stacks(self.to_reference_impl().push(value).to_stacks())
+        return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth(): self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().pop().to_stacks())
     def is_empty(self) -> bool:
