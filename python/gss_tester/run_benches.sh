@@ -129,33 +129,18 @@ for full_impl_path in "${IMPLS[@]}"; do
     fi
 
     # --- Run Preset Sweeps ---
-    # If any workload filters were passed, skip the automatic preset sweeps.
-    # Users can run specific sweeps manually if needed.
-    has_filter_args=false
-    for arg in "${EXTRA_ARGS[@]}"; do
-      if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-        has_filter_args=true
-        break
-      fi
-    done
+    echo
+    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
+    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
 
-    if $has_filter_args; then
-        echo
-        echo ">>> Workload filters detected, skipping automatic preset sweeps."
+    if [ -z "$sweeps_to_run" ]; then
+      echo "No predefined sweeps for preset '$PRESET'."
     else
-        # --- Run Preset Sweeps ---
+      # Use a while loop to read line by line (in case of multiple sweeps)
+      while IFS=';' read -r workload axis values; do
         echo
-        echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-        sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-
-        if [ -z "$sweeps_to_run" ]; then
-            echo "No predefined sweeps for preset '$PRESET'."
-        else
-            # Use a while loop to read line by line (in case of multiple sweeps)
-            while IFS=';' read -r workload axis values; do
-                echo
-                echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-                output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+        echo ">>> Running preset sweep for '$workload' on axis '$axis'"
+        output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
 
         sweep_cmd=(python -m gss_tester.benchmarks.runner
             "$module_name"

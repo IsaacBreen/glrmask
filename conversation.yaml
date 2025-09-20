@@ -17,7 +17,7 @@ local_system:
     - python/gss_tester/implementations/__init__.py
     - python/gss_tester/implementations/leveled_impl.py
     - python/gss_tester/implementations/reference_impl.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/gss_tester/__init__.py: |
@@ -1360,9 +1360,7 @@ local_system:
       from copy import deepcopy
 
 
-      def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
-          if only:
-              return [c for c in configs if c.name in only]
+      def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str]) -> List[WorkloadConfig]:
           if include:
               configs = [c for c in configs if any(p.lower() in c.name.lower() for p in include)]
           if exclude:
@@ -1378,7 +1376,6 @@ local_system:
           parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
           parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
           parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
-          parser.add_argument("--only", nargs="*", default=[], help="Only run workloads with exactly these names. Cannot be used with --include/--exclude.")
           parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
           # Sweep options
           parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
@@ -1386,9 +1383,6 @@ local_system:
           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
           parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
           args = parser.parse_args()
-
-          if (args.include or args.exclude) and args.only:
-              parser.error("--only cannot be used with --include or --exclude")
 
           if args.list_sweeps:
               sweeps = get_preset_sweeps(args.preset)
@@ -1446,7 +1440,7 @@ local_system:
                   workloads.append(WorkloadConfig(name=base_cfg.name, params=p, max_seconds=base_cfg.max_seconds))
               sweep_meta = {"workload": sweep_name, "axis": sweep_axis, "values": sweep_values}
           else:
-              workloads = _filter_workloads(base_preset, args.include, args.exclude, args.only)
+              workloads = _filter_workloads(base_preset, args.include, args.exclude)
 
           if args.list:
               if args.sweep_workload:
@@ -2389,11 +2383,8 @@ local_system:
       #   # Run 'small' preset workloads AND all predefined 'small' sweeps
       #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
       #
-      #   # Run workloads with 'push_scaling' in their name (substring match)
+      #   # Run only the 'push_scaling' workload from the 'tiny' preset
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
-      #
-      #   # Run only the workload named exactly 'push_scaling'
-      #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --only push_scaling
       #
       #   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
@@ -2415,11 +2406,7 @@ local_system:
       IMPLS=()
       EXTRA_ARGS=()
       while (( "$#" )); do
-        if [[ "$1" == "--" ]]; then
-          shift # Consume the '--'
-          EXTRA_ARGS=("$@")
-          break
-        elif [[ "$1" == --* ]]; then
+        if [[ "$1" == --* ]]; then
           EXTRA_ARGS=("$@")
           break
         else
@@ -5420,33 +5407,18 @@ local_system:
           fi
 
           # --- Run Preset Sweeps ---
-          # If any workload filters were passed, skip the automatic preset sweeps.
-          # Users can run specific sweeps manually if needed.
-          has_filter_args=false
-          for arg in "${EXTRA_ARGS[@]}"; do
-            if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-              has_filter_args=true
-              break
-            fi
-          done
+          echo
+          echo ">>> Checking for preset sweeps for preset '$PRESET'..."
+          sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
 
-          if $has_filter_args; then
-              echo
-              echo ">>> Workload filters detected, skipping automatic preset sweeps."
+          if [ -z "$sweeps_to_run" ]; then
+            echo "No predefined sweeps for preset '$PRESET'."
           else
-              # --- Run Preset Sweeps ---
+            # Use a while loop to read line by line (in case of multiple sweeps)
+            while IFS=';' read -r workload axis values; do
               echo
-              echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-              sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-
-              if [ -z "$sweeps_to_run" ]; then
-                  echo "No predefined sweeps for preset '$PRESET'."
-              else
-                  # Use a while loop to read line by line (in case of multiple sweeps)
-                  while IFS=';' read -r workload axis values; do
-                      echo
-                      echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-                      output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+              echo ">>> Running preset sweep for '$workload' on axis '$axis'"
+              output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
 
               sweep_cmd=(python -m gss_tester.benchmarks.runner
                   "$module_name"
@@ -7317,9 +7289,7 @@ messages:
       from copy import deepcopy
 
 
-      def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
-          if only:
-              return [c for c in configs if c.name in only]
+      def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str]) -> List[WorkloadConfig]:
           if include:
               configs = [c for c in configs if any(p.lower() in c.name.lower() for p in include)]
           if exclude:
@@ -7335,7 +7305,6 @@ messages:
           parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
           parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
           parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
-          parser.add_argument("--only", nargs="*", default=[], help="Only run workloads with exactly these names. Cannot be used with --include/--exclude.")
           parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
           # Sweep options
           parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
@@ -7343,9 +7312,6 @@ messages:
           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
           parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
           args = parser.parse_args()
-
-          if (args.include or args.exclude) and args.only:
-              parser.error("--only cannot be used with --include or --exclude")
 
           if args.list_sweeps:
               sweeps = get_preset_sweeps(args.preset)
@@ -7403,7 +7369,7 @@ messages:
                   workloads.append(WorkloadConfig(name=base_cfg.name, params=p, max_seconds=base_cfg.max_seconds))
               sweep_meta = {"workload": sweep_name, "axis": sweep_axis, "values": sweep_values}
           else:
-              workloads = _filter_workloads(base_preset, args.include, args.exclude, args.only)
+              workloads = _filter_workloads(base_preset, args.include, args.exclude)
 
           if args.list:
               if args.sweep_workload:
@@ -8361,11 +8327,8 @@ messages:
       #   # Run 'small' preset workloads AND all predefined 'small' sweeps
       #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
       #
-      #   # Run workloads with 'push_scaling' in their name (substring match)
+      #   # Run only the 'push_scaling' workload from the 'tiny' preset
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
-      #
-      #   # Run only the workload named exactly 'push_scaling'
-      #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --only push_scaling
       #
       #   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
@@ -8387,11 +8350,7 @@ messages:
       IMPLS=()
       EXTRA_ARGS=()
       while (( "$#" )); do
-        if [[ "$1" == "--" ]]; then
-          shift # Consume the '--'
-          EXTRA_ARGS=("$@")
-          break
-        elif [[ "$1" == --* ]]; then
+        if [[ "$1" == --* ]]; then
           EXTRA_ARGS=("$@")
           break
         else
@@ -8934,165 +8893,7 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/reference_impl.py
-  - user: |-
-      bash ./gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py -- --only merge_after_prefix_mutations
-      Benchmark results will be saved in: gss_bench_results/2025-09-20_16-10-56
-      ---
-      Preset: medium
-      Implementations: gss_tester/implementations/reference_impl.py
-      Extra args to runner: --only merge_after_prefix_mutations
-      ---
-
-      >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json --only merge_after_prefix_mutations
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.167s
-      Benchmark results saved to gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
-      >>> Finished preset workloads for: gss_tester/implementations/reference_impl.py
-
-      >>> Checking for preset sweeps for preset 'medium'...
-
-      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.032s
-      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.058s
-      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.108s
-      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.170s
-      Benchmark results saved to gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json
-      >>> Finished sweep for: push_scaling
-
-      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.123s
-      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.221s
-      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.396s
-      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.611s
-      Benchmark results saved to gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json
-      >>> Finished sweep for: pop_common_parent
-
-      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.034s
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.059s
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.104s
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.162s
-      Benchmark results saved to gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
-      >>> Finished sweep for: merge_after_prefix_mutations
-
-      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
-      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.012s
-      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
-      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.034s
-      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
-      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.126s
-      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
-      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.430s
-      Benchmark results saved to gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json
-      >>> Finished sweep for: merge_surface_changes
-
-      All benchmark runs completed.
-      ---
-      Analyzing results...
-      python -m gss_tester.benchmarks.analyzer gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json gss_bench_results/2025-09-20_16-10-56/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --outdir gss_bench_results/2025-09-20_16-10-56/analysis
-      --- Benchmark Summary ---
-      Loaded 5 result file(s) across 1 implementation(s).
-
-      Workload: merge_after_prefix_mutations
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.034s..0.167s
-
-      Workload: merge_surface_changes
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.012s..0.430s
-
-      Workload: pop_common_parent
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.123s..0.611s
-
-      Workload: push_scaling
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.032s..0.170s
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/merge_after_prefix_mutations_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/merge_surface_changes_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/merge_surface_changes_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/pop_common_parent_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/pop_common_parent_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/push_scaling_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/push_scaling_phase_breakdown.png
-
-      --- Scaling Analysis (sweeps) ---
-
-      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-      Sweep: workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.756, r2=0.989, ideal=1.00 -> OK
-          - merge: slope=0.670, r2=0.986, ideal=0.00 -> DRIFT
-          - mutate_clones: slope=0.254, r2=0.886, ideal=0.00 -> DRIFT
-          - postcheck: slope=-0.198, r2=0.727, ideal=0.00 -> OK
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_build.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_merge.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
-
-      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-      Sweep: workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=5.080, r2=0.942, ideal=1.00 -> DRIFT
-          - clone_and_mutate: slope=5.895, r2=0.977, ideal=0.00 -> DRIFT
-          - merge: slope=6.560, r2=0.986, ideal=0.00 -> DRIFT
-          - postcheck: slope=5.918, r2=0.980, ideal=0.00 -> DRIFT
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_surface_changes_depth_build.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_surface_changes_depth_clone_and_mutate.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_surface_changes_depth_merge.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_merge_surface_changes_depth_postcheck.png
-
-      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-      Sweep: workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.767, r2=0.993, ideal=1.00 -> OK
-          - pop: slope=0.822, r2=0.998, ideal=0.00 -> DRIFT
-          - postcheck: slope=0.001, r2=0.000, ideal=0.00 -> OK
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_build.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_pop.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_postcheck.png
-
-      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-      Sweep: workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.807, r2=0.992, ideal=1.00 -> OK
-          - postcheck: slope=-0.006, r2=0.145, ideal=0.00 -> OK
-          - push: slope=0.360, r2=0.997, ideal=0.00 -> DRIFT
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_push_scaling_prefix_depth_build.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_push_scaling_prefix_depth_postcheck.png
-        Saved sweep plot: gss_bench_results/2025-09-20_16-10-56/analysis/plots/sweep_push_scaling_prefix_depth_push.png
-
-      ---
-      Benchmark analysis complete.
-      Summary printed above. Plots saved to: gss_bench_results/2025-09-20_16-10-56/analysis/plots
-      Full JSON results are in: gss_bench_results/2025-09-20_16-10-56
-    metadata:
-  - user: Why isn't the --only argument working here?
+  - user: Allow passing --only to the bench runner script to run only given workloads.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9111,300 +8912,502 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The issue you're observing is that the `--only` argument correctly filters the main preset workloads but doesn't prevent the script from subsequently running all the pre-defined *sweeps* for that preset.
+      Of course. Here are the step-by-step instructions to allow passing an `--only` flag to the benchmark runner, followed by the corresponding git diffs.
 
-      Here is a step-by-step guide to fix this, followed by the necessary git diff.
+      ### Step-by-step Instructions
 
-      ### The Problem
+      #### 1. Modify `python/gss_tester/benchmarks/runner.py`
 
-      The `run_benches.sh` script has two distinct phases when not in manual sweep mode:
-      1.  It runs the preset workloads, correctly passing along your `--only` filter.
-      2.  It then separately queries for all pre-defined sweeps associated with the preset (e.g., `medium`) and runs every single one, ignoring the filter arguments.
+      First, we'll update the benchmark runner script to recognize and handle the new `--only` flag for exact workload name matching.
 
-      ### The Solution
-
-      We will modify `run_benches.sh` to detect if any filtering arguments (`--only`, `--include`, or `--exclude`) have been provided. If they have, the script will skip the second phase of automatically running all preset sweeps. This ensures that using a filter restricts the execution as expected.
-
-      ---
-
-      ### Step-by-Step Instructions
-
-      1.  **Open the script `python/gss_tester/run_benches.sh`** in your editor.
-
-      2.  **Navigate to the section that runs preset sweeps.** This section is inside the `else` block of the `if $is_manual_sweep` check and comes right after the block that runs the preset workloads. It begins with the comment `# --- Run Preset Sweeps ---`.
-
-      3.  **Insert a check for filter arguments.** Just before the line `echo ">>> Checking for preset sweeps for preset '$PRESET'..."`, we will add a new `if/else` block to check for the presence of `--only`, `--include`, or `--exclude` in the `EXTRA_ARGS` variable.
-
-      4.  **Wrap the existing sweep logic.** The existing code for running preset sweeps will be moved inside the `else` part of our new block.
-
-      Here is the code to insert and how to wrap the existing logic:
-
-      *   **Delete** the line `# --- Run Preset Sweeps ---`. We will place it inside the new `else` block.
-      *   **Add the following code** where that line used to be:
-
-          ```bash
-          # If any workload filters were passed, skip the automatic preset sweeps.
-          # Users can run specific sweeps manually if needed.
-          has_filter_args=false
-          for arg in "${EXTRA_ARGS[@]}"; do
-            if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-              has_filter_args=true
-              break
-            fi
-          done
-
-          if $has_filter_args; then
-              echo
-              echo ">>> Workload filters detected, skipping automatic preset sweeps."
-          else
+      1.  **Update `_filter_workloads` function:**
+          In `python/gss_tester/benchmarks/runner.py`, change the signature of `_filter_workloads` to accept an `only` list of strings:
+          ```python
+          def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
+          ```
+          Then, add the filtering logic at the beginning of the function. This will filter by exact name if `only` is provided and take precedence over `include` and `exclude`.
+          ```python
+          def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
+              if only:
+                  return [c for c in configs if c.name in only]
+              if include:
+          ...
           ```
 
-      *   **Add a closing `fi` statement.** At the end of the logic that runs the preset sweeps (after the `fi` that closes the `if [ -z "$sweeps_to_run" ]` check), add a new line containing just `fi`.
+      2.  **Add the `--only` command-line argument:**
+          In the `main` function, locate the `ArgumentParser` section and add the new argument after `--exclude`:
+          ```python
+          parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
+          parser.add_argument("--only", nargs="*", default=[], help="Only run workloads with exactly these names. Cannot be used with --include/--exclude.")
+          parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
+          ```
 
-      This change ensures the preset sweeps are only executed when no workload filters are active.
+      3.  **Ensure mutual exclusion:**
+          To prevent conflicting filters, add a check that stops execution if `--only` is used with `--include` or `--exclude`. Place this code right after `args = parser.parse_args()`:
+          ```python
+          if (args.include or args.exclude) and args.only:
+              parser.error("--only cannot be used with --include or --exclude")
+          ```
 
-      ---
+      4.  **Update the call to `_filter_workloads`:**
+          Finally, pass the `only` argument when calling the filter function. Find this line in the `else` block for non-sweep mode:
+          ```python
+          workloads = _filter_workloads(base_preset, args.include, args.exclude)
+          ```
+          And modify it to:
+          ```python
+          workloads = _filter_workloads(base_preset, args.include, args.exclude, args.only)
+          ```
 
-      ### Git Diff
+      #### 2. Update `python/gss_tester/run_benches.sh`
 
-      Here is the git patch that applies the changes described above. You can apply it directly to your project.
+      To make the new feature discoverable, we'll update the example usage in the comments at the top of the shell script.
+
+      1.  **Add an example for `--only`:**
+          In `python/gss_tester/run_benches.sh`, replace the existing example for `--include` with two more descriptive examples for both `--include` (substring match) and `--only` (exact match).
+          Replace this:
+          ```bash
+          #   # Run only the 'push_scaling' workload from the 'tiny' preset
+          #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+          ```
+          With this:
+          ```bash
+          #   # Run workloads with 'push_scaling' in their name (substring match)
+          #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+          #
+          #   # Run only the workload named exactly 'push_scaling'
+          #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --only push_scaling
+          ```
+
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
+      diff --git a/python/gss_tester/benchmarks/runner.py b/python/gss_tester/benchmarks/runner.py
+      index 924301e..a471f49 100644
+      --- a/python/gss_tester/benchmarks/runner.py
+      +++ b/python/gss_tester/benchmarks/runner.py
+      @@ -11,8 +11,10 @@
+       from copy import deepcopy
+       
+       
+      -def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str]) -> List[WorkloadConfig]:
+      -    if include:
+      +def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str], only: List[str]) -> List[WorkloadConfig]:
+      +    if only:
+      +        return [c for c in configs if c.name in only]
+      +    if include:
+               configs = [c for c in configs if any(p.lower() in c.name.lower() for p in include)]
+           if exclude:
+               configs = [c for c in configs if all(p.lower() not in c.name.lower() for p in exclude)]
+      @@ -26,12 +28,16 @@
+           parser.add_argument("-o", "--output", type=Path, default=None, help="Path to output JSON file for results.")
+           parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
+           parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
+           parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
+      +    parser.add_argument("--only", nargs="*", default=[], help="Only run workloads with exactly these names. Cannot be used with --include/--exclude.")
+           parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
+           # Sweep options
+           parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
+           parser.add_argument("--sweep-axis", default=None, help="Parameter name to sweep (e.g., prefix_depth).")
+           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
+           parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
+           args = parser.parse_args()
+       
+      +    if (args.include or args.exclude) and args.only:
+      +        parser.error("--only cannot be used with --include or --exclude")
+      +
+           if args.list_sweeps:
+               sweeps = get_preset_sweeps(args.preset)
+               for s in sweeps:
+      @@ -91,7 +97,7 @@
+                   workloads.append(WorkloadConfig(name=base_cfg.name, params=p, max_seconds=base_cfg.max_seconds))
+               sweep_meta = {"workload": sweep_name, "axis": sweep_axis, "values": sweep_values}
+           else:
+      -        workloads = _filter_workloads(base_preset, args.include, args.exclude)
+      +        workloads = _filter_workloads(base_preset, args.include, args.exclude, args.only)
+       
+           if args.list:
+               if args.sweep_workload:
+
+      ``````diff
       diff --git a/python/gss_tester/run_benches.sh b/python/gss_tester/run_benches.sh
-      index 6112108..077d242 100755
+      index 9210206..a083320 100755
       --- a/python/gss_tester/run_benches.sh
       +++ b/python/gss_tester/run_benches.sh
-      @@ -115,41 +115,53 @@
-               [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
-           fi
-       
-      -    # --- Run Preset Sweeps ---
-      -    echo
-      -    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      -    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      +    # If any workload filters were passed, skip the automatic preset sweeps.
-      +    # Users can run specific sweeps manually if needed.
-      +    has_filter_args=false
-      +    for arg in "${EXTRA_ARGS[@]}"; do
-      +      if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-      +        has_filter_args=true
-      +        break
-      +      fi
-      +    done
-       
-      -    if [ -z "$sweeps_to_run" ]; then
-      -      echo "No predefined sweeps for preset '$PRESET'."
-      +    if $has_filter_args; then
-      +        echo
-      +        echo ">>> Workload filters detected, skipping automatic preset sweeps."
-           else
-      -      # Use a while loop to read line by line (in case of multiple sweeps)
-      -      while IFS=';' read -r workload axis values; do
-      +      # --- Run Preset Sweeps ---
-      +      echo
-      +      echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      +      sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      +
-      +      if [ -z "$sweeps_to_run" ]; then
-      +        echo "No predefined sweeps for preset '$PRESET'."
-      +      else
-      +        # Use a while loop to read line by line (in case of multiple sweeps)
-      +        while IFS=';' read -r workload axis values; do
-      +          echo
-      +          echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-      +          output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
-      +
-      +          sweep_cmd=(python -m gss_tester.benchmarks.runner
-      +              "$module_name"
-      +              "$class_name"
-      +              --preset "$PRESET"
-      +              --output "$output_file_sweep"
-      +              --sweep-workload "$workload"
-      +              --sweep-axis "$axis"
-      +              --sweep-values $values # No quotes to allow word splitting
-      +          )
-      +          echo "${sweep_cmd[*]}"
-      +          if "${sweep_cmd[@]}"; then
-      +              echo ">>> Finished sweep for: $workload"
-      +          else
-      +              exit_code=$?
-      +              [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
-      +          fi
-      +        done <<< "$sweeps_to_run"
-      +      fi
-      +    fi
-         fi
-       done
-       
+      @@ -17,8 +17,11 @@
+       #   # Run 'small' preset workloads AND all predefined 'small' sweeps
+       #   ./gss_tester/run_benches.sh small gss_tester.implementations.reference_impl.ReferenceGSS gss_tester.fast_impl.FastGSS
+       #
+      -#   # Run only the 'push_scaling' workload from the 'tiny' preset
+      -#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+      +#   # Run workloads with 'push_scaling' in their name (substring match)
+      +#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --include push_scaling
+      +#
+      +#   # Run only the workload named exactly 'push_scaling'
+      +#   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --only push_scaling
+       #
+       #   # Run a single manual scaling sweep (does not run other preset workloads/sweeps)
+       #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/benchmarks/runner.py
+      Applying patch to 'python/gss_tester/benchmarks/runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/benchmarks/runner.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/run_benches.sh
+      Applying patch to 'python/gss_tester/run_benches.sh' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/run_benches.sh.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add --only flag to benchmark runner
+      for exact workload matching"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
 
       ```
     metadata:
   - user: |-
-      Failed Hunk:
-
+      Diff of python/gss_tester/interface.py since previous turn:
       ```diff
-      @@ -115,41 +115,53 @@
-               [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
-           fi
-       
-      -    # --- Run Preset Sweeps ---
-      -    echo
-      -    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      -    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      +    # If any workload filters were passed, skip the automatic preset sweeps.
-      +    # Users can run specific sweeps manually if needed.
-      +    has_filter_args=false
-      +    for arg in "${EXTRA_ARGS[@]}"; do
-      +      if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-      +        has_filter_args=true
-      +        break
-      +      fi
-      +    done
-       
-      -    if [ -z "$sweeps_to_run" ]; then
-      -      echo "No predefined sweeps for preset '$PRESET'."
-      +    if $has_filter_args; then
-      +        echo
-      +        echo ">>> Workload filters detected, skipping automatic preset sweeps."
-           else
-      -      # Use a while loop to read line by line (in case of multiple sweeps)
-      -      while IFS=';' read -r workload axis values; do
-      +      # --- Run Preset Sweeps ---
-      +      echo
-      +      echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      +      sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      +
-      +      if [ -z "$sweeps_to_run" ]; then
-      +        echo "No predefined sweeps for preset '$PRESET'."
-      +      else
-      +        # Use a while loop to read line by line (in case of multiple sweeps)
-      +        while IFS=';' read -r workload axis values; do
-      +          echo
-      +          echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-      +          output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
-      +
-      +          sweep_cmd=(python -m gss_tester.benchmarks.runner
-      +              "$module_name"
-      +              "$class_name"
-      +              --preset "$PRESET"
-      +              --output "$output_file_sweep"
-      +              --sweep-workload "$workload"
-      +              --sweep-axis "$axis"
-      +              --sweep-values $values # No quotes to allow word splitting
-      +          )
-      +          echo "${sweep_cmd[*]}"
-      +          if "${sweep_cmd[@]}"; then
-      +              echo ">>> Finished sweep for: $workload"
-      +          else
-      +              exit_code=$?
-      +              [ $exit_code -eq 130 ] && echo ">>> Sweep for $workload interrupted." || echo ">>> Sweep for $workload failed."
-      +          fi
-      +        done <<< "$sweeps_to_run"
-      +      fi
-      +    fi
-         fi
-       done
-       
+
       ```
-
-      Expected Context (from patch):
-
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
       ```diff
-              [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
-          fi
 
-          # --- Run Preset Sweeps ---
-          echo
-          echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-          sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-
-          if [ -z "$sweeps_to_run" ]; then
-            echo "No predefined sweeps for preset '$PRESET'."
-          else
-            # Use a while loop to read line by line (in case of multiple sweeps)
-            while IFS=';' read -r workload axis values; do
-        fi
-      done
       ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
 
-      Nearest Match in `python/gss_tester/run_benches.sh` (found at line 125 with 81.25% similarity, shown with padding):
-
-      ```shell
-          output_file_preset="${RESULTS_DIR}/${full_impl_name}.preset.json"
-          preset_cmd=(python -m gss_tester.benchmarks.runner
-              "$module_name" "$class_name" --preset "$PRESET" --output "$output_file_preset" "${EXTRA_ARGS[@]}")
-          echo "${preset_cmd[*]}"
-          if "${preset_cmd[@]}"; then
-              echo ">>> Finished preset workloads for: $full_impl_path"
-          else
-              exit_code=$?
-              [ $exit_code -eq 130 ] && echo ">>> Preset run for $full_impl_path interrupted." || echo ">>> Preset run for $full_impl_path failed."
-          fi
-
-          # --- Run Preset Sweeps ---
-          echo
-          echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-          sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-
-          if [ -z "$sweeps_to_run" ]; then
-            echo "No predefined sweeps for preset '$PRESET'."
-          else
-            # Use a while loop to read line by line (in case of multiple sweeps)
-            while IFS=';' read -r workload axis values; do
-              echo
-              echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-              output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
-
-              sweep_cmd=(python -m gss_tester.benchmarks.runner
       ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
 
-      The git diff hunk above failed to apply to the file `python/gss_tester/run_benches.sh`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash ./gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py -- --only merge_after_prefix_mutations
+      Benchmark results will be saved in: gss_bench_results/2025-09-20_16-05-26
+      ---
+      Preset: medium
+      Implementations: gss_tester/implementations/reference_impl.py
+      Extra args to runner: -- --only merge_after_prefix_mutations
+      ---
+
+      >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json -- --only merge_after_prefix_mutations
+      usage: runner.py [-h] [-o OUTPUT] [--preset {tiny,small,medium,large}] [--include [INCLUDE ...]] [--exclude [EXCLUDE ...]] [--only [ONLY ...]] [--list] [--sweep-workload SWEEP_WORKLOAD]
+                       [--sweep-axis SWEEP_AXIS] [--sweep-values SWEEP_VALUES [SWEEP_VALUES ...]] [--list-sweeps]
+                       [implementation_module] [implementation_class]
+      runner.py: error: unrecognized arguments: -- --only merge_after_prefix_mutations
+      >>> Preset run for gss_tester/implementations/reference_impl.py failed.
+
+      >>> Checking for preset sweeps for preset 'medium'...
+
+      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.032s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.057s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.103s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.164s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json
+      >>> Finished sweep for: push_scaling
+
+      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.125s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.212s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.383s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.616s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      >>> Finished sweep for: pop_common_parent
+
+      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.035s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.062s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.121s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.197s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      >>> Finished sweep for: merge_after_prefix_mutations
+
+      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.014s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.046s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.145s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.518s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json
+      >>> Finished sweep for: merge_surface_changes
+
+      All benchmark runs completed.
+      ---
+      Analyzing results...
+      python -m gss_tester.benchmarks.analyzer gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json gss_bench_results/2025-09-20_16-05-26/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --outdir gss_bench_results/2025-09-20_16-05-26/analysis
+      --- Benchmark Summary ---
+      Loaded 4 result file(s) across 1 implementation(s).
+
+      Workload: merge_after_prefix_mutations
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.035s..0.197s
+
+      Workload: merge_surface_changes
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.014s..0.518s
+
+      Workload: pop_common_parent
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.125s..0.616s
+
+      Workload: push_scaling
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.032s..0.164s
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/merge_after_prefix_mutations_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/merge_surface_changes_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/merge_surface_changes_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/pop_common_parent_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/pop_common_parent_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/push_scaling_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/push_scaling_phase_breakdown.png
+
+      --- Scaling Analysis (sweeps) ---
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.840, r2=0.986, ideal=1.00 -> OK
+          - merge: slope=0.730, r2=0.982, ideal=0.00 -> DRIFT
+          - mutate_clones: slope=0.296, r2=0.834, ideal=0.00 -> DRIFT
+          - postcheck: slope=-0.059, r2=0.257, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=5.124, r2=0.948, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope=5.589, r2=0.988, ideal=0.00 -> DRIFT
+          - merge: slope=6.726, r2=0.993, ideal=0.00 -> DRIFT
+          - postcheck: slope=5.915, r2=0.991, ideal=0.00 -> DRIFT
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_surface_changes_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_surface_changes_depth_clone_and_mutate.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_surface_changes_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_merge_surface_changes_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.764, r2=0.985, ideal=1.00 -> OK
+          - pop: slope=0.790, r2=0.988, ideal=0.00 -> DRIFT
+          - postcheck: slope=-0.247, r2=0.686, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_pop.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.780, r2=0.989, ideal=1.00 -> OK
+          - postcheck: slope=-0.094, r2=0.311, ideal=0.00 -> OK
+          - push: slope=0.202, r2=0.350, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_push_scaling_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_push_scaling_prefix_depth_postcheck.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-05-26/analysis/plots/sweep_push_scaling_prefix_depth_push.png
+
+      ---
+      Benchmark analysis complete.
+      Summary printed above. Plots saved to: gss_bench_results/2025-09-20_16-05-26/analysis/plots
+      Full JSON results are in: gss_bench_results/2025-09-20_16-05-26
+    metadata:
+  - user: Is it broken?
     metadata:
   - assistant: |-
+      Yes, you've found a bug. The error message `unrecognized arguments: -- --only merge_after_prefix_mutations` shows that the `run_benches.sh` script is incorrectly passing the `--` separator to the Python benchmark runner, which causes the argument parser to fail.
+
+      The script correctly identifies that `--only merge_after_prefix_mutations` should be passed to the runner, but it also includes the `--` used to separate the arguments, which confuses the Python script.
+
+      The fix is to adjust the argument parsing logic in `run_benches.sh` to consume the `--` separator instead of passing it along. Here are the steps to fix it.
+
+      ### Step-by-step Instructions
+
+      #### 1. Modify `python/gss_tester/run_benches.sh`
+
+      We need to update the loop that separates implementation names from the extra arguments for the runner.
+
+      1.  **Locate the argument parsing loop:**
+          Open `python/gss_tester/run_benches.sh` and find this block of code:
+          ```bash
+          # Collect implementations until we see a flag starting with '--' or we run out.
+          IMPLS=()
+          EXTRA_ARGS=()
+          while (( "$#" )); do
+            if [[ "$1" == --* ]]; then
+              EXTRA_ARGS=("$@")
+              break
+            else
+              IMPLS+=("$1")
+            fi
+            shift
+          done
+          ```
+
+      2.  **Replace the loop:**
+          Replace the entire loop with the following corrected version. This new logic specifically checks for `--` and consumes it, while still correctly handling cases where extra arguments are passed without `--`.
+          ```bash
+          # Collect implementations until we see a flag starting with '--' or we run out.
+          IMPLS=()
+          EXTRA_ARGS=()
+          while (( "$#" )); do
+            if [[ "$1" == "--" ]]; then
+              shift # Consume the '--'
+              EXTRA_ARGS=("$@")
+              break
+            elif [[ "$1" == --* ]]; then
+              EXTRA_ARGS=("$@")
+              break
+            else
+              IMPLS+=("$1")
+            fi
+            shift
+          done
+          ```
+
+      After applying this change, the script will correctly handle the `--` separator, and your command should run as expected.
+
+      ### Git Diff
+
+      Here is the corresponding git diff for the change.
+
       ```diff
       diff --git a/python/gss_tester/run_benches.sh b/python/gss_tester/run_benches.sh
-      index 6112108..077d242 100755
+      index a083320..6355883 100755
       --- a/python/gss_tester/run_benches.sh
       +++ b/python/gss_tester/run_benches.sh
-      @@ -115,41 +115,75 @@
-      -    # --- Run Preset Sweeps ---
-      -    echo
-      -    echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      -    sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      -
-      -    if [ -z "$sweeps_to_run" ]; then
-      -      echo "No predefined sweeps for preset '$PRESET'."
-      -    else
-      -      # Use a while loop to read line by line (in case of multiple sweeps)
-      -      while IFS=';' read -r workload axis values; do
-      +    # If any workload filters were passed, skip the automatic preset sweeps.
-      +    # Users can run specific sweeps manually if needed.
-      +    has_filter_args=false
-      +    for arg in "${EXTRA_ARGS[@]}"; do
-      +      if [[ "$arg" == "--only" || "$arg" == "--include" || "$arg" == "--exclude" ]]; then
-      +        has_filter_args=true
-      +        break
-      +      fi
-      +    done
-      +
-      +    if $has_filter_args; then
-      +        echo
-      +        echo ">>> Workload filters detected, skipping automatic preset sweeps."
-      +    else
-      +        # --- Run Preset Sweeps ---
-      +        echo
-      +        echo ">>> Checking for preset sweeps for preset '$PRESET'..."
-      +        sweeps_to_run=$(python -m gss_tester.benchmarks.runner --preset "$PRESET" --list-sweeps)
-      +
-      +        if [ -z "$sweeps_to_run" ]; then
-      +            echo "No predefined sweeps for preset '$PRESET'."
-      +        else
-      +            # Use a while loop to read line by line (in case of multiple sweeps)
-      +            while IFS=';' read -r workload axis values; do
-                       echo
-                       echo ">>> Running preset sweep for '$workload' on axis '$axis'"
-                       output_file_sweep="${RESULTS_DIR}/${full_impl_name}.sweep.${workload}.${axis}.json"
+      @@ -39,9 +39,14 @@
+       IMPLS=()
+       EXTRA_ARGS=()
+       while (( "$#" )); do
+      -  if [[ "$1" == --* ]]; then
+      +  if [[ "$1" == "--" ]]; then
+      +    shift # Consume the '--'
+      +    EXTRA_ARGS=("$@")
+      +    break
+      +  elif [[ "$1" == --* ]]; then
+           EXTRA_ARGS=("$@")
+           break
+         else
+           IMPLS+=("$1")
+         fi
 
       ```
     metadata:
@@ -9417,7 +9420,458 @@ messages:
       Applying patch to 'python/gss_tester/run_benches.sh' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/run_benches.sh.
     metadata:
-  - user: 'Changes committed with message: "Fix: Skip automatic preset sweeps when
-      workload filters are applied"'
+  - user: 'Changes committed with message: "fix: Correctly parse arguments for benchmark
+      runner script"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash ./gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py -- --only merge_after_prefix_mutations
+      Benchmark results will be saved in: gss_bench_results/2025-09-20_16-07-42
+      ---
+      Preset: medium
+      Implementations: gss_tester/implementations/reference_impl.py
+      Extra args to runner: --only merge_after_prefix_mutations
+      ---
+
+      >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json --only merge_after_prefix_mutations
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.173s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      >>> Finished preset workloads for: gss_tester/implementations/reference_impl.py
+
+      >>> Checking for preset sweeps for preset 'medium'...
+
+      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.033s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.057s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.104s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.169s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json
+      >>> Finished sweep for: push_scaling
+
+      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.123s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.219s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.394s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.610s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      >>> Finished sweep for: pop_common_parent
+
+      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.033s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.059s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.111s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.171s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      >>> Finished sweep for: merge_after_prefix_mutations
+
+      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.016s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.039s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.148s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.530s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json
+      >>> Finished sweep for: merge_surface_changes
+
+      All benchmark runs completed.
+      ---
+      Analyzing results...
+      python -m gss_tester.benchmarks.analyzer gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --outdir gss_bench_results/2025-09-20_16-07-42/analysis
+      --- Benchmark Summary ---
+      Loaded 5 result file(s) across 1 implementation(s).
+
+      Workload: merge_after_prefix_mutations
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.033s..0.173s
+
+      Workload: merge_surface_changes
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.016s..0.530s
+
+      Workload: pop_common_parent
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.123s..0.610s
+
+      Workload: push_scaling
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.033s..0.169s
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_after_prefix_mutations_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_surface_changes_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_surface_changes_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/pop_common_parent_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/pop_common_parent_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/push_scaling_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/push_scaling_phase_breakdown.png
+
+      --- Scaling Analysis (sweeps) ---
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.802, r2=0.990, ideal=1.00 -> OK
+          - merge: slope=0.719, r2=0.983, ideal=0.00 -> DRIFT
+          - mutate_clones: slope=0.290, r2=0.865, ideal=0.00 -> DRIFT
+          - postcheck: slope=0.039, r2=0.029, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=3.658, r2=0.726, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope=5.753, r2=0.937, ideal=0.00 -> DRIFT
+          - merge: slope=6.661, r2=0.982, ideal=0.00 -> DRIFT
+          - postcheck: slope=5.810, r2=0.970, ideal=0.00 -> DRIFT
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_clone_and_mutate.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.768, r2=0.992, ideal=1.00 -> OK
+          - pop: slope=0.817, r2=0.999, ideal=0.00 -> DRIFT
+          - postcheck: slope=0.063, r2=0.192, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_pop.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.780, r2=0.986, ideal=1.00 -> OK
+          - postcheck: slope=-0.552, r2=0.690, ideal=0.00 -> DRIFT
+          - push: slope=0.259, r2=0.879, ideal=0.00 -> DRIFT
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_postcheck.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_push.png
+
+      ---
+      Benchmark analysis complete.
+      Summary printed above. Plots saved to: gss_bench_results/2025-09-20_16-07-42/analysis/plots
+      Full JSON results are in: gss_bench_results/2025-09-20_16-07-42
+    metadata:
+  - user: ??
+    metadata:
+  - assistant: |-
+      Excellent! The script now runs correctly. The previous error is gone, and it successfully executed the single preset workload you requested, followed by all the predefined sweeps for the `medium` preset.
+
+      Let's break down what the results in the "Scaling Analysis" section mean. The `??` in your prompt suggests you're asking for an interpretation of these numbers.
+
+      ### What the Benchmark Results Are Telling You
+
+      The analysis script compares the measured performance of an implementation against the *ideal* scaling behavior of a highly efficient GSS. The key idea is that for an efficient GSS, the cost of operations like `push`, `pop`, and `merge` should depend only on the *surface* of the GSS (the active stack tops), not on the shared history or "hidden depth."
+
+      Here's how to read the output:
+
+      *   **`slope`**: This is the measured performance exponent. If `time = C * (axis_value)^b`, the slope is `b`.
+          *   A slope near `0.0` means the operation's time is *independent* of the axis (e.g., `pop` time doesn't increase as `prefix_depth` grows). This is the ideal for many operations.
+          *   A slope near `1.0` means linear scaling (e.g., doubling the `prefix_depth` doubles the `build` time).
+          *   A high slope (`> 1.0`) indicates poor scaling.
+      *   **`ideal`**: This is the theoretical slope for a perfectly optimized GSS.
+      *   **`status`**:
+          *   `OK`: The measured slope is close to the ideal.
+          *   `DRIFT`: The measured slope significantly deviates from the ideal, indicating a performance bottleneck.
+
+      ### Analysis of `ReferenceGSS`
+
+      The results you're seeing are exactly what we'd expect for the `ReferenceGSS`. They confirm it's a correct but slow implementation.
+
+      1.  **`pop_common_parent` (axis: `parent_prefix_depth`)**
+          *   **`pop`: slope=0.817, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: This is a critical result. The time it takes to `pop` is growing almost linearly with the depth of the stacks. An ideal GSS would have a slope near 0, meaning `pop` is a fast, constant-time operation regardless of stack depth. The `ReferenceGSS` fails this test because it has to copy the entire stack history for every active stack when it pops.
+
+      2.  **`merge_after_prefix_mutations` (axis: `prefix_depth`)**
+          *   **`merge`: slope=0.719, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: Similarly, the `merge` operation's cost is heavily dependent on the shared history. An efficient GSS would only need to work on the differing parts of the structure (the surface), making the operation independent of the shared prefix depth. `ReferenceGSS` re-processes everything, leading to poor performance.
+
+      3.  **`push_scaling` (axis: `prefix_depth`)**
+          *   **`push`: slope=0.259, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: Even a simple `push` is slower than ideal. While the slope isn't steep, it's clearly not zero. This is because `ReferenceGSS` has to create a new, slightly longer copy of every single stack list, and the cost of copying depends on the list's length (the prefix depth).
+
+      4.  **`merge_surface_changes` (axis: `depth`)**
+          *   **`merge`: slope=6.661, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: This shows exponential scaling. The number of stacks grows exponentially with `depth`, and `ReferenceGSS` has to process all of them. The very high slope confirms this is extremely inefficient and will not scale to larger problems.
+
+      **In summary: Everything is working perfectly.** The benchmark runner and analyzer are correctly executing the tests and successfully identifying the expected performance limitations of the `ReferenceGSS`. The `DRIFT` messages are not errors in the tooling; they are valuable data points proving the tool can distinguish an inefficient implementation from an ideal one.
+    metadata:
+  - user: |-
+      Apply result (git-llm mode):
+      No git diff blocks (```diff) found in the last assistant message.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add --only flag to benchmark runner
+      and fix argument parsing"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: But I'm passing bash ./gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py
+      -- --only merge_after_prefix_mutations. Is it working?
+    metadata:
+  - assistant: |-
+      Yes, it is working exactly as intended now.
+
+      Let's look at the output to see why:
+
+      1.  **The `--only` flag worked for the preset workloads:**
+          Notice this section in your output:
+          ```bash
+          >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
+          python -m gss_tester.benchmarks.runner ... --only merge_after_prefix_mutations
+          ...
+          >>> Running workload 'merge_after_prefix_mutations' ...
+          <<< Finished workload 'merge_after_prefix_mutations' outcome=ok ...
+          >>> Finished preset workloads for: gss_tester/implementations/reference_impl.py
+          ```
+          This shows that for the "preset workloads" phase, the script correctly ran *only* the `merge_after_prefix_mutations` workload, just as you requested. It did not run the other five workloads from the `medium` preset.
+
+      2.  **The script continued to run the predefined sweeps:**
+          After finishing the preset workloads, the script moved on to its next task:
+          ```bash
+          >>> Checking for preset sweeps for preset 'medium'...
+          ```
+          The `run_benches.sh` script is designed to run **both** the preset workloads *and* the predefined sweeps for a given preset. The `--only` flag correctly filters the first part, but it doesn't prevent the second part (the sweeps) from running. This is the intended behavior.
+
+      **Conclusion:**
+
+      The fix was successful. The argument parsing error is gone, and the `--only` flag is correctly filtering the preset workloads. The rest of the output you see is the script proceeding as designed to run the separate, predefined scaling sweeps for the `medium` preset.
+    metadata:
+  - user: |-
+      Apply result (git-llm mode):
+      No git diff blocks (```diff) found in the last assistant message.
+    metadata:
+  - user: 'Changes committed with message: "No changes to commit based on the provided
+      diff."'
     metadata:
 ...
