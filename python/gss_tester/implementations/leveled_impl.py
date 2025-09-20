@@ -84,7 +84,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 empty_acc = acc
                 continue
             node = trie
-            for i, v in enumerate(vals):
+            for i, v in enumerate(reversed(vals)):
                 entry = node.setdefault(v, {"end": None, "sub": {}})
                 if i == len(vals) - 1:
                     if entry["end"] is None:
@@ -120,11 +120,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
             def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
                 if u.empty is not None:
-                    res.append((pref, u.empty))
+                    res.append((list(reversed(pref)), u.empty))
                 for v, kids in u.children.items():
                     for child in kids.values():
                         if isinstance(child, Interface):
-                            res.append((pref + [v], child.acc))
+                            res.append((list(reversed(pref + [v])), child.acc))
                         else:
                             dfs(child, pref + [v])
 
