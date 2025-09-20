@@ -9423,4 +9423,315 @@ messages:
   - user: 'Changes committed with message: "fix: Correctly parse arguments for benchmark
       runner script"'
     metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash ./gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py -- --only merge_after_prefix_mutations
+      Benchmark results will be saved in: gss_bench_results/2025-09-20_16-07-42
+      ---
+      Preset: medium
+      Implementations: gss_tester/implementations/reference_impl.py
+      Extra args to runner: --only merge_after_prefix_mutations
+      ---
+
+      >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json --only merge_after_prefix_mutations
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.173s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      >>> Finished preset workloads for: gss_tester/implementations/reference_impl.py
+
+      >>> Checking for preset sweeps for preset 'medium'...
+
+      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.033s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.057s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.104s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.169s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json
+      >>> Finished sweep for: push_scaling
+
+      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.123s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.219s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.394s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.610s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      >>> Finished sweep for: pop_common_parent
+
+      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.033s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.059s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.111s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.171s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      >>> Finished sweep for: merge_after_prefix_mutations
+
+      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.016s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.039s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.148s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.530s
+      Benchmark results saved to gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json
+      >>> Finished sweep for: merge_surface_changes
+
+      All benchmark runs completed.
+      ---
+      Analyzing results...
+      python -m gss_tester.benchmarks.analyzer gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json gss_bench_results/2025-09-20_16-07-42/gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --outdir gss_bench_results/2025-09-20_16-07-42/analysis
+      --- Benchmark Summary ---
+      Loaded 5 result file(s) across 1 implementation(s).
+
+      Workload: merge_after_prefix_mutations
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.033s..0.173s
+
+      Workload: merge_surface_changes
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.016s..0.530s
+
+      Workload: pop_common_parent
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.123s..0.610s
+
+      Workload: push_scaling
+        - gss_tester.implementations.reference_impl.ReferenceGSS: 4 run(s), ok=4, aborted=0, error=0, time range: 0.033s..0.169s
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_after_prefix_mutations_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_surface_changes_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/merge_surface_changes_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/pop_common_parent_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/pop_common_parent_phase_breakdown.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/push_scaling_scaling.png
+      Saved plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/push_scaling_phase_breakdown.png
+
+      --- Scaling Analysis (sweeps) ---
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.802, r2=0.990, ideal=1.00 -> OK
+          - merge: slope=0.719, r2=0.983, ideal=0.00 -> DRIFT
+          - mutate_clones: slope=0.290, r2=0.865, ideal=0.00 -> DRIFT
+          - postcheck: slope=0.039, r2=0.029, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=3.658, r2=0.726, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope=5.753, r2=0.937, ideal=0.00 -> DRIFT
+          - merge: slope=6.661, r2=0.982, ideal=0.00 -> DRIFT
+          - postcheck: slope=5.810, r2=0.970, ideal=0.00 -> DRIFT
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_clone_and_mutate.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_merge.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_merge_surface_changes_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.768, r2=0.992, ideal=1.00 -> OK
+          - pop: slope=0.817, r2=0.999, ideal=0.00 -> DRIFT
+          - postcheck: slope=0.063, r2=0.192, ideal=0.00 -> OK
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_pop.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+
+      Implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+      Sweep: workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+        Measured exponents (log-log slope) per phase:
+          - build: slope=0.780, r2=0.986, ideal=1.00 -> OK
+          - postcheck: slope=-0.552, r2=0.690, ideal=0.00 -> DRIFT
+          - push: slope=0.259, r2=0.879, ideal=0.00 -> DRIFT
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_build.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_postcheck.png
+        Saved sweep plot: gss_bench_results/2025-09-20_16-07-42/analysis/plots/sweep_push_scaling_prefix_depth_push.png
+
+      ---
+      Benchmark analysis complete.
+      Summary printed above. Plots saved to: gss_bench_results/2025-09-20_16-07-42/analysis/plots
+      Full JSON results are in: gss_bench_results/2025-09-20_16-07-42
+    metadata:
+  - user: ??
+    metadata:
+  - assistant: |-
+      Excellent! The script now runs correctly. The previous error is gone, and it successfully executed the single preset workload you requested, followed by all the predefined sweeps for the `medium` preset.
+
+      Let's break down what the results in the "Scaling Analysis" section mean. The `??` in your prompt suggests you're asking for an interpretation of these numbers.
+
+      ### What the Benchmark Results Are Telling You
+
+      The analysis script compares the measured performance of an implementation against the *ideal* scaling behavior of a highly efficient GSS. The key idea is that for an efficient GSS, the cost of operations like `push`, `pop`, and `merge` should depend only on the *surface* of the GSS (the active stack tops), not on the shared history or "hidden depth."
+
+      Here's how to read the output:
+
+      *   **`slope`**: This is the measured performance exponent. If `time = C * (axis_value)^b`, the slope is `b`.
+          *   A slope near `0.0` means the operation's time is *independent* of the axis (e.g., `pop` time doesn't increase as `prefix_depth` grows). This is the ideal for many operations.
+          *   A slope near `1.0` means linear scaling (e.g., doubling the `prefix_depth` doubles the `build` time).
+          *   A high slope (`> 1.0`) indicates poor scaling.
+      *   **`ideal`**: This is the theoretical slope for a perfectly optimized GSS.
+      *   **`status`**:
+          *   `OK`: The measured slope is close to the ideal.
+          *   `DRIFT`: The measured slope significantly deviates from the ideal, indicating a performance bottleneck.
+
+      ### Analysis of `ReferenceGSS`
+
+      The results you're seeing are exactly what we'd expect for the `ReferenceGSS`. They confirm it's a correct but slow implementation.
+
+      1.  **`pop_common_parent` (axis: `parent_prefix_depth`)**
+          *   **`pop`: slope=0.817, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: This is a critical result. The time it takes to `pop` is growing almost linearly with the depth of the stacks. An ideal GSS would have a slope near 0, meaning `pop` is a fast, constant-time operation regardless of stack depth. The `ReferenceGSS` fails this test because it has to copy the entire stack history for every active stack when it pops.
+
+      2.  **`merge_after_prefix_mutations` (axis: `prefix_depth`)**
+          *   **`merge`: slope=0.719, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: Similarly, the `merge` operation's cost is heavily dependent on the shared history. An efficient GSS would only need to work on the differing parts of the structure (the surface), making the operation independent of the shared prefix depth. `ReferenceGSS` re-processes everything, leading to poor performance.
+
+      3.  **`push_scaling` (axis: `prefix_depth`)**
+          *   **`push`: slope=0.259, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: Even a simple `push` is slower than ideal. While the slope isn't steep, it's clearly not zero. This is because `ReferenceGSS` has to create a new, slightly longer copy of every single stack list, and the cost of copying depends on the list's length (the prefix depth).
+
+      4.  **`merge_surface_changes` (axis: `depth`)**
+          *   **`merge`: slope=6.661, ideal=0.00 -> DRIFT**
+          *   **Interpretation**: This shows exponential scaling. The number of stacks grows exponentially with `depth`, and `ReferenceGSS` has to process all of them. The very high slope confirms this is extremely inefficient and will not scale to larger problems.
+
+      **In summary: Everything is working perfectly.** The benchmark runner and analyzer are correctly executing the tests and successfully identifying the expected performance limitations of the `ReferenceGSS`. The `DRIFT` messages are not errors in the tooling; they are valuable data points proving the tool can distinguish an inefficient implementation from an ideal one.
+    metadata:
+  - user: |-
+      Apply result (git-llm mode):
+      No git diff blocks (```diff) found in the last assistant message.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add --only flag to benchmark runner
+      and fix argument parsing"'
+    metadata:
 ...
