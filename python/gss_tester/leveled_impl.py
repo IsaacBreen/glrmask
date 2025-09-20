@@ -204,33 +204,22 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 merged[key] = acc
 
         # Build trie
-        def insert(root: _Node[T, Acc], path: List[T], acc: Acc) -> _Node[T, Acc]:
-            cur = root
-            for item in path:
-                nxt = cur.kids.get(item)
-                if nxt is None:
-                    nxt = _Node[T, Acc](acc=None, kids={})
-                cur = _Node(acc=cur.acc, kids={**cur.kids, item: nxt})
-            # Place/merge acc at the terminal node
-            def set_acc(n: _Node[T, Acc], path_rev: List[T]) -> _Node[T, Acc]:
-                if not path_rev:
-                    return _Node(acc=_merge_acc(n.acc, acc), kids=n.kids)
-                head, *tail = path_rev
-                child = n.kids[head]
-                new_child = set_acc(child, tail)
-                kids = dict(n.kids)
-                kids[head] = new_child
-                return _Node(acc=n.acc, kids=kids)
+        def insert(node: _Node[T, Acc], path: List[T], acc_to_add: Acc) -> _Node[T, Acc]:
+            if not path:
+                # We are at the destination node. Merge the accumulator.
+                return _Node(acc=_merge_acc(node.acc, acc_to_add), kids=node.kids)
 
-            # Re-traverse immutably to set the acc
-            # Build a path list for re-writing
-            node_path: List[T] = []
-            cur2 = root
-            for item in path:
-                node_path.append(item)
-                cur2 = cur2.kids.get(item, _Node(acc=None, kids={}))
-            # Now write back
-            return set_acc(root, path)
+            head, *tail = path
+            
+            # Get the child node, creating it if it doesn't exist.
+            child = node.kids.get(head, _Node(acc=None, kids={}))
+            
+            # Recursively insert into the child.
+            new_child = insert(child, tail, acc_to_add)
+            
+            # Return a new node with the updated child.
+            new_kids = {**node.kids, head: new_child}
+            return _Node(acc=node.acc, kids=new_kids)
 
         root = _Node[T, Acc](acc=None, kids={})
         for key, acc in merged.items():
