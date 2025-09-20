@@ -539,9 +539,59 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
         def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
-            if a is b:
-                return a
+            if a.acc == b.acc:
+                if a.empty:
+                    new_empty = b.empty
+                elif b.empty:
+                    new_empty = a.empty
+                else:
+                    new_empty = a.empty.merge(b.empty)
+                new_children = a.children.copy()
+                for k, max_depth_to_child in b.children.items():
+                    for max_depth, child in max_depth_to_child.items():
+                        if max_depth in new_children.setdefault(k, {}):
+                            existing_child = new_children[k][max_depth]
+                            new_children[k][max_depth] = merge_lower(existing_child, child)
+                        else:
+                            new_children[k][max_depth] = child
+                return Interface(children=new_children, acc=a.acc, empty=new_empty)
             return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
+
+        def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
+            # Fast paths
+            if l1 is l2:
+                return l1
+            if l1 == l2:
+                return l1
+
+            # Merge 'empty' flags (logical OR)
+            new_empty = l1.empty or l2.empty
+
+            # Merge children grouped by value and by child max depth
+            merged_children: Dict[T, Dict[int, Lower[T]]] = {}
+            all_vals = set(l1.children.keys()) | set(l2.children.keys())
+            for v in all_vals:
+                l1map = l1.children.get(v, {})
+                l2map = l2.children.get(v, {})
+
+                depth_buckets: Dict[int, List[Lower[T]]] = {}
+                for child in l1map.values():
+                    depth_buckets.setdefault(child._max_depth(), []).append(child)
+                for child in l2map.values():
+                    depth_buckets.setdefault(child._max_depth(), []).append(child)
+
+                v_out: Dict[int, Lower[T]] = {}
+                for _, nodes in depth_buckets.items():
+                    merged_node = nodes[0]
+                    for n in nodes[1:]:
+                        merged_node = merge_lower(merged_node, n)
+                    # Key by the resulting node's max depth to keep depth-index invariant
+                    v_out[merged_node._max_depth()] = merged_node
+
+                if v_out:
+                    merged_children[v] = v_out
+
+            return Lower(children=merged_children, empty=new_empty)
 
         return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
