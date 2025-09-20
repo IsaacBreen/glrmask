@@ -46,15 +46,8 @@ def main():
 
     if args.list:
         print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
-        from collections import defaultdict
-        grouped = defaultdict(list)
         for cfg in workloads:
-            grouped[cfg.name].append(cfg)
-
-        for name, cfgs in sorted(grouped.items()):
-            param = cfgs[0].complexity_param if cfgs else "N/A"
-            values = sorted([c.complexity_val for c in cfgs])
-            print(f"  - {name} (sweeping '{param}' over {values})")
+            print(f"  - {cfg.name}: {cfg.params} (max_seconds={cfg.max_seconds})")
         return
 
     # Prepare output structure

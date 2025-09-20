@@ -15,7 +15,7 @@ local_system:
     - python/gss_tester/benchmarks/runner.py
     - python/gss_tester/benchmarks/analyzer.py
     - python/gss_tester/run_benches.sh
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/gss_tester/__init__.py: |
@@ -3662,7 +3662,7 @@ local_system:
       import random
       import time
       import tracemalloc
-      from dataclasses import dataclass, field
+      from dataclasses import dataclass
       from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
       from ..interface import MergeableInt, GSS  # Type hints only
@@ -3745,8 +3745,6 @@ local_system:
           name: str
           params: Dict[str, Any]
           max_seconds: float  # maximum wall time for this single workload invocation
-          complexity_param: Optional[str] = None
-          complexity_val: Optional[Any] = None
 
 
       # ----------------------------
@@ -3775,8 +3773,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "merge_surface_changes",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -3869,8 +3865,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "push_scaling",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -3936,8 +3930,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "merge_after_prefix_mutations",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -4009,8 +4001,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "pop_common_parent",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -4083,8 +4073,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "apply_prune",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -4155,8 +4143,6 @@ local_system:
           workload_result: JsonDict = {
               "workload": "fuzz",
               "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
               "phases": [],
               "outcome": "ok",
               "notes": [],
@@ -4218,75 +4204,51 @@ local_system:
       # ----------------------------
 
       def tiny_preset() -> List[WorkloadConfig]:
-          """Target sizes that run quickly even on ReferenceGSS, with small sweeps."""
-          configs: List[WorkloadConfig] = []
-          for depth in [3, 4, 5]:
-              configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
-          for p_depth in [20, 50, 80]:
-              configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 32}, max_seconds=3.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for p_depth in [30, 60, 90]:
-              configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 32, "clones": 6}, max_seconds=5.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for siblings in [32, 64, 96]:
-              configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 50}, max_seconds=3.0, complexity_param="siblings", complexity_val=siblings))
-          for depth in [3, 4, 5]:
-              configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
-          for steps in [50, 100, 150]:
-              configs.append(WorkloadConfig("fuzz", {"seed": 7, "steps": steps, "max_gss_states": 10}, max_seconds=5.0, complexity_param="steps", complexity_val=steps))
-          return configs
+          # Target sizes that run quickly even on ReferenceGSS.
+          return [
+              WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
+              WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
+              WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
+              WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
+              WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
+          ]
 
 
       def small_preset() -> List[WorkloadConfig]:
-          """Still safe for ReferenceGSS but with wider sweeps."""
-          configs: List[WorkloadConfig] = []
-          for depth in [4, 5, 6]:
-              configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
-          for p_depth in [50, 150, 250]:
-              configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 64}, max_seconds=10.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for p_depth in [100, 200, 300]:
-              configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 64, "clones": 8}, max_seconds=15.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for siblings in [64, 128, 192]:
-              configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 150}, max_seconds=10.0, complexity_param="siblings", complexity_val=siblings))
-          for depth in [4, 5, 6]:
-              configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
-          for steps in [100, 200, 300]:
-              configs.append(WorkloadConfig("fuzz", {"seed": 42, "steps": steps, "max_gss_states": 10}, max_seconds=10.0, complexity_param="steps", complexity_val=steps))
-          return configs
+          # Still safe for ReferenceGSS but a bit larger.
+          return [
+              WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
+              WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
+              WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
+              WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
+              WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
+          ]
 
 
       def medium_preset() -> List[WorkloadConfig]:
-          """Designed for efficient GSS implementations; reference may struggle."""
-          configs: List[WorkloadConfig] = []
-          for depth in [6, 7, 8]:
-              configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
-          for p_depth in [200, 500, 800]:
-              configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 128}, max_seconds=20.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for p_depth in [400, 800, 1200]:
-              configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 128, "clones": 16}, max_seconds=25.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for siblings in [128, 256, 384]:
-              configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 500}, max_seconds=20.0, complexity_param="siblings", complexity_val=siblings))
-          for depth in [5, 6, 7]:
-              configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
-          for steps in [300, 500, 700]:
-              configs.append(WorkloadConfig("fuzz", {"seed": 1337, "steps": steps, "max_gss_states": 15}, max_seconds=20.0, complexity_param="steps", complexity_val=steps))
-          return configs
+          # Designed for more efficient GSS implementations; reference may struggle.
+          return [
+              WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
+              WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
+              WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
+              WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
+              WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
+          ]
 
 
       def large_preset() -> List[WorkloadConfig]:
-          """Stressful for advanced implementations; large complexity and surface sizes."""
-          configs: List[WorkloadConfig] = []
-          for depth in [8, 9, 10]:
-              configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
-          for p_depth in [1000, 2000, 3000]:
-              configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 256}, max_seconds=45.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for p_depth in [1500, 3000, 4500]:
-              configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 256, "clones": 24}, max_seconds=60.0, complexity_param="prefix_depth", complexity_val=p_depth))
-          for siblings in [256, 512, 768]:
-              configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 2000}, max_seconds=45.0, complexity_param="siblings", complexity_val=siblings))
-          for depth in [6, 7, 8]:
-              configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
-          for steps in [800, 1200, 1600]:
-              configs.append(WorkloadConfig("fuzz", {"seed": 2024, "steps": steps, "max_gss_states": 20}, max_seconds=40.0, complexity_param="steps", complexity_val=steps))
-          return configs
+          # Stressful for advanced implementations; large hidden complexity and surface sizes.
+          return [
+              WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
+              WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
+              WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
+              WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
+              WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
+              WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
+          ]
 
 
       PRESETS: Dict[str, Callable[[], List[WorkloadConfig]]] = {
@@ -4354,15 +4316,8 @@ local_system:
 
           if args.list:
               print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
-              from collections import defaultdict
-              grouped = defaultdict(list)
               for cfg in workloads:
-                  grouped[cfg.name].append(cfg)
-
-              for name, cfgs in sorted(grouped.items()):
-                  param = cfgs[0].complexity_param if cfgs else "N/A"
-                  values = sorted([c.complexity_val for c in cfgs])
-                  print(f"  - {name} (sweeping '{param}' over {values})")
+                  print(f"  - {cfg.name}: {cfg.params} (max_seconds={cfg.max_seconds})")
               return
 
           # Prepare output structure
@@ -4420,20 +4375,8 @@ local_system:
       from pathlib import Path
       from typing import Any, Dict, List, Tuple, Optional, DefaultDict
       from collections import defaultdict
-      import textwrap
 
-
-      KEY_PHASES = {
-          "merge_surface_changes": ["merge"],
-          "push_scaling": ["push"],
-          "merge_after_prefix_mutations": ["merge"],
-          "pop_common_parent": ["pop"],
-          "apply_prune": ["apply", "prune"],
-          "fuzz": ["fuzz"],
-      }
-
-
-      def _load_results(files: List[Path]) -> List[Dict[str, Any]]:
+      def load_results(files: List[Path]) -> List[Dict[str, Any]]:
           results = []
           for p in files:
               try:
@@ -4449,160 +4392,67 @@ local_system:
           return results
 
 
-      def _format_ns(ns: float) -> str:
-          if ns < 1_000:
-              return f"{ns:.0f} ns"
-          if ns < 1_000_000:
-              return f"{ns/1_000:.2f} µs"
-          if ns < 1_000_000_000:
-              return f"{ns/1_000_000:.2f} ms"
-          return f"{ns/1_000_000_000:.2f} s"
-
-
-      def summarize(results: List[Dict[str, Any]], out_dir: Path):
+      def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = True):
           if not results:
               print("No results to analyze.")
               return
 
+          # Group by workload name and implementation
           grouped: DefaultDict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
           impls: set[str] = set()
           for doc in results:
               impl_name = doc["implementation"]
               impls.add(impl_name)
               for w in doc["workloads"]:
-                  # Sort runs by complexity value to ensure proper plotting order
                   grouped[w["workload"]][impl_name].append(w)
-          for workload, impl_map in grouped.items():
-              for impl, runs in impl_map.items():
-                  runs.sort(key=lambda r: r.get("complexity_val", 0))
 
           print("--- Benchmark Summary ---")
           print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
+          for workload, impl_map in grouped.items():
+              print(f"\nWorkload: {workload}")
+              for impl, runs in impl_map.items():
+                  ok = sum(1 for r in runs if r.get("outcome") == "ok")
+                  aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
+                  errored = sum(1 for r in runs if r.get("outcome") == "error")
+                  times = [r.get("wall_time_ns", 0)/1e9 for r in runs if r.get("outcome") in ("ok", "aborted")]
+                  if times:
+                      print(f"  - {impl}: {len(runs)} run(s), ok={ok}, aborted={aborted}, error={errored}, time range: {min(times):.3f}s..{max(times):.3f}s")
+                  else:
+                      print(f"  - {impl}: {len(runs)} run(s), ok={ok}, aborted={aborted}, error={errored}")
 
+          # Try to plot scaling curves if matplotlib is available
           plots_dir = out_dir / "plots"
           plots_dir.mkdir(parents=True, exist_ok=True)
-          plot_paths = []
-
           try:
               import matplotlib.pyplot as plt
-          except ImportError:
-              print("\nWarning: matplotlib not found. Skipping plot generation. `pip install matplotlib`")
-              plt = None
+              import math
 
-          for workload, impl_map in sorted(grouped.items()):
-              print(f"\n{'='*10} Workload: {workload} {'='*10}")
-
-              first_run = next(iter(next(iter(impl_map.values()), [])), None)
-              if not first_run: continue
-              
-              complexity_param = first_run.get("complexity_param")
-              key_phases = KEY_PHASES.get(workload, [])
-
-              if not complexity_param or not key_phases:
-                  print("  (Could not determine complexity parameter or key phases, skipping scaling analysis.)")
-                  continue
-              
-              print(f"  Scaling analysis against: '{complexity_param}' | Key phase(s): {key_phases}")
-
-              # --- Data Extraction for Table and Plot ---
-              plot_data = defaultdict(lambda: defaultdict(list))
-              for impl, runs in sorted(impl_map.items()):
-                  print(f"\n  Implementation: {impl}")
-                  headers = [complexity_param] + [f"{p}_time" for p in key_phases] + ["peak_mem_mb"]
-                  col_widths = [len(h) for h in headers]
-                  rows = [headers]
-
+              # Helper to extract x (complexity) and y (phase times)
+              def extract_xy(runs: List[Dict[str, Any]], workload: str) -> Tuple[List[float], Dict[str, List[float]]]:
+                  xs: List[float] = []
+                  phase_times: Dict[str, List[float]] = defaultdict(list)
                   for r in runs:
-                      x = r.get("complexity_val", "N/A")
-                      row = [x]
-                      
-                      phase_map = {p["name"]: p.get("elapsed_ns", 0) for p in r.get("phases", [])}
-                      for p_name in key_phases:
-                          y_ns = phase_map.get(p_name, 0)
-                          row.append(y_ns)
-                          if plt:
-                              plot_data[impl][p_name].append((x, y_ns / 1e9))
-                      
-                      mem_mb = r.get("memory", {}).get("peak_bytes", 0) / (1024*1024)
-                      row.append(mem_mb)
-                      
-                      # Format for printing
-                      fmt_row = [f"{row[0]}"]
-                      fmt_row.extend([_format_ns(t) for t in row[1:-1]])
-                      fmt_row.append(f"{row[-1]:.2f}")
-                      
-                      for i, item in enumerate(fmt_row):
-                          col_widths[i] = max(col_widths[i], len(item))
-                      rows.append(fmt_row)
+                      # Pick a heuristic complexity axis depending on workload
+                      if workload in ("merge_surface_changes", "apply_prune"):
+                          derived = r.get("derived", {})
+                          x = float(derived.get("theoretical_nodes", 0))
+                          if x <= 0:
+                              x = float(derived.get("theoretical_leaves", 0))
+                      elif workload in ("push_scaling", "merge_after_prefix_mutations", "pop_common_parent"):
+                          derived = r.get("derived", {})
+                          x = float(derived.get("hidden_prefix_depth", 0))
+                          if x <= 0:
+                              x = float(derived.get("siblings", 0))
+                      else:
+                          x = float(r.get("wall_time_ns", 0))
+                      xs.append(x)
+                      for phase in r.get("phases", []):
+                          phase_times[phase["name"]].append(phase.get("elapsed_ns", 0)/1e9)
+                  return xs, phase_times
 
-                  # Print table
-                  header_line = " | ".join(h.ljust(w) for h, w in zip(rows[0], col_widths))
-                  print("  " + header_line)
-                  print("  " + "-" * len(header_line))
-                  for r in rows[1:]:
-                      line = " | ".join(item.ljust(w) for item, w in zip(r, col_widths))
-                      print("  " + line)
-
-              # --- Plotting ---
-              if plt:
-                  plt.style.use('seaborn-v0_8-whitegrid')
-                  fig, ax = plt.subplots(figsize=(10, 6))
-                  
-                  has_data = False
-                  for impl, phase_data in sorted(plot_data.items()):
-                      for phase_name, xy_pairs in sorted(phase_data.items()):
-                          if not xy_pairs: continue
-                          has_data = True
-                          xs = [p[0] for p in xy_pairs]
-                          ys = [p[1] for p in xy_pairs]
-                          label = f"{impl.split('.')[-1]} ({phase_name})"
-                          ax.plot(xs, ys, marker='o', linestyle='-', label=label)
-
-                  if has_data:
-                      ax.set_xlabel(f"Complexity: {complexity_param}")
-                      ax.set_ylabel("Key Phase Time (s)")
-                      ax.set_title(f"Scaling Analysis: {workload}", fontsize=14, pad=15)
-                      ax.legend(title="Implementation (Phase)", bbox_to_anchor=(1.02, 1), loc='upper left')
-                      ax.set_yscale('log')
-                      ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-                      fig.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust for legend
-                      
-                      out_path = plots_dir / f"{workload}_scaling.png"
-                      fig.savefig(out_path, dpi=120)
-                      plt.close(fig)
-                      plot_paths.append(out_path)
-
-          if plot_paths:
-              print("\n--- Plots Generated ---")
-              for p in plot_paths:
-                  print(f"  - {p}")
-
-
-      def main():
-          parser = argparse.ArgumentParser(
-              description="Analyze benchmark JSON files and produce scaling summaries and plots.",
-              formatter_class=argparse.RawDescriptionHelpFormatter,
-              epilog=textwrap.dedent("""
-              This analyzer is designed to process benchmark results where workloads have been
-              run over a range of complexity parameters. It identifies the key computational
-              phase of each workload (e.g., 'merge', 'push') and plots its execution time
-              against the complexity parameter that was varied.
-
-              This helps visualize and quantify the scaling performance of different GSS
-              implementations.
-              """)
-          )
-          parser.add_argument("result_files", nargs="+", type=Path, help="Paths to benchmark JSON files.")
-          parser.add_argument("-o", "--outdir", type=Path, default=Path("bench_analysis"), help="Output directory for analyses and plots.")
-          args = parser.parse_args()
-
-          args.outdir.mkdir(parents=True, exist_ok=True)
-          docs = _load_results(args.result_files)
-          summarize(docs, args.outdir)
-
-
-      if __name__ == "__main__":
-          main()
+              # For each workload, produce per-impl scaling plots
+              for workload, impl_map in grouped.items():
+                  plt.figure(figsize=(8, 5))
                   for impl, runs in impl_map.items():
                       xs, phase_times = extract_xy(runs, workload)
                       if not xs:
@@ -4805,7 +4655,7 @@ local_system:
       echo "Full JSON results are in: $RESULTS_DIR"
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: simple
 system:
   message: |-
     You are a helpful assistant.
@@ -4813,7 +4663,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -4825,7 +4675,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: simple
   llm_context_mode: full
 messages:
   - user: |-
@@ -7341,833 +7191,5 @@ messages:
       Successfully created new file: python/gss_tester/benchmarks/runner.py
       Successfully created new file: python/gss_tester/benchmarks/analyzer.py
       Successfully created new file: python/gss_tester/run_benches.sh
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/test_spec.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_tests.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_benches.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: I'm not super happy with this. I can't infer anything about the scaling
-      efficiency.
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/test_spec.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_tests.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/run_benches.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      bash gss_tester/run_benches.sh medium gss_tester/implementations/reference_impl.py
-      Benchmark results will be saved in: gss_bench_results/2025-09-20_15-14-23
-      ---
-      Preset: medium
-      Implementations: gss_tester/implementations/reference_impl.py
-      ---
-
-      >>> Running benches for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output gss_bench_results/2025-09-20_15-14-23/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:56: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
-      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.685s
-      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.116s
-      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.753s
-      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.421s
-      >>> Running workload 'apply_prune' with params {'depth': 6, 'branching': 4, 'apply_amount': 10, 'prune_threshold': 20} (max 20.0s)
-      <<< Finished workload 'apply_prune' outcome=ok in 0.066s
-      >>> Running workload 'fuzz' with params {'seed': 1337, 'steps': 500, 'max_gss_states': 15} (max 20.0s)
-      <<< Finished workload 'fuzz' outcome=ok in 0.025s
-      Benchmark results saved to gss_bench_results/2025-09-20_15-14-23/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      >>> Finished benches for: gss_tester/implementations/reference_impl.py
-
-      All benchmark runs completed.
-      ---
-      Analyzing results...
-      python -m gss_tester.benchmarks.analyzer gss_bench_results/2025-09-20_15-14-23/gss_tester.implementations.reference_impl.ReferenceGSS.json --outdir gss_bench_results/2025-09-20_15-14-23/analysis
-      --- Benchmark Summary ---
-      Loaded 1 result file(s) across 1 implementation(s).
-
-      Workload: merge_surface_changes
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.685s..0.685s
-
-      Workload: push_scaling
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.116s..0.116s
-
-      Workload: merge_after_prefix_mutations
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.753s..0.753s
-
-      Workload: pop_common_parent
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.421s..0.421s
-
-      Workload: apply_prune
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.066s..0.066s
-
-      Workload: fuzz
-        - gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.025s..0.025s
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/merge_surface_changes_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/merge_surface_changes_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/push_scaling_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/push_scaling_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/merge_after_prefix_mutations_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/pop_common_parent_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/pop_common_parent_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/apply_prune_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/apply_prune_phase_breakdown.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/fuzz_scaling.png
-      Saved plot: gss_bench_results/2025-09-20_15-14-23/analysis/plots/fuzz_phase_breakdown.png
-
-      ---
-      Benchmark analysis complete.
-      Summary printed above. Plots saved to: gss_bench_results/2025-09-20_15-14-23/analysis/plots
-      Full JSON results are in: gss_bench_results/2025-09-20_15-14-23
-      ```
-
-      `````
-
-      I'm not super happy with this. I can't infer anything about the scaling efficiency.
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. To better analyze scaling efficiency, I'll modify the benchmark suite to run workloads over a range of complexity parameters and update the analyzer to produce detailed scaling plots and summary tables.
-
-      Here are the step-by-step instructions to update the benchmark files:
-
-      ### Step 1: Update Workload Definitions (`workloads.py`)
-
-      In `python/gss_tester/benchmarks/workloads.py`, we need to:
-      1.  Add fields to `WorkloadConfig` to explicitly track the parameter being scaled.
-      2.  Update each `workload_*` function to include this new information in its JSON result.
-      3.  Rewrite the `*_preset` functions to generate a series of workloads that sweep the complexity parameter, allowing us to measure performance at different scales.
-
-      **Instructions for `python/gss_tester/benchmarks/workloads.py`:**
-
-      1.  Find the `WorkloadConfig` dataclass definition and add `complexity_param` and `complexity_val` fields:
-
-          ```python
-          @dataclass
-          class WorkloadConfig:
-              name: str
-              params: Dict[str, Any]
-              max_seconds: float  # maximum wall time for this single workload invocation
-              complexity_param: Optional[str] = None
-              complexity_val: Optional[Any] = None
-          ```
-
-      2.  In every `workload_*` function (e.g., `workload_merge_surface_changes`, `workload_push_scaling`, etc.), find the `workload_result` dictionary initialization and add the `complexity_param` and `complexity_val` from the `cfg` object:
-
-          ```python
-          # Example for workload_merge_surface_changes
-          workload_result: JsonDict = {
-              "workload": "merge_surface_changes",
-              "params": params,
-              "complexity_param": cfg.complexity_param,
-              "complexity_val": cfg.complexity_val,
-              "phases": [],
-              # ... rest of the dictionary
-          }
-          ```
-          Apply this same change to all other `workload_*` functions.
-
-      3.  Replace the existing preset functions (`tiny_preset`, `small_preset`, `medium_preset`, `large_preset`) with new versions that generate a range of configurations for each workload. This is a full replacement of these functions.
-
-      ### Step 2: Improve Benchmark Runner's Listing (`runner.py`)
-
-      To make the new workload sweeps easier to understand when listing them, we'll improve the output of the `--list` command in `python/gss_tester/benchmarks/runner.py`.
-
-      **Instructions for `python/gss_tester/benchmarks/runner.py`:**
-
-      1.  Locate the `if args.list:` block inside the `main` function.
-      2.  Replace the simple loop with a new version that groups workloads by name and prints a summary of the parameter sweep.
-
-          ```python
-          # Replace this:
-          if args.list:
-              print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
-              for cfg in workloads:
-                  print(f"  - {cfg.name}: {cfg.params} (max_seconds={cfg.max_seconds})")
-              return
-
-          # With this:
-          if args.list:
-              print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
-              from collections import defaultdict
-              grouped = defaultdict(list)
-              for cfg in workloads:
-                  grouped[cfg.name].append(cfg)
-
-              for name, cfgs in sorted(grouped.items()):
-                  param = cfgs[0].complexity_param if cfgs else "N/A"
-                  values = sorted([c.complexity_val for c in cfgs])
-                  print(f"  - {name} (sweeping '{param}' over {values})")
-              return
-          ```
-
-      ### Step 3: Overhaul the Benchmark Analyzer (`analyzer.py`)
-
-      This is the most critical change. We will completely rewrite the `summarize` function in `python/gss_tester/benchmarks/analyzer.py` to focus on scaling analysis. It will now generate plots of key phase times versus the complexity parameter and print detailed summary tables.
-
-      **Instructions for `python/gss_tester/benchmarks/analyzer.py`:**
-
-      1.  Replace the entire content of `python/gss_tester/benchmarks/analyzer.py` with the new, more powerful version provided in the diff below. The new code includes:
-          *   A `KEY_PHASES` dictionary to identify the most important phase for each workload.
-          *   A completely new `summarize` function that extracts scaling data.
-          *   Logic to generate informative text tables showing how performance scales with complexity.
-          *   Revised plotting logic to create scaling graphs (`key phase time` vs. `complexity`).
-
-      ---
-
-      Here are the `git diff` patches for the changes described above.
-
-      ```diff
-      --- a/python/gss_tester/benchmarks/analyzer.py
-      +++ b/python/gss_tester/benchmarks/analyzer.py
-      @@ -3,8 +3,20 @@
-       from pathlib import Path
-       from typing import Any, Dict, List, Tuple, Optional, DefaultDict
-       from collections import defaultdict
-      +import textwrap
-       
-      -def load_results(files: List[Path]) -> List[Dict[str, Any]]:
-      +
-      +KEY_PHASES = {
-      +    "merge_surface_changes": ["merge"],
-      +    "push_scaling": ["push"],
-      +    "merge_after_prefix_mutations": ["merge"],
-      +    "pop_common_parent": ["pop"],
-      +    "apply_prune": ["apply", "prune"],
-      +    "fuzz": ["fuzz"],
-      +}
-      +
-      +
-      +def _load_results(files: List[Path]) -> List[Dict[str, Any]]:
-           results = []
-           for p in files:
-               try:
-      @@ -19,117 +31,146 @@
-           return results
-       
-       
-      -def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = True):
-      +def _format_ns(ns: float) -> str:
-      +    if ns < 1_000:
-      +        return f"{ns:.0f} ns"
-      +    if ns < 1_000_000:
-      +        return f"{ns/1_000:.2f} µs"
-      +    if ns < 1_000_000_000:
-      +        return f"{ns/1_000_000:.2f} ms"
-      +    return f"{ns/1_000_000_000:.2f} s"
-      +
-      +
-      +def summarize(results: List[Dict[str, Any]], out_dir: Path):
-           if not results:
-               print("No results to analyze.")
-               return
-       
-      -    # Group by workload name and implementation
-           grouped: DefaultDict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
-           impls: set[str] = set()
-           for doc in results:
-               impl_name = doc["implementation"]
-               impls.add(impl_name)
-               for w in doc["workloads"]:
-      +            # Sort runs by complexity value to ensure proper plotting order
-                   grouped[w["workload"]][impl_name].append(w)
-      +    for workload, impl_map in grouped.items():
-      +        for impl, runs in impl_map.items():
-      +            runs.sort(key=lambda r: r.get("complexity_val", 0))
-       
-           print("--- Benchmark Summary ---")
-           print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
-      -    for workload, impl_map in grouped.items():
-      -        print(f"\nWorkload: {workload}")
-      -        for impl, runs in impl_map.items():
-      -            ok = sum(1 for r in runs if r.get("outcome") == "ok")
-      -            aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
-      -            errored = sum(1 for r in runs if r.get("outcome") == "error")
-      -            times = [r.get("wall_time_ns", 0)/1e9 for r in runs if r.get("outcome") in ("ok", "aborted")]
-      -            if times:
-      -                print(f"  - {impl}: {len(runs)} run(s), ok={ok}, aborted={aborted}, error={errored}, time range: {min(times):.3f}s..{max(times):.3f}s")
-      -            else:
-      -                print(f"  - {impl}: {len(runs)} run(s), ok={ok}, aborted={aborted}, error={errored}")
-      -
-      -    # Try to plot scaling curves if matplotlib is available
-      +
-           plots_dir = out_dir / "plots"
-           plots_dir.mkdir(parents=True, exist_ok=True)
-      +    plot_paths = []
-      +
-           try:
-               import matplotlib.pyplot as plt
-      -        import math
-      -
-      -        # Helper to extract x (complexity) and y (phase times)
-      -        def extract_xy(runs: List[Dict[str, Any]], workload: str) -> Tuple[List[float], Dict[str, List[float]]]:
-      -            xs: List[float] = []
-      -            phase_times: Dict[str, List[float]] = defaultdict(list)
-      -            for r in runs:
-      -                # Pick a heuristic complexity axis depending on workload
-      -                if workload in ("merge_surface_changes", "apply_prune"):
-      -                    derived = r.get("derived", {})
-      -                    x = float(derived.get("theoretical_nodes", 0))
-      -                    if x <= 0:
-      -                        x = float(derived.get("theoretical_leaves", 0))
-      -                elif workload in ("push_scaling", "merge_after_prefix_mutations", "pop_common_parent"):
-      -                    derived = r.get("derived", {})
-      -                    x = float(derived.get("hidden_prefix_depth", 0))
-      -                    if x <= 0:
-      -                        x = float(derived.get("siblings", 0))
-      -                else:
-      -                    x = float(r.get("wall_time_ns", 0))
-      -                xs.append(x)
-      -                for phase in r.get("phases", []):
-      -                    phase_times[phase["name"]].append(phase.get("elapsed_ns", 0)/1e9)
-      -            return xs, phase_times
-      -
-      -        # For each workload, produce per-impl scaling plots
-      -        for workload, impl_map in grouped.items():
-      -            plt.figure(figsize=(8, 5))
-      +    except ImportError:
-      +        print("\nWarning: matplotlib not found. Skipping plot generation. `pip install matplotlib`")
-      +        plt = None
-      +
-      +    for workload, impl_map in sorted(grouped.items()):
-      +        print(f"\n{'='*10} Workload: {workload} {'='*10}")
-      +
-      +        first_run = next(iter(next(iter(impl_map.values()), [])), None)
-      +        if not first_run: continue
-      +        
-      +        complexity_param = first_run.get("complexity_param")
-      +        key_phases = KEY_PHASES.get(workload, [])
-      +
-      +        if not complexity_param or not key_phases:
-      +            print("  (Could not determine complexity parameter or key phases, skipping scaling analysis.)")
-      +            continue
-      +        
-      +        print(f"  Scaling analysis against: '{complexity_param}' | Key phase(s): {key_phases}")
-      +
-      +        # --- Data Extraction for Table and Plot ---
-      +        plot_data = defaultdict(lambda: defaultdict(list))
-      +        for impl, runs in sorted(impl_map.items()):
-      +            print(f"\n  Implementation: {impl}")
-      +            headers = [complexity_param] + [f"{p}_time" for p in key_phases] + ["peak_mem_mb"]
-      +            col_widths = [len(h) for h in headers]
-      +            rows = [headers]
-      +
-      +            for r in runs:
-      +                x = r.get("complexity_val", "N/A")
-      +                row = [x]
-      +                
-      +                phase_map = {p["name"]: p.get("elapsed_ns", 0) for p in r.get("phases", [])}
-      +                for p_name in key_phases:
-      +                    y_ns = phase_map.get(p_name, 0)
-      +                    row.append(y_ns)
-      +                    if plt:
-      +                        plot_data[impl][p_name].append((x, y_ns / 1e9))
-      +                
-      +                mem_mb = r.get("memory", {}).get("peak_bytes", 0) / (1024*1024)
-      +                row.append(mem_mb)
-      +                
-      +                # Format for printing
-      +                fmt_row = [f"{row[0]}"]
-      +                fmt_row.extend([_format_ns(t) for t in row[1:-1]])
-      +                fmt_row.append(f"{row[-1]:.2f}")
-      +                
-      +                for i, item in enumerate(fmt_row):
-      +                    col_widths[i] = max(col_widths[i], len(item))
-      +                rows.append(fmt_row)
-      +
-      +            # Print table
-      +            header_line = " | ".join(h.ljust(w) for h, w in zip(rows[0], col_widths))
-      +            print("  " + header_line)
-      +            print("  " + "-" * len(header_line))
-      +            for r in rows[1:]:
-      +                line = " | ".join(item.ljust(w) for item, w in zip(r, col_widths))
-      +                print("  " + line)
-      +
-      +        # --- Plotting ---
-      +        if plt:
-      +            plt.style.use('seaborn-v0_8-whitegrid')
-      +            fig, ax = plt.subplots(figsize=(10, 6))
-      +            
-      +            has_data = False
-      +            for impl, phase_data in sorted(plot_data.items()):
-      +                for phase_name, xy_pairs in sorted(phase_data.items()):
-      +                    if not xy_pairs: continue
-      +                    has_data = True
-      +                    xs = [p[0] for p in xy_pairs]
-      +                    ys = [p[1] for p in xy_pairs]
-      +                    label = f"{impl.split('.')[-1]} ({phase_name})"
-      +                    ax.plot(xs, ys, marker='o', linestyle='-', label=label)
-      +
-      +            if has_data:
-      +                ax.set_xlabel(f"Complexity: {complexity_param}")
-      +                ax.set_ylabel("Key Phase Time (s)")
-      +                ax.set_title(f"Scaling Analysis: {workload}", fontsize=14, pad=15)
-      +                ax.legend(title="Implementation (Phase)", bbox_to_anchor=(1.02, 1), loc='upper left')
-      +                ax.set_yscale('log')
-      +                ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-      +                fig.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust for legend
-      +                
-      +                out_path = plots_dir / f"{workload}_scaling.png"
-      +                fig.savefig(out_path, dpi=120)
-      +                plt.close(fig)
-      +                plot_paths.append(out_path)
-      +
-      +    if plot_paths:
-      +        print("\n--- Plots Generated ---")
-      +        for p in plot_paths:
-      +            print(f"  - {p}")
-      +
-      +
-      +def main():
-      +    parser = argparse.ArgumentParser(
-      +        description="Analyze benchmark JSON files and produce scaling summaries and plots.",
-      +        formatter_class=argparse.RawDescriptionHelpFormatter,
-      +        epilog=textwrap.dedent("""
-      +        This analyzer is designed to process benchmark results where workloads have been
-      +        run over a range of complexity parameters. It identifies the key computational
-      +        phase of each workload (e.g., 'merge', 'push') and plots its execution time
-      +        against the complexity parameter that was varied.
-      +
-      +        This helps visualize and quantify the scaling performance of different GSS
-      +        implementations.
-      +        """)
-      +    )
-      +    parser.add_argument("result_files", nargs="+", type=Path, help="Paths to benchmark JSON files.")
-      +    parser.add_argument("-o", "--outdir", type=Path, default=Path("bench_analysis"), help="Output directory for analyses and plots.")
-      +    args = parser.parse_args()
-      +
-      +    args.outdir.mkdir(parents=True, exist_ok=True)
-      +    docs = _load_results(args.result_files)
-      +    summarize(docs, args.outdir)
-      +
-      +
-      +if __name__ == "__main__":
-      +    main()
-
-      ``````diff
-      --- a/python/gss_tester/benchmarks/runner.py
-      +++ b/python/gss_tester/benchmarks/runner.py
-      @@ -37,10 +37,17 @@
-           workloads = _filter_workloads(workloads, args.include, args.exclude)
-       
-           if args.list:
-               print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
-      -        for cfg in workloads:
-      -            print(f"  - {cfg.name}: {cfg.params} (max_seconds={cfg.max_seconds})")
-      +        from collections import defaultdict
-      +        grouped = defaultdict(list)
-      +        for cfg in workloads:
-      +            grouped[cfg.name].append(cfg)
-      +
-      +        for name, cfgs in sorted(grouped.items()):
-      +            param = cfgs[0].complexity_param if cfgs else "N/A"
-      +            values = sorted([c.complexity_val for c in cfgs])
-      +            print(f"  - {name} (sweeping '{param}' over {values})")
-               return
-       
-           # Prepare output structure
-           header = {
-
-      ``````diff
-      --- a/python/gss_tester/benchmarks/workloads.py
-      +++ b/python/gss_tester/benchmarks/workloads.py
-      @@ -3,7 +3,7 @@
-       import random
-       import time
-       import tracemalloc
-      -from dataclasses import dataclass
-      +from dataclasses import dataclass, field
-       from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-       
-       from ..interface import MergeableInt, GSS  # Type hints only
-      @@ -80,6 +80,8 @@
-           name: str
-           params: Dict[str, Any]
-           max_seconds: float  # maximum wall time for this single workload invocation
-      +    complexity_param: Optional[str] = None
-      +    complexity_val: Optional[Any] = None
-       
-       
-       # ----------------------------
-      @@ -104,6 +106,8 @@
-           workload_result: JsonDict = {
-               "workload": "merge_surface_changes",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -176,6 +180,8 @@
-           workload_result: JsonDict = {
-               "workload": "push_scaling",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -226,6 +232,8 @@
-           workload_result: JsonDict = {
-               "workload": "merge_after_prefix_mutations",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -282,6 +290,8 @@
-           workload_result: JsonDict = {
-               "workload": "pop_common_parent",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -339,6 +349,8 @@
-           workload_result: JsonDict = {
-               "workload": "apply_prune",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -395,6 +407,8 @@
-           workload_result: JsonDict = {
-               "workload": "fuzz",
-               "params": params,
-      +        "complexity_param": cfg.complexity_param,
-      +        "complexity_val": cfg.complexity_val,
-               "phases": [],
-               "outcome": "ok",
-               "notes": [],
-      @@ -445,54 +459,102 @@
-       # ----------------------------
-       
-       def tiny_preset() -> List[WorkloadConfig]:
-      -    # Target sizes that run quickly even on ReferenceGSS.
-      -    return [
-      -        WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
-      -        WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
-      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
-      -        WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
-      -        WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
-      -        WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
-      -    ]
-      +    """Target sizes that run quickly even on ReferenceGSS, with small sweeps."""
-      +    configs: List[WorkloadConfig] = []
-      +    for depth in [3, 4, 5]:
-      +        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
-      +    for p_depth in [20, 50, 80]:
-      +        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 32}, max_seconds=3.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for p_depth in [30, 60, 90]:
-      +        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 32, "clones": 6}, max_seconds=5.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for siblings in [32, 64, 96]:
-      +        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 50}, max_seconds=3.0, complexity_param="siblings", complexity_val=siblings))
-      +    for depth in [3, 4, 5]:
-      +        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
-      +    for steps in [50, 100, 150]:
-      +        configs.append(WorkloadConfig("fuzz", {"seed": 7, "steps": steps, "max_gss_states": 10}, max_seconds=5.0, complexity_param="steps", complexity_val=steps))
-      +    return configs
-       
-       
-       def small_preset() -> List[WorkloadConfig]:
-      -    # Still safe for ReferenceGSS but a bit larger.
-      -    return [
-      -        WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
-      -        WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
-      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
-      -        WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
-      -        WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
-      -        WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
-      -    ]
-      +    """Still safe for ReferenceGSS but with wider sweeps."""
-      +    configs: List[WorkloadConfig] = []
-      +    for depth in [4, 5, 6]:
-      +        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
-      +    for p_depth in [50, 150, 250]:
-      +        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 64}, max_seconds=10.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for p_depth in [100, 200, 300]:
-      +        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 64, "clones": 8}, max_seconds=15.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for siblings in [64, 128, 192]:
-      +        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 150}, max_seconds=10.0, complexity_param="siblings", complexity_val=siblings))
-      +    for depth in [4, 5, 6]:
-      +        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
-      +    for steps in [100, 200, 300]:
-      +        configs.append(WorkloadConfig("fuzz", {"seed": 42, "steps": steps, "max_gss_states": 10}, max_seconds=10.0, complexity_param="steps", complexity_val=steps))
-      +    return configs
-       
-       
-       def medium_preset() -> List[WorkloadConfig]:
-      -    # Designed for more efficient GSS implementations; reference may struggle.
-      -    return [
-      -        WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
-      -        WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
-      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
-      -        WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
-      -        WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
-      -        WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
-      -    ]
-      +    """Designed for efficient GSS implementations; reference may struggle."""
-      +    configs: List[WorkloadConfig] = []
-      +    for depth in [6, 7, 8]:
-      +        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
-      +    for p_depth in [200, 500, 800]:
-      +        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 128}, max_seconds=20.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for p_depth in [400, 800, 1200]:
-      +        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 128, "clones": 16}, max_seconds=25.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for siblings in [128, 256, 384]:
-      +        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 500}, max_seconds=20.0, complexity_param="siblings", complexity_val=siblings))
-      +    for depth in [5, 6, 7]:
-      +        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
-      +    for steps in [300, 500, 700]:
-      +        configs.append(WorkloadConfig("fuzz", {"seed": 1337, "steps": steps, "max_gss_states": 15}, max_seconds=20.0, complexity_param="steps", complexity_val=steps))
-      +    return configs
-       
-       
-       def large_preset() -> List[WorkloadConfig]:
-      -    # Stressful for advanced implementations; large hidden complexity and surface sizes.
-      -    return [
-      -        WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
-      -        WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
-      -        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
-      -        WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
-      -        WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
-      -        WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
-      -    ]
-      +    """Stressful for advanced implementations; large complexity and surface sizes."""
-      +    configs: List[WorkloadConfig] = []
-      +    for depth in [8, 9, 10]:
-      +        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
-      +    for p_depth in [1000, 2000, 3000]:
-      +        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 256}, max_seconds=45.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for p_depth in [1500, 3000, 4500]:
-      +        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 256, "clones": 24}, max_seconds=60.0, complexity_param="prefix_depth", complexity_val=p_depth))
-      +    for siblings in [256, 512, 768]:
-      +        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 2000}, max_seconds=45.0, complexity_param="siblings", complexity_val=siblings))
-      +    for depth in [6, 7, 8]:
-      +        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
-      +    for steps in [800, 1200, 1600]:
-      +        configs.append(WorkloadConfig("fuzz", {"seed": 2024, "steps": steps, "max_gss_states": 20}, max_seconds=40.0, complexity_param="steps", complexity_val=steps))
-      +    return configs
-       
-       
-       PRESETS: Dict[str, Callable[[], List[WorkloadConfig]]] = {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/benchmarks/analyzer.py
-      Applying patch to 'python/gss_tester/benchmarks/analyzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/benchmarks/analyzer.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/benchmarks/runner.py
-      Applying patch to 'python/gss_tester/benchmarks/runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/benchmarks/runner.py.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/gss_tester/benchmarks/workloads.py
-      Applying patch to 'python/gss_tester/benchmarks/workloads.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/benchmarks/workloads.py.
     metadata:
 ...
