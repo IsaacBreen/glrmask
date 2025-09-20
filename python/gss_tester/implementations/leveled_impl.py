@@ -18,6 +18,16 @@ class UpperBranch(Generic[T, Acc]):
     children: Dict[T, Dict[int, Upper[T, Acc]]]
     empty: Optional[Acc]
 
+    def _max_depth(self) -> int:
+        """Computes the max depth of the subtree rooted at this node."""
+        if not self.children:
+            return 0
+        max_child_depth = 0
+        for v_children in self.children.values():
+            if v_children:
+                max_child_depth = max(max_child_depth, max(v_children.keys()))
+        return 1 + max_child_depth
+
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
@@ -25,11 +35,34 @@ class Interface(Generic[T, Acc]):
     acc: Acc
     empty: Optional[Acc]
 
+    def _max_depth(self) -> int:
+        """
+        Computes the max depth of the subtree. For an Interface, this is based
+        on the Lower children. An Interface is a leaf in the Upper tree.
+        """
+        if not self.children:
+            return 0
+        max_child_depth = 0
+        for v_children in self.children.values():
+            if v_children:
+                max_child_depth = max(max_child_depth, max(v_children.keys()))
+        return 1 + max_child_depth
+
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
     children: Dict[T, Dict[int, Lower[T]]]
     empty: bool
+
+    def _max_depth(self) -> int:
+        """Computes the max depth of the subtree rooted at this node."""
+        if not self.children:
+            return 0
+        max_child_depth = 0
+        for v_children in self.children.values():
+            if v_children:
+                max_child_depth = max(max_child_depth, max(v_children.keys()))
+        return 1 + max_child_depth
 
 
 @dataclass(frozen=True, eq=True)
@@ -72,7 +105,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 if sub:
                     nodes.append(build(sub))
                 if nodes:
-                    children[v] = {i: n for i, n in enumerate(nodes)}
+                    children[v] = {n._max_depth(): n for n in nodes}
             return UpperBranch(children=children, empty=root_empty)
 
         return LeveledGSS(build(trie, empty_acc))
