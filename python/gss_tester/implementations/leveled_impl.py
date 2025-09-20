@@ -658,3 +658,5 @@ def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
             children[v] = bucket
     ub = UpperBranch(children=children, empty=(acc if l.empty else None))
     return try_promote(ub)
+
+__all__ = ["LeveledGSS"]
