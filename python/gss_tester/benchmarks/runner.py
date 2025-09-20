@@ -10,6 +10,7 @@ import socket
 
 from .instrumentation import TimingRecorder, GSSFactory
 from .workloads import PRESETS, WORKLOAD_FUNCS, WorkloadConfig
+from copy import deepcopy
 
 
 def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude: List[str]) -> List[WorkloadConfig]:
@@ -29,6 +30,10 @@ def main():
     parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
     parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
     parser.add_argument("--list", action="store_true", help="List workloads for the selected preset and exit.")
+    # Sweep options
+    parser.add_argument("--sweep-workload", default=None, help="Run only this workload in sweep mode across --sweep-values.")
+    parser.add_argument("--sweep-axis", default=None, help="Parameter name to sweep (e.g., prefix_depth).")
+    parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
     args = parser.parse_args()
 
     # Load implementation
@@ -41,11 +46,44 @@ def main():
 
     # Build workload list based on preset
     preset_func = PRESETS[args.preset]
-    workloads = preset_func()
-    workloads = _filter_workloads(workloads, args.include, args.exclude)
+    base_preset = preset_func()
+
+    # Sweep mode: override workloads with parameterized copies of a single workload
+    workloads: List[WorkloadConfig]
+    sweep_meta: Dict[str, Any] = {}
+    if args.sweep_workload:
+        sweep_name = args.sweep_workload
+        sweep_axis = args.sweep_axis
+        sweep_values_raw = args.sweep_values
+        if not sweep_axis or not sweep_values_raw:
+            print("Error: --sweep-workload requires --sweep-axis and --sweep-values.", file=sys.stderr)
+            sys.exit(1)
+        # Find a base config from preset or create a default if not present
+        base_cfg = next((c for c in base_preset if c.name == sweep_name), WorkloadConfig(sweep_name, {}, 15.0))
+        # Parse numeric values; keep strings if not numeric
+        sweep_values: List[Any] = []
+        for v in sweep_values_raw:
+            try:
+                sweep_values.append(int(v))
+            except ValueError:
+                try:
+                    sweep_values.append(float(v))
+                except ValueError:
+                    sweep_values.append(v)
+        workloads = []
+        for val in sweep_values:
+            p = deepcopy(base_cfg.params)
+            p[sweep_axis] = val
+            workloads.append(WorkloadConfig(name=base_cfg.name, params=p, max_seconds=base_cfg.max_seconds))
+        sweep_meta = {"workload": sweep_name, "axis": sweep_axis, "values": sweep_values}
+    else:
+        workloads = _filter_workloads(base_preset, args.include, args.exclude)
 
     if args.list:
-        print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
+        if args.sweep_workload:
+            print(f"Sweep workloads (base preset '{args.preset}') for '{args.sweep_workload}' over axis '{args.sweep_axis}':")
+        else:
+            print(f"Preset '{args.preset}' workloads ({len(workloads)}):")
         for cfg in workloads:
             print(f"  - {cfg.name}: {cfg.params} (max_seconds={cfg.max_seconds})")
         return
@@ -65,6 +103,8 @@ def main():
         },
         "workloads": [],
     }
+    if sweep_meta:
+        header["sweep"] = sweep_meta
 
     # Run workloads sequentially; errors are captured per workload.
     for cfg in workloads:

@@ -609,3 +609,60 @@ WORKLOAD_FUNCS: Dict[str, Callable[[GSSFactory, WorkloadConfig], JsonDict]] = {
     "apply_prune": workload_apply_prune,
     "fuzz": workload_fuzz,
 }
+
+# ---------------------------------------------------------------------------
+# Ideal scaling expectations registry
+# ---------------------------------------------------------------------------
+# This registry maps: workload -> axis -> phase_name -> ideal exponent
+# Exponent interpretation: time ~ O(axis_value^exponent) if other params fixed.
+# For "surface-only" efficient GSS implementations, the key phases should be
+# independent (exponent ~ 0) of the hidden complexity axis.
+#
+# Notes:
+# - build phases often scale with hidden size; we generally expect exponent > 0.
+# - apply_prune and fuzz are left unspecified as "ideal" behavior depends on
+#   semantics; analyzer will simply measure them without ideal comparison.
+SCALING_EXPECTATIONS: Dict[str, Dict[str, Dict[str, float]]] = {
+    # A long hidden prefix, fixed surface width; a single push should be
+    # independent of hidden prefix depth in an ideal GSS (exponent ~ 0).
+    "push_scaling": {
+        "prefix_depth": {
+            "build": 1.0,   # building grows with hidden prefix
+            "push": 0.0,    # should not depend on hidden prefix
+            "postcheck": 0.0,
+        }
+    },
+    # Clone-and-merge after pushing unique tags at the surface;
+    # merge should be independent of hidden prefix depth.
+    "merge_after_prefix_mutations": {
+        "prefix_depth": {
+            "build": 1.0,
+            "mutate_clones": 0.0,
+            "merge": 0.0,
+            "postcheck": 0.0,
+        }
+    },
+    # Pop siblings back to a common parent; pop should be independent of
+    # the hidden prefix depth.
+    "pop_common_parent": {
+        "parent_prefix_depth": {
+            "build": 1.0,
+            "pop": 0.0,
+            "postcheck": 0.0,
+        }
+    },
+    # Balanced fanout DAG clones, mutate the surface, then merge.
+    # We check independence from depth (hidden size). Even though hidden grows
+    # exponentially with depth, ideal merge should be ~ constant vs depth.
+    "merge_surface_changes": {
+        "depth": {
+            "build": 1.0,   # grows with depth (proxy)
+            "clone_and_mutate": 0.0,
+            "merge": 0.0,
+            "postcheck": 0.0,
+        }
+    },
+}
+
+def get_scaling_expectations() -> Dict[str, Dict[str, Dict[str, float]]]:
+    return SCALING_EXPECTATIONS

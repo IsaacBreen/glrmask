@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, DefaultDict
 from collections import defaultdict
+import math
+
+from .workloads import get_scaling_expectations
 
 def load_results(files: List[Path]) -> List[Dict[str, Any]]:
     results = []
@@ -19,6 +22,143 @@ def load_results(files: List[Path]) -> List[Dict[str, Any]]:
             print(f"Warning: Could not read {p}: {e}")
     return results
 
+def _loglog_fit(xs: List[float], ys: List[float]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Fit ys ~ a * xs^b via log-log linear regression and return (b, a, r2).
+    Returns (None, None, None) if not enough valid points.
+    """
+    pairs = [(float(x), float(y)) for x, y in zip(xs, ys) if x > 0 and y > 0]
+    n = len(pairs)
+    if n < 2:
+        return None, None, None
+    lx = [math.log(x) for x, _ in pairs]
+    ly = [math.log(y) for _, y in pairs]
+    sumx = sum(lx)
+    sumy = sum(ly)
+    sumx2 = sum(v*v for v in lx)
+    sumxy = sum(a*b for a, b in zip(lx, ly))
+    den = n * sumx2 - sumx * sumx
+    if den <= 0:
+        return None, None, None
+    b = (n * sumxy - sumx * sumy) / den
+    a_log = (sumy - b * sumx) / n
+    # r^2
+    y_mean = sumy / n
+    ss_tot = sum((v - y_mean) ** 2 for v in ly)
+    ss_res = sum((lyi - (a_log + b*lxi)) ** 2 for lxi, lyi in zip(lx, ly))
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else None
+    a = math.exp(a_log)
+    return b, a, r2
+
+def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
+    """
+    Detect sweep-mode benchmark documents and estimate scaling exponents per phase.
+    Compare measured exponents to ideal expectations (if available), and plot.
+    """
+    sweeps = [doc for doc in results if "sweep" in doc]
+    if not sweeps:
+        return
+
+    expectations = get_scaling_expectations()
+    plots_dir = out_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n--- Scaling Analysis (sweeps) ---")
+    for doc in sweeps:
+        impl = doc.get("implementation", "(unknown)")
+        sweep = doc["sweep"]
+        workload = sweep["workload"]
+        axis = sweep["axis"]
+        vals = sweep["values"]
+        runs = [w for w in doc["workloads"] if w.get("workload") == workload]
+        if not runs:
+            print(f"Skipping sweep for {impl} workload '{workload}': no runs found.")
+            continue
+
+        # Gather x and per-phase times
+        phases_union = set()
+        for r in runs:
+            for ph in r.get("phases", []):
+                phases_union.add(ph["name"])
+        phases = sorted(phases_union)
+
+        print(f"\nImplementation: {impl}")
+        print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
+        ideal_map = expectations.get(workload, {}).get(axis, {})
+
+        # Build x,y series per phase
+        x = []
+        phase_ys: Dict[str, List[float]] = {p: [] for p in phases}
+        for r in runs:
+            pv = r.get("params", {}).get(axis)
+            if pv is None:
+                pv = r.get("derived", {}).get(axis)
+            try:
+                xval = float(pv)
+            except Exception:
+                # Non-numeric axis; skip sweep analysis
+                x = []
+                break
+            x.append(xval)
+            phmap = {ph["name"]: ph.get("elapsed_ns", 0) / 1e9 for ph in r.get("phases", [])}
+            for p in phases:
+                phase_ys[p].append(phmap.get(p, 0.0))
+
+        if len(x) < 2:
+            print("  Not enough data points for regression.")
+            continue
+
+        # Fit exponents per phase and print
+        print("  Measured exponents (log-log slope) per phase:")
+        for p in phases:
+            b, a, r2 = _loglog_fit(x, phase_ys[p])
+            if b is None:
+                print(f"    - {p}: insufficient data")
+                continue
+            ideal = ideal_map.get(p)
+            if ideal is None:
+                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f} (no ideal)")
+            else:
+                delta = abs(b - ideal)
+                status = "OK" if delta <= 0.25 else "DRIFT"
+                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
+
+        # Plot log-log per phase
+        try:
+            import matplotlib.pyplot as plt
+            for p in phases:
+                y = phase_ys[p]
+                valid = [(xi, yi) for xi, yi in zip(x, y) if xi > 0 and yi > 0]
+                if len(valid) < 2:
+                    continue
+                xs, ys = zip(*valid)
+                b, a, r2 = _loglog_fit(list(xs), list(ys))
+                plt.figure(figsize=(6, 4))
+                plt.loglog(xs, ys, marker='o', linestyle='-', label=f"measured (r2={r2:.2f})")
+                if b is not None and a is not None:
+                    # Draw fitted curve on same xs
+                    xs_sorted = sorted(xs)
+                    ys_fit = [a * (xx ** b) for xx in xs_sorted]
+                    plt.loglog(xs_sorted, ys_fit, linestyle='--', label=f"fit: y~{a:.2e}x^{b:.2f}")
+                ideal = ideal_map.get(p)
+                if ideal is not None:
+                    # Plot a reference line with slope=ideal through the first point
+                    x0 = xs[0]
+                    y0 = ys[0]
+                    ref = [y0 * ((xx / x0) ** ideal) for xx in xs_sorted]
+                    plt.loglog(xs_sorted, ref, linestyle=':', label=f'ideal slope {ideal:.2f}')
+                plt.xlabel(axis)
+                plt.ylabel("Time (s)")
+                plt.title(f"{impl.split('.')[-1]} | {workload} | phase={p}")
+                plt.legend()
+                plt.grid(True, which="both", alpha=0.3)
+                plt.tight_layout()
+                out_path = plots_dir / f"sweep_{workload}_{axis}_{p}.png"
+                plt.savefig(out_path)
+                plt.close()
+                print(f"  Saved sweep plot: {out_path}")
+        except Exception as e:
+            print(f"  Note: Sweep plotting skipped ({e}).")
 
 def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = True):
     if not results:
@@ -145,6 +285,9 @@ def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = T
 
     except Exception as e:
         print(f"Note: Plotting skipped or failed ({e}). You can install matplotlib and numpy for plots.")
+
+    # After general plots, run sweep-specific scaling analysis
+    analyze_sweeps(results, out_dir)
 
 
 def main():
