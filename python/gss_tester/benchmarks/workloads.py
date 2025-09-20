@@ -4,7 +4,7 @@ import math
 import random
 import time
 import tracemalloc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..interface import MergeableInt, GSS  # Type hints only
@@ -87,6 +87,8 @@ class WorkloadConfig:
     name: str
     params: Dict[str, Any]
     max_seconds: float  # maximum wall time for this single workload invocation
+    complexity_param: Optional[str] = None
+    complexity_val: Optional[Any] = None
 
 
 # ----------------------------
@@ -115,6 +117,8 @@ def workload_merge_surface_changes(factory: GSSFactory, cfg: WorkloadConfig) -> 
     workload_result: JsonDict = {
         "workload": "merge_surface_changes",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -207,6 +211,8 @@ def workload_push_scaling(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
     workload_result: JsonDict = {
         "workload": "push_scaling",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -272,6 +278,8 @@ def workload_merge_after_prefix_mutations(factory: GSSFactory, cfg: WorkloadConf
     workload_result: JsonDict = {
         "workload": "merge_after_prefix_mutations",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -343,6 +351,8 @@ def workload_pop_common_parent(factory: GSSFactory, cfg: WorkloadConfig) -> Json
     workload_result: JsonDict = {
         "workload": "pop_common_parent",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -415,6 +425,8 @@ def workload_apply_prune(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
     workload_result: JsonDict = {
         "workload": "apply_prune",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -485,6 +497,8 @@ def workload_fuzz(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
     workload_result: JsonDict = {
         "workload": "fuzz",
         "params": params,
+        "complexity_param": cfg.complexity_param,
+        "complexity_val": cfg.complexity_val,
         "phases": [],
         "outcome": "ok",
         "notes": [],
@@ -546,51 +560,75 @@ def workload_fuzz(factory: GSSFactory, cfg: WorkloadConfig) -> JsonDict:
 # ----------------------------
 
 def tiny_preset() -> List[WorkloadConfig]:
-    # Target sizes that run quickly even on ReferenceGSS.
-    return [
-        WorkloadConfig("merge_surface_changes", {"depth": 4, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0),
-        WorkloadConfig("push_scaling", {"prefix_depth": 50, "surface_width": 32}, max_seconds=3.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 75, "surface_width": 32, "clones": 6}, max_seconds=5.0),
-        WorkloadConfig("pop_common_parent", {"siblings": 64, "parent_prefix_depth": 50}, max_seconds=3.0),
-        WorkloadConfig("apply_prune", {"depth": 4, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0),
-        WorkloadConfig("fuzz", {"seed": 7, "steps": 100, "max_gss_states": 10}, max_seconds=5.0),
-    ]
+    """Target sizes that run quickly even on ReferenceGSS, with small sweeps."""
+    configs: List[WorkloadConfig] = []
+    for depth in [3, 4, 5]:
+        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 2, "clones": 4, "mutation": "push"}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
+    for p_depth in [20, 50, 80]:
+        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 32}, max_seconds=3.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for p_depth in [30, 60, 90]:
+        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 32, "clones": 6}, max_seconds=5.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for siblings in [32, 64, 96]:
+        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 50}, max_seconds=3.0, complexity_param="siblings", complexity_val=siblings))
+    for depth in [3, 4, 5]:
+        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 2, "apply_amount": 5, "prune_threshold": 3}, max_seconds=5.0, complexity_param="depth", complexity_val=depth))
+    for steps in [50, 100, 150]:
+        configs.append(WorkloadConfig("fuzz", {"seed": 7, "steps": steps, "max_gss_states": 10}, max_seconds=5.0, complexity_param="steps", complexity_val=steps))
+    return configs
 
 
 def small_preset() -> List[WorkloadConfig]:
-    # Still safe for ReferenceGSS but a bit larger.
-    return [
-        WorkloadConfig("merge_surface_changes", {"depth": 5, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0),
-        WorkloadConfig("push_scaling", {"prefix_depth": 150, "surface_width": 64}, max_seconds=10.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 200, "surface_width": 64, "clones": 8}, max_seconds=15.0),
-        WorkloadConfig("pop_common_parent", {"siblings": 128, "parent_prefix_depth": 150}, max_seconds=10.0),
-        WorkloadConfig("apply_prune", {"depth": 5, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0),
-        WorkloadConfig("fuzz", {"seed": 42, "steps": 200, "max_gss_states": 10}, max_seconds=10.0),
-    ]
+    """Still safe for ReferenceGSS but with wider sweeps."""
+    configs: List[WorkloadConfig] = []
+    for depth in [4, 5, 6]:
+        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 6, "mutation": "push"}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
+    for p_depth in [50, 150, 250]:
+        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 64}, max_seconds=10.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for p_depth in [100, 200, 300]:
+        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 64, "clones": 8}, max_seconds=15.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for siblings in [64, 128, 192]:
+        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 150}, max_seconds=10.0, complexity_param="siblings", complexity_val=siblings))
+    for depth in [4, 5, 6]:
+        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 3, "apply_amount": 7, "prune_threshold": 10}, max_seconds=12.0, complexity_param="depth", complexity_val=depth))
+    for steps in [100, 200, 300]:
+        configs.append(WorkloadConfig("fuzz", {"seed": 42, "steps": steps, "max_gss_states": 10}, max_seconds=10.0, complexity_param="steps", complexity_val=steps))
+    return configs
 
 
 def medium_preset() -> List[WorkloadConfig]:
-    # Designed for more efficient GSS implementations; reference may struggle.
-    return [
-        WorkloadConfig("merge_surface_changes", {"depth": 7, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0),
-        WorkloadConfig("push_scaling", {"prefix_depth": 500, "surface_width": 128}, max_seconds=20.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 800, "surface_width": 128, "clones": 16}, max_seconds=25.0),
-        WorkloadConfig("pop_common_parent", {"siblings": 256, "parent_prefix_depth": 500}, max_seconds=20.0),
-        WorkloadConfig("apply_prune", {"depth": 6, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0),
-        WorkloadConfig("fuzz", {"seed": 1337, "steps": 500, "max_gss_states": 15}, max_seconds=20.0),
-    ]
+    """Designed for efficient GSS implementations; reference may struggle."""
+    configs: List[WorkloadConfig] = []
+    for depth in [6, 7, 8]:
+        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 3, "clones": 12, "mutation": "push"}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
+    for p_depth in [200, 500, 800]:
+        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 128}, max_seconds=20.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for p_depth in [400, 800, 1200]:
+        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 128, "clones": 16}, max_seconds=25.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for siblings in [128, 256, 384]:
+        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 500}, max_seconds=20.0, complexity_param="siblings", complexity_val=siblings))
+    for depth in [5, 6, 7]:
+        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 4, "apply_amount": 10, "prune_threshold": 20}, max_seconds=20.0, complexity_param="depth", complexity_val=depth))
+    for steps in [300, 500, 700]:
+        configs.append(WorkloadConfig("fuzz", {"seed": 1337, "steps": steps, "max_gss_states": 15}, max_seconds=20.0, complexity_param="steps", complexity_val=steps))
+    return configs
 
 
 def large_preset() -> List[WorkloadConfig]:
-    # Stressful for advanced implementations; large hidden complexity and surface sizes.
-    return [
-        WorkloadConfig("merge_surface_changes", {"depth": 8, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0),
-        WorkloadConfig("push_scaling", {"prefix_depth": 2000, "surface_width": 256}, max_seconds=45.0),
-        WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": 3000, "surface_width": 256, "clones": 24}, max_seconds=60.0),
-        WorkloadConfig("pop_common_parent", {"siblings": 512, "parent_prefix_depth": 2000}, max_seconds=45.0),
-        WorkloadConfig("apply_prune", {"depth": 7, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0),
-        WorkloadConfig("fuzz", {"seed": 2024, "steps": 1000, "max_gss_states": 20}, max_seconds=40.0),
-    ]
+    """Stressful for advanced implementations; large complexity and surface sizes."""
+    configs: List[WorkloadConfig] = []
+    for depth in [8, 9, 10]:
+        configs.append(WorkloadConfig("merge_surface_changes", {"depth": depth, "branching": 4, "clones": 20, "mutation": "push"}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
+    for p_depth in [1000, 2000, 3000]:
+        configs.append(WorkloadConfig("push_scaling", {"prefix_depth": p_depth, "surface_width": 256}, max_seconds=45.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for p_depth in [1500, 3000, 4500]:
+        configs.append(WorkloadConfig("merge_after_prefix_mutations", {"prefix_depth": p_depth, "surface_width": 256, "clones": 24}, max_seconds=60.0, complexity_param="prefix_depth", complexity_val=p_depth))
+    for siblings in [256, 512, 768]:
+        configs.append(WorkloadConfig("pop_common_parent", {"siblings": siblings, "parent_prefix_depth": 2000}, max_seconds=45.0, complexity_param="siblings", complexity_val=siblings))
+    for depth in [6, 7, 8]:
+        configs.append(WorkloadConfig("apply_prune", {"depth": depth, "branching": 5, "apply_amount": 20, "prune_threshold": 40}, max_seconds=45.0, complexity_param="depth", complexity_val=depth))
+    for steps in [800, 1200, 1600]:
+        configs.append(WorkloadConfig("fuzz", {"seed": 2024, "steps": steps, "max_gss_states": 20}, max_seconds=40.0, complexity_param="steps", complexity_val=steps))
+    return configs
 
 
 PRESETS: Dict[str, Callable[[], List[WorkloadConfig]]] = {
