@@ -185,7 +185,7 @@ def _reduce_node_acc(n: _Node[T, Acc]) -> Optional[Acc]:
 _EMPTY_UPPER: Upper[Any, Any] = Upper(Interface(node=Lower(Leaf()), acc=None))
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True, eq=False)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
     empty: Optional[Acc]
