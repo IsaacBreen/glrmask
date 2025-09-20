@@ -159,18 +159,57 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 else:
                     node = entry["sub"]
 
-        def build(d: Dict[T, Dict[str, Any]], root_empty: Optional[Acc] = None) -> UpperBranch[T, Acc]:
+        def build(d: Dict[T, Dict[str, Any]], root_empty: Optional[Acc] = None) -> Upper[T, Acc]:
+            # Build children recursively
             children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            all_child_nodes: List[Upper[T, Acc]] = []
             for v, e in d.items():
-                nodes: List[Upper[T, Acc]] = []
+                nodes_for_v: List[Upper[T, Acc]] = []
                 end_acc = e.get("end")
                 sub = e.get("sub", {})
                 if end_acc is not None:
-                    nodes.append(Interface(children={}, acc=end_acc, empty=None))
+                    nodes_for_v.append(Interface(children={}, acc=end_acc, empty=None))
                 if sub:
-                    nodes.append(build(sub))
-                if nodes:
-                    children[v] = {n._max_depth(): n for n in nodes}
+                    nodes_for_v.append(build(sub))
+                if nodes_for_v:
+                    children[v] = {n._max_depth(): n for n in nodes_for_v}
+                    all_child_nodes.extend(nodes_for_v)
+
+            # Check for promotion
+            if all(isinstance(child, Interface) for child in all_child_nodes):
+                accs: Set[Acc] = set()
+                for c in all_child_nodes:
+                    # This must be an Interface, based on the check above.
+                    accs.add(c.acc)
+                    if c.empty is not None:
+                        accs.add(c.empty)
+
+                if root_empty is not None:
+                    accs.add(root_empty)
+
+                if len(accs) <= 1:
+                    the_acc = accs.pop() if accs else None
+                    if the_acc is None:
+                        # This is a truly empty GSS.
+                        return UpperBranch(children={}, empty=None)
+
+                    def build_lower(sub_d: Dict[T, Dict[str, Any]]) -> Lower[T]:
+                        l_children: Dict[T, Dict[int, Lower[T]]] = {}
+                        for v_l, e_l in sub_d.items():
+                            sub_l = e_l.get("sub", {})
+                            has_end = e_l.get("end") is not None
+                            sub_lower = build_lower(sub_l) if sub_l else Lower(children={}, empty=False)
+                            node_for_v = Lower(children=sub_lower.children, empty=has_end)
+                            l_children[v_l] = {node_for_v._max_depth(): node_for_v}
+                        return Lower(children=l_children, empty=False)
+
+                    lower_tree = build_lower(d)
+                    return Interface(
+                        children=lower_tree.children,
+                        acc=the_acc,
+                        empty=root_empty
+                    )
+
             return UpperBranch(children=children, empty=root_empty)
 
         return LeveledGSS(build(trie, empty_acc))
@@ -178,19 +217,32 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         res: List[Tuple[List[T], Acc]] = []
 
-        def dfs(u: UpperBranch[T, Acc], pref: List[T]) -> None:
-            if u.empty is not None:
-                res.append((list(reversed(pref)), u.empty))
-            for v, kids in u.children.items():
+        def dfs_lower(l: Lower[T], pref: List[T], acc: Acc) -> None:
+            if l.empty:
+                res.append((list(reversed(pref)), acc))
+            for v, kids in l.children.items():
                 for child in kids.values():
-                    if isinstance(child, Interface):
-                        res.append((list(reversed(pref + [v])), child.acc))
-                    else:
-                        dfs(child, pref + [v])
+                    dfs_lower(child, pref + [v], acc)
 
-        # self.inner is always an UpperBranch as constructed by from_stacks.
-        if isinstance(self.inner, UpperBranch):
-            dfs(self.inner, [])
+        def dfs_upper(u: Upper[T, Acc], pref: List[T]) -> None:
+            if isinstance(u, UpperBranch):
+                if u.empty is not None:
+                    res.append((list(reversed(pref)), u.empty))
+                for v, kids in u.children.items():
+                    for child in kids.values():
+                        dfs_upper(child, pref + [v])
+            elif isinstance(u, Interface):
+                # The interface's `empty` slot is for a stack ending at `pref`.
+                if u.empty is not None:
+                    res.append((list(reversed(pref)), u.empty))
+
+                # The interface's `children` are for stacks extending `pref`.
+                # All these stacks share accumulator `u.acc`.
+                for v, kids in u.children.items():
+                    for child in kids.values():
+                        dfs_lower(child, pref + [v], u.acc)
+
+        dfs_upper(self.inner, [])
 
         from .reference_impl import ReferenceGSS
         return ReferenceGSS.from_stacks(res).to_stacks()
