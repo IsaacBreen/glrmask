@@ -352,45 +352,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         if value is None:
             # Keep only empty stacks.
-            empty_acc: Optional[Acc] = None
             if isinstance(self.inner, UpperBranch):
                 empty_acc = self.inner.empty
-            elif isinstance(self.inner, Interface):
+            else:
                 empty_acc = self.inner.empty
-
-            if empty_acc is not None:
-                return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-            return LeveledGSS(empty_gss_inner)
+            return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
 
         # Keep stacks with `value` at the top.
         if isinstance(self.inner, UpperBranch):
-            children_to_merge = self.inner.children.get(value, {}).values()
-            if not children_to_merge:
-                return LeveledGSS(empty_gss_inner)
-
-            it = iter(children_to_merge)
-            merged = next(it)
-            for c in it:
-                merged = merge_upper(merged, c)
-            # Preserve the top-of-stack item by wrapping the merged subtree under 'value'
-            wrapped = UpperBranch(children={value: {merged._max_depth(): merged}}, empty=None)
-            return LeveledGSS(wrapped)
-
-        # self.inner is an Interface
-        children_to_merge = self.inner.children.get(value, {}).values()
-        if not children_to_merge:
-            return LeveledGSS(empty_gss_inner)
-
-        it = iter(children_to_merge)
-        merged_lower = next(it)
-        for c in it:
-            merged_lower = merge_lower(merged_lower, c)
-
-        # Convert the merged Lower subtree back to an Upper tree with the Interface's accumulator.
-        upper_node = lower_to_upper(merged_lower, self.inner.acc)
-        # Preserve the top-of-stack item by wrapping under 'value'
-        wrapped_upper = UpperBranch(children={value: {upper_node._max_depth(): upper_node}}, empty=None)
-        return LeveledGSS(wrapped_upper)
+            filtered_children = {value: self.inner.children[value]}
+            return LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
+        else:
+            filtered_children = {value: self.inner.children[value]}
+            return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         memo: Dict[int, Any] = {}
