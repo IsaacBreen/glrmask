@@ -3,6 +3,7 @@ import importlib
 import json
 from pathlib import Path
 import sys
+import os
 
 from .test_spec import run_test_spec
 
@@ -23,6 +24,9 @@ def main():
         help="Path to the output JSON file for the results."
     )
     args = parser.parse_args()
+
+    # Enable expensive validation checks in LeveledGSS for testing.
+    os.environ['GSS_TESTER_VALIDATE'] = '1'
 
     try:
         print(f"Importing {args.implementation_class} from {args.implementation_module}...")

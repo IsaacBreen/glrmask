@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
 
@@ -65,9 +66,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
 
     def __post_init__(self):
-        self._validate_max_depths()
-        self._validate_no_promotions()
-        self._validate_populated_nodes()
+        if os.environ.get("GSS_TESTER_VALIDATE"):
+            self._validate_max_depths()
+            self._validate_no_promotions()
+            self._validate_populated_nodes()
 
     def _validate_max_depths(self) -> None:
         """Recursively validates that the `_max_depth` of each node is correct."""
