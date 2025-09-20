@@ -284,26 +284,21 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         return LeveledGSS.from_stacks(self.to_reference_impl().prune(predicate).to_stacks())
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        # Efficient structural merge that preserves canonical shape and avoids round-tripping.
-        if self.inner is other.inner:
-            return self
-
         return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
-        tops: Set[T] = set()
-        for vals, _ in self.to_stacks():
-            if vals:
-                tops.add(vals[-1])
-        return tops
+        if isinstance(self.inner, Interface):
+            return set(self.inner.children.keys())
+        else:
+            return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
-        from functools import reduce
-        items = self.to_stacks()
-        if not items:
-            return None
-        accs = [acc for _, acc in items]
-        return reduce(lambda a, b: a.merge(b), accs)
-
+        def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
+            ...
+        gen = generate_accs(self.inner)
+        reduced_acc = next(gen)
+        for acc in gen:
+            reduced_acc = reduced_acc.merge(acc)
+        return reduced_acc
 
 
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
