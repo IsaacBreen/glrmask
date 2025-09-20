@@ -263,32 +263,33 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         out: List[Tuple[List[T], Acc]] = []
 
-        def emit_stack(pref: List[T], acc: Acc) -> None:
-            out.append((list(reversed(pref)), acc))
+        def emit_stack(pref_tos: List[T], acc: Acc) -> None:
+            # pref_tos is top-of-stack first; reverse to get bottom-to-top ordering
+            out.append((list(reversed(pref_tos)), acc))
 
-        def dfs_lower(node: Lower[T], pref: List[T], acc: Acc) -> None:
+        def dfs_lower(node: Lower[T], pref_tos: List[T], acc: Acc) -> None:
             if node.empty:
-                emit_stack(pref, acc)
+                emit_stack(pref_tos, acc)
             for v, kids in node.children.items():
                 for child in kids.values():
-                    dfs_lower(child, pref + [v], acc)
+                    dfs_lower(child, pref_tos + [v], acc)
 
-        def dfs_upper(node: Upper[T, Acc], pref: List[T]) -> None:
+        def dfs_upper(node: Upper[T, Acc], pref_tos: List[T]) -> None:
             if isinstance(node, UpperBranch):
                 if node.empty is not None:
-                    emit_stack(pref, node.empty)
+                    emit_stack(pref_tos, node.empty)
                 for v, kids in node.children.items():
                     for child in kids.values():
-                        dfs_upper(child, pref + [v])
+                        dfs_upper(child, pref_tos + [v])
             else:
                 if node.empty is not None:
-                    emit_stack(pref, node.empty)
+                    emit_stack(pref_tos, node.empty)
                 if not node.children and node.empty is None:
-                    emit_stack(pref, node.acc)
+                    emit_stack(pref_tos, node.acc)
                 else:
                     for v, kids in node.children.items():
                         for child in kids.values():
-                            dfs_lower(child, pref + [v], node.acc)
+                            dfs_lower(child, pref_tos + [v], node.acc)
 
         dfs_upper(self.inner, [])
         return _canonicalize_and_sort(out)
@@ -316,19 +317,22 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         Pop the top element from all non-empty stacks.
         Empty stacks are discarded.
         """
-        ub = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
+        ub = _as_upperbranch(self.inner)
 
         # Merge all direct children (across all top-of-stack values).
-        children = list(ub._all_children())
-        if not children:
+        all_children = [child for kids in ub.children.values() for child in kids.values()]
+        if not all_children:
             return LeveledGSS(UpperBranch(children={}, empty=None))
-
-        merged: Upper[T, Acc] = children[0]
-        for child in children[1:]:
-            merged = merge_upper(merged, child)
+        if len(all_children) == 1:
+            merged: Upper[T, Acc] = all_children[0]
+        else:
+            it = iter(all_children)
+            merged = next(it)
+            for child in it:
+                merged = merge_upper(merged, child)
 
         # Ensure canonical form at the new root
-        merged_ub = merged if isinstance(merged, UpperBranch) else interface_to_upperbranch(merged)
+        merged_ub = _as_upperbranch(merged)
         return LeveledGSS(try_promote(merged_ub))
 
     def is_empty(self) -> bool:
@@ -462,6 +466,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def peek(self) -> Set[T]:
         """
         Return the set of all top-of-stack values (ignores empty stacks).
+        Works uniformly for both UpperBranch and Interface since both have 'children'.
         """
         return set(self.inner.children.keys())
 
@@ -505,6 +510,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 # Internal helpers (no new classes added)
 # ------------------------------------------------------------------------------
 
+def _as_upperbranch(node: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+    return node if isinstance(node, UpperBranch) else interface_to_upperbranch(node)
+
+
 Node = TypeVar("Node")
 
 
@@ -519,30 +528,16 @@ def _merge_children_by_depth(
     """
     merged: Dict[T, Dict[int, Node]] = {}
 
-    keys = set(c1.keys()) | set(c2.keys())
-    for v in keys:
-        map1 = c1.get(v)
-        map2 = c2.get(v)
-        if map1 is None and map2 is None:
-            continue
-
-        out_for_v: Dict[int, Node] = {}
-
-        if map1:
-            for n in map1.values():
+    def ingest(src: Dict[T, Dict[int, Node]]) -> None:
+        for v, bucket in src.items():
+            out_bucket = merged.setdefault(v, {})
+            for n in bucket.values():
                 d = getattr(n, "_max_depth")
-                prev = out_for_v.get(d)
-                out_for_v[d] = n if prev is None else merge_func(prev, n)
+                prev = out_bucket.get(d)
+                out_bucket[d] = n if prev is None else merge_func(prev, n)
 
-        if map2:
-            for n in map2.values():
-                d = getattr(n, "_max_depth")
-                prev = out_for_v.get(d)
-                out_for_v[d] = n if prev is None else merge_func(prev, n)
-
-        if out_for_v:
-            merged[v] = out_for_v
-
+    ingest(c1)
+    ingest(c2)
     return merged
 
 
@@ -654,22 +649,6 @@ def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
     new_empty = l1.empty or l2.empty
     merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
     return Lower(children=merged_children, empty=new_empty)
-
-
-def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
-    """
-    Convert a Lower subtree into an Upper subtree with a uniform accumulator 'acc'.
-    """
-    children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-    for v, kids in l.children.items():
-        bucket: Dict[int, Upper[T, Acc]] = {}
-        for lchild in kids.values():
-            up_child = lower_to_upper(lchild, acc)
-            bucket[up_child._max_depth] = up_child
-        if bucket:
-            children[v] = bucket
-    ub = UpperBranch(children=children, empty=(acc if l.empty else None))
-    return try_promote(ub)
 
 
 def _interface_empty_acc(it: Interface[T, Acc]) -> Optional[Acc]:
