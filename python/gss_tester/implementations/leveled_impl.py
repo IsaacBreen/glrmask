@@ -610,16 +610,15 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
 def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
     if u1 is u2:
         return u1
+    # If both are the same type, use the appropriate merge function
     if isinstance(u1, Interface) and isinstance(u2, Interface):
         return merge_interfaces(u1, u2)
     if isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
         return merge_upperbranches(u1, u2)
-    if isinstance(u1, Interface):
-        return merge_upperbranches(interface_to_upperbranch(u1),
-                                   u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2))  # type: ignore[arg-type]
-    else:
-        return merge_upperbranches(u1,
-                                   u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2))  # type: ignore[arg-type]
+    # Mixed types: convert Interface(s) to UpperBranch and merge
+    ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1)
+    ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2)
+    return merge_upperbranches(ub1, ub2)  # type: ignore[arg-type]
 
 def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     if a is b:
