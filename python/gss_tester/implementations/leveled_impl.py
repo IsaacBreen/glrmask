@@ -11,28 +11,26 @@ from ..interface import GSS, T, Acc
 # Internal node classes
 # ------------------------------
 
-@dataclass(frozen=True, eq=True)
-class Upper(Generic[T, Acc]):
-    inner: UpperBranch[T, Acc] | Interface[T, Acc]
-    empty: Optional[Acc]
+type Upper[T, Acc] = UpperBranch[T, Acc] | Interface[T, Acc]
 
 
 @dataclass(frozen=True, eq=True)
 class UpperBranch(Generic[T, Acc]):
     children: Dict[T, Dict[int, Upper[T, Acc]]]
+    empty: Optional[Acc]
 
 
 @dataclass(frozen=True, eq=True)
 class Interface(Generic[T, Acc]):
     children: Dict[T, Dict[int, Lower[T]]]
     acc: Acc
+    empty: Optional[Acc]
 
 
 @dataclass(frozen=True, eq=True)
 class Lower(Generic[T]):
     children: Dict[T, Dict[int, Lower[T]]]
     empty: bool
-
 
 
 @dataclass(frozen=True, eq=True)
