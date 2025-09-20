@@ -23,9 +23,9 @@ def _filter_workloads(configs: List[WorkloadConfig], include: List[str], exclude
 
 def main():
     parser = argparse.ArgumentParser(description="Run GSS benchmark workloads for a given implementation.")
-    parser.add_argument("implementation_module", help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
-    parser.add_argument("implementation_class", help="Class name of the GSS implementation (e.g., ReferenceGSS)")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="Path to output JSON file for results.")
+    parser.add_argument("implementation_module", nargs='?', default=None, help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
+    parser.add_argument("implementation_class", nargs='?', default=None, help="Class name of the GSS implementation (e.g., ReferenceGSS)")
+    parser.add_argument("-o", "--output", type=Path, default=None, help="Path to output JSON file for results.")
     parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
     parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
     parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
@@ -37,14 +37,6 @@ def main():
     parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
     args = parser.parse_args()
 
-    # Load implementation
-    try:
-        module = importlib.import_module(args.implementation_module)
-        gss_class = getattr(module, args.implementation_class)
-    except (ImportError, AttributeError) as e:
-        print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
-        sys.exit(1)
-
     if args.list_sweeps:
         sweeps = get_preset_sweeps(args.preset)
         for s in sweeps:
@@ -52,6 +44,21 @@ def main():
             values_str = " ".join(map(str, s.values))
             print(f"{s.workload};{s.axis};{values_str}")
         return
+
+    # If not listing sweeps or workloads, the main arguments are required.
+    if not all([args.implementation_module, args.implementation_class, args.output]):
+        if not args.list: # --list also doesn't need them
+            parser.error("implementation_module, implementation_class, and --output are required unless using --list-sweeps or --list.")
+
+    # Load implementation (only if not in a list mode)
+    gss_class = None
+    if not args.list:
+        try:
+            module = importlib.import_module(args.implementation_module)
+            gss_class = getattr(module, args.implementation_class)
+        except (ImportError, AttributeError, TypeError) as e:
+            print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Build workload list based on preset
     preset_func = PRESETS[args.preset]

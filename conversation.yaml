@@ -4390,9 +4390,9 @@ local_system:
 
       def main():
           parser = argparse.ArgumentParser(description="Run GSS benchmark workloads for a given implementation.")
-          parser.add_argument("implementation_module", help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
-          parser.add_argument("implementation_class", help="Class name of the GSS implementation (e.g., ReferenceGSS)")
-          parser.add_argument("-o", "--output", type=Path, required=True, help="Path to output JSON file for results.")
+          parser.add_argument("implementation_module", nargs='?', default=None, help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
+          parser.add_argument("implementation_class", nargs='?', default=None, help="Class name of the GSS implementation (e.g., ReferenceGSS)")
+          parser.add_argument("-o", "--output", type=Path, default=None, help="Path to output JSON file for results.")
           parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
           parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
           parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
@@ -4404,14 +4404,6 @@ local_system:
           parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
           args = parser.parse_args()
 
-          # Load implementation
-          try:
-              module = importlib.import_module(args.implementation_module)
-              gss_class = getattr(module, args.implementation_class)
-          except (ImportError, AttributeError) as e:
-              print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
-              sys.exit(1)
-
           if args.list_sweeps:
               sweeps = get_preset_sweeps(args.preset)
               for s in sweeps:
@@ -4419,6 +4411,21 @@ local_system:
                   values_str = " ".join(map(str, s.values))
                   print(f"{s.workload};{s.axis};{values_str}")
               return
+
+          # If not listing sweeps or workloads, the main arguments are required.
+          if not all([args.implementation_module, args.implementation_class, args.output]):
+              if not args.list: # --list also doesn't need them
+                  parser.error("implementation_module, implementation_class, and --output are required unless using --list-sweeps or --list.")
+
+          # Load implementation (only if not in a list mode)
+          gss_class = None
+          if not args.list:
+              try:
+                  module = importlib.import_module(args.implementation_module)
+                  gss_class = getattr(module, args.implementation_class)
+              except (ImportError, AttributeError, TypeError) as e:
+                  print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+                  sys.exit(1)
 
           # Build workload list based on preset
           preset_func = PRESETS[args.preset]
@@ -8850,5 +8857,218 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Integrate preset scaling sweeps
       into benchmark runner and script"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_tests.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/instrumentation.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/workloads.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/benchmarks/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/run_benches.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash ./gss_tester/run_benches.sh tiny gss_tester/implementations/reference_impl.py
+      Benchmark results will be saved in: gss_bench_results/2025-09-20_15-30-14
+      ---
+      Preset: tiny
+      Implementations: gss_tester/implementations/reference_impl.py
+      ---
+
+      >>> Running preset workloads for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.benchmarks.runner gss_tester.implementations.reference_impl ReferenceGSS --preset tiny --output gss_bench_results/2025-09-20_15-30-14/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:103: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 2, 'clones': 4, 'mutation': 'push'} (max 5.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.001s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 50, 'surface_width': 32} (max 3.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.003s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 75, 'surface_width': 32, 'clones': 6} (max 5.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.007s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 64, 'parent_prefix_depth': 50} (max 3.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.008s
+      >>> Running workload 'apply_prune' with params {'depth': 4, 'branching': 2, 'apply_amount': 5, 'prune_threshold': 3} (max 5.0s)
+      <<< Finished workload 'apply_prune' outcome=ok in 0.000s
+      >>> Running workload 'fuzz' with params {'seed': 7, 'steps': 100, 'max_gss_states': 10} (max 5.0s)
+      <<< Finished workload 'fuzz' outcome=ok in 0.004s
+      Benchmark results saved to gss_bench_results/2025-09-20_15-30-14/gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      >>> Finished preset workloads for: gss_tester/implementations/reference_impl.py
+
+      >>> Checking for preset sweeps for preset 'tiny'...
+      usage: runner.py [-h] -o OUTPUT [--preset {tiny,small,medium,large}]
+                       [--include [INCLUDE ...]] [--exclude [EXCLUDE ...]] [--list]
+                       [--sweep-workload SWEEP_WORKLOAD] [--sweep-axis SWEEP_AXIS]
+                       [--sweep-values SWEEP_VALUES [SWEEP_VALUES ...]]
+                       [--list-sweeps]
+                       implementation_module implementation_class
+      runner.py: error: the following arguments are required: implementation_module, implementation_class, -o/--output
+    metadata:
+  - assistant: |-
+      You've encountered a classic command-line parsing issue. The `runner.py` script requires arguments like the implementation and output file, but the shell script calls it with `--list-sweeps` *without* those arguments, causing it to fail before it can even process the `--list-sweeps` flag.
+
+      The fix is to make those arguments optional at the parsing stage and then manually validate their presence for the main execution path. Here are the steps and the diff to correct this.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `python/gss_tester/benchmarks/runner.py`**.
+      2.  In the `main` function, modify the `ArgumentParser` definitions:
+          *   For `implementation_module` and `implementation_class`, make them optional positional arguments by adding `nargs='?'` and `default=None`.
+          *   For the `-o`/`--output` argument, remove `required=True` and add `default=None`.
+      3.  Immediately after the `if args.list_sweeps:` block, add a new validation check. This check will ensure that if the script is *not* in a listing mode, the `implementation_module`, `implementation_class`, and `output` arguments must be present. If they are missing, it will print an error and exit.
+
+      This ensures the script only requires arguments when they are actually needed.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/python/gss_tester/benchmarks/runner.py b/python/gss_tester/benchmarks/runner.py
+      index 5a550d5..594270f 100644
+      --- a/python/gss_tester/benchmarks/runner.py
+      +++ b/python/gss_tester/benchmarks/runner.py
+      @@ -21,9 +21,9 @@
+       
+       def main():
+           parser = argparse.ArgumentParser(description="Run GSS benchmark workloads for a given implementation.")
+      -    parser.add_argument("implementation_module", help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
+      -    parser.add_argument("implementation_class", help="Class name of the GSS implementation (e.g., ReferenceGSS)")
+      -    parser.add_argument("-o", "--output", type=Path, required=True, help="Path to output JSON file for results.")
+      +    parser.add_argument("implementation_module", nargs='?', default=None, help="Python module containing the GSS class (e.g., gss_tester.implementations.reference_impl)")
+      +    parser.add_argument("implementation_class", nargs='?', default=None, help="Class name of the GSS implementation (e.g., ReferenceGSS)")
+      +    parser.add_argument("-o", "--output", type=Path, default=None, help="Path to output JSON file for results.")
+           parser.add_argument("--preset", choices=list(PRESETS.keys()), default="small", help="Workload size preset.")
+           parser.add_argument("--include", nargs="*", default=[], help="Only run workloads whose names contain one of these substrings.")
+           parser.add_argument("--exclude", nargs="*", default=[], help="Exclude workloads whose names contain one of these substrings.")
+      @@ -33,13 +33,6 @@
+           parser.add_argument("--sweep-values", nargs="+", default=[], help="Values for sweep axis (space-separated).")
+           parser.add_argument("--list-sweeps", action="store_true", help="List the predefined sweeps for a preset and exit.")
+           args = parser.parse_args()
+      -
+      -    # Load implementation
+      -    try:
+      -        module = importlib.import_module(args.implementation_module)
+      -        gss_class = getattr(module, args.implementation_class)
+      -    except (ImportError, AttributeError) as e:
+      -        print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+      -        sys.exit(1)
+       
+           if args.list_sweeps:
+               sweeps = get_preset_sweeps(args.preset)
+      @@ -49,6 +42,18 @@
+                   print(f"{s.workload};{s.axis};{values_str}")
+               return
+       
+      +    # If not listing sweeps or workloads, the main arguments are required.
+      +    if not all([args.implementation_module, args.implementation_class, args.output]):
+      +        if not args.list: # --list also doesn't need them
+      +            parser.error("implementation_module, implementation_class, and --output are required unless using --list-sweeps or --list.")
+      +
+      +    # Load implementation (only if not in a list mode)
+      +    gss_class = None
+      +    if not args.list:
+      +        try:
+      +            module = importlib.import_module(args.implementation_module)
+      +            gss_class = getattr(module, args.implementation_class)
+      +        except (ImportError, AttributeError, TypeError) as e:
+      +            print(f"Error: Could not load GSS implementation. {e}", file=sys.stderr)
+      +            sys.exit(1)
+      +
+           # Build workload list based on preset
+           preset_func = PRESETS[args.preset]
+           base_preset = preset_func()
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/benchmarks/runner.py
+      Applying patch to 'python/gss_tester/benchmarks/runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/benchmarks/runner.py.
+    metadata:
+  - user: 'Changes committed with message: "refactor: Make runner arguments optional
+      for listing modes"'
     metadata:
 ...
