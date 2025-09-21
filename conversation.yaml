@@ -297,7 +297,6 @@ local_system:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
-          total_accumulator_instances: int
           accumulator_sharing_ratio: float
 
           # "Empty" flags / terminal interfaces
@@ -359,7 +358,6 @@ local_system:
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-              lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
@@ -741,8 +739,9 @@ local_system:
                           new_child = transform(child)
                           if new_child is not child:
                               any_child_changed_for_v = True
-                          # Depth does not change in apply, so we can reuse `d`.
-                          new_kids_for_v[d] = new_child
+                          # The depth of a child can change if a promotion occurs,
+                          # so we must use the new depth as the key.
+                          new_kids_for_v[new_child._max_depth] = new_child
 
                       if any_child_changed_for_v:
                           changed = True
@@ -1134,7 +1133,6 @@ local_system:
 
               distinct_values: Set[T] = set()
               unique_accumulators: Set[Acc] = set()
-              total_accumulator_instances = 0
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
@@ -1189,7 +1187,6 @@ local_system:
                           if node.empty is not None:
                               num_upper_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              total_accumulator_instances += 1
                           # edges and values
                           for v, kids in node.children.items():
                               distinct_values.add(v)
@@ -1212,11 +1209,9 @@ local_system:
                           visited_interface.add(nid)
                           num_interface_nodes += 1
                           unique_accumulators.add(node.acc)
-                          total_accumulator_instances += 1
                           if node.empty is not None:
                               num_interfaces_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              total_accumulator_instances += 1
                           if not node.children and node.empty is None:
                               num_interface_implicit_terminals += 1
                           # edges to lower and values
@@ -1303,7 +1298,6 @@ local_system:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
-                  total_accumulator_instances=total_accumulator_instances,
                   accumulator_sharing_ratio=accumulator_sharing_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
@@ -2169,26 +2163,19 @@ local_system:
 
               return gss_for_stacks
 
-          def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-              memo: Dict[int, Upper[T, Acc]] = {}
-              acc_cache: Dict[Acc, Acc] = {}
-
-              def map_acc(acc: Acc) -> Acc:
-                  if acc in acc_cache:
-                      return acc_cache[acc]
-                  res = func(acc)
-                  acc_cache[acc] = res
-                  return res
+          def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
+              if memo is None:
+                  memo = {}
 
               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
                   if id(node) in memo:
                       return memo[id(node)]
 
                   if isinstance(node, Interface):
-                      new_acc = map_acc(node.acc)
-                      new_empty = map_acc(node.empty) if node.empty is not None else None
+                      new_acc = func(node.acc)
+                      new_empty = func(node.empty) if node.empty is not None else None
 
-                      if new_acc is node.acc and new_empty is node.empty:
+                      if new_acc == node.acc and new_empty == node.empty:
                           memo[id(node)] = node
                           return node
 
@@ -2197,9 +2184,9 @@ local_system:
                       return res
 
                   # It's an UpperBranch
-                  new_empty = map_acc(node.empty) if node.empty is not None else None
+                  new_empty = func(node.empty) if node.empty is not None else None
 
-                  changed = new_empty is not node.empty
+                  changed = new_empty != node.empty
                   new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
 
                   for v, kids in node.children.items():
@@ -2231,25 +2218,17 @@ local_system:
 
           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
               memo: Dict[int, Optional[Upper[T, Acc]]] = {}
-              acc_cache: Dict[Acc, bool] = {}
-
-              def check_acc(acc: Acc) -> bool:
-                  if acc in acc_cache:
-                      return acc_cache[acc]
-                  res = predicate(acc)
-                  acc_cache[acc] = res
-                  return res
 
               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
                   if id(node) in memo:
                       return memo[id(node)]
 
                   if isinstance(node, Interface):
-                      keep_acc = check_acc(node.acc)
-                      keep_empty = node.empty is not None and check_acc(node.empty)
+                      keep_acc = predicate(node.acc)
+                      keep_empty = node.empty is not None and predicate(node.empty)
                       new_empty = node.empty if keep_empty else None
 
-                      if keep_acc and new_empty is node.empty:
+                      if keep_acc and new_empty == node.empty:
                           memo[id(node)] = node
                           return node
 
@@ -2268,8 +2247,8 @@ local_system:
                       return res
 
                   # It's an UpperBranch
-                  new_empty = node.empty if node.empty is not None and check_acc(node.empty) else None
-                  changed = new_empty is not node.empty
+                  new_empty = node.empty if node.empty is not None and predicate(node.empty) else None
+                  changed = new_empty != node.empty
 
                   new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
                   for v, kids in node.children.items():
@@ -2318,13 +2297,14 @@ local_system:
                   * return Acc (possibly unchanged) to keep/update stacks
               This fuses the behavior of `apply` and `prune` and minimizes reconstruction.
               """
-              acc_cache: Dict[Acc, Optional[Acc]] = {}
+              acc_cache: Dict[int, Optional[Acc]] = {}
 
               def mutate_acc(a: Acc) -> Optional[Acc]:
-                  if a in acc_cache:
-                      return acc_cache[a]
+                  k = id(a)
+                  if k in acc_cache:
+                      return acc_cache[k]
                   r = mutator(a)
-                  acc_cache[a] = r
+                  acc_cache[k] = r
                   return r
 
               memo: Dict[int, Optional[Upper[T, Acc]]] = {}
@@ -2357,8 +2337,8 @@ local_system:
                       # keep_acc is True
                       new_acc = new_acc_opt  # type: ignore[assignment]
                       # Detect if anything changed; children are reused verbatim.
-                      changed = (new_acc is not node.acc) or (
-                          (node.empty is not None and new_empty_opt is not node.empty)
+                      changed = (new_acc != node.acc) or (
+                          (node.empty is not None and new_empty_opt != node.empty)
                       )
                       if not changed:
                           memo[nid] = node
@@ -2371,7 +2351,7 @@ local_system:
                   # UpperBranch
                   if node.empty is not None:
                       new_empty_opt = mutate_acc(node.empty)
-                      empty_changed = new_empty_opt is not node.empty
+                      empty_changed = new_empty_opt != node.empty
                   else:
                       new_empty_opt = None
                       empty_changed = False
@@ -3287,7 +3267,6 @@ messages:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
-          total_accumulator_instances: int
           accumulator_sharing_ratio: float
 
           # "Empty" flags / terminal interfaces
@@ -3349,7 +3328,6 @@ messages:
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-              lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
@@ -3731,8 +3709,9 @@ messages:
                           new_child = transform(child)
                           if new_child is not child:
                               any_child_changed_for_v = True
-                          # Depth does not change in apply, so we can reuse `d`.
-                          new_kids_for_v[d] = new_child
+                          # The depth of a child can change if a promotion occurs,
+                          # so we must use the new depth as the key.
+                          new_kids_for_v[new_child._max_depth] = new_child
 
                       if any_child_changed_for_v:
                           changed = True
@@ -4124,7 +4103,6 @@ messages:
 
               distinct_values: Set[T] = set()
               unique_accumulators: Set[Acc] = set()
-              total_accumulator_instances = 0
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
@@ -4179,7 +4157,6 @@ messages:
                           if node.empty is not None:
                               num_upper_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              total_accumulator_instances += 1
                           # edges and values
                           for v, kids in node.children.items():
                               distinct_values.add(v)
@@ -4202,11 +4179,9 @@ messages:
                           visited_interface.add(nid)
                           num_interface_nodes += 1
                           unique_accumulators.add(node.acc)
-                          total_accumulator_instances += 1
                           if node.empty is not None:
                               num_interfaces_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              total_accumulator_instances += 1
                           if not node.children and node.empty is None:
                               num_interface_implicit_terminals += 1
                           # edges to lower and values
@@ -4293,7 +4268,6 @@ messages:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
-                  total_accumulator_instances=total_accumulator_instances,
                   accumulator_sharing_ratio=accumulator_sharing_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
@@ -4460,10 +4434,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: In `apply` and `apply_and_prune`, and `prune` for that matter, the number
-      of times the passed function is called should be exactly the number of unique
-      appearances of each accumulator. Make this so by memoizing the function result
-      based on accumulator. Assume acc is hashable.
+  - user: It'd be really useful to know the number of appearances of acc in interface
+      or in upper branch nodes, not just unique appearances, either in acc or empty
+      field.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4482,170 +4455,89 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the optimizations, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to add the total number of accumulator appearances to the `LeveledGSSStats`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will update three methods in `python/gss_tester/implementations/leveled_impl.py`: `apply`, `prune`, and `apply_and_prune`. The goal is to ensure that the function passed to each of these methods is only called once for each unique accumulator value by using memoization.
+      You will need to edit one file: `python/gss_tester/implementations/leveled_impl.py`.
 
-      #### File: `python/gss_tester/implementations/leveled_impl.py`
+      1.  **Modify the `LeveledGSSStats` Dataclass**
+          In `python/gss_tester/implementations/leveled_impl.py`, locate the `LeveledGSSStats` dataclass definition. Add a new field `total_accumulator_instances: int` after the `unique_accumulators` field.
 
-      1.  **In the `apply` method:**
-          *   I'll change the method signature to `apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:` to match the base class and remove the unused `memo` parameter from the public API.
-          *   Inside the method, I will introduce an `acc_cache` dictionary to store the results of `func` for each accumulator.
-          *   A new inner function, `map_acc`, will wrap `func` to use this cache.
-          *   All direct calls to `func` will be replaced with calls to `map_acc`.
-          *   I will also change equality checks (`==`, `!=`) on accumulators to faster identity checks (`is`, `is not`).
+      2.  **Update the `__str__` Method**
+          In the same file, find the `__str__` method within the `LeveledGSSStats` class. Add a new line to print the `total_accumulator_instances` value. A good place for this is after the line that prints `unique_accumulators_count`.
 
-      2.  **In the `prune` method:**
-          *   Similar to `apply`, I will add an `acc_cache` to memoize the results of the `predicate`.
-          *   A new inner function, `check_acc`, will be introduced to handle the caching logic for `predicate`.
-          *   Calls to `predicate` will be replaced by `check_acc`.
-          *   Equality checks on accumulators will be converted to identity checks.
+      3.  **Update the `stats` Method in `LeveledGSS`**
+          a.  Navigate to the `stats` method within the `LeveledGSS` class.
+          b.  Initialize a new counter variable `total_accumulator_instances = 0` near the other statistical counters.
+          c.  Inside the `while upper_queue:` loop, which traverses the GSS structure, increment `total_accumulator_instances`:
+              -   When an `UpperBranch` node has a non-`None` `empty` accumulator.
+              -   For the `acc` field of every unique `Interface` node visited.
+              -   When an `Interface` node has a non-`None` `empty` accumulator.
+          d.  At the end of the `stats` method, pass the final `total_accumulator_instances` count to the `LeveledGSSStats` constructor.
 
-      3.  **In the `apply_and_prune` method:**
-          *   The existing `acc_cache` is keyed by the accumulator's `id()`. I will change it to be keyed by the accumulator object itself, as requested. This assumes the accumulator is hashable.
-          *   The `mutate_acc` function will be updated to use the accumulator as the key.
-          *   Equality checks on accumulators will be converted to identity checks.
+      ### Git Diff
 
-      These changes will ensure that for any given accumulator instance, the provided function is executed only once, with subsequent calls returning a cached result.
-
-      ### Git Diffs
-
-      Here are the git diffs to apply these changes.
+      Here is the git diff to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 927b50f..38f459c 100644
+      index 4554471..c85a1a1 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -600,28 +600,32 @@
+      @@ -101,6 +101,7 @@
+           distinct_values: Set[T]
+           unique_accumulators_count: int
+           unique_accumulators: Set[Acc]
+      +    total_accumulator_instances: int
+           accumulator_sharing_ratio: float
        
-               return gss_for_stacks
+           # "Empty" flags / terminal interfaces
+      @@ -151,6 +152,7 @@
+               lines.append("- values/accumulators:")
+               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+      +        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
+               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
        
-      -    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
-      -        if memo is None:
-      -            memo = {}
-      +    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-      +        memo: Dict[int, Upper[T, Acc]] = {}
-      +        acc_cache: Dict[Acc, Acc] = {}
-      +
-      +        def map_acc(acc: Acc) -> Acc:
-      +            if acc in acc_cache:
-      +                return acc_cache[acc]
-      +            res = func(acc)
-      +            acc_cache[acc] = res
-      +            return res
+      @@ -808,6 +810,7 @@
        
-               def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-                   if id(node) in memo:
-                       return memo[id(node)]
+               distinct_values: Set[T] = set()
+               unique_accumulators: Set[Acc] = set()
+      +        total_accumulator_instances = 0
        
-                   if isinstance(node, Interface):
-      -                new_acc = func(node.acc)
-      -                new_empty = func(node.empty) if node.empty is not None else None
-      -
-      -                if new_acc == node.acc and new_empty == node.empty:
-      +                new_acc = map_acc(node.acc)
-      +                new_empty = map_acc(node.empty) if node.empty is not None else None
-      +
-      +                if new_acc is node.acc and new_empty is node.empty:
-                           memo[id(node)] = node
-                           return node
-       
-                       res = Interface(children=node.children, acc=new_acc, empty=new_empty)
-                       memo[id(node)] = res
-                       return res
-       
-                   # It's an UpperBranch
-      -            new_empty = func(node.empty) if node.empty is not None else None
-      -
-      -            changed = new_empty != node.empty
-      +            new_empty = map_acc(node.empty) if node.empty is not None else None
-      +
-      +            changed = new_empty is not node.empty
-                   new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-       
-                   for v, kids in node.children.items():
-      @@ -650,19 +654,27 @@
-       
-           def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-               memo: Dict[int, Optional[Upper[T, Acc]]] = {}
-      +        acc_cache: Dict[Acc, bool] = {}
-      +
-      +        def check_acc(acc: Acc) -> bool:
-      +            if acc in acc_cache:
-      +                return acc_cache[acc]
-      +            res = predicate(acc)
-      +            acc_cache[acc] = res
-      +            return res
-       
-               def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-                   if id(node) in memo:
-                       return memo[id(node)]
-       
-                   if isinstance(node, Interface):
-      -                keep_acc = predicate(node.acc)
-      -                keep_empty = node.empty is not None and predicate(node.empty)
-      +                keep_acc = check_acc(node.acc)
-      +                keep_empty = node.empty is not None and check_acc(node.empty)
-                       new_empty = node.empty if keep_empty else None
-       
-      -                if keep_acc and new_empty == node.empty:
-      +                if keep_acc and new_empty is node.empty:
-                           memo[id(node)] = node
-                           return node
-       
-      @@ -680,8 +692,8 @@
-                       return res
-       
-                   # It's an UpperBranch
-      -            new_empty = node.empty if node.empty is not None and predicate(node.empty) else None
-      -            changed = new_empty != node.empty
-      +            new_empty = node.empty if node.empty is not None and check_acc(node.empty) else None
-      +            changed = new_empty is not node.empty
-       
-                   new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-                   for v, kids in node.children.items():
-      @@ -722,14 +734,13 @@
-                   * return Acc (possibly unchanged) to keep/update stacks
-               This fuses the behavior of `apply` and `prune` and minimizes reconstruction.
-               """
-      -        acc_cache: Dict[int, Optional[Acc]] = {}
-      +        acc_cache: Dict[Acc, Optional[Acc]] = {}
-       
-               def mutate_acc(a: Acc) -> Optional[Acc]:
-      -            k = id(a)
-      -            if k in acc_cache:
-      -                return acc_cache[k]
-      +            if a in acc_cache:
-      +                return acc_cache[a]
-                   r = mutator(a)
-      -            acc_cache[k] = r
-      +            acc_cache[a] = r
-                   return r
-       
-               memo: Dict[int, Optional[Upper[T, Acc]]] = {}
-      @@ -759,8 +770,8 @@
-                       # keep_acc is True
-                       new_acc = new_acc_opt  # type: ignore[assignment]
-                       # Detect if anything changed; children are reused verbatim.
-      -                changed = (new_acc != node.acc) or (
-      -                    (node.empty is not None and new_empty_opt != node.empty)
-      +                changed = (new_acc is not node.acc) or (
-      +                    (node.empty is not None and new_empty_opt is not node.empty)
-                       )
-                       if not changed:
-                           memo[nid] = node
-      @@ -772,7 +783,7 @@
-                   # UpperBranch
-                   if node.empty is not None:
-                       new_empty_opt = mutate_acc(node.empty)
-      -                empty_changed = new_empty_opt != node.empty
-      +                empty_changed = new_empty_opt is not node.empty
-                   else:
-                       new_empty_opt = None
-                       empty_changed = False
+               num_upper_with_empty = 0
+               num_interfaces_with_empty = 0
+      @@ -853,6 +856,7 @@
+                           if node.empty is not None:
+                               num_upper_with_empty += 1
+                               unique_accumulators.add(node.empty)
+      +                        total_accumulator_instances += 1
+                           # edges and values
+                           for v, kids in node.children.items():
+                               distinct_values.add(v)
+      @@ -874,10 +878,12 @@
+                       if nid not in visited_interface:
+                           visited_interface.add(nid)
+                           num_interface_nodes += 1
+                           unique_accumulators.add(node.acc)
+      +                    total_accumulator_instances += 1
+                           if node.empty is not None:
+                               num_interfaces_with_empty += 1
+                               unique_accumulators.add(node.empty)
+      +                        total_accumulator_instances += 1
+                           if not node.children and node.empty is None:
+                               num_interface_implicit_terminals += 1
+                           # edges to lower and values
+      @@ -945,6 +951,7 @@
+                   distinct_values=distinct_values,
+                   unique_accumulators_count=unique_accumulators_count,
+                   unique_accumulators=unique_accumulators,
+      +            total_accumulator_instances=total_accumulator_instances,
+                   accumulator_sharing_ratio=accumulator_sharing_ratio,
+                   num_upper_with_empty=num_upper_with_empty,
+                   num_interfaces_with_empty=num_interfaces_with_empty,
 
       ```
     metadata:
@@ -4658,7 +4550,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Optimize LeveledGSS apply, prune,
-      and apply_and_prune with accumulator memoization"'
+  - user: 'Changes committed with message: "feat: Add total accumulator instance count
+      to LeveledGSSStats"'
     metadata:
 ...

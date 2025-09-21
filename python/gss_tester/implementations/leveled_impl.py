@@ -506,28 +506,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return gss_for_stacks
 
-    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Upper[T, Acc]]] = None) -> LeveledGSS[T, Acc]:
+    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
         if memo is None:
             memo = {}
-
-        acc_cache: Dict[Acc, Acc] = {}
-
-        def map_acc(acc: Acc) -> Acc:
-            if acc in acc_cache:
-                return acc_cache[acc]
-            res = func(acc)
-            acc_cache[acc] = res
-            return res
 
         def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
             if id(node) in memo:
                 return memo[id(node)]
 
             if isinstance(node, Interface):
-                new_acc = map_acc(node.acc)
-                new_empty = map_acc(node.empty) if node.empty is not None else None
+                new_acc = func(node.acc)
+                new_empty = func(node.empty) if node.empty is not None else None
 
-                if new_acc is node.acc and new_empty is node.empty:
+                if new_acc == node.acc and new_empty == node.empty:
                     memo[id(node)] = node
                     return node
 
@@ -536,9 +527,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return res
 
             # It's an UpperBranch
-            new_empty = map_acc(node.empty) if node.empty is not None else None
+            new_empty = func(node.empty) if node.empty is not None else None
 
-            changed = new_empty is not node.empty
+            changed = new_empty != node.empty
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
 
             for v, kids in node.children.items():
@@ -570,25 +561,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         memo: Dict[int, Optional[Upper[T, Acc]]] = {}
-        acc_cache: Dict[Acc, bool] = {}
-
-        def check_acc(acc: Acc) -> bool:
-            if acc in acc_cache:
-                return acc_cache[acc]
-            res = predicate(acc)
-            acc_cache[acc] = res
-            return res
 
         def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
             if id(node) in memo:
                 return memo[id(node)]
 
             if isinstance(node, Interface):
-                keep_acc = check_acc(node.acc)
-                keep_empty = node.empty is not None and check_acc(node.empty)
+                keep_acc = predicate(node.acc)
+                keep_empty = node.empty is not None and predicate(node.empty)
                 new_empty = node.empty if keep_empty else None
 
-                if keep_acc and new_empty is node.empty:
+                if keep_acc and new_empty == node.empty:
                     memo[id(node)] = node
                     return node
 
@@ -607,8 +590,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return res
 
             # It's an UpperBranch
-            new_empty = node.empty if node.empty is not None and check_acc(node.empty) else None
-            changed = new_empty is not node.empty
+            new_empty = node.empty if node.empty is not None and predicate(node.empty) else None
+            changed = new_empty != node.empty
 
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
             for v, kids in node.children.items():
@@ -657,13 +640,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             * return Acc (possibly unchanged) to keep/update stacks
         This fuses the behavior of `apply` and `prune` and minimizes reconstruction.
         """
-        acc_cache: Dict[Acc, Optional[Acc]] = {}
+        acc_cache: Dict[int, Optional[Acc]] = {}
 
         def mutate_acc(a: Acc) -> Optional[Acc]:
-            if a in acc_cache:
-                return acc_cache[a]
+            k = id(a)
+            if k in acc_cache:
+                return acc_cache[k]
             r = mutator(a)
-            acc_cache[a] = r
+            acc_cache[k] = r
             return r
 
         memo: Dict[int, Optional[Upper[T, Acc]]] = {}
@@ -696,8 +680,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 # keep_acc is True
                 new_acc = new_acc_opt  # type: ignore[assignment]
                 # Detect if anything changed; children are reused verbatim.
-                changed = (new_acc is not node.acc) or (
-                    (node.empty is not None and new_empty_opt is not node.empty)
+                changed = (new_acc != node.acc) or (
+                    (node.empty is not None and new_empty_opt != node.empty)
                 )
                 if not changed:
                     memo[nid] = node
@@ -710,7 +694,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # UpperBranch
             if node.empty is not None:
                 new_empty_opt = mutate_acc(node.empty)
-                empty_changed = new_empty_opt is not node.empty
+                empty_changed = new_empty_opt != node.empty
             else:
                 new_empty_opt = None
                 empty_changed = False
