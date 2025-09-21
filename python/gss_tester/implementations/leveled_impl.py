@@ -357,7 +357,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
                 return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
 
-
     def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
         if memo is None:
             memo = {}

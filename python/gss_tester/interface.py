@@ -94,6 +94,17 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
+    def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
+        """
+        Keeps only the stacks that have any of the `values` at the top.
+        If `None` is in `values`, it keeps only the empty stacks as well.
+        Returns a new GSS state containing only these stacks.
+        """
+        dest = self.empty()
+        for v in values:
+            dest = dest.merge(self.isolate(v))
+        return dest
+
     @abstractmethod
     def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
         """Applies a function to each accumulator, returning a new GSS state."""
