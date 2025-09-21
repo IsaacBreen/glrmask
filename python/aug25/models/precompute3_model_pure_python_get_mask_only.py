@@ -68,42 +68,35 @@ class Model(GraphProvider):
         pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
-        # Helper to compute disallowed terminals as HybridL2Bitset complement of allowed.
-        def disallowed_terminals(g: GSS) -> ffi.HybridL2Bitset:
-            acc = g.reduce_acc()
-            return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
-
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+        memo = {}
         for sid, gss in state_map.items():
             r: Optional[int] = roots_map.get(int(sid))
             if r is None:
                 continue
             r = int(r)
 
-            # Compute forbidden LLM tokens from disallowed terminals for this GSS
-            forbid: ffi.Bitset = ffi.Bitset.zeros()
-            disallowed_l2 = disallowed_terminals(gss)
-            for (start, end), bv in disallowed_l2.range_values():
-                if bv.is_empty():
-                    continue
-                for tsid in range(start, min(end, max_state) + 1):
-                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                    if not pm:
-                        continue
-                    for terminal_id_str, llm_tokens in pm.items():
-                        if bv.contains(int(terminal_id_str)):
-                            forbid = forbid.union(llm_tokens)
-
-            # Set initial llm_mask on each accumulator and consume terminals_union
-            allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
-
             def initialize_acc(acc: PyAcc) -> PyAcc:
+                # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                forbid: ffi.Bitset = ffi.Bitset.zeros()
+                disallowed_l2 = acc.terminals_union.complement()
+                for (start, end), bv in disallowed_l2.range_values():
+                    if bv.is_empty():
+                        continue
+                    for tsid in range(start, min(end, max_state) + 1):
+                        pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                        if not pm:
+                            continue
+                        for terminal_id_str, llm_tokens in pm.items():
+                            if bv.contains(int(terminal_id_str)):
+                                forbid = forbid.union(llm_tokens)
+                allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
                 return PyAcc(
                     terminals_union=ffi.HybridL2Bitset.all(),  # consume
                     llm_mask=allowed_mask
                 )
 
-            gss_initialized: GSS = gss.apply(initialize_acc)
+            gss_initialized: GSS = gss.apply(initialize_acc, memo)
 
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
