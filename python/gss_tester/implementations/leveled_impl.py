@@ -95,6 +95,8 @@ class LeveledGSSStats(Generic[T, Acc]):
     distinct_values: Set[T]
     unique_accumulators_count: int
     unique_accumulators: Set[Acc]
+    total_accumulators: int
+    accumulator_uniqueness_ratio: float
 
     # "Empty" flags / terminal interfaces
     num_upper_with_empty: int
@@ -155,6 +157,8 @@ class LeveledGSSStats(Generic[T, Acc]):
         lines.append("- values/accumulators:")
         lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
         lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+        lines.append(f"  total_accumulators={self.total_accumulators}")
+        lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
 
         lines.append("- empties/terminals:")
         lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
@@ -1049,6 +1053,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         distinct_values_count = len(distinct_values)
         unique_accumulators_count = len(unique_accumulators)
 
+        # Accumulator counts
+        total_accumulators = total_stacks
+        if total_accumulators > 0:
+            accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+        else:
+            accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+
         # Sharing metrics
         if incoming_edges:
             max_in_degree = max(incoming_edges.values())
@@ -1084,6 +1095,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             distinct_values=distinct_values,
             unique_accumulators_count=unique_accumulators_count,
             unique_accumulators=unique_accumulators,
+            total_accumulators=total_accumulators,
+            accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
             num_upper_with_empty=num_upper_with_empty,
             num_interfaces_with_empty=num_interfaces_with_empty,
             num_lower_with_empty=num_lower_with_empty,

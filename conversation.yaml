@@ -1537,15 +1537,14 @@ local_system:
               t_start = time.perf_counter_ns()
               self.get_mask_calls += 1
 
-              # Reset per-call stats
-              for k in _PROFILING_STATS:
-                  _PROFILING_STATS[k] = 0
               call_stats = {
                   'nodes_visited': 0,
                   'main_loop_iterations': 0,
                   'end_nodes_reached': 0,
                   'main_loop_apply_calls': 0,
                   'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
               }
 
               all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
@@ -1619,6 +1618,10 @@ local_system:
 
               t_init_done = time.perf_counter_ns()
 
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
               # Main loop
               while depth_heap:
                   call_stats['main_loop_iterations'] += 1
@@ -1632,7 +1635,9 @@ local_system:
                       if is_end(node):
                           call_stats['end_nodes_reached'] += 1
                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
 
                       # Traverse edges and propagate masks
                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
@@ -1654,13 +1659,19 @@ local_system:
 
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                               if not llm_bv.is_empty():
-                                  def intersect_edge(acc: PyAcc) -> PyAcc:
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          return None
                                       return PyAcc(
                                           terminals_union=acc.terminals_union,
-                                          llm_mask=acc.llm_mask.intersection(llm_bv)
+                                          llm_mask=new_mask
                                       )
                                   call_stats['main_loop_apply_calls'] += 1
-                                  child_gss = child_gss.apply(intersect_edge)
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
 
                               d: int = int(dest_idx)
                               if d in values:
@@ -1693,6 +1704,8 @@ local_system:
               print(f"End nodes reached: {call_stats['end_nodes_reached']}")
               print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
               print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
               for k, v in _PROFILING_STATS.items():
                   print(f"{k} calls: {v}")
               print("---------------------------------------------------\n")
@@ -1990,6 +2003,8 @@ local_system:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
+          total_accumulators: int
+          accumulator_uniqueness_ratio: float
 
           # "Empty" flags / terminal interfaces
           num_upper_with_empty: int
@@ -2050,6 +2065,8 @@ local_system:
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+              lines.append(f"  total_accumulators={self.total_accumulators}")
+              lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
 
               lines.append("- empties/terminals:")
               lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
@@ -2944,6 +2961,13 @@ local_system:
               distinct_values_count = len(distinct_values)
               unique_accumulators_count = len(unique_accumulators)
 
+              # Accumulator counts
+              total_accumulators = total_stacks
+              if total_accumulators > 0:
+                  accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+              else:
+                  accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+
               # Sharing metrics
               if incoming_edges:
                   max_in_degree = max(incoming_edges.values())
@@ -2979,6 +3003,8 @@ local_system:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
+                  total_accumulators=total_accumulators,
+                  accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
                   num_lower_with_empty=num_lower_with_empty,
@@ -3229,15 +3255,14 @@ local_system:
               t_start = time.perf_counter_ns()
               self.get_mask_calls += 1
 
-              # Reset per-call stats
-              for k in _PROFILING_STATS:
-                  _PROFILING_STATS[k] = 0
               call_stats = {
                   'nodes_visited': 0,
                   'main_loop_iterations': 0,
                   'end_nodes_reached': 0,
                   'main_loop_apply_calls': 0,
                   'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
               }
 
               all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
@@ -3311,6 +3336,10 @@ local_system:
 
               t_init_done = time.perf_counter_ns()
 
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
               # Main loop
               while depth_heap:
                   call_stats['main_loop_iterations'] += 1
@@ -3325,6 +3354,7 @@ local_system:
                           call_stats['end_nodes_reached'] += 1
                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                           if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
                               final_mask = final_mask.union(reduced_acc.llm_mask)
 
                       # Traverse edges and propagate masks
@@ -3349,6 +3379,7 @@ local_system:
                               if not llm_bv.is_empty():
                                   def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                                       new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
                                       if new_mask.is_empty():
                                           return None
                                       return PyAcc(
@@ -3391,6 +3422,8 @@ local_system:
               print(f"End nodes reached: {call_stats['end_nodes_reached']}")
               print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
               print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
               for k, v in _PROFILING_STATS.items():
                   print(f"{k} calls: {v}")
               print("---------------------------------------------------\n")
@@ -4986,15 +5019,14 @@ messages:
               t_start = time.perf_counter_ns()
               self.get_mask_calls += 1
 
-              # Reset per-call stats
-              for k in _PROFILING_STATS:
-                  _PROFILING_STATS[k] = 0
               call_stats = {
                   'nodes_visited': 0,
                   'main_loop_iterations': 0,
                   'end_nodes_reached': 0,
                   'main_loop_apply_calls': 0,
                   'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
               }
 
               all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
@@ -5068,6 +5100,10 @@ messages:
 
               t_init_done = time.perf_counter_ns()
 
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
               # Main loop
               while depth_heap:
                   call_stats['main_loop_iterations'] += 1
@@ -5081,7 +5117,9 @@ messages:
                       if is_end(node):
                           call_stats['end_nodes_reached'] += 1
                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
 
                       # Traverse edges and propagate masks
                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
@@ -5103,13 +5141,19 @@ messages:
 
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                               if not llm_bv.is_empty():
-                                  def intersect_edge(acc: PyAcc) -> PyAcc:
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          return None
                                       return PyAcc(
                                           terminals_union=acc.terminals_union,
-                                          llm_mask=acc.llm_mask.intersection(llm_bv)
+                                          llm_mask=new_mask
                                       )
                                   call_stats['main_loop_apply_calls'] += 1
-                                  child_gss = child_gss.apply(intersect_edge)
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
 
                               d: int = int(dest_idx)
                               if d in values:
@@ -5142,6 +5186,8 @@ messages:
               print(f"End nodes reached: {call_stats['end_nodes_reached']}")
               print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
               print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
               for k, v in _PROFILING_STATS.items():
                   print(f"{k} calls: {v}")
               print("---------------------------------------------------\n")
@@ -5151,8 +5197,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-  - user: Use `apply_and_prune` instead of just `apply` in `get_mask`. Prune if the
-      LLM token bv is empty.
+  - user: Its useful to know in stats the number of accs, regardless of uniqueness,
+      and the amount of redundancy in accs, or num unique div num overall of accs.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5171,113 +5217,118 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify the code, followed by the corresponding git diff.
+      Of course! I can help you add statistics about accumulator count and redundancy to your `LeveledGSS` implementation. Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I'll make two adjustments to `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`:
+      Here are the edits for `python/gss_tester/implementations/leveled_impl.py`:
 
-      1.  I will update the edge traversal logic to use `apply_and_prune`. This will modify the `llm_mask` for each path and discard paths where the mask becomes empty, improving efficiency.
-      2.  I will add a safeguard when processing end-nodes to correctly handle cases where a GSS has become empty, preventing potential errors.
+      1.  **Update the `LeveledGSSStats` dataclass:**
+          In `python/gss_tester/implementations/leveled_impl.py`, locate the `LeveledGSSStats` dataclass definition. Add the `total_accumulators` and `accumulator_uniqueness_ratio` fields under the "Value/accumulator coverage" section, right after `unique_accumulators`:
 
-      Here are the detailed changes for the file:
-
-      **File: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`**
-
-      1.  **Safeguard end-node processing:**
-
-          In the `get_mask` method, locate the following code block around line 174:
           ```python
-                      # End-node handling: just union the allowed LLM tokens
-                      if is_end(node):
-                          call_stats['end_nodes_reached'] += 1
-                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
-          ```
-          Modify it to safely handle cases where `reduced_acc` is `None`:
-          ```python
-                      # End-node handling: just union the allowed LLM tokens
-                      if is_end(node):
-                          call_stats['end_nodes_reached'] += 1
-                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          if reduced_acc:
-                              final_mask = final_mask.union(reduced_acc.llm_mask)
+          # ... inside LeveledGSSStats
+          unique_accumulators: Set[Acc]
+          total_accumulators: int
+          accumulator_uniqueness_ratio: float
+          # ...
           ```
 
-      2.  **Use `apply_and_prune` for edge traversal:**
+      2.  **Enhance the `__str__` method for `LeveledGSSStats`:**
+          In the same file, find the `__str__` method within the `LeveledGSSStats` class. Add two lines to display the new statistics. Insert them after the line that prints `unique_accumulators_count`:
 
-          In the same `get_mask` method, find the edge traversal logic around line 194:
           ```python
-                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.is_empty():
-                                  def intersect_edge(acc: PyAcc) -> PyAcc:
-                                      return PyAcc(
-                                          terminals_union=acc.terminals_union,
-                                          llm_mask=acc.llm_mask.intersection(llm_bv)
-                                      )
-                                  call_stats['main_loop_apply_calls'] += 1
-                                  child_gss = child_gss.apply(intersect_edge)
+          # ... inside LeveledGSSStats.__str__
+          lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+          lines.append(f"  total_accumulators={self.total_accumulators}")
+          lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+          # ...
           ```
-          Replace this block with the following code, which uses `apply_and_prune` to filter out paths with empty LLM token masks:
+
+      3.  **Calculate the new stats in `LeveledGSS.stats()`:**
+          Navigate to the `stats` method of the `LeveledGSS` class. Towards the end of the method, after the structural scan is complete and `unique_accumulators_count` has been determined, add the logic to calculate the total number of accumulators and their uniqueness ratio. A good place is right before the "Sharing metrics" section:
+
           ```python
-                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.is_empty():
-                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                      new_mask = acc.llm_mask.intersection(llm_bv)
-                                      if new_mask.is_empty():
-                                          return None
-                                      return PyAcc(
-                                          terminals_union=acc.terminals_union,
-                                          llm_mask=new_mask
-                                      )
-                                  call_stats['main_loop_apply_calls'] += 1
-                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                                  if child_gss.is_empty():
-                                      continue
+          # ... inside LeveledGSS.stats()
+          unique_accumulators_count = len(unique_accumulators)
+
+          # Accumulator counts
+          total_accumulators = total_stacks
+          if total_accumulators > 0:
+              accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+          else:
+              accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+
+          # Sharing metrics
+          # ...
           ```
+
+      4.  **Update the `LeveledGSSStats` instantiation:**
+          At the very end of the `stats` method, update the `return` statement to pass the newly calculated values to the `LeveledGSSStats` constructor:
+
+          ```python
+          # ... inside the return statement of LeveledGSS.stats()
+          unique_accumulators_count=unique_accumulators_count,
+          unique_accumulators=unique_accumulators,
+          total_accumulators=total_accumulators,
+          accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
+          num_upper_with_empty=num_upper_with_empty,
+          # ...
+          ```
+
+      These changes will add the desired accumulator metrics to your statistics output.
 
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
+      Here is the git diff to apply these changes directly.
 
       ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      index 1928014..871c89f 100644
-      --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -176,7 +176,8 @@
-                       if is_end(node):
-                           call_stats['end_nodes_reached'] += 1
-                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-      -                    final_mask = final_mask.union(reduced_acc.llm_mask)
-      +                    if reduced_acc:
-      +                        final_mask = final_mask.union(reduced_acc.llm_mask)
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 9e90082..e0a711b 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -100,6 +100,8 @@
+           distinct_values: Set[T]
+           unique_accumulators_count: int
+           unique_accumulators: Set[Acc]
+      +    total_accumulators: int
+      +    accumulator_uniqueness_ratio: float
        
-                       # Traverse edges and propagate masks
-                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-      @@ -196,13 +197,18 @@
+           # "Empty" flags / terminal interfaces
+           num_upper_with_empty: int
+      @@ -151,7 +153,9 @@
        
-                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                               if not llm_bv.is_empty():
-      -                            def intersect_edge(acc: PyAcc) -> PyAcc:
-      -                                return PyAcc(
-      +                            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-      +                                new_mask = acc.llm_mask.intersection(llm_bv)
-      +                                if new_mask.is_empty():
-      +                                    return None
-      +                                return PyAcc(
-                                           terminals_union=acc.terminals_union,
-      -                                    llm_mask=acc.llm_mask.intersection(llm_bv)
-      +                                    llm_mask=new_mask
-                                       )
-                                   call_stats['main_loop_apply_calls'] += 1
-      -                            child_gss = child_gss.apply(intersect_edge)
-      +                            child_gss = child_gss.apply_and_prune(intersect_and_prune)
-      +                            if child_gss.is_empty():
-      +                                continue
+               lines.append("- values/accumulators:")
+               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+      +        lines.append(f"  total_accumulators={self.total_accumulators}")
+      +        lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
        
-                               d: int = int(dest_idx)
-                               if d in values:
+               lines.append("- empties/terminals:")
+               lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+      @@ -1014,6 +1018,13 @@
+               max_upper_depth = self.inner._max_depth
+               distinct_values_count = len(distinct_values)
+               unique_accumulators_count = len(unique_accumulators)
+      +
+      +        # Accumulator counts
+      +        total_accumulators = total_stacks
+      +        if total_accumulators > 0:
+      +            accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+      +        else:
+      +            accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+       
+               # Sharing metrics
+               if incoming_edges:
+      @@ -1048,6 +1059,8 @@
+                   distinct_values=distinct_values,
+                   unique_accumulators_count=unique_accumulators_count,
+                   unique_accumulators=unique_accumulators,
+      +            total_accumulators=total_accumulators,
+      +            accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
+                   num_upper_with_empty=num_upper_with_empty,
+                   num_interfaces_with_empty=num_interfaces_with_empty,
+                   num_lower_with_empty=num_lower_with_empty,
 
       ```
     metadata:
@@ -5286,11 +5337,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Use apply_and_prune and add
-      end-node safeguard in get_mask"'
+  - user: 'Changes committed with message: "feat: Add accumulator count and uniqueness
+      ratio to LeveledGSS stats"'
     metadata:
 ...
