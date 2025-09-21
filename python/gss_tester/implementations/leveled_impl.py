@@ -7,7 +7,7 @@ from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Gen
 from ..interface import GSS, T, Acc
 
 # ------------------------------------------------------------------------------
-# Internal node classes and type alias
+# Internal node classes and type alias (unchanged typing structure)
 # ------------------------------------------------------------------------------
 
 # Keep the type alias exactly as authored (no changes to typing structure).
@@ -193,12 +193,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> LeveledGSS[T, Acc]:
         """
-        Build a canonical LeveledGSS from explicit stacks.
-
-        Steps:
+        Build a canonical LeveledGSS from explicit stacks:
           1) Merge duplicate stacks (same values) by merging their accumulators.
-          2) Compile the result into an Upper trie (top-of-stack first).
-          3) Optionally promote local regions to Interface where possible.
+          2) Compile into an Upper trie (top-of-stack first).
+          3) Locally promote to Interface where possible.
         """
         # 1) Merge duplicates
         merged: Dict[Tuple[T, ...], Acc] = {}
@@ -253,12 +251,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # ------------------------------
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         """
-        Convert back to explicit stacks, then canonicalize (merge duplicates) and sort deterministically.
+        Convert back to explicit stacks, then canonicalize (merge duplicates) and sort.
         """
         out: List[Tuple[List[T], Acc]] = []
 
         def emit_stack(pref_tos: List[T], acc: Acc) -> None:
-            # pref_tos is top-of-stack first; reverse to get bottom-to-top ordering
             out.append((list(reversed(pref_tos)), acc))
 
         def dfs_lower(node: Lower[T], pref_tos: List[T], acc: Acc) -> None:
@@ -297,7 +294,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self
 
         if isinstance(self.inner, Interface):
-            # The interface pins acc for everything underneath. After push, the Interface remains,
+            # Interface pins acc for everything underneath. After push, the Interface remains,
             # and its lower children become a single lower child under `value`.
             had_empty_stack = (self.inner.empty is not None) or (not self.inner.children)
             lower_node = Lower(children=self.inner.children, empty=had_empty_stack)
@@ -314,15 +311,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         Empty stacks are discarded.
         """
         ub = _as_upperbranch(self.inner)
-        all_children = [child for kids in ub.children.values() for child in kids.values()]
-        if not all_children:
+        # Gather all children across all top values
+        children = [child for kids in ub.children.values() for child in kids.values()]
+        if not children:
             return LeveledGSS(UpperBranch(children={}, empty=None))
-        it = iter(all_children)
-        merged: Upper[T, Acc] = next(it)
-        for child in it:
-            merged = merge_upper(merged, child)
-        merged_ub = _as_upperbranch(merged)
-        return LeveledGSS(try_promote(merged_ub))
+        merged = _merge_many_upper(children)
+        return LeveledGSS(try_promote(_as_upperbranch(merged)))
 
     def is_empty(self) -> bool:
         if isinstance(self.inner, UpperBranch):
@@ -455,13 +449,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def peek(self) -> Set[T]:
         """
         Return the set of all top-of-stack values (ignores empty stacks).
-        Works uniformly for both UpperBranch and Interface since both have 'children'.
         """
         return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
         """
-        Reduce/merge all accumulators across all active stacks.
+        Merge the accumulators of all active stacks into a single optional value.
         """
         def emit_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
             if node.empty:
@@ -528,6 +521,17 @@ def _merge_children_by_depth(
     ingest(c1)
     ingest(c2)
     return merged
+
+
+def _merge_many_upper(nodes: List[Upper[T, Acc]]) -> Upper[T, Acc]:
+    """
+    Merge a non-empty list of Upper nodes into a single Upper node.
+    """
+    it = iter(nodes)
+    acc = next(it)
+    for n in it:
+        acc = merge_upper(acc, n)
+    return acc
 
 
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
