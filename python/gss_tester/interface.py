@@ -1,7 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from functools import reduce
-from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type
+from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
 
 
 class Mergeable(Protocol):
@@ -118,6 +118,32 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
+    def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
+        """
+        Combined transform that applies a mutate-and-prune function to each stack's accumulator.
+        The `mutator` must return:
+          - a new (or unchanged) accumulator to keep the stack, or
+          - None to prune the stack.
+
+        Default implementation composes prune + apply, with memoization to avoid
+        invoking `mutator` more than once per accumulator instance when possible.
+        Concrete implementations can override for a faster single-pass transform.
+        """
+        cache: Dict[int, Optional[Acc]] = {}
+
+        def decide(a: Acc) -> Optional[Acc]:
+            k = id(a)
+            if k in cache:
+                return cache[k]
+            r = mutator(a)
+            cache[k] = r
+            return r
+
+        pruned = self.prune(lambda a: decide(a) is not None)
+        def map_acc(a: Acc) -> Acc:
+            r = decide(a)
+            return r if r is not None else a
+        return pruned.apply(map_acc)
     @abstractmethod
     def merge(self: GSSType, other: GSSType) -> GSSType:
         """Merges this GSS with another, combining accumulators for identical stacks."""

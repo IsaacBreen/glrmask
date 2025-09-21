@@ -625,6 +625,114 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledGSS(UpperBranch(children={}, empty=None))
         return LeveledGSS(res_inner)
 
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[Acc]]) -> LeveledGSS[T, Acc]:
+        """
+        Fast single-pass implementation of apply_and_prune for LeveledGSS.
+        - mutator(acc) -> Optional[Acc]
+            * return None to prune stacks carrying `acc`
+            * return Acc (possibly unchanged) to keep/update stacks
+        This fuses the behavior of `apply` and `prune` and minimizes reconstruction.
+        """
+        acc_cache: Dict[int, Optional[Acc]] = {}
+
+        def mutate_acc(a: Acc) -> Optional[Acc]:
+            k = id(a)
+            if k in acc_cache:
+                return acc_cache[k]
+            r = mutator(a)
+            acc_cache[k] = r
+            return r
+
+        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
+
+        def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+            nid = id(node)
+            if nid in memo:
+                return memo[nid]
+
+            if isinstance(node, Interface):
+                # Mutate/prune the primary accumulator
+                new_acc_opt = mutate_acc(node.acc)
+                # Mutate/prune the explicit empty, if present
+                new_empty_opt = mutate_acc(node.empty) if node.empty is not None else None
+
+                keep_acc = new_acc_opt is not None
+                keep_empty = new_empty_opt is not None
+
+                if not keep_acc and not keep_empty:
+                    memo[nid] = None
+                    return None
+
+                if not keep_acc and keep_empty:
+                    # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
+                    # Becomes an UpperBranch leaf with only 'empty'.
+                    res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
+                    memo[nid] = res
+                    return res
+
+                # keep_acc is True
+                new_acc = new_acc_opt  # type: ignore[assignment]
+                # Detect if anything changed; children are reused verbatim.
+                changed = (new_acc != node.acc) or (
+                    (node.empty is not None and new_empty_opt != node.empty)
+                )
+                if not changed:
+                    memo[nid] = node
+                    return node
+
+                res = Interface(children=node.children, acc=new_acc, empty=new_empty_opt)
+                memo[nid] = res
+                return res
+
+            # UpperBranch
+            if node.empty is not None:
+                new_empty_opt = mutate_acc(node.empty)
+                empty_changed = new_empty_opt != node.empty
+            else:
+                new_empty_opt = None
+                empty_changed = False
+
+            changed = empty_changed
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+
+            for v, kids in node.children.items():
+                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+                child_map_changed = False
+                for d, child in kids.items():
+                    new_child = transform(child)
+                    if new_child is not child:
+                        child_map_changed = True
+                    if new_child is not None:
+                        new_kids_for_v[new_child._max_depth] = new_child
+
+                if len(new_kids_for_v) != len(kids):
+                    child_map_changed = True
+
+                if child_map_changed:
+                    changed = True
+                    if new_kids_for_v:
+                        new_children[v] = new_kids_for_v
+                else:
+                    new_children[v] = kids  # Reuse
+
+            if not changed:
+                memo[nid] = node
+                return node
+
+            if not new_children and new_empty_opt is None:
+                memo[nid] = None
+                return None
+
+            res = UpperBranch(children=new_children, empty=new_empty_opt)
+            promoted = try_promote(res)
+            memo[nid] = promoted
+            return promoted
+
+        res_inner = transform(self.inner)
+        if res_inner is None:
+            return LeveledGSS(UpperBranch(children={}, empty=None))
+        return LeveledGSS(res_inner)
+
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
