@@ -48,15 +48,10 @@ class ParserTable:
     table: Dict[int, Row]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
     llm_mask: ffi.Bitset
-
-    def __hash__(self):
-        # Hash by terminals_union only; equals uses both fields (default dataclass),
-        # but equal objects (same terminals_union and llm_mask) will still share hash.
-        return hash(self.terminals_union)
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         # Merge terminals_union by union (as before).
