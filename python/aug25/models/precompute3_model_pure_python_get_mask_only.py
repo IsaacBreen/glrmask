@@ -121,9 +121,10 @@ class Model(GraphProvider):
         # Main loop
         while depth_heap:
             depth: int = hpop(depth_heap)
-            nodes: Set[int] = todo.pop(depth)
+            nodes: Set[int] = todo[depth]
 
-            for node in nodes:
+            while nodes:
+                node: int = nodes.pop()
                 gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
