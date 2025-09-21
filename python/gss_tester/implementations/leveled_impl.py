@@ -67,9 +67,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def __post_init__(self):
         if os.environ.get("GSS_TESTER_VALIDATE"):
-            self._validate_max_depths()
-            self._validate_no_promotions()
-            self._validate_populated_nodes()
+            self._validate()
+
+    def _validate(self):
+        self._validate_max_depths()
+        self._validate_no_promotions()
+        self._validate_populated_nodes()
 
     def _validate_max_depths(self) -> None:
         """Recursively validates that the `_max_depth` of each node is correct."""
