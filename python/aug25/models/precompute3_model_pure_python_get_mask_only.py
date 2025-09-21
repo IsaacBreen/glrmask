@@ -117,7 +117,6 @@ class Model(GraphProvider):
         memo = {}
         for sid, gss in state_map.items():
             r: Optional[int] = roots_map[int(sid)]
-            r = int(r)
 
             def initialize_acc(acc: PyAcc) -> PyAcc:
                 # Compute forbidden LLM tokens from disallowed terminals for this GSS
