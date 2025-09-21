@@ -184,7 +184,7 @@ class Model(GraphProvider):
                     call_stats['end_nodes_reached'] += 1
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     if reduced_acc:
-                        call_stats['main_loop_intersection_calls'] += 1
+                        call_stats['main_loop_union_calls'] += 1
                         final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
