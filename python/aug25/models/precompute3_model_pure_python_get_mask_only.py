@@ -95,6 +95,8 @@ class Model(GraphProvider):
             'end_nodes_reached': 0,
             'main_loop_apply_calls': 0,
             'main_loop_merge_calls': 0,
+            'main_loop_union_calls': 0,
+            'main_loop_intersection_calls': 0,
         }
 
         all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
@@ -182,6 +184,7 @@ class Model(GraphProvider):
                     call_stats['end_nodes_reached'] += 1
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     if reduced_acc:
+                        call_stats['main_loop_intersection_calls'] += 1
                         final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
@@ -206,6 +209,7 @@ class Model(GraphProvider):
                         if not llm_bv.is_empty():
                             def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                                 new_mask = acc.llm_mask.intersection(llm_bv)
+                                call_stats['main_loop_intersection_calls'] += 1
                                 if new_mask.is_empty():
                                     return None
                                 return PyAcc(
@@ -248,6 +252,8 @@ class Model(GraphProvider):
         print(f"End nodes reached: {call_stats['end_nodes_reached']}")
         print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
         print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+        print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+        print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
         for k, v in _PROFILING_STATS.items():
             print(f"{k} calls: {v}")
         print("---------------------------------------------------\n")
