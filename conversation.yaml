@@ -214,6 +214,7 @@ local_system:
     python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
       import heapq
       import _sep1 as ffi
+
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from .precompute3_model_pure_python import Model as InnerModel
       from ..common_interface import GraphProvider, RangeSet
@@ -221,15 +222,23 @@ local_system:
       try:
           profile
       except NameError:
-          def profile(f): return f
+          def profile(func): return func
 
 
       class Model(GraphProvider):
           def __init__(self, inner_model: InnerModel):
               self.inner_model = inner_model
+              im = self.inner_model
+              self.arena = im.arena
+              self.roots_map = im.roots_map
+              self.max_depth = im.max_depth
+              self.possible_matches_cache = im.possible_matches_cache
+              self.tokenizer_max_state = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map = im.internal_to_original_map
 
           @staticmethod
-          def from_json_string(s: str) -> 'Model':
+          def from_json_string(s: str):
               return Model(InnerModel.from_json_string(s))
 
           def commit(self, token_id: int):
@@ -239,123 +248,111 @@ local_system:
           def state(self):
               return self.inner_model.state
 
-          @profile
-          def get_mask(self) -> RangeSet:
-              m = self.inner_model
-              B, H = ffi.Bitset, ffi.HybridL2Bitset
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
 
-              state_map = m.state
-              ones = m.all_internal_llm_tokens_bitset
-              final_mask = B.zeros()
+          @profile
+          def get_mask(self):
+              state_map = self.state
+              all_ones = self.all_internal_llm_tokens_bitset
+              final_mask = ffi.Bitset.zeros()
 
               values = {}
               stopped = set()
               todo = {}
-              heap = []
-              heappush, heappop = heapq.heappush, heapq.heappop
+              depth_heap = []
 
-              # Seed
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map, max_depth, arena = self.roots_map, self.max_depth, self.arena
+              is_end = self.is_end
+              pmc = self.possible_matches_cache
+              max_state = self.tokenizer_max_state
+
               for sid, gss in state_map.items():
-                  root = m.roots_map.get(int(sid))
-                  if root is None:
+                  r = roots_map.get(int(sid))
+                  if r is None:
                       continue
-                  d = int(root)
-                  if d in values:
-                      values[d] = (values[d][0].merge(gss), ones)
+                  r = int(r)
+                  if r in values:
+                      values[r] = (values[r][0].merge(gss), all_ones)
                   else:
-                      values[d] = (gss, ones)
-                  depth = m.max_depth[d]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {d}
-                      heappush(heap, depth)
+                      values[r] = (gss, all_ones)
+                  d = max_depth[r]
+                  b = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
                   else:
-                      bucket.add(d)
+                      b.add(r)
 
-              def enqueue(depth, node):
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node}
-                      heappush(heap, depth)
+              def enqueue(d: int, n: int):
+                  b = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
                   else:
-                      bucket.add(node)
+                      b.add(n)
 
-              def disallowed_terminals(gss):
-                  acc = gss.reduce_acc()
-                  return H.all() if acc is None else acc.terminals_union.complement()
+              def disallowed_terminals(g: GSS):
+                  acc = g.reduce_acc()
+                  return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
 
-              pmc = m.possible_matches_cache or {}
-              arena = m.arena
-              max_depth = m.max_depth
-              tmax = m.tokenizer.max_state()
-
-              while True:
-                  node_indices = None
-                  while heap:
-                      depth = heappop(heap)
-                      node_indices = todo.pop(depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
-
-                  for idx in node_indices:
-                      if idx in stopped:
+              while depth_heap:
+                  depth = hpop(depth_heap)
+                  nodes = todo.pop(depth, None)
+                  if not nodes:
+                      continue
+                  for node in nodes:
+                      if node in stopped:
                           continue
-                      item = values.pop(idx, None)
+                      item = values.pop(node, None)
                       if item is None:
                           continue
                       gss_node, llm_mask = item
-                      nd = arena.get(idx, {})
 
-                      # End-node handling
-                      if (nd.get("value") or {}).get("clean_end"):
-                          forb = B.zeros()
-                          for (start, end), dis in disallowed_terminals(gss_node).range_values():
-                              if dis.is_empty():
+                      if is_end(node):
+                          forbid = ffi.Bitset.zeros()
+                          for (start, end), bv in disallowed_terminals(gss_node).range_values():
+                              if bv.is_empty():
                                   continue
-                              end = min(end, tmax)
-                              for tsid in range(start, end + 1):
+                              for tsid in range(start, min(end, max_state) + 1):
                                   pm = pmc.get(tsid)
                                   if not pm:
                                       continue
-                                  for term_id, token_bv in pm.items():
-                                      if dis.contains(int(term_id)):
-                                          forb = forb.union(token_bv)
-                          if not llm_mask.is_empty():
-                              allowed = llm_mask.difference(forb)
-                              if not allowed.is_empty():
-                                  final_mask = final_mask.union(allowed)
+                                  for terminal_id_str, llm_tokens in pm.items():
+                                      if bv.contains(int(terminal_id_str)):
+                                          forbid = forbid.union(llm_tokens)
+                          allowed = llm_mask.difference(forbid)
+                          if not allowed.is_empty():
+                              final_mask = final_mask.union(allowed)
 
                       if llm_mask.is_empty():
-                          stopped.add(idx)
+                          stopped.add(node)
                           continue
 
-                      # Transitions
-                      for (pop, llm_bv), dests in (nd.get("children") or []):
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                           popped = gss_node.popn(pop)
-                          child_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                           for dest_idx, state_bv in dests:
-                              matched = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                              if not matched:
+                              if not state_bv.is_empty():
+                                  matched = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
+                                  if not matched:
+                                      continue
+                              else:
                                   continue
                               child_gss = GSS.merge_many(matched)
+                              child_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                               d = int(dest_idx)
                               if d in values:
-                                  eg, em = values[d]
-                                  values[d] = (eg.merge(child_gss), em.union(child_mask))
+                                  g0, m0 = values[d]
+                                  values[d] = (g0.merge(child_gss), m0.union(child_mask))
                               else:
                                   values[d] = (child_gss, child_mask)
                               enqueue(max_depth[d], d)
 
-              # Map internal to original IDs
-              original_mask = B.zeros()
-              ins = original_mask.insert
-              mp = m.internal_to_original_map
-              for internal_id in final_mask.to_indices():
-                  orig_id = mp.get(internal_id)
-                  if orig_id is not None:
-                      ins(orig_id)
+              original_mask = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
               return RangeSet.from_ranges(original_mask.to_ranges())
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -612,7 +609,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-  - user: Make this script as concise as possible.
+  - user: Make this script as concise as possible. Keep it functionally the same.
+      (This includes public fields which must not be changed.)
     metadata:
   - user: |-
       Mode instruction: For this turn, output the full, final contents of any created or modified files.
@@ -634,6 +632,7 @@ messages:
       ```python "python/aug25/models/precompute3_model_pure_python_get_mask_only.py"
       import heapq
       import _sep1 as ffi
+
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from .precompute3_model_pure_python import Model as InnerModel
       from ..common_interface import GraphProvider, RangeSet
@@ -641,15 +640,23 @@ messages:
       try:
           profile
       except NameError:
-          def profile(f): return f
+          def profile(func): return func
 
 
       class Model(GraphProvider):
           def __init__(self, inner_model: InnerModel):
               self.inner_model = inner_model
+              im = self.inner_model
+              self.arena = im.arena
+              self.roots_map = im.roots_map
+              self.max_depth = im.max_depth
+              self.possible_matches_cache = im.possible_matches_cache
+              self.tokenizer_max_state = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map = im.internal_to_original_map
 
           @staticmethod
-          def from_json_string(s: str) -> 'Model':
+          def from_json_string(s: str):
               return Model(InnerModel.from_json_string(s))
 
           def commit(self, token_id: int):
@@ -659,123 +666,111 @@ messages:
           def state(self):
               return self.inner_model.state
 
-          @profile
-          def get_mask(self) -> RangeSet:
-              m = self.inner_model
-              B, H = ffi.Bitset, ffi.HybridL2Bitset
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
 
-              state_map = m.state
-              ones = m.all_internal_llm_tokens_bitset
-              final_mask = B.zeros()
+          @profile
+          def get_mask(self):
+              state_map = self.state
+              all_ones = self.all_internal_llm_tokens_bitset
+              final_mask = ffi.Bitset.zeros()
 
               values = {}
               stopped = set()
               todo = {}
-              heap = []
-              heappush, heappop = heapq.heappush, heapq.heappop
+              depth_heap = []
 
-              # Seed
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map, max_depth, arena = self.roots_map, self.max_depth, self.arena
+              is_end = self.is_end
+              pmc = self.possible_matches_cache
+              max_state = self.tokenizer_max_state
+
               for sid, gss in state_map.items():
-                  root = m.roots_map.get(int(sid))
-                  if root is None:
+                  r = roots_map.get(int(sid))
+                  if r is None:
                       continue
-                  d = int(root)
-                  if d in values:
-                      values[d] = (values[d][0].merge(gss), ones)
+                  r = int(r)
+                  if r in values:
+                      values[r] = (values[r][0].merge(gss), all_ones)
                   else:
-                      values[d] = (gss, ones)
-                  depth = m.max_depth[d]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {d}
-                      heappush(heap, depth)
+                      values[r] = (gss, all_ones)
+                  d = max_depth[r]
+                  b = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
                   else:
-                      bucket.add(d)
+                      b.add(r)
 
-              def enqueue(depth, node):
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node}
-                      heappush(heap, depth)
+              def enqueue(d: int, n: int):
+                  b = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
                   else:
-                      bucket.add(node)
+                      b.add(n)
 
-              def disallowed_terminals(gss):
-                  acc = gss.reduce_acc()
-                  return H.all() if acc is None else acc.terminals_union.complement()
+              def disallowed_terminals(g: GSS):
+                  acc = g.reduce_acc()
+                  return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
 
-              pmc = m.possible_matches_cache or {}
-              arena = m.arena
-              max_depth = m.max_depth
-              tmax = m.tokenizer.max_state()
-
-              while True:
-                  node_indices = None
-                  while heap:
-                      depth = heappop(heap)
-                      node_indices = todo.pop(depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
-
-                  for idx in node_indices:
-                      if idx in stopped:
+              while depth_heap:
+                  depth = hpop(depth_heap)
+                  nodes = todo.pop(depth, None)
+                  if not nodes:
+                      continue
+                  for node in nodes:
+                      if node in stopped:
                           continue
-                      item = values.pop(idx, None)
+                      item = values.pop(node, None)
                       if item is None:
                           continue
                       gss_node, llm_mask = item
-                      nd = arena.get(idx, {})
 
-                      # End-node handling
-                      if (nd.get("value") or {}).get("clean_end"):
-                          forb = B.zeros()
-                          for (start, end), dis in disallowed_terminals(gss_node).range_values():
-                              if dis.is_empty():
+                      if is_end(node):
+                          forbid = ffi.Bitset.zeros()
+                          for (start, end), bv in disallowed_terminals(gss_node).range_values():
+                              if bv.is_empty():
                                   continue
-                              end = min(end, tmax)
-                              for tsid in range(start, end + 1):
+                              for tsid in range(start, min(end, max_state) + 1):
                                   pm = pmc.get(tsid)
                                   if not pm:
                                       continue
-                                  for term_id, token_bv in pm.items():
-                                      if dis.contains(int(term_id)):
-                                          forb = forb.union(token_bv)
-                          if not llm_mask.is_empty():
-                              allowed = llm_mask.difference(forb)
-                              if not allowed.is_empty():
-                                  final_mask = final_mask.union(allowed)
+                                  for terminal_id_str, llm_tokens in pm.items():
+                                      if bv.contains(int(terminal_id_str)):
+                                          forbid = forbid.union(llm_tokens)
+                          allowed = llm_mask.difference(forbid)
+                          if not allowed.is_empty():
+                              final_mask = final_mask.union(allowed)
 
                       if llm_mask.is_empty():
-                          stopped.add(idx)
+                          stopped.add(node)
                           continue
 
-                      # Transitions
-                      for (pop, llm_bv), dests in (nd.get("children") or []):
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                           popped = gss_node.popn(pop)
-                          child_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                           for dest_idx, state_bv in dests:
-                              matched = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                              if not matched:
+                              if not state_bv.is_empty():
+                                  matched = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
+                                  if not matched:
+                                      continue
+                              else:
                                   continue
                               child_gss = GSS.merge_many(matched)
+                              child_mask = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
                               d = int(dest_idx)
                               if d in values:
-                                  eg, em = values[d]
-                                  values[d] = (eg.merge(child_gss), em.union(child_mask))
+                                  g0, m0 = values[d]
+                                  values[d] = (g0.merge(child_gss), m0.union(child_mask))
                               else:
                                   values[d] = (child_gss, child_mask)
                               enqueue(max_depth[d], d)
 
-              # Map internal to original IDs
-              original_mask = B.zeros()
-              ins = original_mask.insert
-              mp = m.internal_to_original_map
-              for internal_id in final_mask.to_indices():
-                  orig_id = mp.get(internal_id)
-                  if orig_id is not None:
-                      ins(orig_id)
+              original_mask = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
               return RangeSet.from_ranges(original_mask.to_ranges())
       ```
     metadata:
@@ -791,7 +786,7 @@ messages:
       --- Phase 6: Applying changes to assigned files ---
       Successfully updated file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
     metadata:
-  - user: 'Changes committed with message: "Refactor: Simplify Model wrapper and optimize
-      get_mask implementation"'
+  - user: 'Changes committed with message: "Refactor: Streamline get_mask logic for
+      conciseness"'
     metadata:
 ...
