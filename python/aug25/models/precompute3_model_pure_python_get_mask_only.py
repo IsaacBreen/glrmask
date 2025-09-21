@@ -106,7 +106,7 @@ class Model(GraphProvider):
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
                 todo[d] = {r}
-                hp(depth_heap, d)
+                hp(depth_heap, -d)
             else:
                 b.add(r)
 
@@ -114,26 +114,33 @@ class Model(GraphProvider):
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
                 todo[d] = {n}
-                hp(depth_heap, d)
+                hp(depth_heap, -d)
             else:
                 b.add(n)
 
         # Main loop
         while depth_heap:
-            depth: int = hpop(depth_heap)
-            nodes: Optional[Set[int]] = todo.pop(depth, None)
+            depth: int = -hpop(depth_heap)
+            nodes: Set[int] = todo.pop(depth)
 
             for node in nodes:
-                gss_node: Optional[GSS] = values.pop(node)
+                gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                    final_mask = final_mask.union(reduced_acc.llm_mask)
+                    if reduced_acc:
+                        final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                    popped: GSS = gss_node.popn(pop)
+                    if pop > 0:
+                        popped: GSS = gss_node.popn(pop)
+                    else:
+                        popped: GSS = gss_node
+                    if popped.is_empty():
+                        continue
+
                     for dest_idx, state_bv in dests:
                         if state_bv.is_empty():
                             continue
@@ -143,6 +150,9 @@ class Model(GraphProvider):
                             continue
 
                         child_gss: GSS = popped.isolate_many(values_to_keep)
+                        if child_gss.is_empty():
+                            continue
+
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
                             def intersect_edge(acc: PyAcc) -> PyAcc:

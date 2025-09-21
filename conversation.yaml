@@ -228,7 +228,7 @@ local_system:
 
       import os
       from dataclasses import dataclass, field
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
 
       from ..interface import GSS, T, Acc
       from .reference_impl import ReferenceGSS
@@ -582,6 +582,37 @@ local_system:
                   else:
                       filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
                       return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+          def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
+              values_set = set(values)
+
+              # Part 1: handle non-empty stacks
+              gss_for_stacks: LeveledGSS[T, Acc]
+              if isinstance(self.inner, UpperBranch):
+                  filtered_children = {
+                      v: kids for v, kids in self.inner.children.items() if v in values_set
+                  }
+                  if not filtered_children:
+                      gss_for_stacks = self.empty()
+                  else:
+                      gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
+              elif isinstance(self.inner, Interface):
+                  filtered_children = {
+                      v: kids for v, kids in self.inner.children.items() if v in values_set
+                  }
+                  if not filtered_children:
+                      gss_for_stacks = self.empty()
+                  else:
+                      gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+              # Part 2: handle empty stacks
+              if None in values_set:
+                  empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
+                  if empty_acc is not None:
+                      gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                      return gss_for_stacks.merge(gss_for_empty)
+
+              return gss_for_stacks
 
           def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
               if memo is None:
@@ -1039,15 +1070,14 @@ local_system:
                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                           popped: GSS = gss_node.popn(pop)
                           for dest_idx, state_bv in dests:
-                              if not state_bv.is_empty():
-                                  matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                                  if not matched:
-                                      continue
-                              else:
+                              if state_bv.is_empty():
                                   continue
 
-                              child_gss: GSS = GSS.merge_many(matched)
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
 
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                               if not llm_bv.is_empty():
                                   def intersect_edge(acc: PyAcc) -> PyAcc:
@@ -2104,7 +2134,7 @@ local_system:
                   b: Optional[Set[int]] = todo.get(d)
                   if b is None:
                       todo[d] = {r}
-                      hp(depth_heap, d)
+                      hp(depth_heap, -d)
                   else:
                       b.add(r)
 
@@ -2112,26 +2142,33 @@ local_system:
                   b: Optional[Set[int]] = todo.get(d)
                   if b is None:
                       todo[d] = {n}
-                      hp(depth_heap, d)
+                      hp(depth_heap, -d)
                   else:
                       b.add(n)
 
               # Main loop
               while depth_heap:
-                  depth: int = hpop(depth_heap)
-                  nodes: Optional[Set[int]] = todo.pop(depth, None)
+                  depth: int = -hpop(depth_heap)
+                  nodes: Set[int] = todo.pop(depth)
 
                   for node in nodes:
-                      gss_node: Optional[GSS] = values.pop(node)
+                      gss_node: GSS = values.pop(node)
 
                       # End-node handling: just union the allowed LLM tokens
                       if is_end(node):
                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
+                          if reduced_acc:
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
 
                       # Traverse edges and propagate masks
                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                          popped: GSS = gss_node.popn(pop)
+                          if pop > 0:
+                              popped: GSS = gss_node.popn(pop)
+                          else:
+                              popped: GSS = gss_node
+                          if popped.is_empty():
+                              continue
+
                           for dest_idx, state_bv in dests:
                               if state_bv.is_empty():
                                   continue
@@ -2141,6 +2178,9 @@ local_system:
                                   continue
 
                               child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                               if not llm_bv.is_empty():
                                   def intersect_edge(acc: PyAcc) -> PyAcc:
@@ -2443,7 +2483,7 @@ messages:
 
       import os
       from dataclasses import dataclass, field
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
 
       from ..interface import GSS, T, Acc
       from .reference_impl import ReferenceGSS
@@ -2797,6 +2837,37 @@ messages:
                   else:
                       filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
                       return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+          def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
+              values_set = set(values)
+
+              # Part 1: handle non-empty stacks
+              gss_for_stacks: LeveledGSS[T, Acc]
+              if isinstance(self.inner, UpperBranch):
+                  filtered_children = {
+                      v: kids for v, kids in self.inner.children.items() if v in values_set
+                  }
+                  if not filtered_children:
+                      gss_for_stacks = self.empty()
+                  else:
+                      gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
+              elif isinstance(self.inner, Interface):
+                  filtered_children = {
+                      v: kids for v, kids in self.inner.children.items() if v in values_set
+                  }
+                  if not filtered_children:
+                      gss_for_stacks = self.empty()
+                  else:
+                      gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+              # Part 2: handle empty stacks
+              if None in values_set:
+                  empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
+                  if empty_acc is not None:
+                      gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                      return gss_for_stacks.merge(gss_for_empty)
+
+              return gss_for_stacks
 
           def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
               if memo is None:
@@ -3259,15 +3330,14 @@ messages:
                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                           popped: GSS = gss_node.popn(pop)
                           for dest_idx, state_bv in dests:
-                              if not state_bv.is_empty():
-                                  matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                                  if not matched:
-                                      continue
-                              else:
+                              if state_bv.is_empty():
                                   continue
 
-                              child_gss: GSS = GSS.merge_many(matched)
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
 
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                               if not llm_bv.is_empty():
                                   def intersect_edge(acc: PyAcc) -> PyAcc:
@@ -3295,21 +3365,94 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
   - user: |-
-      Add a faster impl of isolate_many to leveled_impl.py.
-      Use it in get_mask here
-      ```python
-                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                          popped: GSS = gss_node.popn(pop)
-                          for dest_idx, state_bv in dests:
-                              if not state_bv.is_empty():
-                                  matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                                  if not matched:
-                                      continue
-                              else:
-                                  continue
+      DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      Benchmark results will be saved in: benchmark_results/2025-09-21_13-09-26
+      ---
+      Baseline Model: python/aug25/models/rust_model.py
+      Other Models: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      Constraint File: ./.cache/test_vocabs/js_grammar_constraint.json.gz
+      Code: ./src/example_code.js
+      ---
+      Starting benchmark runs...
 
-                              child_gss: GSS = GSS.merge_many(matched)
-      ```
+      >>> Running benchmark for: rust_model.py
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-21_13-09-26
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
+      Loading model from: python/aug25/models/rust_model.py
+      Model loaded in 3.2034 seconds.
+      Loading and tokenizing code from: src/example_code.js
+      Tokenized into 21 tokens.
+
+      --- Running benchmark (21 steps) ---
+      Traversing edges:  30%|███████████████████████████████████████████▎                                                                                                  | 112702/371471 [00:00<00:00, 1126594.25it/s]--- Benchmark finished ---
+
+      Benchmark results saved to: benchmark_results/2025-09-21_13-09-26/rust_model_results.json
+      >>> Finished benchmark for: rust_model.py
+
+      >>> Running benchmark for: precompute3_model_pure_python_get_mask_only.py
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_pure_python_get_mask_only.py --output benchmark_results/2025-09-21_13-09-26
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
+      Loading model from: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      Model loaded in 13.7975 seconds.
+      Loading and tokenizing code from: src/example_code.js
+      Tokenized into 21 tokens.
+
+      --- Running benchmark (21 steps) ---
+      commit (ms): 0.62
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 310, in main
+          run_benchmark(args)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 234, in run_benchmark
+          mask_rs = model.get_mask()
+                    ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_get_mask_only.py", line 127, in get_mask
+          gss_node: Optional[GSS] = values.pop(node)
+                                    ^^^^^^^^^^^^^^^^
+      KeyError: 7305184
+
+      >>> Benchmark for precompute3_model_pure_python_get_mask_only.py failed with exit code 1. Skipping.
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-21_13-09-26/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-21_13-09-26/analysis
+      Selected baseline: rust_model
+      --- Benchmark Summary ---
+                 equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                   
+      rust_model          ✅                    0     21   152.5061  265.6080   28.6880   77.0614  157.0545 1090.0724 1260.3732
+
+      Baseline: rust_model
+      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
+
+      Saving plots to benchmark_results/2025-09-21_13-09-26/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-21_13-09-26/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-21_13-09-26/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-21_13-09-26/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-21_13-09-26/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-21_13-09-26/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-21_13-09-26/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-21_13-09-26/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-21_13-09-26/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-21_13-09-26/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-21_13-09-26/analysis/total_timings_per_token_log.png
+
+      ---
+      Benchmark analysis complete.
+      Baseline: rust_model
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-21_13-09-26/analysis
+      Full JSON results are in: benchmark_results/2025-09-21_13-09-26
+    metadata:
+  - user: |-
+      How can this be? Should always be there. Adding a check would be a quick fix but ignores the bigger issue which is that it isn't there. Don't just add a check for the item. Address the root problem.
+
+      Maybe to make it simpler, don't pop off depth_heap, just read it and pop a node from what's read, and then if the entry is empty pop it off.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3328,170 +3471,93 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement a faster `isolate_many` and use it, followed by the git diffs.
+      Hello! I've analyzed the `KeyError` you're encountering. The root cause appears to be a logical error in the graph traversal, which I'll correct. I'll also add a few robustness improvements to prevent related issues.
 
-      ### Step-by-step Instructions
+      The primary issue is that the algorithm processes nodes from the precomputed trie in the wrong order. It uses a min-heap on the `max_depth` of nodes, causing it to process nodes with smaller `max_depth` (closer to the end) before nodes with larger `max_depth` (closer to the start). This violates the topological sort required for correct GSS propagation. The fix is to simulate a max-heap by storing the negative of the depths.
 
-      #### 1. Add `isolate_many` to `LeveledGSS`
+      Here are the step-by-step instructions to fix the file:
 
-      First, we'll add an efficient, specialized implementation of `isolate_many` to the `LeveledGSS` class.
+      ### File: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
 
-      -   **File:** `python/gss_tester/implementations/leveled_impl.py`
-      -   **Action:**
-          1.  At the top of the file, add `Iterable` to the list of imports from the `typing` module. The import line should look like this:
-              ```python
-              from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
-              ```
-          2.  In the `LeveledGSS` class, add the new `isolate_many` method immediately after the existing `isolate` method.
+      1.  **Fix the heap logic for topological sorting:**
+          *   In the initial seeding loop (around line 89), when pushing to `depth_heap`, push the negative depth: `hp(depth_heap, -d)`.
+          *   In the `enqueue` function (around line 97), also push the negative depth: `hp(depth_heap, -d)`.
+          *   In the main `while` loop (around line 103), when popping from the heap, negate the result to get the correct positive depth: `depth: int = -hpop(depth_heap)`.
 
-              ```python
-              # ... inside LeveledGSS class, after the isolate method ...
-              def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
-                  values_set = set(values)
-          
-                  # Part 1: handle non-empty stacks
-                  gss_for_stacks: LeveledGSS[T, Acc]
-                  if isinstance(self.inner, UpperBranch):
-                      filtered_children = {
-                          v: kids for v, kids in self.inner.children.items() if v in values_set
-                      }
-                      if not filtered_children:
-                          gss_for_stacks = self.empty()
-                      else:
-                          gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
-                  elif isinstance(self.inner, Interface):
-                      filtered_children = {
-                          v: kids for v, kids in self.inner.children.items() if v in values_set
-                      }
-                      if not filtered_children:
-                          gss_for_stacks = self.empty()
-                      else:
-                          gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
-          
-                  # Part 2: handle empty stacks
-                  if None in values_set:
-                      empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
-                      if empty_acc is not None:
-                          gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-                          return gss_for_stacks.merge(gss_for_empty)
-          
-                  return gss_for_stacks
-              ```
+      2.  **Improve type hint precision:**
+          *   Around line 104, change the type hint for `nodes` from `Optional[Set[int]]` to `Set[int]` and remove the default from `todo.pop()`. If a depth is in the heap, it must be in `todo`.
+          *   Around line 106, change the type hint for `gss_node` from `Optional[GSS]` to `GSS`, as `values.pop()` will raise the `KeyError` if the node is missing, rather than returning `None`.
 
-      #### 2. Use `isolate_many` in `get_mask`
+      3.  **Add robustness for end-node handling:**
+          *   Around line 110, after calling `gss_node.reduce_acc()`, add a check to ensure the result (`reduced_acc`) is not `None` before attempting to access its `llm_mask` attribute. This prevents a potential `AttributeError` if the GSS is empty.
 
-      Next, we'll update the `get_mask` method to use our new, faster implementation. This change also resolves a potential `UnboundLocalError` in the original code.
+      4.  **Optimize GSS propagation:**
+          *   Around line 114, avoid calling `popn(0)` as it's a no-op. Add a check for `pop > 0`.
+          *   After popping, check if the resulting `popped` GSS is empty. If so, `continue` to the next edge, as no paths can be extended from an empty GSS.
+          *   After isolating stacks with `isolate_many`, check if the resulting `child_gss` is empty. If so, `continue` to avoid propagating empty GSSs.
 
-      -   **File:** `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
-      -   **Action:** In the `get_mask` method, find the inner loop `for dest_idx, state_bv in dests:`. Replace the block that calculates `child_gss` with a more efficient and correct version using `isolate_many`.
-
-          -   **Replace this block:**
-              ```python
-                              if not state_bv.is_empty():
-                                  matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                                  if not matched:
-                                      continue
-                              else:
-                                  continue
-
-                              child_gss: GSS = GSS.merge_many(matched)
-              ```
-          -   **With this new block:**
-              ```python
-                              if state_bv.is_empty():
-                                  continue
-
-                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
-                              if not values_to_keep:
-                                  continue
-
-                              child_gss: GSS = popped.isolate_many(values_to_keep)
-              ```
-
-      ---
-
-      ### Git Diffs
-
-      Here are the git diffs for the changes described above.
-
-      ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 811111c..1111111 100644
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -2,7 +2,7 @@
-       
-       import os
-       from dataclasses import dataclass, field
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
-       
-       from ..interface import GSS, T, Acc
-       from .reference_impl import ReferenceGSS
-      @@ -411,6 +411,36 @@
-                       filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
-                       return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
-       
-      +    def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
-      +        values_set = set(values)
-      +
-      +        # Part 1: handle non-empty stacks
-      +        gss_for_stacks: LeveledGSS[T, Acc]
-      +        if isinstance(self.inner, UpperBranch):
-      +            filtered_children = {
-      +                v: kids for v, kids in self.inner.children.items() if v in values_set
-      +            }
-      +            if not filtered_children:
-      +                gss_for_stacks = self.empty()
-      +            else:
-      +                gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
-      +        elif isinstance(self.inner, Interface):
-      +            filtered_children = {
-      +                v: kids for v, kids in self.inner.children.items() if v in values_set
-      +            }
-      +            if not filtered_children:
-      +                gss_for_stacks = self.empty()
-      +            else:
-      +                gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
-      +
-      +        # Part 2: handle empty stacks
-      +        if None in values_set:
-      +            empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
-      +            if empty_acc is not None:
-      +                gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-      +                return gss_for_stacks.merge(gss_for_empty)
-      +
-      +        return gss_for_stacks
-      +
-           def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
-               if memo is None:
-                   memo = {}
-
-      ```
+      Here are the corresponding git diffs:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      index 1111111..2222222 100644
       --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
       +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -130,17 +130,14 @@
+      @@ -86,7 +86,7 @@
+                   b: Optional[Set[int]] = todo.get(d)
+                   if b is None:
+                       todo[d] = {r}
+      -                hp(depth_heap, d)
+      +                hp(depth_heap, -d)
+                   else:
+                       b.add(r)
+       
+      @@ -94,28 +94,33 @@
+                   b: Optional[Set[int]] = todo.get(d)
+                   if b is None:
+                       todo[d] = {n}
+      -                hp(depth_heap, d)
+      +                hp(depth_heap, -d)
+                   else:
+                       b.add(n)
+       
+               # Main loop
+               while depth_heap:
+      -            depth: int = hpop(depth_heap)
+      -            nodes: Optional[Set[int]] = todo.pop(depth, None)
+      +            depth: int = -hpop(depth_heap)
+      +            nodes: Set[int] = todo.pop(depth)
+       
+                   for node in nodes:
+      -                gss_node: Optional[GSS] = values.pop(node)
+      +                gss_node: GSS = values.pop(node)
+       
+                       # End-node handling: just union the allowed LLM tokens
+                       if is_end(node):
+                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+      -                    final_mask = final_mask.union(reduced_acc.llm_mask)
+      +                    if reduced_acc:
+      +                        final_mask = final_mask.union(reduced_acc.llm_mask)
+       
+                       # Traverse edges and propagate masks
                        for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                           popped: GSS = gss_node.popn(pop)
+      -                    popped: GSS = gss_node.popn(pop)
+      +                    if pop > 0:
+      +                        popped: GSS = gss_node.popn(pop)
+      +                    else:
+      +                        popped: GSS = gss_node
+      +                    if popped.is_empty():
+      +                        continue
+      +
                            for dest_idx, state_bv in dests:
-      -                        if not state_bv.is_empty():
-      -                            matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-      -                            if not matched:
-      -                                continue
-      -                        else:
-      +                        if state_bv.is_empty():
+                               if state_bv.is_empty():
+                                   continue
+      @@ -125,6 +130,9 @@
                                    continue
        
-      -                        child_gss: GSS = GSS.merge_many(matched)
-      +                        values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
-      +                        if not values_to_keep:
+                               child_gss: GSS = popped.isolate_many(values_to_keep)
+      +                        if child_gss.is_empty():
       +                            continue
-       
-      +                        child_gss: GSS = popped.isolate_many(values_to_keep)
+      +
                                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                                if not llm_bv.is_empty():
                                    def intersect_edge(acc: PyAcc) -> PyAcc:
@@ -3500,19 +3566,14 @@ messages:
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
-
-      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add optimized isolate_many to LeveledGSS
-      and use in get_mask"'
+  - user: 'Changes committed with message: "Fix heap logic for topological sort and
+      improve GSS propagation robustness"'
     metadata:
 ...
