@@ -48,7 +48,7 @@ class ParserTable:
     table: Dict[int, Row]
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
     llm_mask: ffi.Bitset
