@@ -106,7 +106,7 @@ class Model(GraphProvider):
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
                 todo[d] = {r}
-                hp(depth_heap, -d)
+                hp(depth_heap, d)
             else:
                 b.add(r)
 
@@ -114,13 +114,13 @@ class Model(GraphProvider):
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
                 todo[d] = {n}
-                hp(depth_heap, -d)
+                hp(depth_heap, d)
             else:
                 b.add(n)
 
         # Main loop
         while depth_heap:
-            depth: int = -hpop(depth_heap)
+            depth: int = hpop(depth_heap)
             nodes: Set[int] = todo.pop(depth)
 
             for node in nodes:
@@ -129,15 +129,11 @@ class Model(GraphProvider):
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                    if reduced_acc:
-                        final_mask = final_mask.union(reduced_acc.llm_mask)
+                    final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                    if pop > 0:
-                        popped: GSS = gss_node.popn(pop)
-                    else:
-                        popped: GSS = gss_node
+                    popped: GSS = gss_node.popn(pop)
                     if popped.is_empty():
                         continue
 
