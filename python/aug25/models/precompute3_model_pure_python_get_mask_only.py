@@ -235,6 +235,7 @@ class Model(GraphProvider):
                             for k, v in _PROFILING_STATS.items():
                                 print(f"{k} calls: {v}")
                             print(values[d].stats())
+                            values[d]._validate()
                             print("------")
                         else:
                             values[d] = child_gss
