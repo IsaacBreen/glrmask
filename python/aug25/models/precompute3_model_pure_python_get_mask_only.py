@@ -86,9 +86,6 @@ class Model(GraphProvider):
         t_start = time.perf_counter_ns()
         self.get_mask_calls += 1
 
-        # Reset per-call stats
-        for k in _PROFILING_STATS:
-            _PROFILING_STATS[k] = 0
         call_stats = {
             'nodes_visited': 0,
             'main_loop_iterations': 0,
@@ -169,6 +166,10 @@ class Model(GraphProvider):
                 b.add(n)
 
         t_init_done = time.perf_counter_ns()
+
+        # Reset per-call stats
+        for k in _PROFILING_STATS:
+            _PROFILING_STATS[k] = 0
 
         # Main loop
         while depth_heap:
