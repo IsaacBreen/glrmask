@@ -122,13 +122,10 @@ class Model(GraphProvider):
         while depth_heap:
             depth: int = hpop(depth_heap)
             nodes: Optional[Set[int]] = todo.pop(depth, None)
-            if not nodes:
-                continue
 
             for node in nodes:
-                gss_node: Optional[GSS] = values.pop(node, None)
-                if gss_node is None:
-                    continue
+                gss_node: Optional[GSS] = values.pop(node)
+                assert gss_node is not None
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
