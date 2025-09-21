@@ -373,7 +373,7 @@ class Model(GraphProvider):
             if existing is not None:
                 existing_gss, existing_mask = existing
                 merged_gss = existing_gss.merge(gss)
-                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                values[root_idx] = (merged_gss, new_mask)
             else:
                 values[root_idx] = (gss, new_mask)
 
@@ -424,14 +424,12 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     forbidden_llm_tokens = ffi.Bitset.zeros()
                     disallowed_terminals_l2 = get_disallowed_terminals_py(gss_node)
-                    possible_matches = self.possible_matches_cache
-
                     for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
                         if disallowed_bv.is_empty():
                             continue
                         end = min(end, self.tokenizer.max_state())
                         for tsid in range(start, end + 1):
-                            possible_matches_for_state = possible_matches.get(tsid)
+                            possible_matches_for_state = self.possible_matches_cache.get(tsid)
                             if not possible_matches_for_state:
                                 continue
                             for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
