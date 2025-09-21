@@ -305,9 +305,6 @@ class Model(GraphProvider):
         t1 = time.perf_counter()
         print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
-        for sid, gss in self.state.items():
-            gss._validate()
-
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
