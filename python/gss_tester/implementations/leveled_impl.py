@@ -358,8 +358,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
 
 
-    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        memo: Dict[int, Any] = {}
+    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
+        if memo is None:
+            memo = {}
 
         def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
             if id(node) in memo:
