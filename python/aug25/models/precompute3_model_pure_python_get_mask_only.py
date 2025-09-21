@@ -116,9 +116,7 @@ class Model(GraphProvider):
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         memo = {}
         for sid, gss in state_map.items():
-            r: Optional[int] = roots_map.get(int(sid))
-            if r is None:
-                continue
+            r: Optional[int] = roots_map[int(sid)]
             r = int(r)
 
             def initialize_acc(acc: PyAcc) -> PyAcc:
