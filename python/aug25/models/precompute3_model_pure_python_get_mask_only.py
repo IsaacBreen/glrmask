@@ -156,6 +156,7 @@ class Model(GraphProvider):
             else:
                 b.add(r)
 
+        print(GSS.merge_many(list(self.state.values())).stats())
         print(GSS.merge_many(list(values.values())).stats())
 
         def enqueue(d: int, n: int) -> None:
