@@ -121,10 +121,8 @@ class Model(GraphProvider):
         # Main loop
         while depth_heap:
             depth: int = hpop(depth_heap)
-            nodes: Set[int] = todo[depth]
-
-            while nodes:
-                node: int = nodes.pop()
+            while todo[depth]:
+                node: int = todo[depth].pop()
                 gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
@@ -165,6 +163,8 @@ class Model(GraphProvider):
                         else:
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
+
+                todo.pop(depth)
 
         # Convert internal mask back to original IDs
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
