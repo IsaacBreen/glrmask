@@ -93,6 +93,8 @@ def load_model_class(model_path: Path):
 
 def print_model_statistics(model, model_name: str):
     """Analyzes and prints statistics about the loaded graph model."""
+    print("Decrecated")
+    return
     from aug25.common_interface import RangeSet  # local import to avoid cycles
     import _sep1 as ffi
     print(f"\n--- Statistics for {model_name} ---")
