@@ -739,8 +739,9 @@ local_system:
                           new_child = transform(child)
                           if new_child is not child:
                               any_child_changed_for_v = True
-                          # Depth does not change in apply, so we can reuse `d`.
-                          new_kids_for_v[d] = new_child
+                          # The depth of a child can change if a promotion occurs,
+                          # so we must use the new depth as the key.
+                          new_kids_for_v[new_child._max_depth] = new_child
 
                       if any_child_changed_for_v:
                           changed = True
@@ -1751,6 +1752,7 @@ local_system:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
+          total_accumulator_instances: int
           accumulator_sharing_ratio: float
 
           # "Empty" flags / terminal interfaces
@@ -1812,6 +1814,7 @@ local_system:
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+              lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
@@ -2193,9 +2196,8 @@ local_system:
                           new_child = transform(child)
                           if new_child is not child:
                               any_child_changed_for_v = True
-                          # The depth of a child can change if a promotion occurs,
-                          # so we must use the new depth as the key.
-                          new_kids_for_v[new_child._max_depth] = new_child
+                          # Depth does not change in apply, so we can reuse `d`.
+                          new_kids_for_v[d] = new_child
 
                       if any_child_changed_for_v:
                           changed = True
@@ -2587,6 +2589,7 @@ local_system:
 
               distinct_values: Set[T] = set()
               unique_accumulators: Set[Acc] = set()
+              total_accumulator_instances = 0
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
@@ -2641,6 +2644,7 @@ local_system:
                           if node.empty is not None:
                               num_upper_with_empty += 1
                               unique_accumulators.add(node.empty)
+                              total_accumulator_instances += 1
                           # edges and values
                           for v, kids in node.children.items():
                               distinct_values.add(v)
@@ -2663,9 +2667,11 @@ local_system:
                           visited_interface.add(nid)
                           num_interface_nodes += 1
                           unique_accumulators.add(node.acc)
+                          total_accumulator_instances += 1
                           if node.empty is not None:
                               num_interfaces_with_empty += 1
                               unique_accumulators.add(node.empty)
+                              total_accumulator_instances += 1
                           if not node.children and node.empty is None:
                               num_interface_implicit_terminals += 1
                           # edges to lower and values
@@ -2752,6 +2758,7 @@ local_system:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
+                  total_accumulator_instances=total_accumulator_instances,
                   accumulator_sharing_ratio=accumulator_sharing_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
@@ -3702,8 +3709,9 @@ messages:
                           new_child = transform(child)
                           if new_child is not child:
                               any_child_changed_for_v = True
-                          # Depth does not change in apply, so we can reuse `d`.
-                          new_kids_for_v[d] = new_child
+                          # The depth of a child can change if a promotion occurs,
+                          # so we must use the new depth as the key.
+                          new_kids_for_v[new_child._max_depth] = new_child
 
                       if any_child_changed_for_v:
                           changed = True
@@ -4426,9 +4434,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py
-      python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee
-      .temp
+  - user: It'd be really useful to know the number of appearances of acc in interface
+      or in upper branch nodes, not just unique appearances, either in acc or empty
+      field.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4447,56 +4455,89 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'm here to help you with your code. Based on my analysis of the provided files, I've identified a potential subtle bug in the `apply` method of `LeveledGSS`. Here are the step-by-step instructions to fix it, followed by the corresponding git diff.
-
-      The `apply` method in `python/gss_tester/implementations/leveled_impl.py` assumes that the `_max_depth` of a child node does not change during the transformation. While this is often true, a promotion triggered by changing accumulators could theoretically alter the structure in a way that changes the depth. The current implementation reuses the old depth `d` as the key, which could lead to an inconsistent state.
-
-      The fix is to use the `_max_depth` from the `new_child` object, which is guaranteed to be correct. This makes the `apply` method's logic consistent with the safer approaches used in `prune` and `apply_and_prune`.
+      Of course. Here are the step-by-step instructions to add the total number of accumulator appearances to the `LeveledGSSStats`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/implementations/leveled_impl.py`.
+      You will need to edit one file: `python/gss_tester/implementations/leveled_impl.py`.
 
-      2.  **Navigate to the `apply` method** inside the `LeveledGSS` class. Within the nested `transform` function, find the logic that handles `UpperBranch` nodes.
+      1.  **Modify the `LeveledGSSStats` Dataclass**
+          In `python/gss_tester/implementations/leveled_impl.py`, locate the `LeveledGSSStats` dataclass definition. Add a new field `total_accumulator_instances: int` after the `unique_accumulators` field.
 
-      3.  **Locate and modify the child update logic.** Around line 638, you will find the following lines:
+      2.  **Update the `__str__` Method**
+          In the same file, find the `__str__` method within the `LeveledGSSStats` class. Add a new line to print the `total_accumulator_instances` value. A good place for this is after the line that prints `unique_accumulators_count`.
 
-          ```python
-                          # Depth does not change in apply, so we can reuse `d`.
-                          new_kids_for_v[d] = new_child
-          ```
-
-      4.  **Replace those lines** with the corrected logic that uses the new child's depth. Also, update the comment to reflect why this change is necessary:
-
-          ```python
-                          # The depth of a child can change if a promotion occurs,
-                          # so we must use the new depth as the key.
-                          new_kids_for_v[new_child._max_depth] = new_child
-          ```
-
-      This ensures the internal structure of the GSS remains valid, especially when validation checks are enabled.
+      3.  **Update the `stats` Method in `LeveledGSS`**
+          a.  Navigate to the `stats` method within the `LeveledGSS` class.
+          b.  Initialize a new counter variable `total_accumulator_instances = 0` near the other statistical counters.
+          c.  Inside the `while upper_queue:` loop, which traverses the GSS structure, increment `total_accumulator_instances`:
+              -   When an `UpperBranch` node has a non-`None` `empty` accumulator.
+              -   For the `acc` field of every unique `Interface` node visited.
+              -   When an `Interface` node has a non-`None` `empty` accumulator.
+          d.  At the end of the `stats` method, pass the final `total_accumulator_instances` count to the `LeveledGSSStats` constructor.
 
       ### Git Diff
 
-      Here is the git patch to apply the change:
+      Here is the git diff to apply these changes.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 4554e20..270e53a 100644
+      index 4554471..c85a1a1 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -636,9 +636,9 @@
-                           new_child = transform(child)
-                           if new_child is not child:
-                               any_child_changed_for_v = True
-      -                    # Depth does not change in apply, so we can reuse `d`.
-      -                    new_kids_for_v[d] = new_child
-      +                    # The depth of a child can change if a promotion occurs,
-      +                    # so we must use the new depth as the key.
-      +                    new_kids_for_v[new_child._max_depth] = new_child
+      @@ -101,6 +101,7 @@
+           distinct_values: Set[T]
+           unique_accumulators_count: int
+           unique_accumulators: Set[Acc]
+      +    total_accumulator_instances: int
+           accumulator_sharing_ratio: float
        
-                       if any_child_changed_for_v:
-                           changed = True
+           # "Empty" flags / terminal interfaces
+      @@ -151,6 +152,7 @@
+               lines.append("- values/accumulators:")
+               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+      +        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
+               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+       
+      @@ -808,6 +810,7 @@
+       
+               distinct_values: Set[T] = set()
+               unique_accumulators: Set[Acc] = set()
+      +        total_accumulator_instances = 0
+       
+               num_upper_with_empty = 0
+               num_interfaces_with_empty = 0
+      @@ -853,6 +856,7 @@
+                           if node.empty is not None:
+                               num_upper_with_empty += 1
+                               unique_accumulators.add(node.empty)
+      +                        total_accumulator_instances += 1
+                           # edges and values
+                           for v, kids in node.children.items():
+                               distinct_values.add(v)
+      @@ -874,10 +878,12 @@
+                       if nid not in visited_interface:
+                           visited_interface.add(nid)
+                           num_interface_nodes += 1
+                           unique_accumulators.add(node.acc)
+      +                    total_accumulator_instances += 1
+                           if node.empty is not None:
+                               num_interfaces_with_empty += 1
+                               unique_accumulators.add(node.empty)
+      +                        total_accumulator_instances += 1
+                           if not node.children and node.empty is None:
+                               num_interface_implicit_terminals += 1
+                           # edges to lower and values
+      @@ -945,6 +951,7 @@
+                   distinct_values=distinct_values,
+                   unique_accumulators_count=unique_accumulators_count,
+                   unique_accumulators=unique_accumulators,
+      +            total_accumulator_instances=total_accumulator_instances,
+                   accumulator_sharing_ratio=accumulator_sharing_ratio,
+                   num_upper_with_empty=num_upper_with_empty,
+                   num_interfaces_with_empty=num_interfaces_with_empty,
 
       ```
     metadata:
@@ -4509,7 +4550,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Fix(leveled_impl): Use new_child._max_depth
-      as key in LeveledGSS.apply"'
+  - user: 'Changes committed with message: "feat: Add total accumulator instance count
+      to LeveledGSSStats"'
     metadata:
 ...
