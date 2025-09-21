@@ -202,7 +202,7 @@ class Model(GraphProvider):
         in_queue: Set[int] = set()
 
         def push_node(n: int) -> None:
-            if n not in_queue:
+            if n not in in_queue:
                 in_queue.add(n)
                 d = max_depth.get(int(n), 0)
                 heapq.heappush(heap, (int(d), int(n)))
