@@ -181,7 +181,8 @@ class Model(GraphProvider):
                 if is_end(node):
                     call_stats['end_nodes_reached'] += 1
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                    final_mask = final_mask.union(reduced_acc.llm_mask)
+                    if reduced_acc:
+                        final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
@@ -203,13 +204,18 @@ class Model(GraphProvider):
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
-                            def intersect_edge(acc: PyAcc) -> PyAcc:
+                            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                new_mask = acc.llm_mask.intersection(llm_bv)
+                                if new_mask.is_empty():
+                                    return None
                                 return PyAcc(
                                     terminals_union=acc.terminals_union,
-                                    llm_mask=acc.llm_mask.intersection(llm_bv)
+                                    llm_mask=new_mask
                                 )
                             call_stats['main_loop_apply_calls'] += 1
-                            child_gss = child_gss.apply(intersect_edge)
+                            child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                            if child_gss.is_empty():
+                                continue
 
                         d: int = int(dest_idx)
                         if d in values:
