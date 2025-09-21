@@ -335,8 +335,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 end_acc = e.get("end")
                 sub = e.get("sub", {})
                 if end_acc is not None:
-                    # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty'
-                    nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
+                    # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty', then promote
+                    nodes_for_v.append(try_promote(UpperBranch(children={}, empty=end_acc)))
                 if sub:
                     nodes_for_v.append(build(sub))
                 if nodes_for_v:
