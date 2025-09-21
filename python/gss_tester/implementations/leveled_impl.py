@@ -457,7 +457,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 empty_acc = self.inner.empty
             else:
                 empty_acc = self.inner.empty
-            return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+            new_root = UpperBranch(children={}, empty=empty_acc)
+            # Promote to canonical form if applicable (avoids validator errors).
+            return LeveledGSS(try_promote(new_root))
 
         # Keep stacks with `value` at the top.
         if isinstance(self.inner, UpperBranch):
@@ -496,7 +498,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if None in values_set:
             empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
             if empty_acc is not None:
-                gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                # Promote the singleton-empty representation to keep structure canonical.
+                gss_for_empty = LeveledGSS(try_promote(UpperBranch(children={}, empty=empty_acc)))
                 return gss_for_stacks.merge(gss_for_empty)
 
         return gss_for_stacks
@@ -576,8 +579,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
                 if not keep_acc and keep_empty:
                     res = UpperBranch(children={}, empty=new_empty)
-                    memo[id(node)] = res
-                    return res
+                    promoted = try_promote(res)
+                    memo[id(node)] = promoted
+                    return promoted
 
                 # keep_acc is True, but empty might have been pruned.
                 res = Interface(children=node.children, acc=node.acc, empty=new_empty)
@@ -667,10 +671,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
                 if not keep_acc and keep_empty:
                     # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-                    # Becomes an UpperBranch leaf with only 'empty'.
+                    # Promote the leaf to maintain canonical form (Interface with no children).
                     res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
-                    memo[nid] = res
-                    return res
+                    promoted = try_promote(res)
+                    memo[nid] = promoted
+                    return promoted
 
                 # keep_acc is True
                 new_acc = new_acc_opt  # type: ignore[assignment]
@@ -1147,6 +1152,10 @@ def _merge_children_by_depth(
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     all_children = list(node._all_children())
     if not all_children:
+        # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
+        # it can be represented canonically as an Interface with no children.
+        if node.empty is not None:
+            return Interface(children={}, acc=node.empty, empty=node.empty)
         return node
     if not all(isinstance(c, Interface) for c in all_children):
         return node
