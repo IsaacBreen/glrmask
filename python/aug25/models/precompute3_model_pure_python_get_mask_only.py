@@ -125,7 +125,6 @@ class Model(GraphProvider):
 
             for node in nodes:
                 gss_node: Optional[GSS] = values.pop(node)
-                assert gss_node is not None
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
