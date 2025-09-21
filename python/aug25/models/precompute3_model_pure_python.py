@@ -48,37 +48,23 @@ class ParserTable:
     table: Dict[int, Row]
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class PyAcc:
     terminals_union: ffi.HybridL2Bitset
-    llm_tokens: Optional[ffi.Bitset] = None
-
-    @property
-    def _llm_tokens_tuple(self) -> Optional[Tuple[Tuple[int, int], ...]]:
-        if self.llm_tokens is None:
-            return None
-        return tuple(self.llm_tokens.to_ranges())
+    llm_mask: ffi.Bitset
 
     def __hash__(self):
-        return hash((self.terminals_union, self._llm_tokens_tuple))
-
-    def __eq__(self, other):
-        if not isinstance(other, PyAcc):
-            return NotImplemented
-        return self.terminals_union == other.terminals_union and self._llm_tokens_tuple == other._llm_tokens_tuple
+        # Hash by terminals_union only; equals uses both fields (default dataclass),
+        # but equal objects (same terminals_union and llm_mask) will still share hash.
+        return hash(self.terminals_union)
 
     def merge(self, other: "PyAcc") -> "PyAcc":
-        new_terminals = self.terminals_union.union(other.terminals_union)
-        
-        new_llm_tokens = None
-        if self.llm_tokens is not None and other.llm_tokens is not None:
-            new_llm_tokens = self.llm_tokens.union(other.llm_tokens)
-        elif self.llm_tokens is not None:
-            new_llm_tokens = self.llm_tokens
-        elif other.llm_tokens is not None:
-            new_llm_tokens = other.llm_tokens
-            
-        return PyAcc(terminals_union=new_terminals, llm_tokens=new_llm_tokens)
+        # Merge terminals_union by union (as before).
+        # Merge llm_mask by union as well, since overall allowances are a disjunction of paths.
+        return PyAcc(
+            terminals_union=self.terminals_union.union(other.terminals_union),
+            llm_mask=self.llm_mask.union(other.llm_mask),
+        )
 
 
 class Model(GraphProvider):
@@ -174,7 +160,7 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
-        initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all())
+        initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all(), llm_mask=ffi.Bitset.zeros())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -207,7 +193,7 @@ class Model(GraphProvider):
             new_l2 = ffi.HybridL2Bitset.all()
             for new_sid, bv in new_bvs.items():
                 new_l2.insert_l2_bitset(new_sid, bv)
-            return PyAcc(terminals_union=new_l2)
+            return PyAcc(terminals_union=new_l2, llm_mask=acc.llm_mask)
         return gss.apply(apply_map)
 
     @profile
@@ -220,7 +206,7 @@ class Model(GraphProvider):
                 to_remove = ffi.Bitset.from_indices([terminal_id])
                 new_bv = curr_bv.difference(to_remove)
                 new_l2.insert_l2_bitset(state_id, new_bv)
-            return PyAcc(terminals_union=new_l2)
+            return PyAcc(terminals_union=new_l2, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
 
     def get_root(self, state_id: int) -> int:
@@ -366,36 +352,17 @@ class Model(GraphProvider):
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+        Changes:
+        - Initialize LLM mask per-accumulator (PyAcc.llm_mask) BEFORE traversal by computing
+          the forbidden terminals -> forbidden LLM tokens and taking the complement.
+        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         state_map = self.state
         all_ones_mask = self.all_internal_llm_tokens_bitset
         final_mask = ffi.Bitset.zeros()
-
-        pmc = self.possible_matches_cache
-        max_state = self.tokenizer.max_state()
-
-        processed_state_map: Dict[int, GSS] = {}
-        for sid, gss in state_map.items():
-            def prepare_acc(acc: PyAcc) -> PyAcc:
-                disallowed_terminals_l2 = acc.terminals_union.complement()
-                forbid = ffi.Bitset.zeros()
-                for (start, end), bv in disallowed_terminals_l2.range_values():
-                    if bv.is_empty():
-                        continue
-                    for tsid in range(start, min(end, max_state) + 1):
-                        pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                        if not pm:
-                            continue
-                        for terminal_id_str, llm_tokens in pm.items():
-                            if bv.contains(int(terminal_id_str)):
-                                forbid = forbid.union(llm_tokens)
-                
-                allowed_llm_tokens = all_ones_mask.difference(forbid)
-                return PyAcc(terminals_union=ffi.HybridL2Bitset.all(), llm_tokens=allowed_llm_tokens)
-
-            processed_gss = gss.apply(prepare_acc)
-            if not processed_gss.is_empty():
-                 processed_state_map[sid] = processed_gss
 
         values: Dict[int, GSS] = {}
         stopped: set[int] = set()
@@ -409,18 +376,53 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
-        # Seed
-        for sid, gss in processed_state_map.items():
+        pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+        max_state = self.tokenizer.max_state()
+
+        def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
+            merged_acc = gss.reduce_acc()
+            if merged_acc is None:
+                return ffi.HybridL2Bitset.all()
+            return merged_acc.terminals_union.complement()
+
+        # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
+        for sid, gss in state_map.items():
+            # Compute forbidden LLM tokens from disallowed terminals
+            forbid: ffi.Bitset = ffi.Bitset.zeros()
+            disallowed_l2 = get_disallowed_terminals_py(gss)
+            for (start, end), bv in disallowed_l2.range_values():
+                if bv.is_empty():
+                    continue
+                for tsid in range(start, min(end, max_state) + 1):
+                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                    if not pm:
+                        continue
+                    for terminal_id_str, llm_tokens in pm.items():
+                        if bv.contains(int(terminal_id_str)):
+                            forbid = forbid.union(llm_tokens)
+
+            allowed_mask = all_ones_mask.difference(forbid)
+
+            # Set initial llm_mask on each accumulator and consume terminals_union
+            def initialize_acc(acc: PyAcc) -> PyAcc:
+                return PyAcc(
+                    terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                    llm_mask=allowed_mask
+                )
+
+            gss_initialized = gss.apply(initialize_acc)
+
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
 
-            existing_gss = values.get(root_idx)
-            if existing_gss is not None:
-                values[root_idx] = existing_gss.merge(gss)
+            existing = values.get(root_idx)
+            if existing is not None:
+                merged_gss = existing.merge(gss_initialized)
+                values[root_idx] = merged_gss
             else:
-                values[root_idx] = gss
+                values[root_idx] = gss_initialized
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -458,50 +460,49 @@ class Model(GraphProvider):
                 if gss_node is None:
                     continue
 
-                reduced_acc_for_check = gss_node.reduce_acc()
-                if not reduced_acc_for_check or not reduced_acc_for_check.llm_tokens or reduced_acc_for_check.llm_tokens.is_empty():
+                # Compute current allowed LLM tokens at this node by reducing acc
+                reduced_acc = gss_node.reduce_acc()
+                if reduced_acc is None or reduced_acc.llm_mask.is_empty():
+                    # No possible tokens here -> stop this branch
                     stopped.add(node_idx)
                     continue
 
-                # End-node handling
+                # End-node handling: just union the allowed LLM tokens
                 if is_end(node_idx):
-                    reduced_acc = gss_node.reduce_acc()
-                    if reduced_acc and reduced_acc.llm_tokens:
-                        final_mask = final_mask.union(reduced_acc.llm_tokens)
+                    final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
-                    popped_gss = gss_node
-                    for _ in range(pop):
-                        popped_gss = popped_gss.pop()
-
-                    gss_to_filter = popped_gss
-                    if not llm_bv.is_empty():
-                        def apply_mask(acc: PyAcc) -> PyAcc:
-                            new_llm_tokens = acc.llm_tokens.intersection(llm_bv) if acc.llm_tokens else ffi.Bitset.zeros()
-                            return PyAcc(terminals_union=acc.terminals_union, llm_tokens=new_llm_tokens)
-                        
-                        gss_to_filter = popped_gss.apply(apply_mask)
+                    popped = gss_node.popn(pop)
+                    llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
                         matched: List[GSS] = []
                         if not state_bv.is_empty():
-                            for sid_val in gss_to_filter.peek():
+                            for sid_val in popped.peek():
                                 if state_bv.contains(sid_val):
-                                    matched.append(gss_to_filter.isolate(sid_val))
+                                    matched.append(popped.isolate(sid_val))
                         if not matched:
                             continue
 
                         child_gss_node = GSS.merge_many(matched)
-                        if child_gss_node.is_empty():
-                            continue
-                            
+
+                        # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                        if not llm_empty:
+                            def intersect_edge(acc: PyAcc) -> PyAcc:
+                                return PyAcc(
+                                    terminals_union=acc.terminals_union,
+                                    llm_mask=acc.llm_mask.intersection(llm_bv)
+                                )
+                            child_gss_node = child_gss_node.apply(intersect_edge)
+
                         d = int(dest_idx)
-                        existing_gss = values.get(d)
-                        if existing_gss is not None:
-                            values[d] = existing_gss.merge(child_gss_node)
+                        existing_child = values.get(d)
+                        if existing_child is not None:
+                            merged_gss = existing_child.merge(child_gss_node)
+                            values[d] = merged_gss
                         else:
                             values[d] = child_gss_node
 
