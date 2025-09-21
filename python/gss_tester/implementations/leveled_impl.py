@@ -244,24 +244,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             for child in children_at_depth.values():
                 self._validate_promotion_node(child)
 
-        # Now, check for promotion condition on the current node:
-        # Only applicable if there is at least one child AND all children are Interfaces.
-        all_children = list(node._all_children())
-        if not all_children or not all(isinstance(c, Interface) for c in all_children):
-            return
-
+        # Now, check for promotion condition on the current node
         # All children are Interfaces. Gather all accumulators.
         accs: Set[Acc] = set()
         if node.empty is not None:
             accs.add(node.empty)
 
-        for c in all_children:
-            ic: Interface[T, Acc] = c  # type: ignore[assignment]
-            accs.add(ic.acc)
-            if ic.empty is not None:
-                accs.add(ic.empty)
+        for child in node._all_children():
+            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+            accs.add(interface_child.acc)
+            if interface_child.empty is not None:
+                accs.add(interface_child.empty)
 
-        if len(accs) <= 1:
+        if len(accs) == 1:
             raise ValueError(
                 "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
                 f"indicating a non-canonical structure. Node: {node}"
@@ -431,10 +426,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if self.is_empty():
             return self
         if isinstance(self.inner, Interface):
-            # The previous root Interface represents a terminal stack if it has an explicit
-            # empty accumulator OR it has no children (implicit terminal via acc).
-            is_terminal = (self.inner.empty is not None) or (not self.inner.children)
-            lower_node = Lower(children=self.inner.children, empty=is_terminal)
+            lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
             new_children = {value: {lower_node._max_depth: lower_node}}
             return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
         else:
@@ -1177,10 +1169,7 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
             v_map: Dict[int, Lower[T]] = {}
             for child in kids.values():
                 ci: Interface[T, Acc] = child  # type: ignore[assignment]
-                # A child Interface represents a terminal stack either if it has an explicit
-                # empty accumulator or if it has no children (implicit terminal via acc).
-                child_is_terminal = (ci.empty is not None) or (not ci.children)
-                lower = Lower(children=ci.children, empty=child_is_terminal)
+                lower = Lower(children=ci.children, empty=(ci.empty is not None))
                 v_map[lower._max_depth] = lower
             if v_map:
                 l_children[v] = v_map
@@ -1195,9 +1184,7 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
             ci = Interface(
                 children=lchild.children,
                 acc=it.acc,
-                # Lower child contributes a terminal stack either via its own 'empty' flag
-                # or implicitly if it has no children.
-                empty=(it.acc if (lchild.empty or not lchild.children) else None),
+                empty=(it.acc if lchild.empty else None),
             )
             v_map[ci._max_depth] = ci
         if v_map:
