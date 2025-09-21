@@ -245,17 +245,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 self._validate_promotion_node(child)
 
         # Now, check for promotion condition on the current node
-        all_children = list(node._all_children())
-
-        if not all_children or not all(isinstance(child, Interface) for child in all_children):
-            return  # Cannot promote
-
         # All children are Interfaces. Gather all accumulators.
         accs: Set[Acc] = set()
         if node.empty is not None:
             accs.add(node.empty)
 
-        for child in all_children:
+        for child in node._all_children():
             interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
             accs.add(interface_child.acc)
             if interface_child.empty is not None:

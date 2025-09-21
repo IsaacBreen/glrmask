@@ -232,6 +232,7 @@ class Model(GraphProvider):
                         if d in values:
                             call_stats['main_loop_merge_calls'] += 1
                             values[d] = values[d].merge(child_gss)
+                            print(values[d])
                             for k, v in _PROFILING_STATS.items():
                                 print(f"{k} calls: {v}")
                             print(values[d].stats())
