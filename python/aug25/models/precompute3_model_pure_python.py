@@ -59,13 +59,6 @@ class PyAcc:
         return PyAcc(terminals_union=self.terminals_union.union(other.terminals_union))
 
 
-def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
-    merged_acc = gss.reduce_acc()
-    if merged_acc is None:
-        return ffi.HybridL2Bitset.all()
-    return merged_acc.terminals_union.complement()
-
-
 class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
@@ -399,6 +392,12 @@ class Model(GraphProvider):
                 heappush(depth_heap, depth)
             else:
                 bucket.add(node_idx)
+
+        def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
+            merged_acc = gss.reduce_acc()
+            if merged_acc is None:
+                return ffi.HybridL2Bitset.all()
+            return merged_acc.terminals_union.complement()
 
         # Main loop
         while True:
