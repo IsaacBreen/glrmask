@@ -537,9 +537,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_child = transform(child)
                     if new_child is not child:
                         any_child_changed_for_v = True
-                    # The depth of a child can change if a promotion occurs,
-                    # so we must use the new depth as the key.
-                    new_kids_for_v[new_child._max_depth] = new_child
+                    # Depth does not change in apply, so we can reuse `d`.
+                    new_kids_for_v[d] = new_child
 
                 if any_child_changed_for_v:
                     changed = True
