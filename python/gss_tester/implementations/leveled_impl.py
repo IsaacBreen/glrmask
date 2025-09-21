@@ -95,13 +95,12 @@ class LeveledGSSStats(Generic[T, Acc]):
     distinct_values: Set[T]
     unique_accumulators_count: int
     unique_accumulators: Set[Acc]
-    total_accumulators: int
-    accumulator_uniqueness_ratio: float
+    accumulator_sharing_ratio: float
 
     # "Empty" flags / terminal interfaces
     num_upper_with_empty: int
     num_interfaces_with_empty: int
-    num_lower_with_empty: int
+    num_lower_terminal_nodes: int
     num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
 
     # Multi-depth slot metrics
@@ -156,13 +155,15 @@ class LeveledGSSStats(Generic[T, Acc]):
 
         lines.append("- values/accumulators:")
         lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
-        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
-        lines.append(f"  total_accumulators={self.total_accumulators}")
-        lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+        lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+        lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
         lines.append("- empties/terminals:")
-        lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
-        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
+        lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
+        lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
+        lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
+        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
 
         lines.append("- multi-depth slots:")
         lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
@@ -932,7 +933,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         num_upper_with_empty = 0
         num_interfaces_with_empty = 0
-        num_lower_with_empty = 0
+        num_lower_terminal_nodes = 0
         num_interface_implicit_terminals = 0
 
         num_multi_depth_slots_upper = 0
@@ -1031,7 +1032,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             visited_lower.add(nid)
             num_lower_nodes += 1
             if node.empty:
-                num_lower_with_empty += 1
+                num_lower_terminal_nodes += 1
             if node._max_depth > max_lower_depth:
                 max_lower_depth = node._max_depth
             # edges and values
@@ -1054,11 +1055,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         unique_accumulators_count = len(unique_accumulators)
 
         # Accumulator counts
-        total_accumulators = total_stacks
-        if total_accumulators > 0:
-            accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+        if total_stacks > 0:
+            accumulator_sharing_ratio = unique_accumulators_count / total_stacks
         else:
-            accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+            accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
 
         # Sharing metrics
         if incoming_edges:
@@ -1095,11 +1095,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             distinct_values=distinct_values,
             unique_accumulators_count=unique_accumulators_count,
             unique_accumulators=unique_accumulators,
-            total_accumulators=total_accumulators,
-            accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
+            accumulator_sharing_ratio=accumulator_sharing_ratio,
             num_upper_with_empty=num_upper_with_empty,
             num_interfaces_with_empty=num_interfaces_with_empty,
-            num_lower_with_empty=num_lower_with_empty,
+            num_lower_terminal_nodes=num_lower_terminal_nodes,
             num_interface_implicit_terminals=num_interface_implicit_terminals,
             num_multi_depth_slots_upper=num_multi_depth_slots_upper,
             num_multi_depth_slots_lower=num_multi_depth_slots_lower,
