@@ -259,17 +259,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if self.is_empty():
             return self
 
-        # Fast path: if the root is an Interface, we can keep the pinned-acc structure by
-        # turning the whole subtree into a single Lower child under `value`.
-        if isinstance(self.inner, Interface):
-            had_empty_here = (self.inner.empty is not None) or (not self.inner.children)
-            lower = Lower(children=self.inner.children, empty=had_empty_here)
-            new_children: Dict[T, Dict[int, Lower[T]]] = {value: {lower._max_depth: lower}}
-            return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-
-        # Otherwise wrap the entire UpperBranch under `value`.
-        child = self.inner
-        return LeveledGSS(UpperBranch(children={value: {child._max_depth: child}}, empty=None))
+        child = self.inner  # Keep structure as-is; just add a new top-of-stack edge.
+        new_root = UpperBranch(children={value: {child._max_depth: child}}, empty=None)
+        return LeveledGSS(new_root)
 
     def pop(self) -> LeveledGSS[T, Acc]:
         """
@@ -297,10 +289,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if value is None:
             return LeveledGSS(UpperBranch(children={}, empty=ub.empty))
 
-        filtered = {value: ub.children[value]} if value in ub.children else {}
-        if not filtered:
+        if value not in ub.children:
             return LeveledGSS(UpperBranch(children={}, empty=None))
-        return LeveledGSS(try_promote(UpperBranch(children=filtered, empty=None)))
+
+        return LeveledGSS(try_promote(UpperBranch(children={value: ub.children[value]}, empty=None)))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         """
@@ -311,33 +303,33 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         memo: Dict[int, Upper[T, Acc]] = {}
 
-        def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
-            cached = memo.get(id(node))
+        def transform(n: Upper[T, Acc]) -> Upper[T, Acc]:
+            cached = memo.get(id(n))
             if cached is not None:
                 return cached
 
-            if isinstance(node, Interface):
+            if isinstance(n, Interface):
                 res: Upper[T, Acc] = Interface(
-                    children=node.children,
-                    acc=func(node.acc),
-                    empty=(func(node.empty) if node.empty is not None else None),
+                    children=n.children,
+                    acc=func(n.acc),
+                    empty=(func(n.empty) if n.empty is not None else None),
                 )
-                memo[id(node)] = res
+                memo[id(n)] = res
                 return res
 
             # UpperBranch
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-            for v, bucket in node.children.items():
-                out_bucket: Dict[int, Upper[T, Acc]] = {}
+            for v, bucket in n.children.items():
+                mapped: Dict[int, Upper[T, Acc]] = {}
                 for child in bucket.values():
-                    tchild = transform(child)
-                    out_bucket[tchild._max_depth] = tchild
-                if out_bucket:
-                    new_children[v] = out_bucket
+                    tch = transform(child)
+                    mapped[tch._max_depth] = tch
+                if mapped:
+                    new_children[v] = mapped
 
-            new_empty = func(node.empty) if node.empty is not None else None
+            new_empty = func(n.empty) if n.empty is not None else None
             res = try_promote(UpperBranch(children=new_children, empty=new_empty))
-            memo[id(node)] = res
+            memo[id(n)] = res
             return res
 
         return LeveledGSS(transform(self.inner))
@@ -355,31 +347,29 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         memo: Dict[int, Optional[Upper[T, Acc]]] = {}
 
-        def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
-            cached = memo.get(id(node))
+        def transform(n: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+            cached = memo.get(id(n))
             if cached is not None:
                 return cached
 
-            if isinstance(node, Interface):
-                keep_acc = predicate(node.acc)
-                keep_empty = node.empty is not None and predicate(node.empty)
-                new_empty = node.empty if keep_empty else None
-
+            if isinstance(n, Interface):
+                keep_acc = predicate(n.acc)
+                keep_empty = n.empty is not None and predicate(n.empty)
                 if not keep_acc and not keep_empty:
-                    memo[id(node)] = None
+                    memo[id(n)] = None
                     return None
                 if not keep_acc and keep_empty:
-                    res = UpperBranch(children={}, empty=new_empty)
-                    memo[id(node)] = res
+                    res = UpperBranch(children={}, empty=n.empty)
+                    memo[id(n)] = res
                     return res
-
-                res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                memo[id(node)] = res
+                # keep_acc
+                res = Interface(children=n.children, acc=n.acc, empty=(n.empty if keep_empty else None))
+                memo[id(n)] = res
                 return res
 
             # UpperBranch
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-            for v, bucket in node.children.items():
+            for v, bucket in n.children.items():
                 out_bucket: Dict[int, Upper[T, Acc]] = {}
                 for child in bucket.values():
                     tchild = transform(child)
@@ -388,13 +378,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 if out_bucket:
                     new_children[v] = out_bucket
 
-            new_empty = node.empty if (node.empty is not None and predicate(node.empty)) else None
+            new_empty = n.empty if (n.empty is not None and predicate(n.empty)) else None
             if not new_children and new_empty is None:
-                memo[id(node)] = None
+                memo[id(n)] = None
                 return None
 
             res = try_promote(UpperBranch(children=new_children, empty=new_empty))
-            memo[id(node)] = res
+            memo[id(n)] = res
             return res
 
         new_inner = transform(self.inner)
