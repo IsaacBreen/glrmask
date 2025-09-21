@@ -164,7 +164,7 @@ class Model(GraphProvider):
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
 
-                todo.pop(depth)
+            todo.pop(depth)
 
         # Convert internal mask back to original IDs
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
