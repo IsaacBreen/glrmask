@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
+from collections import Counter
 
 from ..interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
@@ -59,6 +60,116 @@ class Lower(Generic[T]):
     def _all_children(self) -> Iterator[Lower[T]]:
         for v_children in self.children.values():
             yield from v_children.values()
+
+
+@dataclass(frozen=True)
+class LeveledGSSStats(Generic[T, Acc]):
+    # Stack-level statistics
+    total_stacks: int
+    empty_stacks: int
+    non_empty_stacks: int
+    min_stack_length: Optional[int]
+    max_stack_length: Optional[int]
+    avg_stack_length: Optional[float]
+    median_stack_length: Optional[float]
+    length_histogram: Dict[int, int]
+    top_values_distribution: Dict[T, int]
+    top_values: Set[T]
+
+    # Structure-level statistics (unique nodes/edges in the DAG)
+    num_upperbranch_nodes: int
+    num_interface_nodes: int
+    num_lower_nodes: int
+    total_unique_nodes: int
+
+    upper_edges: int                      # UpperBranch -> (Upper | Interface)
+    interface_to_lower_edges: int         # Interface -> Lower
+    lower_edges: int                      # Lower -> Lower
+    total_edges: int
+
+    max_upper_depth: int                  # inner._max_depth at root (Upper tree)
+    max_lower_depth: int                  # max _max_depth across Lower nodes
+
+    # Value/accumulator coverage
+    distinct_values_count: int
+    distinct_values: Set[T]
+    unique_accumulators_count: int
+    unique_accumulators: Set[Acc]
+
+    # "Empty" flags / terminal interfaces
+    num_upper_with_empty: int
+    num_interfaces_with_empty: int
+    num_lower_with_empty: int
+    num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
+
+    # Multi-depth slot metrics
+    num_multi_depth_slots_upper: int       # Count of (UpperBranch node, value) pairs with >1 children at different depths
+    num_multi_depth_slots_lower: int       # Same for the lower layer (Interface and Lower children)
+    max_multiplicity_per_value_upper: int
+    max_multiplicity_per_value_lower: int
+
+    # Sharing/graph metrics
+    average_in_degree: float               # average incoming edges across nodes with at least one incoming edge
+    max_in_degree: int
+    structural_sharing_factor: float       # edges / max(1, nodes - 1) — >1 implies sharing
+
+    # Potential canonicalization insights (non-fatal)
+    promotable_upper_nodes: int            # UpperBranch nodes that could be promoted to Interface
+
+    def _fmt_subset(self, s: Set[Any], max_items: int = 10) -> str:
+        if not s:
+            return "{}"
+        items = list(s)
+        shown = ", ".join(repr(x) for x in items[:max_items])
+        suffix = "" if len(items) <= max_items else ", ..."
+        return "{" + shown + suffix + "}"
+
+    def _fmt_hist(self, h: Dict[int, int], max_items: int = 12) -> str:
+        if not h:
+            return "{}"
+        keys = sorted(h.keys())
+        shown_pairs = []
+        for k in keys[:max_items]:
+            shown_pairs.append(f"{k}:{h[k]}")
+        suffix = "" if len(keys) <= max_items else ", ..."
+        return "{" + ", ".join(shown_pairs) + suffix + "}"
+
+    def __str__(self) -> str:
+        lines: List[str] = []
+        lines.append("LeveledGSSStats")
+        lines.append(f"- stacks: total={self.total_stacks}, empty={self.empty_stacks}, non_empty={self.non_empty_stacks}")
+        lines.append(f"- lengths: min={self.min_stack_length}, max={self.max_stack_length}, avg={self.avg_stack_length}, median={self.median_stack_length}")
+        lines.append(f"- length_histogram: {self._fmt_hist(self.length_histogram)}")
+        lines.append(f"- top_values: {len(self.top_values)} distinct -> {self._fmt_subset(self.top_values)}")
+        lines.append(f"- top_values_distribution (counts by top-of-stack value): size={len(self.top_values_distribution)}")
+        # Try to display a small preview of top_values_distribution
+        if self.top_values_distribution:
+            sample_items = list(self.top_values_distribution.items())[:10]
+            lines.append("  " + ", ".join(f"{repr(k)}:{v}" for k, v in sample_items) + (" ..." if len(self.top_values_distribution) > 10 else ""))
+
+        lines.append("- structure:")
+        lines.append(f"  nodes: UpperBranch={self.num_upperbranch_nodes}, Interface={self.num_interface_nodes}, Lower={self.num_lower_nodes}, total={self.total_unique_nodes}")
+        lines.append(f"  edges: upper={self.upper_edges}, interface_to_lower={self.interface_to_lower_edges}, lower={self.lower_edges}, total={self.total_edges}")
+        lines.append(f"  depths: max_upper_depth={self.max_upper_depth}, max_lower_depth={self.max_lower_depth}")
+
+        lines.append("- values/accumulators:")
+        lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+
+        lines.append("- empties/terminals:")
+        lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
+
+        lines.append("- multi-depth slots:")
+        lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
+        lines.append(f"  num_multi_depth_slots_lower={self.num_multi_depth_slots_lower}, max_multiplicity_per_value_lower={self.max_multiplicity_per_value_lower}")
+
+        lines.append("- sharing/graph:")
+        lines.append(f"  average_in_degree={self.average_in_degree}, max_in_degree={self.max_in_degree}, structural_sharing_factor={self.structural_sharing_factor}")
+
+        lines.append("- canonicalization opportunities (non-fatal):")
+        lines.append(f"  promotable_upper_nodes={self.promotable_upper_nodes}")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, eq=True)
@@ -558,6 +669,326 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         for acc in gen:
             reduced_acc = reduced_acc.merge(acc)
         return reduced_acc
+
+    def stats(self) -> LeveledGSSStats[T, Acc]:
+        """
+        Compute a comprehensive set of statistics for this LeveledGSS without flattening to stacks.
+        Where possible, dynamic programming is used to avoid enumerating all stacks.
+        """
+        # --------------------
+        # Helpers: histograms of path lengths (suffix lengths from a node to any terminal stack)
+        # --------------------
+        lower_hist_cache: Dict[int, Dict[int, int]] = {}
+        upper_hist_cache: Dict[int, Dict[int, int]] = {}
+
+        def _merge_hist_inplace(dst: Dict[int, int], src: Dict[int, int], offset: int = 0) -> None:
+            if offset == 0:
+                for k, v in src.items():
+                    dst[k] = dst.get(k, 0) + v
+            else:
+                for k, v in src.items():
+                    kk = k + offset
+                    dst[kk] = dst.get(kk, 0) + v
+
+        def _hist_lower(node: Lower[T]) -> Dict[int, int]:
+            key = id(node)
+            cached = lower_hist_cache.get(key)
+            if cached is not None:
+                return cached
+            hist: Dict[int, int] = {}
+            if node.empty:
+                hist[0] = hist.get(0, 0) + 1
+            for kids in node.children.values():
+                for child in kids.values():
+                    ch = _hist_lower(child)
+                    _merge_hist_inplace(hist, ch, offset=1)
+            lower_hist_cache[key] = hist
+            return hist
+
+        def _hist_upper(node: Upper[T, Acc]) -> Dict[int, int]:
+            key = id(node)
+            cached = upper_hist_cache.get(key)
+            if cached is not None:
+                return cached
+            hist: Dict[int, int] = {}
+            if isinstance(node, UpperBranch):
+                if node.empty is not None:
+                    hist[0] = hist.get(0, 0) + 1
+                for kids in node.children.values():
+                    for child in kids.values():
+                        ch = _hist_upper(child)
+                        _merge_hist_inplace(hist, ch, offset=1)
+            else:
+                # Interface
+                if not node.children and node.empty is None:
+                    # Terminal via acc
+                    hist[0] = hist.get(0, 0) + 1
+                if node.empty is not None:
+                    # Terminal via explicit empty
+                    hist[0] = hist.get(0, 0) + 1
+                for kids in node.children.values():
+                    for child in kids.values():
+                        ch = _hist_lower(child)
+                        _merge_hist_inplace(hist, ch, offset=1)
+            upper_hist_cache[key] = hist
+            return hist
+
+        def _hist_total(h: Dict[int, int]) -> int:
+            return sum(h.values())
+
+        # Root histogram (suffix lengths from root)
+        root_hist = _hist_upper(self.inner)
+        total_stacks = _hist_total(root_hist)
+        empty_stacks = root_hist.get(0, 0)
+        non_empty_stacks = total_stacks - empty_stacks
+        if total_stacks > 0:
+            min_len = min(root_hist.keys())
+            max_len = max(root_hist.keys())
+            avg_len = sum(k * v for k, v in root_hist.items()) / total_stacks
+            # median from histogram
+            def median_from_hist(h: Dict[int, int], n: int) -> float:
+                keys = sorted(h.keys())
+                if n % 2 == 1:
+                    k_idx = (n + 1) // 2
+                    cum = 0
+                    for L in keys:
+                        cum += h[L]
+                        if cum >= k_idx:
+                            return float(L)
+                    return float(keys[-1])
+                else:
+                    k1 = n // 2
+                    k2 = k1 + 1
+                    cum = 0
+                    L1 = keys[0]
+                    L2 = keys[0]
+                    hit1 = False
+                    for L in keys:
+                        cum += h[L]
+                        if not hit1 and cum >= k1:
+                            L1 = L
+                            hit1 = True
+                        if cum >= k2:
+                            L2 = L
+                            break
+                    return (L1 + L2) / 2.0
+            median_len: Optional[float] = median_from_hist(root_hist, total_stacks)
+        else:
+            min_len = None
+            max_len = None
+            avg_len = None
+            median_len = None
+
+        # --------------------
+        # Top-of-stack distribution
+        # --------------------
+        top_values_distribution: Dict[T, int] = {}
+        if isinstance(self.inner, UpperBranch):
+            for v, kids in self.inner.children.items():
+                cnt = 0
+                for child in kids.values():
+                    cnt += _hist_total(_hist_upper(child))
+                if cnt:
+                    top_values_distribution[v] = cnt
+        else:
+            # Interface at root
+            for v, kids in self.inner.children.items():
+                cnt = 0
+                for child in kids.values():
+                    cnt += _hist_total(_hist_lower(child))
+                if cnt:
+                    top_values_distribution[v] = cnt
+        top_values: Set[T] = set(top_values_distribution.keys())
+
+        # --------------------
+        # Structural scan (unique nodes/edges, depths, values, accumulators, multi-depth slots, sharing)
+        # --------------------
+        visited_upperbranch: Set[int] = set()
+        visited_interface: Set[int] = set()
+        visited_lower: Set[int] = set()
+
+        num_upperbranch_nodes = 0
+        num_interface_nodes = 0
+        num_lower_nodes = 0
+
+        upper_edges = 0
+        interface_to_lower_edges = 0
+        lower_edges = 0
+
+        distinct_values: Set[T] = set()
+        unique_accumulators: Set[Acc] = set()
+
+        num_upper_with_empty = 0
+        num_interfaces_with_empty = 0
+        num_lower_with_empty = 0
+        num_interface_implicit_terminals = 0
+
+        num_multi_depth_slots_upper = 0
+        num_multi_depth_slots_lower = 0
+        max_multiplicity_per_value_upper = 1
+        max_multiplicity_per_value_lower = 1
+
+        max_lower_depth = 0
+
+        incoming_edges: Dict[int, int] = {}
+
+        def bump_incoming(child_obj: Any) -> None:
+            cid = id(child_obj)
+            incoming_edges[cid] = incoming_edges.get(cid, 0) + 1
+
+        # Promotable UpperBranch nodes
+        promotable_upper_nodes = 0
+
+        def is_promotable(node: UpperBranch[T, Acc]) -> bool:
+            all_children = list(node._all_children())
+            if not all_children:
+                return False
+            if not all(isinstance(c, Interface) for c in all_children):
+                return False
+            accs: Set[Acc] = set()
+            if node.empty is not None:
+                accs.add(node.empty)
+            for c in all_children:
+                ic: Interface[T, Acc] = c  # type: ignore[assignment]
+                accs.add(ic.acc)
+                if ic.empty is not None:
+                    accs.add(ic.empty)
+            return len(accs) == 1
+
+        # Traverse graph collecting the structural stats
+        # Use queues to ensure we visit each UNIQUE node once for node-level data,
+        # but we still count edges (which are properties of parents) when visiting each unique parent.
+        upper_queue: List[Upper[T, Acc]] = [self.inner]
+        lower_queue: List[Lower[T]] = []
+
+        while upper_queue:
+            node = upper_queue.pop()
+            if isinstance(node, UpperBranch):
+                nid = id(node)
+                if nid not in visited_upperbranch:
+                    visited_upperbranch.add(nid)
+                    num_upperbranch_nodes += 1
+                    if node.empty is not None:
+                        num_upper_with_empty += 1
+                        unique_accumulators.add(node.empty)
+                    # edges and values
+                    for v, kids in node.children.items():
+                        distinct_values.add(v)
+                        # multi-depth slot counting for upper layer
+                        if len(kids) > 1:
+                            num_multi_depth_slots_upper += 1
+                            if len(kids) > max_multiplicity_per_value_upper:
+                                max_multiplicity_per_value_upper = len(kids)
+                        for child in kids.values():
+                            upper_edges += 1
+                            bump_incoming(child)
+                            upper_queue.append(child)
+                    # promotable?
+                    if is_promotable(node):
+                        promotable_upper_nodes += 1
+            else:
+                # Interface
+                nid = id(node)
+                if nid not in visited_interface:
+                    visited_interface.add(nid)
+                    num_interface_nodes += 1
+                    unique_accumulators.add(node.acc)
+                    if node.empty is not None:
+                        num_interfaces_with_empty += 1
+                        unique_accumulators.add(node.empty)
+                    if not node.children and node.empty is None:
+                        num_interface_implicit_terminals += 1
+                    # edges to lower and values
+                    for v, kids in node.children.items():
+                        distinct_values.add(v)
+                        # multi-depth slot counting for lower layer at interface boundary
+                        if len(kids) > 1:
+                            num_multi_depth_slots_lower += 1
+                            if len(kids) > max_multiplicity_per_value_lower:
+                                max_multiplicity_per_value_lower = len(kids)
+                        for child in kids.values():
+                            interface_to_lower_edges += 1
+                            bump_incoming(child)
+                            lower_queue.append(child)
+
+        while lower_queue:
+            node = lower_queue.pop()
+            nid = id(node)
+            if nid in visited_lower:
+                continue
+            visited_lower.add(nid)
+            num_lower_nodes += 1
+            if node.empty:
+                num_lower_with_empty += 1
+            if node._max_depth > max_lower_depth:
+                max_lower_depth = node._max_depth
+            # edges and values
+            for v, kids in node.children.items():
+                distinct_values.add(v)
+                # multi-depth at lower layer
+                if len(kids) > 1:
+                    num_multi_depth_slots_lower += 1
+                    if len(kids) > max_multiplicity_per_value_lower:
+                        max_multiplicity_per_value_lower = len(kids)
+                for child in kids.values():
+                    lower_edges += 1
+                    bump_incoming(child)
+                    lower_queue.append(child)
+
+        total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes
+        total_edges = upper_edges + interface_to_lower_edges + lower_edges
+        max_upper_depth = self.inner._max_depth
+        distinct_values_count = len(distinct_values)
+        unique_accumulators_count = len(unique_accumulators)
+
+        # Sharing metrics
+        if incoming_edges:
+            max_in_degree = max(incoming_edges.values())
+            # average over nodes that actually have an incoming edge
+            average_in_degree = sum(incoming_edges.values()) / len(incoming_edges)
+        else:
+            max_in_degree = 0
+            average_in_degree = 0.0
+        structural_sharing_factor = total_edges / float(max(1, total_unique_nodes - 1))
+
+        return LeveledGSSStats(
+            total_stacks=total_stacks,
+            empty_stacks=empty_stacks,
+            non_empty_stacks=non_empty_stacks,
+            min_stack_length=min_len,
+            max_stack_length=max_len,
+            avg_stack_length=avg_len,
+            median_stack_length=median_len,
+            length_histogram=dict(sorted(root_hist.items())),
+            top_values_distribution=top_values_distribution,
+            top_values=top_values,
+            num_upperbranch_nodes=num_upperbranch_nodes,
+            num_interface_nodes=num_interface_nodes,
+            num_lower_nodes=num_lower_nodes,
+            total_unique_nodes=total_unique_nodes,
+            upper_edges=upper_edges,
+            interface_to_lower_edges=interface_to_lower_edges,
+            lower_edges=lower_edges,
+            total_edges=total_edges,
+            max_upper_depth=max_upper_depth,
+            max_lower_depth=max_lower_depth,
+            distinct_values_count=distinct_values_count,
+            distinct_values=distinct_values,
+            unique_accumulators_count=unique_accumulators_count,
+            unique_accumulators=unique_accumulators,
+            num_upper_with_empty=num_upper_with_empty,
+            num_interfaces_with_empty=num_interfaces_with_empty,
+            num_lower_with_empty=num_lower_with_empty,
+            num_interface_implicit_terminals=num_interface_implicit_terminals,
+            num_multi_depth_slots_upper=num_multi_depth_slots_upper,
+            num_multi_depth_slots_lower=num_multi_depth_slots_lower,
+            max_multiplicity_per_value_upper=max_multiplicity_per_value_upper,
+            max_multiplicity_per_value_lower=max_multiplicity_per_value_lower,
+            average_in_degree=average_in_degree,
+            max_in_degree=max_in_degree,
+            structural_sharing_factor=structural_sharing_factor,
+            promotable_upper_nodes=promotable_upper_nodes,
+        )
 
 
 Node = TypeVar("Node")
