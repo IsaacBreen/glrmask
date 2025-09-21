@@ -167,15 +167,15 @@ class Model(GraphProvider):
 
         t_init_done = time.perf_counter_ns()
 
+        # Reset per-call stats
+        for k in _PROFILING_STATS:
+            _PROFILING_STATS[k] = 0
 
         # Main loop
         while depth_heap:
             call_stats['main_loop_iterations'] += 1
             depth: int = hpop(depth_heap)
             while todo[depth]:
-                # Reset per-call stats
-                for k in _PROFILING_STATS:
-                    _PROFILING_STATS[k] = 0
                 call_stats['nodes_visited'] += 1
                 node: int = todo[depth].pop()
                 gss_node: GSS = values.pop(node)
@@ -232,15 +232,10 @@ class Model(GraphProvider):
                         if d in values:
                             call_stats['main_loop_merge_calls'] += 1
                             values[d] = values[d].merge(child_gss)
-                            print(values[d])
-                            for k, v in _PROFILING_STATS.items():
-                                print(f"{k} calls: {v}")
-                            print(values[d].stats())
-                            values[d]._validate()
-                            print("------")
                         else:
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
+
 
             todo.pop(depth)
 
@@ -266,6 +261,8 @@ class Model(GraphProvider):
         print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
         print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
         print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+        for k, v in _PROFILING_STATS.items():
+            print(f"{k} calls: {v}")
         print("---------------------------------------------------\n")
 
         return RangeSet.from_ranges(original_mask.to_ranges())
