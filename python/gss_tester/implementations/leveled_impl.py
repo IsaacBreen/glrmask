@@ -506,8 +506,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return gss_for_stacks
 
-    def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
-        memo: Dict[int, Upper[T, Acc]] = {}
+    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Upper[T, Acc]]] = None) -> LeveledGSS[T, Acc]:
+        if memo is None:
+            memo = {}
+
         acc_cache: Dict[Acc, Acc] = {}
 
         def map_acc(acc: Acc) -> Acc:
