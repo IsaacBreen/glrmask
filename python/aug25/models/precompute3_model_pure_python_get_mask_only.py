@@ -1,14 +1,12 @@
 import heapq
 from typing import Dict, List, Tuple, Optional
 
-from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
-from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
+from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # Import the original model to wrap it, and PyAcc which is used in get_mask's logic
 from .precompute3_model_pure_python import Model as InnerModel
-from .precompute3_model_pure_python import PyAcc
-
+from ..common_interface import GraphProvider, RangeSet
 
 # Add a dummy profiler for when not running under kernprof
 try:
@@ -66,7 +64,6 @@ class Model(GraphProvider):
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-        This implementation is copied from the original model and adapted to this wrapper class.
         """
         state_map = self.state
         all_ones_mask = self.all_internal_llm_tokens_bitset
