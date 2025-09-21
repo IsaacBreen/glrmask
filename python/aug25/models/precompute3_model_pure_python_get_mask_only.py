@@ -156,7 +156,9 @@ class Model(GraphProvider):
             else:
                 b.add(r)
 
+        print("\nInitial GSS stats:")
         print(GSS.merge_many(list(self.state.values())).stats())
+        print("Stats after seeding:")
         print(GSS.merge_many(list(values.values())).stats())
 
         def enqueue(d: int, n: int) -> None:
