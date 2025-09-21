@@ -741,9 +741,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(res_inner)
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        # Per-merge memoization caches: upper-node merges, lower-node merges, and interface->upper conversion.
-        memo: Dict[str, Any] = {"upper": {}, "lower": {}, "conv": {}}
-        return LeveledGSS(merge_upper(self.inner, other.inner, memo))
+        return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
         if isinstance(self.inner, Interface):
             return set(self.inner.children.keys())
@@ -1183,12 +1181,8 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
         return Interface(children=l_children, acc=the_acc, empty=node.empty)
     return node
 
-def interface_to_upperbranch(it: Interface[T, Acc], conv_cache: Optional[Dict[int, UpperBranch[T, Acc]]] = None) -> UpperBranch[T, Acc]:
+def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
     children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-    if conv_cache is not None:
-        cached = conv_cache.get(id(it))
-        if cached is not None:
-            return cached
     for v, kids in it.children.items():
         v_map: Dict[int, Upper[T, Acc]] = {}
         for lchild in kids.values():
@@ -1203,37 +1197,22 @@ def interface_to_upperbranch(it: Interface[T, Acc], conv_cache: Optional[Dict[in
     new_empty = it.empty
     if not it.children and new_empty is None:
         new_empty = it.acc
-    res = UpperBranch(children=children, empty=new_empty)
-    if conv_cache is not None:
-        conv_cache[id(it)] = res
-    return res
+    return UpperBranch(children=children, empty=new_empty)
 
-def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc], memo: Optional[Dict[str, Any]] = None) -> Upper[T, Acc]:
+def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
     if u1 is u2:
         return u1
-    # Initialize memoization caches if not provided
-    if memo is None:
-        memo = {"upper": {}, "lower": {}, "conv": {}}
-    upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = memo.setdefault("upper", {})
-    key = (id(u1), id(u2))
-    cached = upper_cache.get(key)
-    if cached is not None:
-        return cached
     # If both are the same type, use the appropriate merge function
     if isinstance(u1, Interface) and isinstance(u2, Interface):
-        res = merge_interfaces(u1, u2, memo)
-    elif isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
-        res = merge_upperbranches(u1, u2, memo)
-    else:
-        # Mixed types: convert Interface(s) to UpperBranch and merge
-        conv_cache: Dict[int, UpperBranch[T, Acc]] = memo.setdefault("conv", {})
-        ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1, conv_cache)
-        ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2, conv_cache)
-        res = merge_upperbranches(ub1, ub2, memo)  # type: ignore[arg-type]
-    upper_cache[key] = res
-    return res
+        return merge_interfaces(u1, u2)
+    if isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
+        return merge_upperbranches(u1, u2)
+    # Mixed types: convert Interface(s) to UpperBranch and merge
+    ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1)
+    ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2)
+    return merge_upperbranches(ub1, ub2)  # type: ignore[arg-type]
 
-def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc], memo: Optional[Dict[str, Any]] = None) -> Upper[T, Acc]:
+def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     if a is b:
         return a
     # Merge 'empty'
@@ -1244,14 +1223,10 @@ def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc], memo: Op
     else:
         new_empty = a.empty.merge(b.empty)
 
-    merged_children = _merge_children_by_depth(
-        a.children,
-        b.children,
-        lambda x, y: merge_upper(x, y, memo)
-    )
+    merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
     return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
-def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc], memo: Optional[Dict[str, Any]] = None) -> Upper[T, Acc]:
+def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
     if a.acc == b.acc:
         if a.empty is None:
             new_empty = b.empty
@@ -1259,45 +1234,22 @@ def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc], memo: Optional[
             new_empty = a.empty
         else:
             new_empty = a.empty.merge(b.empty)
-        merged_children = _merge_children_by_depth(
-            a.children,
-            b.children,
-            lambda x, y: merge_lower(x, y, memo)
-        )
+        merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
         return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-    conv_cache: Optional[Dict[int, UpperBranch[T, Acc]]] = None
-    if memo is not None:
-        conv_cache = memo.setdefault("conv", {})
-    return merge_upperbranches(interface_to_upperbranch(a, conv_cache), interface_to_upperbranch(b, conv_cache), memo)
+    return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
-def merge_lower(l1: Lower[T], l2: Lower[T], memo: Optional[Dict[str, Any]] = None) -> Lower[T]:
+def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
     # Fast paths
     if l1 is l2:
         return l1
     if l1 == l2:
         return l1
 
-    lower_cache: Optional[Dict[Tuple[int, int], Lower[T]]] = None
-    key: Optional[Tuple[int, int]] = None
-    if memo is not None:
-        lower_cache = memo.setdefault("lower", {})
-        key = (id(l1), id(l2))
-        cached = lower_cache.get(key)
-        if cached is not None:
-            return cached
-
     # Merge 'empty' flags (logical OR)
     new_empty = l1.empty or l2.empty
 
-    merged_children = _merge_children_by_depth(
-        l1.children,
-        l2.children,
-        lambda x, y: merge_lower(x, y, memo)
-    )
-    result = Lower(children=merged_children, empty=new_empty)
-    if lower_cache is not None and key is not None:
-        lower_cache[key] = result
-    return result
+    merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
+    return Lower(children=merged_children, empty=new_empty)
 
 
 def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
