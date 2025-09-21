@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
 
 from ..interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
@@ -356,6 +356,37 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
                 return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+    def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
+        values_set = set(values)
+
+        # Part 1: handle non-empty stacks
+        gss_for_stacks: LeveledGSS[T, Acc]
+        if isinstance(self.inner, UpperBranch):
+            filtered_children = {
+                v: kids for v, kids in self.inner.children.items() if v in values_set
+            }
+            if not filtered_children:
+                gss_for_stacks = self.empty()
+            else:
+                gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
+        elif isinstance(self.inner, Interface):
+            filtered_children = {
+                v: kids for v, kids in self.inner.children.items() if v in values_set
+            }
+            if not filtered_children:
+                gss_for_stacks = self.empty()
+            else:
+                gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+
+        # Part 2: handle empty stacks
+        if None in values_set:
+            empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
+            if empty_acc is not None:
+                gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                return gss_for_stacks.merge(gss_for_empty)
+
+        return gss_for_stacks
 
     def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
         if memo is None:

@@ -135,15 +135,14 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                     popped: GSS = gss_node.popn(pop)
                     for dest_idx, state_bv in dests:
-                        if not state_bv.is_empty():
-                            matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                            if not matched:
-                                continue
-                        else:
+                        if state_bv.is_empty():
                             continue
 
-                        child_gss: GSS = GSS.merge_many(matched)
+                        values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                        if not values_to_keep:
+                            continue
 
+                        child_gss: GSS = popped.isolate_many(values_to_keep)
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
                             def intersect_edge(acc: PyAcc) -> PyAcc:
