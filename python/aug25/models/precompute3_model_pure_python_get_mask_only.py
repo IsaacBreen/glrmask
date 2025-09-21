@@ -208,15 +208,21 @@ class Model(GraphProvider):
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
+                            memo: Dict[PyAcc, Optional[PyAcc]] = {}
                             def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                if memo.get(acc) is not None:
+                                    return memo[acc]
                                 new_mask = acc.llm_mask.intersection(llm_bv)
                                 call_stats['main_loop_intersection_calls'] += 1
                                 if new_mask.is_empty():
-                                    return None
-                                return PyAcc(
-                                    terminals_union=acc.terminals_union,
-                                    llm_mask=new_mask
-                                )
+                                    result = None
+                                else:
+                                    result = PyAcc(
+                                        terminals_union=acc.terminals_union,
+                                        llm_mask=new_mask
+                                    )
+                                memo[acc] = result
+                                return result
                             call_stats['main_loop_apply_calls'] += 1
                             child_gss = child_gss.apply_and_prune(intersect_and_prune)
                             if child_gss.is_empty():
