@@ -736,11 +736,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(res_inner)
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-        merged_inner = merge_upper(self.inner, other.inner)
-        # Final canonicalization guard: if the root is an UpperBranch, ensure promotion occurs.
-        if isinstance(merged_inner, UpperBranch):
-            merged_inner = try_promote(merged_inner)
-        return LeveledGSS(merged_inner)
+        return LeveledGSS(merge_upper(self.inner, other.inner))
     def peek(self) -> Set[T]:
         if isinstance(self.inner, Interface):
             return set(self.inner.children.keys())
@@ -1173,9 +1169,7 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
             v_map: Dict[int, Lower[T]] = {}
             for child in kids.values():
                 ci: Interface[T, Acc] = child  # type: ignore[assignment]
-                # A Lower node is terminal if the child Interface has an explicit empty,
-                # or if it represents an implicit terminal (no children, no explicit empty).
-                lower = Lower(children=ci.children, empty=((ci.empty is not None) or (not ci.children and ci.empty is None)))
+                lower = Lower(children=ci.children, empty=(ci.empty is not None))
                 v_map[lower._max_depth] = lower
             if v_map:
                 l_children[v] = v_map
@@ -1201,6 +1195,8 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
     return UpperBranch(children=children, empty=new_empty)
 
 def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
+    if u1 is u2:
+        return u1
     # If both are the same type, use the appropriate merge function
     if isinstance(u1, Interface) and isinstance(u2, Interface):
         return merge_interfaces(u1, u2)
