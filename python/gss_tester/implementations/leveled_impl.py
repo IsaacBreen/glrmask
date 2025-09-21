@@ -95,7 +95,6 @@ class LeveledGSSStats(Generic[T, Acc]):
     distinct_values: Set[T]
     unique_accumulators_count: int
     unique_accumulators: Set[Acc]
-    accumulator_appearances: Dict[Acc, int]
     accumulator_sharing_ratio: float
 
     # "Empty" flags / terminal interfaces
@@ -157,10 +156,6 @@ class LeveledGSSStats(Generic[T, Acc]):
         lines.append("- values/accumulators:")
         lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
         lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-        if self.accumulator_appearances:
-            sample_items = list(self.accumulator_appearances.items())[:10]
-            lines.append(f"  accumulator_appearances (counts of acc in nodes): size={len(self.accumulator_appearances)}")
-            lines.append("    " + ", ".join(f"{repr(k)}:{v}" for k, v in sample_items) + (" ..." if len(self.accumulator_appearances) > 10 else ""))
         lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
         lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
@@ -935,7 +930,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         distinct_values: Set[T] = set()
         unique_accumulators: Set[Acc] = set()
-        accumulator_appearances: Counter[Acc] = Counter()
 
         num_upper_with_empty = 0
         num_interfaces_with_empty = 0
@@ -990,7 +984,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     if node.empty is not None:
                         num_upper_with_empty += 1
                         unique_accumulators.add(node.empty)
-                        accumulator_appearances[node.empty] += 1
                     # edges and values
                     for v, kids in node.children.items():
                         distinct_values.add(v)
@@ -1013,11 +1006,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     visited_interface.add(nid)
                     num_interface_nodes += 1
                     unique_accumulators.add(node.acc)
-                    accumulator_appearances[node.acc] += 1
                     if node.empty is not None:
                         num_interfaces_with_empty += 1
                         unique_accumulators.add(node.empty)
-                        accumulator_appearances[node.empty] += 1
                     if not node.children and node.empty is None:
                         num_interface_implicit_terminals += 1
                     # edges to lower and values
@@ -1104,7 +1095,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             distinct_values=distinct_values,
             unique_accumulators_count=unique_accumulators_count,
             unique_accumulators=unique_accumulators,
-            accumulator_appearances=dict(sorted(accumulator_appearances.items(), key=lambda item: item[1], reverse=True)),
             accumulator_sharing_ratio=accumulator_sharing_ratio,
             num_upper_with_empty=num_upper_with_empty,
             num_interfaces_with_empty=num_interfaces_with_empty,

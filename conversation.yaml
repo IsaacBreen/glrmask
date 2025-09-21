@@ -297,12 +297,13 @@ local_system:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
-          accumulator_sharing_ratio: float
+          total_accumulators: int
+          accumulator_uniqueness_ratio: float
 
           # "Empty" flags / terminal interfaces
           num_upper_with_empty: int
           num_interfaces_with_empty: int
-          num_lower_terminal_nodes: int
+          num_lower_with_empty: int
           num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
 
           # Multi-depth slot metrics
@@ -357,15 +358,13 @@ local_system:
 
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
-              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-              lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
-              lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+              lines.append(f"  total_accumulators={self.total_accumulators}")
+              lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
 
               lines.append("- empties/terminals:")
-              lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
-              lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
-              lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
-              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
+              lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
 
               lines.append("- multi-depth slots:")
               lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
@@ -1135,7 +1134,7 @@ local_system:
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
-              num_lower_terminal_nodes = 0
+              num_lower_with_empty = 0
               num_interface_implicit_terminals = 0
 
               num_multi_depth_slots_upper = 0
@@ -1234,7 +1233,7 @@ local_system:
                   visited_lower.add(nid)
                   num_lower_nodes += 1
                   if node.empty:
-                      num_lower_terminal_nodes += 1
+                      num_lower_with_empty += 1
                   if node._max_depth > max_lower_depth:
                       max_lower_depth = node._max_depth
                   # edges and values
@@ -1257,10 +1256,11 @@ local_system:
               unique_accumulators_count = len(unique_accumulators)
 
               # Accumulator counts
-              if total_stacks > 0:
-                  accumulator_sharing_ratio = unique_accumulators_count / total_stacks
+              total_accumulators = total_stacks
+              if total_accumulators > 0:
+                  accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
               else:
-                  accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
+                  accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
 
               # Sharing metrics
               if incoming_edges:
@@ -1297,10 +1297,11 @@ local_system:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
-                  accumulator_sharing_ratio=accumulator_sharing_ratio,
+                  total_accumulators=total_accumulators,
+                  accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
-                  num_lower_terminal_nodes=num_lower_terminal_nodes,
+                  num_lower_with_empty=num_lower_with_empty,
                   num_interface_implicit_terminals=num_interface_implicit_terminals,
                   num_multi_depth_slots_upper=num_multi_depth_slots_upper,
                   num_multi_depth_slots_lower=num_multi_depth_slots_lower,
@@ -1751,7 +1752,6 @@ local_system:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
-          accumulator_appearances: Dict[Acc, int]
           accumulator_sharing_ratio: float
 
           # "Empty" flags / terminal interfaces
@@ -1813,10 +1813,6 @@ local_system:
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-              if self.accumulator_appearances:
-                  sample_items = list(self.accumulator_appearances.items())[:10]
-                  lines.append(f"  accumulator_appearances (counts of acc in nodes): size={len(self.accumulator_appearances)}")
-                  lines.append("    " + ", ".join(f"{repr(k)}:{v}" for k, v in sample_items) + (" ..." if len(self.accumulator_appearances) > 10 else ""))
               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
 
@@ -2591,7 +2587,6 @@ local_system:
 
               distinct_values: Set[T] = set()
               unique_accumulators: Set[Acc] = set()
-              accumulator_appearances: Counter[Acc] = Counter()
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
@@ -2646,7 +2641,6 @@ local_system:
                           if node.empty is not None:
                               num_upper_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              accumulator_appearances[node.empty] += 1
                           # edges and values
                           for v, kids in node.children.items():
                               distinct_values.add(v)
@@ -2669,11 +2663,9 @@ local_system:
                           visited_interface.add(nid)
                           num_interface_nodes += 1
                           unique_accumulators.add(node.acc)
-                          accumulator_appearances[node.acc] += 1
                           if node.empty is not None:
                               num_interfaces_with_empty += 1
                               unique_accumulators.add(node.empty)
-                              accumulator_appearances[node.empty] += 1
                           if not node.children and node.empty is None:
                               num_interface_implicit_terminals += 1
                           # edges to lower and values
@@ -2760,7 +2752,6 @@ local_system:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
-                  accumulator_appearances=dict(sorted(accumulator_appearances.items(), key=lambda item: item[1], reverse=True)),
                   accumulator_sharing_ratio=accumulator_sharing_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
@@ -3269,12 +3260,13 @@ messages:
           distinct_values: Set[T]
           unique_accumulators_count: int
           unique_accumulators: Set[Acc]
-          accumulator_sharing_ratio: float
+          total_accumulators: int
+          accumulator_uniqueness_ratio: float
 
           # "Empty" flags / terminal interfaces
           num_upper_with_empty: int
           num_interfaces_with_empty: int
-          num_lower_terminal_nodes: int
+          num_lower_with_empty: int
           num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
 
           # Multi-depth slot metrics
@@ -3329,15 +3321,13 @@ messages:
 
               lines.append("- values/accumulators:")
               lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
-              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-              lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
-              lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+              lines.append(f"  total_accumulators={self.total_accumulators}")
+              lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
 
               lines.append("- empties/terminals:")
-              lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
-              lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
-              lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
-              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
+              lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
 
               lines.append("- multi-depth slots:")
               lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
@@ -4107,7 +4097,7 @@ messages:
 
               num_upper_with_empty = 0
               num_interfaces_with_empty = 0
-              num_lower_terminal_nodes = 0
+              num_lower_with_empty = 0
               num_interface_implicit_terminals = 0
 
               num_multi_depth_slots_upper = 0
@@ -4206,7 +4196,7 @@ messages:
                   visited_lower.add(nid)
                   num_lower_nodes += 1
                   if node.empty:
-                      num_lower_terminal_nodes += 1
+                      num_lower_with_empty += 1
                   if node._max_depth > max_lower_depth:
                       max_lower_depth = node._max_depth
                   # edges and values
@@ -4229,10 +4219,11 @@ messages:
               unique_accumulators_count = len(unique_accumulators)
 
               # Accumulator counts
-              if total_stacks > 0:
-                  accumulator_sharing_ratio = unique_accumulators_count / total_stacks
+              total_accumulators = total_stacks
+              if total_accumulators > 0:
+                  accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
               else:
-                  accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
+                  accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
 
               # Sharing metrics
               if incoming_edges:
@@ -4269,10 +4260,11 @@ messages:
                   distinct_values=distinct_values,
                   unique_accumulators_count=unique_accumulators_count,
                   unique_accumulators=unique_accumulators,
-                  accumulator_sharing_ratio=accumulator_sharing_ratio,
+                  total_accumulators=total_accumulators,
+                  accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
                   num_upper_with_empty=num_upper_with_empty,
                   num_interfaces_with_empty=num_interfaces_with_empty,
-                  num_lower_terminal_nodes=num_lower_terminal_nodes,
+                  num_lower_with_empty=num_lower_with_empty,
                   num_interface_implicit_terminals=num_interface_implicit_terminals,
                   num_multi_depth_slots_upper=num_multi_depth_slots_upper,
                   num_multi_depth_slots_lower=num_multi_depth_slots_lower,
@@ -4435,8 +4427,214 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: It'd be really useful to know the number of appearances of acc in interface
-      or in upper branch nodes, either in acc or empty field.
+  - user: |-
+      Of course. The core issue is that the naming in the statistics doesn't accurately reflect what's being calculated, which obscures the cleverness and efficiency of the `LeveledGSS` data structure. The underlying calculations are correct, but the labels are misleading.
+
+      Here are the instructions for fixing the misleading stats, starting with the one you identified.
+
+      ---
+
+      ### **Fix #1: Clarify `total_accumulators` vs. `total_stacks`**
+
+      **The Problem:**
+      The stat `total_accumulators` does not count the number of physically stored, unique accumulator objects. Instead, it counts the total number of unique paths (stacks) in the GSS. This is the single most misleading stat because it hides the primary optimization of the data structure: that a small number of stored accumulators can represent an exponentially large number of logical stacks.
+
+      **Instructions for Fixing:**
+
+      1.  **Rename the Field in `LeveledGSSStats`:** Change the field name from `total_accumulators` to `total_stacks`. The `unique_accumulators_count` field correctly represents the number of stored accumulators and should remain.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats` dataclass:**
+          ```python
+          # BEFORE
+          unique_accumulators_count: int
+          unique_accumulators: Set[Acc]
+          total_accumulators: int
+          accumulator_uniqueness_ratio: float
+
+          # AFTER
+          unique_accumulators_count: int
+          unique_accumulators: Set[Acc]
+          total_stacks: int  # Renamed from total_accumulators
+          accumulator_uniqueness_ratio: float # This will be fixed next
+          ```
+
+      2.  **Update the `stats()` Method:** The calculation is already correct, just ensure it populates the newly named field.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSS.stats()` method:**
+          ```python
+          # BEFORE
+          total_accumulators = total_stacks
+          # ...
+          return LeveledGSSStats(
+              # ...
+              total_accumulators=total_accumulators,
+              # ...
+          )
+
+          # AFTER
+          # The line `total_accumulators = total_stacks` can be removed.
+          # ...
+          return LeveledGSSStats(
+              total_stacks=total_stacks, # Assign to the correct field
+              # ...
+          )
+          ```
+
+      3.  **Update the `__str__` Method:** Change the print output to reflect the new, clearer naming.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats.__str__()` method:**
+          ```python
+          # BEFORE
+          lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+          lines.append(f"  total_accumulators={self.total_accumulators}")
+          lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+
+          # AFTER
+          lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+          lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+          # The ratio will be updated in the next step.
+          ```
+
+      ---
+
+      ### **Fix #2: Create a Meaningful "Sharing Ratio"**
+
+      **The Problem:**
+      The `accumulator_uniqueness_ratio` was calculated as `unique_accumulators_count / total_accumulators`. With the previous naming, this was confusing. With the new naming, `unique_accumulators_count / total_stacks` is a very meaningful number: it's the **accumulator sharing factor**. A smaller number indicates more efficient sharing. The name should reflect this.
+
+      **Instructions for Fixing:**
+
+      1.  **Rename the Field in `LeveledGSSStats`:** Change `accumulator_uniqueness_ratio` to `accumulator_sharing_ratio`.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats` dataclass:**
+          ```python
+          # BEFORE
+          accumulator_uniqueness_ratio: float
+
+          # AFTER
+          accumulator_sharing_ratio: float
+          ```
+
+      2.  **Update the `stats()` Method:** The calculation `unique_accumulators_count / total_stacks` is correct. Just assign it to the new field name.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSS.stats()` method:**
+          ```python
+          # BEFORE
+          if total_accumulators > 0:
+              accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+          # ...
+          return LeveledGSSStats(
+              # ...
+              accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
+              # ...
+          )
+
+          # AFTER
+          if total_stacks > 0:
+              accumulator_sharing_ratio = unique_accumulators_count / total_stacks
+          else:
+              accumulator_sharing_ratio = 1.0
+          # ...
+          return LeveledGSSStats(
+              # ...
+              accumulator_sharing_ratio=accumulator_sharing_ratio,
+              # ...
+          )
+          ```
+
+      3.  **Update the `__str__` Method:** Explain the new ratio clearly.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats.__str__()` method:**
+          ```python
+          # BEFORE
+          lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+
+          # AFTER
+          lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+          ```
+
+      ---
+
+      ### **Fix #3: Clarify the Overloaded "Empty" Stat**
+
+      **The Problem:**
+      The word "empty" is used in two different ways:
+      1.  In `UpperBranch` and `Interface`, `empty: Optional[Acc]` refers to a true **empty stack** (a path of length 0).
+      2.  In `Lower`, `empty: bool` refers to a **terminal node** (a path can end here), not an empty stack.
+
+      The stat `num_lower_with_empty` is therefore misleading. It doesn't count empty stacks, it counts the number of terminal nodes in the shared `Lower` tree structure.
+
+      **Instructions for Fixing:**
+
+      1.  **Rename the Field in `LeveledGSSStats`:** Change `num_lower_with_empty` to `num_lower_terminal_nodes`.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats` dataclass:**
+          ```python
+          # BEFORE
+          num_upper_with_empty: int
+          num_interfaces_with_empty: int
+          num_lower_with_empty: int
+
+          # AFTER
+          num_upper_with_empty: int
+          num_interfaces_with_empty: int
+          num_lower_terminal_nodes: int # Renamed from num_lower_with_empty
+          ```
+
+      2.  **Update the `stats()` Method:** Update the variable name and field assignment.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSS.stats()` method:**
+          ```python
+          # BEFORE
+          num_lower_with_empty = 0
+          # ... in the traversal loop ...
+          if node.empty:
+              num_lower_with_empty += 1
+          # ...
+          return LeveledGSSStats(
+              # ...
+              num_lower_with_empty=num_lower_with_empty,
+              # ...
+          )
+
+          # AFTER
+          num_lower_terminal_nodes = 0
+          # ... in the traversal loop ...
+          if node.empty:
+              num_lower_terminal_nodes += 1
+          # ...
+          return LeveledGSSStats(
+              # ...
+              num_lower_terminal_nodes=num_lower_terminal_nodes,
+              # ...
+          )
+          ```
+
+      3.  **Update the `__str__` Method:** Clarify the meaning of all "empty" and "terminal" stats.
+
+          **File:** `python/gss_tester/implementations/leveled_impl.py`
+          **In `LeveledGSSStats.__str__()` method:**
+          ```python
+          # BEFORE
+          lines.append("- empties/terminals:")
+          lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+          lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
+
+          # AFTER
+          lines.append("- empties/terminals:")
+          lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
+          lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
+          lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
+          lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
+          ```
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4455,89 +4653,173 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add statistics about accumulator appearances in `LeveledGSSStats`, followed by the corresponding git diff.
+      Of course. You've correctly identified that the statistics, while numerically accurate, are poorly named and obscure the efficiency of the `LeveledGSS` implementation. Clarifying these names will make the `stats()` output much more valuable.
 
-      ### Step-by-step Instructions
+      Here are the step-by-step instructions to apply the fixes, followed by the corresponding git diffs.
 
-      I will modify the `LeveledGSSStats` dataclass to include a new field for accumulator appearance counts, update the `stats` method to compute this information, and adjust the `__str__` method to display it.
+      ---
 
-      **File: `python/gss_tester/implementations/leveled_impl.py`**
+      ### Step-by-Step Instructions
 
-      1.  **Update `LeveledGSSStats` Dataclass:**
-          In the `LeveledGSSStats` dataclass definition, add a new field `accumulator_appearances: Dict[Acc, int]` under the "Value/accumulator coverage" section, right after `unique_accumulators: Set[Acc]`.
+      #### File: `python/gss_tester/implementations/leveled_impl.py`
 
-      2.  **Enhance `LeveledGSSStats.__str__`:**
-          In the `__str__` method of `LeveledGSSStats`, add a few lines to format and display the new `accumulator_appearances` data. This should be inside the "- values/accumulators:" section, after the line for `unique_accumulators_count`.
+      1.  **Update the `LeveledGSSStats` Dataclass Definition:**
+          -   In the `LeveledGSSStats` class definition (around line 90), make the following changes:
+              -   Remove the line `total_accumulators: int`.
+              -   Rename `accumulator_uniqueness_ratio: float` to `accumulator_sharing_ratio: float`.
+              -   Rename `num_lower_with_empty: int` to `num_lower_terminal_nodes: int`.
 
-      3.  **Update `LeveledGSS.stats()` Method:**
-          a. In the "Structural scan" section where variables are initialized, add `accumulator_appearances: Counter[Acc] = Counter()` to create a new counter.
-          b. Inside the `while upper_queue:` loop, augment the logic for both `UpperBranch` and `Interface` nodes to increment the `accumulator_appearances` counter whenever an accumulator is found in an `acc` or `empty` field.
-          c. In the final `return LeveledGSSStats(...)` call at the end of the method, add the `accumulator_appearances` field, converting the counter to a dictionary sorted by count in descending order for consistent output.
+      2.  **Update the `LeveledGSSStats.__str__` Method:**
+          -   In the `__str__` method of the `LeveledGSSStats` class (around line 165), replace the "values/accumulators" and "empties/terminals" sections.
+          -   **Replace this block:**
+              ```python
+              lines.append("- values/accumulators:")
+              lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+              lines.append(f"  total_accumulators={self.total_accumulators}")
+              lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+
+              lines.append("- empties/terminals:")
+              lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
+              ```
+          -   **With this new block:**
+              ```python
+              lines.append("- values/accumulators:")
+              lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
+              lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+              lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+              lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+
+              lines.append("- empties/terminals:")
+              lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
+              lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
+              lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
+              lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
+              ```
+
+      3.  **Update the `LeveledGSS.stats` Method:**
+          -   Inside the `stats` method (around line 1008), update the variable initializations.
+          -   Change `num_lower_with_empty = 0` to `num_lower_terminal_nodes = 0`.
+          -   In the `while lower_queue:` loop (around line 1120), update the counter.
+          -   Change `num_lower_with_empty += 1` to `num_lower_terminal_nodes += 1`.
+          -   Further down in the `stats` method (around line 1140), update the accumulator and ratio calculations.
+          -   **Remove this block:**
+              ```python
+              # Accumulator counts
+              total_accumulators = total_stacks
+              if total_accumulators > 0:
+                  accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+              else:
+                  accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+              ```
+          -   **And replace it with this:**
+              ```python
+              # Accumulator counts
+              if total_stacks > 0:
+                  accumulator_sharing_ratio = unique_accumulators_count / total_stacks
+              else:
+                  accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
+              ```
+          -   Finally, update the `return LeveledGSSStats(...)` statement at the end of the method (around line 1155).
+          -   Remove the `total_accumulators` argument.
+          -   Rename the `accumulator_uniqueness_ratio` argument to `accumulator_sharing_ratio`.
+          -   Rename the `num_lower_with_empty` argument to `num_lower_terminal_nodes`.
+
+      ---
 
       ### Git Diffs
 
-      Here is the git diff to apply these changes:
+      Here are the git diffs to apply these changes directly.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 455440c..a712411 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -107,6 +107,7 @@
+      @@ -113,14 +113,13 @@
            distinct_values: Set[T]
            unique_accumulators_count: int
            unique_accumulators: Set[Acc]
-      +    accumulator_appearances: Dict[Acc, int]
-           accumulator_sharing_ratio: float
+      -    total_accumulators: int
+      -    accumulator_uniqueness_ratio: float
+      +    accumulator_sharing_ratio: float
        
            # "Empty" flags / terminal interfaces
-      @@ -156,6 +157,11 @@
+           num_upper_with_empty: int
+           num_interfaces_with_empty: int
+      -    num_lower_with_empty: int
+      +    num_lower_terminal_nodes: int
+           num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
+       
+           # Multi-depth slot metrics
+      @@ -171,14 +170,14 @@
+       
                lines.append("- values/accumulators:")
                lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
-               lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-      +        if self.accumulator_appearances:
-      +            sample_items = list(self.accumulator_appearances.items())[:10]
-      +            lines.append(f"  accumulator_appearances (counts of acc in nodes): size={len(self.accumulator_appearances)}")
-      +            lines.append("    " + ", ".join(f"{repr(k)}:{v}" for k, v in sample_items) + (" ..." if len(self.accumulator_appearances) > 10 else ""))
-               lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
-               lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+      -        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count}")
+      -        lines.append(f"  total_accumulators={self.total_accumulators}")
+      -        lines.append(f"  accumulator_uniqueness_ratio={self.accumulator_uniqueness_ratio:.4f} (unique/total)")
+      +        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
+      +        lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
+      +        lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
        
-      @@ -919,6 +925,7 @@
+               lines.append("- empties/terminals:")
+      -        lines.append(f"  upper_with_empty={self.num_upper_with_empty}, interfaces_with_empty={self.num_interfaces_with_empty}, lower_with_empty={self.num_lower_with_empty}")
+      -        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals}")
+      +        lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
+      +        lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
+      +        lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
+      +        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
        
-               distinct_values: Set[T] = set()
-               unique_accumulators: Set[Acc] = set()
-      +        accumulator_appearances: Counter[Acc] = Counter()
+               lines.append("- multi-depth slots:")
+               lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
+      @@ -1005,7 +1004,7 @@
        
                num_upper_with_empty = 0
                num_interfaces_with_empty = 0
-      @@ -968,6 +975,7 @@
-                           if node.empty is not None:
-                               num_upper_with_empty += 1
-                               unique_accumulators.add(node.empty)
-      +                        accumulator_appearances[node.empty] += 1
-                           # edges and values
-                           for v, kids in node.children.items():
-                               distinct_values.add(v)
-      @@ -989,10 +997,12 @@
-                           visited_interface.add(nid)
-                           num_interface_nodes += 1
-                           unique_accumulators.add(node.acc)
-      +                    accumulator_appearances[node.acc] += 1
-                           if node.empty is not None:
-                               num_interfaces_with_empty += 1
-                               unique_accumulators.add(node.empty)
-      +                        accumulator_appearances[node.empty] += 1
-                           if not node.children and node.empty is None:
-                               num_interface_implicit_terminals += 1
-                           # edges to lower and values
-      @@ -1067,6 +1077,7 @@
+      -        num_lower_with_empty = 0
+      +        num_lower_terminal_nodes = 0
+               num_interface_implicit_terminals = 0
+       
+               num_multi_depth_slots_upper = 0
+      @@ -1118,7 +1117,7 @@
+                   visited_lower.add(nid)
+                   num_lower_nodes += 1
+                   if node.empty:
+      -                num_lower_with_empty += 1
+      +                num_lower_terminal_nodes += 1
+                   if node._max_depth > max_lower_depth:
+                       max_lower_depth = node._max_depth
+                   # edges and values
+      @@ -1138,12 +1137,11 @@
+               unique_accumulators_count = len(unique_accumulators)
+       
+               # Accumulator counts
+      -        total_accumulators = total_stacks
+      -        if total_accumulators > 0:
+      -            accumulator_uniqueness_ratio = unique_accumulators_count / total_accumulators
+      +        if total_stacks > 0:
+      +            accumulator_sharing_ratio = unique_accumulators_count / total_stacks
+               else:
+      -            accumulator_uniqueness_ratio = 1.0  # No stacks, so no redundancy.
+      +            accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
+       
+               # Sharing metrics
+               if incoming_edges:
+      @@ -1179,11 +1177,10 @@
                    distinct_values=distinct_values,
                    unique_accumulators_count=unique_accumulators_count,
                    unique_accumulators=unique_accumulators,
-      +            accumulator_appearances=dict(sorted(accumulator_appearances.items(), key=lambda item: item[1], reverse=True)),
-                   accumulator_sharing_ratio=accumulator_sharing_ratio,
+      -            total_accumulators=total_accumulators,
+      -            accumulator_uniqueness_ratio=accumulator_uniqueness_ratio,
+      +            accumulator_sharing_ratio=accumulator_sharing_ratio,
                    num_upper_with_empty=num_upper_with_empty,
                    num_interfaces_with_empty=num_interfaces_with_empty,
+      -            num_lower_with_empty=num_lower_with_empty,
+      +            num_lower_terminal_nodes=num_lower_terminal_nodes,
+                   num_interface_implicit_terminals=num_interface_implicit_terminals,
+                   num_multi_depth_slots_upper=num_multi_depth_slots_upper,
+                   num_multi_depth_slots_lower=num_multi_depth_slots_lower,
 
       ```
     metadata:
@@ -4550,7 +4832,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add accumulator appearance counts
-      to LeveledGSSStats"'
+  - user: 'Changes committed with message: "Refactor: Clarify LeveledGSS statistics
+      naming for improved understanding"'
     metadata:
 ...
