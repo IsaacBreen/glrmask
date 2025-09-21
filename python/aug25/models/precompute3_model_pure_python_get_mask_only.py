@@ -1,5 +1,7 @@
 import heapq
 import _sep1 as ffi
+import time
+from functools import wraps
 from typing import Dict, List, Set, Tuple, Optional
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -12,6 +14,33 @@ except NameError:
     def profile(func): return func
 
 
+# --- Profiling infrastructure ---
+_PROFILING_STATS = {
+    'bitset_union': 0,
+    'bitset_intersection': 0,
+    'bitset_difference': 0,
+    'hybrid_complement': 0,
+}
+
+def _profile_method(cls, method_name, counter_name):
+    original_method = getattr(cls, method_name)
+    @wraps(original_method)
+    def wrapper(*args, **kwargs):
+        _PROFILING_STATS[counter_name] += 1
+        return original_method(*args, **kwargs)
+    setattr(cls, method_name, wrapper)
+
+_hooks_installed = False
+def _install_profiling_hooks():
+    global _hooks_installed
+    if _hooks_installed:
+        return
+    _profile_method(ffi.Bitset, 'union', 'bitset_union')
+    _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+    _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+    _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+    _hooks_installed = True
+
 class Model(GraphProvider):
     def __init__(self, inner_model: InnerModel):
         self.inner_model: InnerModel = inner_model
@@ -23,6 +52,9 @@ class Model(GraphProvider):
         self.tokenizer_max_state: int = im.tokenizer.max_state()
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+        # Profiling state
+        _install_profiling_hooks()
+        self.get_mask_calls = 0
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -51,6 +83,18 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         state_map: Dict[int, GSS] = self.state
+        t_start = time.perf_counter_ns()
+        self.get_mask_calls += 1
+
+        # Reset per-call stats
+        for k in _PROFILING_STATS:
+            _PROFILING_STATS[k] = 0
+        call_stats = {
+            'nodes_visited': 0,
+            'main_loop_iterations': 0,
+            'end_nodes_reached': 0,
+        }
+
         all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
         final_mask: ffi.Bitset = ffi.Bitset.zeros()
 
@@ -118,15 +162,20 @@ class Model(GraphProvider):
             else:
                 b.add(n)
 
+        t_init_done = time.perf_counter_ns()
+
         # Main loop
         while depth_heap:
+            call_stats['main_loop_iterations'] += 1
             depth: int = hpop(depth_heap)
             while todo[depth]:
+                call_stats['nodes_visited'] += 1
                 node: int = todo[depth].pop()
                 gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
+                    call_stats['end_nodes_reached'] += 1
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     final_mask = final_mask.union(reduced_acc.llm_mask)
 
@@ -164,11 +213,29 @@ class Model(GraphProvider):
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
 
+
             todo.pop(depth)
+
+        t_main_loop_done = time.perf_counter_ns()
 
         # Convert internal mask back to original IDs
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])
+
+        t_end = time.perf_counter_ns()
+
+        print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+        print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+        print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+        print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+        print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+        print(f"Nodes visited: {call_stats['nodes_visited']}")
+        print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+        print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+        for k, v in _PROFILING_STATS.items():
+            print(f"{k} calls: {v}")
+        print("---------------------------------------------------\n")
+
         return RangeSet.from_ranges(original_mask.to_ranges())
