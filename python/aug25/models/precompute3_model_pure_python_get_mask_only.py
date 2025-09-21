@@ -138,7 +138,6 @@ class Model(GraphProvider):
         for sid, gss in state_map.items():
             r: Optional[int] = roots_map[int(sid)]
 
-
             gss_initialized: GSS = gss.apply(initialize_acc, memo)
 
             if r in values:
