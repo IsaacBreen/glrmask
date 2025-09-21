@@ -1,6 +1,5 @@
 import heapq
 import _sep1 as ffi
-from time import perf_counter
 from typing import Dict, List, Set, Tuple, Optional
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -41,44 +40,12 @@ class Model(GraphProvider):
 
     @profile
     def get_mask(self) -> RangeSet:
-        # Profiling counters
-        loops_while_depth_heap: int = 0
-        nodes_visited: int = 0
-        items_processed: int = 0
-        end_nodes_reached_items: int = 0
-        end_nodes_unique: Set[int] = set()
-        bitset_union_calls: int = 0
-        bitset_difference_calls: int = 0
-        bitset_intersection_calls: int = 0
-        hybrid_complement_calls: int = 0
-        hybrid_range_values_calls: int = 0
-        tsid_iterations: int = 0
-        pm_get_calls: int = 0
-        pm_items_iterated: int = 0
-        children_groups_processed: int = 0
-        transitions_processed: int = 0
-        t_start: float = perf_counter()
-
-        def bs_union(a: ffi.Bitset, b: ffi.Bitset) -> ffi.Bitset:
-            nonlocal bitset_union_calls
-            bitset_union_calls += 1
-            return a.union(b)
-
-        def bs_diff(a: ffi.Bitset, b: ffi.Bitset) -> ffi.Bitset:
-            nonlocal bitset_difference_calls
-            bitset_difference_calls += 1
-            return a.difference(b)
-
-        def bs_inter(a: ffi.Bitset, b: ffi.Bitset) -> ffi.Bitset:
-            nonlocal bitset_intersection_calls
-            bitset_intersection_calls += 1
-            return a.intersection(b)
-
         state_map: Dict[int, GSS] = self.state
         all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
         final_mask: ffi.Bitset = ffi.Bitset.zeros()
 
-        values: Dict[int, List[Tuple[GSS, ffi.Bitset]]] = {}
+        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
 
@@ -96,9 +63,9 @@ class Model(GraphProvider):
                 continue
             r = int(r)
             if r in values:
-                values[r].append((gss, all_ones))
+                values[r] = (values[r][0].merge(gss), all_ones)
             else:
-                values[r] = [(gss, all_ones)]
+                values[r] = (gss, all_ones)
             d: int = max_depth[r]
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
@@ -117,94 +84,62 @@ class Model(GraphProvider):
 
         def disallowed_terminals(g: GSS) -> ffi.HybridL2Bitset:
             acc = g.reduce_acc()
-            if acc is None:
-                return ffi.HybridL2Bitset.all()
-            nonlocal hybrid_complement_calls
-            hybrid_complement_calls += 1
-            return acc.terminals_union.complement()
+            return ffi.HybridL2Bitset.all() if acc is None else acc.terminals_union.complement()
 
         while depth_heap:
-            loops_while_depth_heap += 1
             depth: int = hpop(depth_heap)
             nodes: Optional[Set[int]] = todo.pop(depth, None)
             if not nodes:
                 continue
             for node in nodes:
-                nodes_visited += 1
-                items: Optional[List[Tuple[GSS, ffi.Bitset]]] = values.pop(node, None)
-                if items is None:
+                if node in stopped:
+                    continue
+                item: Optional[Tuple[GSS, ffi.Bitset]] = values.pop(node, None)
+                if item is None:
+                    continue
+                gss_node, llm_mask = item
+
+                if is_end(node):
+                    forbid: ffi.Bitset = ffi.Bitset.zeros()
+                    for (start, end), bv in disallowed_terminals(gss_node).range_values():
+                        if bv.is_empty():
+                            continue
+                        for tsid in range(start, min(end, max_state) + 1):
+                            pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                            if not pm:
+                                continue
+                            for terminal_id_str, llm_tokens in pm.items():
+                                if bv.contains(int(terminal_id_str)):
+                                    forbid = forbid.union(llm_tokens)
+                    allowed: ffi.Bitset = llm_mask.difference(forbid)
+                    if not allowed.is_empty():
+                        final_mask = final_mask.union(allowed)
+
+                if llm_mask.is_empty():
+                    stopped.add(node)
                     continue
 
-                end_node_flag: bool = is_end(node)
-                if end_node_flag:
-                    end_nodes_unique.add(node)
-                for gss_node, llm_mask in items:
-                    items_processed += 1
-                    if end_node_flag:
-                        end_nodes_reached_items += 1
-                        forbid: ffi.Bitset = ffi.Bitset.zeros()
-                        hyb = disallowed_terminals(gss_node)
-                        hybrid_range_values_calls += 1
-                        for (start, end), bv in hyb.range_values():
-                            if bv.is_empty():
+                for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                    popped: GSS = gss_node.popn(pop)
+                    for dest_idx, state_bv in dests:
+                        if not state_bv.is_empty():
+                            matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
+                            if not matched:
                                 continue
-                            for tsid in range(start, min(end, max_state) + 1):
-                                tsid_iterations += 1
-                                pm_get_calls += 1
-                                pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                                if not pm:
-                                    continue
-                                for terminal_id_str, llm_tokens in pm.items():
-                                    pm_items_iterated += 1
-                                    if bv.contains(int(terminal_id_str)):
-                                        forbid = bs_union(forbid, llm_tokens)
-                        allowed: ffi.Bitset = bs_diff(llm_mask, forbid)
-                        if not allowed.is_empty():
-                            final_mask = bs_union(final_mask, allowed)
-
-                    if llm_mask.is_empty():
-                        continue
-
-                    for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                        children_groups_processed += 1
-                        popped: GSS = gss_node.popn(pop)
-                        for dest_idx, state_bv in dests:
-                            transitions_processed += 1
-                            if not state_bv.is_empty():
-                                matched: List[GSS] = [popped.isolate(s) for s in popped.peek() if state_bv.contains(s)]
-                                if not matched:
-                                    continue
-                            else:
-                                continue
-                            child_gss: GSS = GSS.merge_many(matched)
-                            child_mask: ffi.Bitset
-                            if llm_bv.is_empty():
-                                child_mask = llm_mask
-                            else:
-                                child_mask = bs_inter(llm_mask, llm_bv)
-                            d: int = int(dest_idx)
-                            if d in values:
-                                values[d].append((child_gss, child_mask))
-                            else:
-                                values[d] = [(child_gss, child_mask)]
-                            enqueue(max_depth[d], d)
+                        else:
+                            continue
+                        child_gss: GSS = GSS.merge_many(matched)
+                        child_mask: ffi.Bitset = llm_mask if llm_bv.is_empty() else llm_mask.intersection(llm_bv)
+                        d: int = int(dest_idx)
+                        if d in values:
+                            g0, m0 = values[d]
+                            values[d] = (g0.merge(child_gss), m0.union(child_mask))
+                        else:
+                            values[d] = (child_gss, child_mask)
+                        enqueue(max_depth[d], d)
 
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])
-        t_end: float = perf_counter()
-        # Print profiling summary
-        print("[get_mask profile]")
-        print(f"  time_sec: {t_end - t_start:.6f}")
-        print(f"  while_iterations: {loops_while_depth_heap}")
-        print(f"  nodes_visited: {nodes_visited}")
-        print(f"  items_processed: {items_processed}")
-        print(f"  end_nodes_items: {end_nodes_reached_items}")
-        print(f"  end_nodes_unique: {len(end_nodes_unique)}")
-        print(f"  bitset: union={bitset_union_calls}, difference={bitset_difference_calls}, intersection={bitset_intersection_calls}")
-        print(f"  hybrid: complement={hybrid_complement_calls}, range_values={hybrid_range_values_calls}")
-        print(f"  tsid_iterations: {tsid_iterations}")
-        print(f"  pm_get_calls: {pm_get_calls}, pm_items_iterated: {pm_items_iterated}")
-        print(f"  children_groups_processed: {children_groups_processed}, transitions_processed: {transitions_processed}")
         return RangeSet.from_ranges(original_mask.to_ranges())
