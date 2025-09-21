@@ -56,7 +56,6 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
-        stopped: Set[int] = set()
         todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
 
@@ -127,21 +126,13 @@ class Model(GraphProvider):
                 continue
 
             for node in nodes:
-                if node in stopped:
-                    continue
                 gss_node: Optional[GSS] = values.pop(node, None)
                 if gss_node is None:
                     continue
 
-                # Compute current allowed LLM tokens at this node by reducing acc
-                reduced_acc = gss_node.reduce_acc()
-                if reduced_acc is None or reduced_acc.llm_mask.is_empty():
-                    # No possible tokens here -> stop this branch
-                    stopped.add(node)
-                    continue
-
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
+                    reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
