@@ -93,6 +93,8 @@ class Model(GraphProvider):
             'nodes_visited': 0,
             'main_loop_iterations': 0,
             'end_nodes_reached': 0,
+            'main_loop_apply_calls': 0,
+            'main_loop_merge_calls': 0,
         }
 
         all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
@@ -154,6 +156,8 @@ class Model(GraphProvider):
             else:
                 b.add(r)
 
+        print(GSS.merge_many(list(values.values())).stats())
+
         def enqueue(d: int, n: int) -> None:
             b: Optional[Set[int]] = todo.get(d)
             if b is None:
@@ -204,10 +208,12 @@ class Model(GraphProvider):
                                     terminals_union=acc.terminals_union,
                                     llm_mask=acc.llm_mask.intersection(llm_bv)
                                 )
+                            call_stats['main_loop_apply_calls'] += 1
                             child_gss = child_gss.apply(intersect_edge)
 
                         d: int = int(dest_idx)
                         if d in values:
+                            call_stats['main_loop_merge_calls'] += 1
                             values[d] = values[d].merge(child_gss)
                         else:
                             values[d] = child_gss
@@ -234,6 +240,8 @@ class Model(GraphProvider):
         print(f"Nodes visited: {call_stats['nodes_visited']}")
         print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
         print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+        print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+        print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
         for k, v in _PROFILING_STATS.items():
             print(f"{k} calls: {v}")
         print("---------------------------------------------------\n")
