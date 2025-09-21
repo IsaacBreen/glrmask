@@ -1147,7 +1147,10 @@ def _merge_children_by_depth(
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     all_children = list(node._all_children())
     if not all_children:
-        return node
+        if node.empty is not None:
+            # This represents a single terminal stack. Promote to an Interface.
+            return Interface(children={}, acc=node.empty, empty=None)
+        return node  # It's an empty UpperBranch, representing an empty GSS.
     if not all(isinstance(c, Interface) for c in all_children):
         return node
 
