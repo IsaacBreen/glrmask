@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Iterator, TypeVar
 
 from ..interface import GSS, T, Acc
 
@@ -300,12 +300,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         Empty stacks are discarded.
         """
         ub = _as_upperbranch(self.inner)
-        # Gather all children across top values
         children = [child for kids in ub.children.values() for child in kids.values()]
         if not children:
             return LeveledGSS(UpperBranch(children={}, empty=None))
+
         merged = _merge_many_upper(children)
-        return LeveledGSS(try_promote(_as_upperbranch(merged)))
+        if isinstance(merged, UpperBranch):
+            return LeveledGSS(try_promote(merged))
+        return LeveledGSS(merged)
 
     def is_empty(self) -> bool:
         if isinstance(self.inner, UpperBranch):
@@ -316,20 +318,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         """
         Keep only stacks whose top equals value. If value is None, keep only empty stacks.
         """
+        ub = _as_upperbranch(self.inner)
         if value is None:
-            if isinstance(self.inner, UpperBranch):
-                return LeveledGSS(UpperBranch(children={}, empty=self.inner.empty))
-            empty_acc = _interface_empty_acc(self.inner)
-            return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+            return LeveledGSS(UpperBranch(children={}, empty=ub.empty))
 
-        if isinstance(self.inner, UpperBranch):
-            filtered = {value: self.inner.children[value]} if value in self.inner.children else {}
-            return LeveledGSS(try_promote(UpperBranch(children=filtered, empty=None)))
-        else:
-            if value not in self.inner.children:
-                return LeveledGSS(UpperBranch(children={}, empty=None))
-            filtered_children = {value: self.inner.children[value]}
-            return LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
+        filtered = {value: ub.children[value]} if value in ub.children else {}
+        if not filtered:
+            return LeveledGSS(UpperBranch(children={}, empty=None))
+        return LeveledGSS(try_promote(UpperBranch(children=filtered, empty=None)))
 
     def apply(self, func: Callable[[Acc], Acc]) -> LeveledGSS[T, Acc]:
         """
