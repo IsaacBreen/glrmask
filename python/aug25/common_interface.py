@@ -75,6 +75,7 @@ class RangeSet:
         intervals.append((start, indices_sorted[-1]))
         return RangeSet(intervals)
 
+    @staticmethod
     def empty() -> 'RangeSet':
         """Creates an empty RangeSet."""
         return RangeSet()
