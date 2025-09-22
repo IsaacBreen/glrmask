@@ -397,7 +397,7 @@ class Model(GraphProvider):
 
             # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
             values: Dict[int, GSS] = {}
-            todo: Dict[int, Set[int]] = collections.defaultdict(set)
+            todo: Dict[int, Set[int]] = {}
             depth_heap: List[int] = []
 
             hp, hpop = heapq.heappush, heapq.heappop
@@ -480,17 +480,23 @@ class Model(GraphProvider):
                     values[r] = gss_initialized
 
                 d: int = max_depth[r]
-                if not todo[d]:
+                bucket: Optional[Set[int]] = todo.get(d)
+                if bucket is None:
+                    todo[d] = {r}
                     hp(depth_heap, d)
-                todo[d].add(r)
+                else:
+                    bucket.add(r)
             stats.inc('get_mask.seeding.apply_memo.size', len(apply_memo))
             stats.stop('get_mask.seeding')
 
             def enqueue(d: int, n: int) -> None:
                 stats.inc('get_mask.traversal.enqueues')
-                if not todo[d]:
+                bucket: Optional[Set[int]] = todo.get(d)
+                if bucket is None:
+                    todo[d] = {n}
                     hp(depth_heap, d)
-                todo[d].add(n)
+                else:
+                    bucket.add(n)
 
             # Main loop
             stats.start('get_mask.main_loop')
@@ -501,14 +507,11 @@ class Model(GraphProvider):
                 max_depth_reached = max(max_depth_reached, depth)
                 stats.inc('get_mask.traversal.depth_heap.pops')
 
-                current_nodes = todo.pop(depth)
-                while current_nodes:
+                while todo[depth]:
                     stats.inc('get_mask.traversal.nodes_processed')
-                    node: int = current_nodes.pop()
+                    node: int = todo[depth].pop()
                     visited_nodes.add(node)
-                    gss_node: GSS = values.pop(node, None)
-                    if gss_node is None:
-                        continue
+                    gss_node: GSS = values.pop(node)
                     stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
                     # stats.inc('get_mask.gss.at_node.stacks.sum', len(gss_node))
 
@@ -599,6 +602,7 @@ class Model(GraphProvider):
                             else:
                                 values[d] = child_gss
                             enqueue(max_depth[d], d)
+                todo.pop(depth)
             stats.stop('get_mask.main_loop')
             stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
             stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
