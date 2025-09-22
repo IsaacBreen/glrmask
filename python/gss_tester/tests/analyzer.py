@@ -5,7 +5,6 @@ from typing import List, Dict, Any, Tuple, Optional
 import itertools
 
 MAX_STACKS_PREVIEW = 5
-TRACE_CONTEXT_WINDOW = 10
 
 def analyze_results(result_files: List[Path], reference_file: Path = None):
     all_results: Dict[str, List[Dict[str, Any]]] = {}
@@ -46,15 +45,15 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
         except Exception:
             return repr(stacks)
 
-    def extract_trace_window(results: List[Dict[str, Any]], up_to_index: int, window: int = TRACE_CONTEXT_WINDOW) -> List[Tuple[int, Dict[str, Any]]]:
-        start = max(0, up_to_index - window + 1)
+    def extract_full_trace(results: List[Dict[str, Any]], up_to_index: int) -> List[Tuple[int, Dict[str, Any]]]:
         items: List[Tuple[int, Dict[str, Any]]] = []
-        for i in range(start, up_to_index + 1):
-            r = results[i]
-            t = r.get("trace")
-            if isinstance(t, dict):
-                items.append((i, t))
-        return items[-window:]
+        for i in range(up_to_index + 1):
+            if i < len(results):
+                r = results[i]
+                t = r.get("trace")
+                if isinstance(t, dict):
+                    items.append((i, t))
+        return items
 
     partitions: Dict[Signature, List[str]] = {}
     for impl_name, results in all_results.items():
@@ -156,40 +155,53 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         else:
                             print(f"    - {impl_name2}: No trace info at divergence index.")
 
-                    # Rolling window of previous fuzz ops for each impl (up to TRACE_CONTEXT_WINDOW)
-                    ctx1 = extract_trace_window(all_results[impl_name1], i, TRACE_CONTEXT_WINDOW)
-                    ctx2 = extract_trace_window(all_results[impl_name2], i, TRACE_CONTEXT_WINDOW)
-                    if ctx1:
-                        seed1 = ctx1[-1][1].get("seed")
-                        print(f"  - Trace context for {impl_name1} (seed={seed1}, last {len(ctx1)} op(s)):")
-                        for idx, tr in ctx1:
-                            op = tr.get("op")
-                            step = tr.get("step")
-                            args = tr.get("args", {})
-                            ss = tr.get("source_stacks")
-                            rs = tr.get("result_stacks")
-                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
-                            if ss is not None:
-                                print(f"         src={pretty_stacks(ss)}")
-                            if rs is not None:
-                                print(f"         res={pretty_stacks(rs)}")
-                    else:
-                        print(f"  - No fuzz trace context available for {impl_name1}.")
+                    print("\n  --- Full Trace Comparison ---")
+                    
+                    trace1 = extract_full_trace(all_results[impl_name1], i)
+                    trace2 = extract_full_trace(all_results[impl_name2], i)
 
-                    if ctx2:
-                        seed2 = ctx2[-1][1].get("seed")
-                        print(f"  - Trace context for {impl_name2} (seed={seed2}, last {len(ctx2)} op(s)):")
-                        for idx, tr in ctx2:
+                    if trace1:
+                        seed1 = trace1[-1][1].get("seed")
+                        print(f"  - Full trace for {impl_name1} (seed={seed1}):")
+                        for idx, tr in trace1:
                             op = tr.get("op")
                             step = tr.get("step")
-                            args = tr.get("args", {})
-                            ss = tr.get("source_stacks")
-                            rs = tr.get("result_stacks")
-                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
-                            if ss is not None:
-                                print(f"         src={pretty_stacks(ss)}")
-                            if rs is not None:
-                                print(f"         res={pretty_stacks(rs)}")
+                            args = json.dumps(tr.get("args", {}), ensure_ascii=False)
+                            avail = tr.get("available_ops")
+                            src_idx = tr.get("source_index")
+                            src = pretty_stacks(tr.get("source_stacks"))
+                            res = pretty_stacks(tr.get("result_stacks"))
+                            print(f"    [{idx}] step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}")
+                            print(f"      src: {src}")
+                            print(f"      res: {res}")
+                    else:
+                        print(f"  - No fuzz trace available for {impl_name1}.")
+
+                    if trace2:
+                        seed2 = trace2[-1][1].get("seed")
+                        print(f"  - Full trace for {impl_name2} (seed={seed2}):")
+                        for idx, tr in trace2:
+                            op = tr.get("op")
+                            step = tr.get("step")
+                            args = json.dumps(tr.get("args", {}), ensure_ascii=False)
+                            avail = tr.get("available_ops")
+                            src_idx = tr.get("source_index")
+                            src = pretty_stacks(tr.get("source_stacks"))
+                            res = pretty_stacks(tr.get("result_stacks"))
+                            print(f"    [{idx}] step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}")
+                            print(f"      src: {src}")
+                            print(f"      res: {res}")
+                    else:
+                        print(f"  - No fuzz trace available for {impl_name2}.")
+
+                    # Add explanation
+                    t1 = res1.get("trace") if res1 else None
+                    t2 = res2.get("trace") if res2 else None
+                    if t1 and t2 and t1.get('op') != t2.get('op'):
+                        print("\n  [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.")
+                        print("              Review the trace diff above to find the first step where 'res' (result_stacks) differs.")
+                        print("              This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').")
+
                     break # Show only the first divergence for this pair
 
 def main():

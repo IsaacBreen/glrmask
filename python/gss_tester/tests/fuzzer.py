@@ -139,6 +139,7 @@ def run_fuzz_test(
             yield new_gss, {
                 "phase": "fuzz",
                 "op": op_choice,
+                "available_ops": operations,
                 "step": step_idx,
                 "seed": seed,
                 "args": args,
