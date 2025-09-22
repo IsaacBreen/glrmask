@@ -9,11 +9,45 @@ local_system:
       from typing import Dict, List, Set, Optional
       import time
       import collections
+      from functools import wraps
 
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from .precompute3_model_pure_python import Model as InnerModel, PyAcc
       from ..common_interface import GraphProvider, RangeSet
 
+
+      RANGESET_STATS = collections.defaultdict(float)
+      RANGESET_CALLS = collections.defaultdict(int)
+
+      def time_rangeset_method(func):
+          """Decorator to time methods of RangeSet."""
+          @wraps(func)
+          def wrapper(*args, **kwargs):
+              t0 = time.time()
+              result = func(*args, **kwargs)
+              RANGESET_STATS[func.__name__] += time.time() - t0
+              RANGESET_CALLS[func.__name__] += 1
+              return result
+          return wrapper
+
+      def print_rangeset_stats():
+          """Prints the collected stats for RangeSet methods."""
+          print("\n--- RangeSet stats ---")
+          total_time = sum(RANGESET_STATS.values())
+          for k, v in sorted(RANGESET_STATS.items()):
+              calls = RANGESET_CALLS[k]
+              if total_time > 1e-6:
+                  print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+              else:
+                  print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
+          print("----------------------\n")
+
+      # Monkey-patch RangeSet methods for profiling
+      if not hasattr(RangeSet, '_instrumented'):
+          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+              if hasattr(RangeSet, method_name):
+                  setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
+          RangeSet._instrumented = True
 
       class Model(GraphProvider):
           def __init__(self, inner_model: InnerModel):
@@ -158,8 +192,6 @@ local_system:
 
                           for dest_idx, state_bv in dests:
                               stats['dests_processed'] += 1
-                              if state_bv.is_empty():
-                                  continue
 
                               t_intersect_start = time.time()
                               values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
@@ -176,29 +208,28 @@ local_system:
                                   continue
 
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.is_empty():
-                                  stats['apply_prune_calls'] += 1
-                                  t_apply_prune_start = time.time()
-                                  acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                              stats['apply_prune_calls'] += 1
+                              t_apply_prune_start = time.time()
+                              acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
-                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                      if acc in acc_memo:
-                                          return acc_memo[acc]
-                                      new_mask = acc.llm_mask.intersection(llm_bv)
-                                      if new_mask.is_empty():
-                                          result = None
-                                      else:
-                                          result = PyAcc(
-                                              terminals_union=acc.terminals_union,
-                                              llm_mask=new_mask
-                                          )
-                                      acc_memo[acc] = result
-                                      return result
+                              def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                  if acc in acc_memo:
+                                      return acc_memo[acc]
+                                  new_mask = acc.llm_mask.intersection(llm_bv)
+                                  if new_mask.is_empty():
+                                      result = None
+                                  else:
+                                      result = PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=new_mask
+                                      )
+                                  acc_memo[acc] = result
+                                  return result
 
-                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                                  stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                                  if child_gss.is_empty():
-                                      continue
+                              child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                              stats['t_apply_prune'] += time.time() - t_apply_prune_start
+                              if child_gss.is_empty():
+                                  continue
 
                               d: int = int(dest_idx)
                               if d in values:
@@ -237,9 +268,326 @@ local_system:
                   else:
                       print(f"{k:<25}: {int(v)}")
               print("----------------------\n")
+
+              print_rangeset_stats()
               return RangeSet.from_indices(original_indices)
   prev_file_contents:
     python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      from typing import Dict, List, Set, Optional
+      import time
+      import collections
+      from functools import wraps
+
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
+
+
+      RANGESET_STATS = collections.defaultdict(float)
+      RANGESET_CALLS = collections.defaultdict(int)
+
+      def time_rangeset_method(func):
+          """Decorator to time methods of RangeSet."""
+          @wraps(func)
+          def wrapper(*args, **kwargs):
+              t0 = time.time()
+              result = func(*args, **kwargs)
+              RANGESET_STATS[func.__name__] += time.time() - t0
+              RANGESET_CALLS[func.__name__] += 1
+              return result
+          return wrapper
+
+      def print_rangeset_stats():
+          """Prints the collected stats for RangeSet methods."""
+          print("\n--- RangeSet stats ---")
+          total_time = sum(RANGESET_STATS.values())
+          for k, v in sorted(RANGESET_STATS.items()):
+              calls = RANGESET_CALLS[k]
+              if total_time > 1e-6:
+                  print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+              else:
+                  print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
+          print("----------------------\n")
+
+      # Monkey-patch RangeSet methods for profiling
+      if not hasattr(RangeSet, '_instrumented'):
+          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+              if hasattr(RangeSet, method_name):
+                  setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
+          RangeSet._instrumented = True
+
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+
+              state_map: Dict[int, GSS] = self.state
+
+              t0 = time.time()
+              stats = collections.defaultdict(float)
+
+              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
+              final_mask: RangeSet = RangeSet.empty()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              t_init_start = time.time()
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
+                  disallowed_llm_mask = RangeSet.empty()
+                  disallowed_map = dict(acc.terminals_union)
+
+                  for tsid, disallowed_terminals in disallowed_map.items():
+                      if tsid > max_state or tsid not in pmc:
+                          continue
+                      terminals_to_llm = pmc[tsid]
+                      for terminal_id in disallowed_terminals.to_indices():
+                          if terminal_id in terminals_to_llm:
+                              disallowed_llm_mask = disallowed_llm_mask.union(
+                                  terminals_to_llm[terminal_id]
+                              )
+
+                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
+                  return PyAcc(
+                      terminals_union=tuple(),  # consume
+                      llm_mask=allowed_mask,
+                  )
+
+              apply_memo: Dict[PyAcc, PyAcc] = {}
+              for sid, gss in state_map.items():
+                  r: int = roots_map[int(sid)]
+                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                      stats['init_gss_merges'] += 1
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  bucket: Optional[Set[int]] = todo.get(d)
+                  if bucket is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      bucket.add(r)
+              stats['t_init'] = time.time() - t_init_start
+              stats['init_apply_memo_size'] = len(apply_memo)
+              stats['init_gss_count'] = len(state_map)
+
+              def enqueue(d: int, n: int) -> None:
+                  bucket: Optional[Set[int]] = todo.get(d)
+                  if bucket is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      bucket.add(n)
+
+              # Main loop
+              t_main_loop_start = time.time()
+              while depth_heap:
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+                      stats['nodes_processed'] += 1
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          stats['end_nodes'] += 1
+                          t_reduce_start = time.time()
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+                          stats['t_reduce_acc'] += time.time() - t_reduce_start
+                          stats['reduce_acc_calls'] += 1
+
+                      # Traverse edges and propagate masks
+                      edges = arena.get(node, {}).get("children") or []
+                      stats['edges_traversed'] += len(edges)
+                      for (pop, llm_bv), dests in edges:
+                          stats['popn_calls'] += 1
+                          t_popn_start = time.time()
+                          popped: GSS = gss_node.popn(pop)
+                          stats['t_popn'] += time.time() - t_popn_start
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              stats['dests_processed'] += 1
+
+                              t_intersect_start = time.time()
+                              values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
+                              stats['t_sid_intersection'] += time.time() - t_intersect_start
+
+                              if not values_to_keep:
+                                  continue
+
+                              stats['isolate_many_calls'] += 1
+                              t_isolate_start = time.time()
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              stats['t_isolate_many'] += time.time() - t_isolate_start
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              stats['apply_prune_calls'] += 1
+                              t_apply_prune_start = time.time()
+                              acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
+                              def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                  if acc in acc_memo:
+                                      return acc_memo[acc]
+                                  new_mask = acc.llm_mask.intersection(llm_bv)
+                                  if new_mask.is_empty():
+                                      result = None
+                                  else:
+                                      result = PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=new_mask
+                                      )
+                                  acc_memo[acc] = result
+                                  return result
+
+                              child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                              stats['t_apply_prune'] += time.time() - t_apply_prune_start
+                              if child_gss.is_empty():
+                                  continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  stats['gss_merges'] += 1
+                                  t_merge_start = time.time()
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+                                  values[d] = merged_gss
+                                  stats['t_gss_merge'] += time.time() - t_merge_start
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+                  todo.pop(depth)
+              stats['t_main_loop'] = time.time() - t_main_loop_start
+
+
+              # Convert internal mask back to original IDs
+              t_final_convert_start = time.time()
+              original_indices: List[int] = []
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices.append(self.internal_to_original_map[i])
+              stats['t_final_convert'] = time.time() - t_final_convert_start
+
+              t_total = time.time() - t0
+              stats['t_total'] = t_total
+              print("\n--- get_mask stats ---")
+              for k, v in sorted(stats.items()):
+                  if k.startswith('t_'):
+                      if t_total > 1e-6:
+                          print(f"{k:<25}: {v:8.4f}s ({v/t_total*100:5.1f}%)")
+                      else:
+                          print(f"{k:<25}: {v:8.4f}s")
+                  else:
+                      print(f"{k:<25}: {int(v)}")
+              print("----------------------\n")
+
+              print_rangeset_stats()
+              return RangeSet.from_indices(original_indices)
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - cp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-2.5-flash-lite-preview-06-17
+  diff_correction_model:
+    - qwen3-coder
+    - gpt-oss-120b
+    - gf
+    - gpt-5
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```python 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py'
       import heapq
       from typing import Dict, List, Set, Optional
       import time
@@ -427,8 +775,6 @@ local_system:
 
                           for dest_idx, state_bv in dests:
                               stats['dests_processed'] += 1
-                              if state_bv.is_empty():
-                                  continue
 
                               t_intersect_start = time.time()
                               values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
@@ -445,29 +791,28 @@ local_system:
                                   continue
 
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.is_empty():
-                                  stats['apply_prune_calls'] += 1
-                                  t_apply_prune_start = time.time()
-                                  acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                              stats['apply_prune_calls'] += 1
+                              t_apply_prune_start = time.time()
+                              acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
-                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                      if acc in acc_memo:
-                                          return acc_memo[acc]
-                                      new_mask = acc.llm_mask.intersection(llm_bv)
-                                      if new_mask.is_empty():
-                                          result = None
-                                      else:
-                                          result = PyAcc(
-                                              terminals_union=acc.terminals_union,
-                                              llm_mask=new_mask
-                                          )
-                                      acc_memo[acc] = result
-                                      return result
+                              def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                  if acc in acc_memo:
+                                      return acc_memo[acc]
+                                  new_mask = acc.llm_mask.intersection(llm_bv)
+                                  if new_mask.is_empty():
+                                      result = None
+                                  else:
+                                      result = PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=new_mask
+                                      )
+                                  acc_memo[acc] = result
+                                  return result
 
-                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                                  stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                                  if child_gss.is_empty():
-                                      continue
+                              child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                              stats['t_apply_prune'] += time.time() - t_apply_prune_start
+                              if child_gss.is_empty():
+                                  continue
 
                               d: int = int(dest_idx)
                               if d in values:
@@ -509,290 +854,49 @@ local_system:
 
               print_rangeset_stats()
               return RangeSet.from_indices(original_indices)
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - cp
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-2.5-flash-lite-preview-06-17
-  diff_correction_model:
-    - qwen3-coder
-    - gpt-oss-120b
-    - gf
-    - gpt-5
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py'
-      import heapq
-      from typing import Dict, List, Set, Optional
-      import time
-      import collections
-
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
-      from ..common_interface import GraphProvider, RangeSet
-
-
-      class Model(GraphProvider):
-          def __init__(self, inner_model: InnerModel):
-              self.inner_model: InnerModel = inner_model
-              im: InnerModel = self.inner_model
-              self.arena: Dict[int, dict] = im.arena
-              self.roots_map: Dict[int, int] = im.roots_map
-              self.max_depth: Dict[int, int] = im.max_depth
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
-              self.tokenizer_max_state: int = im.tokenizer.max_state()
-              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
-              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
-              self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              return Model(InnerModel.from_json_string(s))
-
-          def commit(self, token_id: int) -> None:
-              self.inner_model.commit(token_id)
-
-          @property
-          def state(self) -> Dict[int, GSS]:
-              return self.inner_model.state
-
-          def is_end(self, node: int) -> bool:
-              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
-
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              t0 = time.time()
-              stats = collections.defaultdict(float)
-
-              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-              final_mask: RangeSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[int, GSS] = {}
-              todo: Dict[int, Set[int]] = {}
-              depth_heap: List[int] = []
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, int] = self.roots_map
-              max_depth: Dict[int, int] = self.max_depth
-              arena: Dict[int, dict] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              t_init_start = time.time()
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = dict(acc.terminals_union)
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.to_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                  return PyAcc(
-                      terminals_union=tuple(),  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              apply_memo: Dict[PyAcc, PyAcc] = {}
-              for sid, gss in state_map.items():
-                  r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                      stats['init_gss_merges'] += 1
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  bucket: Optional[Set[int]] = todo.get(d)
-                  if bucket is None:
-                      todo[d] = {r}
-                      hp(depth_heap, d)
-                  else:
-                      bucket.add(r)
-              stats['t_init'] = time.time() - t_init_start
-              stats['init_apply_memo_size'] = len(apply_memo)
-              stats['init_gss_count'] = len(state_map)
-
-              def enqueue(d: int, n: int) -> None:
-                  bucket: Optional[Set[int]] = todo.get(d)
-                  if bucket is None:
-                      todo[d] = {n}
-                      hp(depth_heap, d)
-                  else:
-                      bucket.add(n)
-
-              # Main loop
-              t_main_loop_start = time.time()
-              while depth_heap:
-                  depth: int = hpop(depth_heap)
-                  while todo[depth]:
-                      node: int = todo[depth].pop()
-                      gss_node: GSS = values.pop(node)
-                      stats['nodes_processed'] += 1
-
-                      # End-node handling: just union the allowed LLM tokens
-                      if is_end(node):
-                          stats['end_nodes'] += 1
-                          t_reduce_start = time.time()
-                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          if reduced_acc:
-                              final_mask = final_mask.union(reduced_acc.llm_mask)
-                          stats['t_reduce_acc'] += time.time() - t_reduce_start
-                          stats['reduce_acc_calls'] += 1
-
-                      # Traverse edges and propagate masks
-                      edges = arena.get(node, {}).get("children") or []
-                      stats['edges_traversed'] += len(edges)
-                      for (pop, llm_bv), dests in edges:
-                          stats['popn_calls'] += 1
-                          t_popn_start = time.time()
-                          popped: GSS = gss_node.popn(pop)
-                          stats['t_popn'] += time.time() - t_popn_start
-                          if popped.is_empty():
-                              continue
-
-                          for dest_idx, state_bv in dests:
-                              stats['dests_processed'] += 1
-                              if state_bv.is_empty():
-                                  continue
-
-                              t_intersect_start = time.time()
-                              values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
-                              stats['t_sid_intersection'] += time.time() - t_intersect_start
-
-                              if not values_to_keep:
-                                  continue
-
-                              stats['isolate_many_calls'] += 1
-                              t_isolate_start = time.time()
-                              child_gss: GSS = popped.isolate_many(values_to_keep)
-                              stats['t_isolate_many'] += time.time() - t_isolate_start
-                              if child_gss.is_empty():
-                                  continue
-
-                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.is_empty():
-                                  stats['apply_prune_calls'] += 1
-                                  t_apply_prune_start = time.time()
-                                  acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                      if acc in acc_memo:
-                                          return acc_memo[acc]
-                                      new_mask = acc.llm_mask.intersection(llm_bv)
-                                      if new_mask.is_empty():
-                                          result = None
-                                      else:
-                                          result = PyAcc(
-                                              terminals_union=acc.terminals_union,
-                                              llm_mask=new_mask
-                                          )
-                                      acc_memo[acc] = result
-                                      return result
-
-                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                                  stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                                  if child_gss.is_empty():
-                                      continue
-
-                              d: int = int(dest_idx)
-                              if d in values:
-                                  stats['gss_merges'] += 1
-                                  t_merge_start = time.time()
-                                  existing_gss = values[d]
-                                  new_gss = child_gss
-                                  merged_gss = existing_gss.merge(new_gss)
-                                  values[d] = merged_gss
-                                  stats['t_gss_merge'] += time.time() - t_merge_start
-                              else:
-                                  values[d] = child_gss
-                              enqueue(max_depth[d], d)
-
-                  todo.pop(depth)
-              stats['t_main_loop'] = time.time() - t_main_loop_start
-
-
-              # Convert internal mask back to original IDs
-              t_final_convert_start = time.time()
-              original_indices: List[int] = []
-              for i in final_mask.to_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[i])
-              stats['t_final_convert'] = time.time() - t_final_convert_start
-
-              t_total = time.time() - t0
-              stats['t_total'] = t_total
-              print("\n--- get_mask stats ---")
-              for k, v in sorted(stats.items()):
-                  if k.startswith('t_'):
-                      if t_total > 1e-6:
-                          print(f"{k:<25}: {v:8.4f}s ({v/t_total*100:5.1f}%)")
-                      else:
-                          print(f"{k:<25}: {v:8.4f}s")
-                  else:
-                      print(f"{k:<25}: {int(v)}")
-              print("----------------------\n")
-              return RangeSet.from_indices(original_indices)
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-  - user: We want to know how much time is spent in RangeSet.union, intersection etc.
+  - user: |-
+      --- get_mask stats ---
+      apply_prune_calls        : 5611
+      dests_processed          : 119275
+      edges_traversed          : 6714
+      end_nodes                : 1
+      gss_merges               : 3359
+      init_apply_memo_size     : 88
+      init_gss_count           : 3
+      init_gss_merges          : 1
+      isolate_many_calls       : 5611
+      nodes_processed          : 2251
+      popn_calls               : 6714
+      reduce_acc_calls         : 1
+      t_apply_prune            :   0.0448s ( 12.1%)
+      t_final_convert          :   0.0017s (  0.5%)
+      t_gss_merge              :   0.1076s ( 29.2%)
+      t_init                   :   0.0007s (  0.2%)
+      t_isolate_many           :   0.0170s (  4.6%)
+      t_main_loop              :   0.3665s ( 99.3%)
+      t_popn                   :   0.0187s (  5.1%)
+      t_reduce_acc             :   0.0001s (  0.0%)
+      t_sid_intersection       :   0.1493s ( 40.5%)
+      t_total                  :   0.3689s (100.0%)
+      ----------------------
+
+
+      --- RangeSet stats ---
+      t_contains               :   1.0379s ( 70.8%) | calls: 5288636
+      t_difference             :   0.0014s (  0.1%) | calls: 1095
+      t_empty                  :   0.0078s (  0.5%) | calls: 8651
+      t_from_indices           :   0.0069s (  0.5%) | calls: 106
+      t_intersection           :   0.2043s ( 13.9%) | calls: 94495
+      t_is_empty               :   0.0165s (  1.1%) | calls: 94495
+      t_to_indices             :   0.0066s (  0.5%) | calls: 1604
+      t_union                  :   0.1850s ( 12.6%) | calls: 110688
+      ----------------------
+    metadata:
+  - user: these dont make a lot of sense to me
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -811,84 +915,55 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to instrument the `RangeSet` class for performance monitoring, followed by the corresponding git diff.
+      Of course. You've noticed that the profiling statistics don't seem to add up, and you are correct. The total time reported for `get_mask` is significantly less than the accumulated time for `RangeSet` operations.
+
+      This happens because the global dictionaries `RANGESET_STATS` and `RANGESET_CALLS` are not being reset between calls to `get_mask`, causing them to accumulate statistics across multiple runs.
+
+      Here are the steps to fix this by clearing the statistics at the beginning of each `get_mask` call.
 
       ### Step-by-step Instructions
 
-      I will modify `python/aug25/models/precompute3_model_pure_python_get_mask_only.py` to add timing instrumentation to the `RangeSet` class methods. This is done by "monkey-patching" the class when the module is loaded.
+      1.  **Open the file**: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`.
 
-      1.  **Add Imports and Profiling Code:**
-          In `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`, I'll add the following code right after the existing imports and before the `Model` class definition:
-          *   An import for `wraps` from `functools`.
-          *   Global dictionaries `RANGESET_STATS` and `RANGESET_CALLS` to store performance data.
-          *   A decorator function `time_rangeset_method` that measures execution time and counts calls for any function it wraps.
-          *   A helper function `print_rangeset_stats` to format and print the collected statistics.
-          *   A block of code that iterates through a list of `RangeSet` method names (`union`, `intersection`, `difference`, `to_indices`, `from_indices`, `empty`, `is_empty`, `contains`) and applies the `time_rangeset_method` decorator to each one. This is guarded to ensure it only runs once.
+      2.  **Locate the `get_mask` method**: Find the `get_mask` method within the `Model` class.
 
-      2.  **Print Statistics in `get_mask`:**
-          In the `get_mask` method of the `Model` class, I will add a call to the new `print_rangeset_stats()` function. This call will be placed at the end of the method, just before the `return` statement, to ensure the statistics are printed after each run.
+      3.  **Insert reset logic**: At the very beginning of the `get_mask` method, right after the docstring, add two lines to clear the global statistics dictionaries.
 
-      ### Git Diffs
+          ```python
+          # ... inside class Model ...
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+              ... (rest of docstring) ...
+              """
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
 
-      Here is the git diff to apply these changes.
+              state_map: Dict[int, GSS] = self.state
+              # ... rest of the method
+          ```
+
+      This change will ensure that the `RangeSet` statistics are specific to each individual execution of `get_mask`, making the profiling output consistent and easier to interpret.
+
+      ### Git Diff
+
+      Here is the git diff to apply the change:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      index 2111111..2222222 100644
       --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
       +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -2,11 +2,45 @@
-       from typing import Dict, List, Set, Optional
-       import time
-       import collections
-      +from functools import wraps
+      @@ -80,6 +80,9 @@
+               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+               """
+      +        RANGESET_STATS.clear()
+      +        RANGESET_CALLS.clear()
+      +
+               state_map: Dict[int, GSS] = self.state
        
-       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-       from .precompute3_model_pure_python import Model as InnerModel, PyAcc
-       from ..common_interface import GraphProvider, RangeSet
-       
-      +
-      +RANGESET_STATS = collections.defaultdict(float)
-      +RANGESET_CALLS = collections.defaultdict(int)
-      +
-      +def time_rangeset_method(func):
-      +    """Decorator to time methods of RangeSet."""
-      +    @wraps(func)
-      +    def wrapper(*args, **kwargs):
-      +        t0 = time.time()
-      +        result = func(*args, **kwargs)
-      +        RANGESET_STATS[func.__name__] += time.time() - t0
-      +        RANGESET_CALLS[func.__name__] += 1
-      +        return result
-      +    return wrapper
-      +
-      +def print_rangeset_stats():
-      +    """Prints the collected stats for RangeSet methods."""
-      +    print("\n--- RangeSet stats ---")
-      +    total_time = sum(RANGESET_STATS.values())
-      +    for k, v in sorted(RANGESET_STATS.items()):
-      +        calls = RANGESET_CALLS[k]
-      +        if total_time > 1e-6:
-      +            print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
-      +        else:
-      +            print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
-      +    print("----------------------\n")
-      +
-      +# Monkey-patch RangeSet methods for profiling
-      +if not hasattr(RangeSet, '_instrumented'):
-      +    for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
-      +        if hasattr(RangeSet, method_name):
-      +            setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
-      +    RangeSet._instrumented = True
-       
-       class Model(GraphProvider):
-           def __init__(self, inner_model: InnerModel):
-      @@ -214,4 +248,6 @@
-                   else:
-                       print(f"{k:<25}: {int(v)}")
-               print("----------------------\n")
-      +
-      +        print_rangeset_stats()
-               return RangeSet.from_indices(original_indices)
+               t0 = time.time()
 
       ```
     metadata:
@@ -901,7 +976,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: 'Changes committed with message: "Add RangeSet method timing and statistics
-      printing"'
+  - user: 'Changes committed with message: "Reset RangeSet profiling stats before
+      each get_mask call"'
     metadata:
 ...

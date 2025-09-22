@@ -80,6 +80,9 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
+        RANGESET_STATS.clear()
+        RANGESET_CALLS.clear()
+
         state_map: Dict[int, GSS] = self.state
 
         t0 = time.time()
