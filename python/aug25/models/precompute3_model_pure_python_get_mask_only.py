@@ -135,6 +135,8 @@ class Model(GraphProvider):
                     if popped.is_empty():
                         continue
 
+                    memo_intersect: Dict[PyAcc, Optional[PyAcc]] = {}
+
                     for dest_idx, state_bv in dests:
                         if state_bv.is_empty():
                             continue
@@ -149,7 +151,6 @@ class Model(GraphProvider):
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
-                            memo_intersect: Dict[PyAcc, Optional[PyAcc]] = {}
 
                             def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                                 if memo_intersect.get(acc) is not None:
