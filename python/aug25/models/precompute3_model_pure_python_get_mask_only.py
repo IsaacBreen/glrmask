@@ -18,6 +18,7 @@ class Model(GraphProvider):
         self.tokenizer_max_state: int = im.tokenizer.max_state()
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+        self.all_terminals_bitset: Optional[ffi.Bitset] = im.all_terminals_bitset
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -66,19 +67,19 @@ class Model(GraphProvider):
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from allowed terminals for this accumulator
             allowed_mask: ffi.Bitset = ffi.Bitset.zeros()
-            allowed_l2 = acc.terminals_union
-            for (start, end), bv in allowed_l2.range_values():
-                if bv.is_empty():
+            allowed_map = dict(acc.terminals_union)
+
+            for tsid, terminals_to_llm in pmc.items():
+                if tsid > max_state:
                     continue
-                for tsid in range(start, min(end, max_state) + 1):
-                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                    if not pm:
-                        continue
-                    for terminal_id_key, llm_tokens in pm.items():
-                        if bv.contains(int(terminal_id_key)):
-                            allowed_mask = allowed_mask.union(llm_tokens)
+                allowed_terminals_for_tsid = allowed_map.get(tsid, self.all_terminals_bitset)
+                if allowed_terminals_for_tsid.is_empty():
+                    continue
+                for terminal_id_key, llm_tokens in terminals_to_llm.items():
+                    if allowed_terminals_for_tsid.contains(int(terminal_id_key)):
+                        allowed_mask = allowed_mask.union(llm_tokens)
             return PyAcc(
-                terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                terminals_union=tuple(),  # consume
                 llm_mask=allowed_mask
             )
 
