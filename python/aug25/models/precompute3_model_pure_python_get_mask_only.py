@@ -65,7 +65,7 @@ class Model(GraphProvider):
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from allowed terminals for this accumulator
-            allowed_mask: ffi.Bitset = ffi.Bitset.zeros()
+            allowed_mask: ffi.Bitset = all_ones
             allowed_l2 = acc.terminals_union
             for (start, end), bv in allowed_l2.range_values():
                 if bv.is_empty():
@@ -76,7 +76,7 @@ class Model(GraphProvider):
                         continue
                     for terminal_id_key, llm_tokens in pm.items():
                         if bv.contains(int(terminal_id_key)):
-                            allowed_mask = allowed_mask.union(llm_tokens)
+                            allowed_mask = allowed_mask.difference(llm_tokens)
             return PyAcc(
                 terminals_union=ffi.HybridL2Bitset.all(),  # consume
                 llm_mask=allowed_mask
