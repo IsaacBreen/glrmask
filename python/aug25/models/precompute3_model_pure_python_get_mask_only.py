@@ -84,6 +84,8 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
+        print("\n--- get_mask START ---")
+
         state_map: Dict[int, GSS] = self.state
         t_start = time.perf_counter_ns()
         self.get_mask_calls += 1
@@ -265,6 +267,6 @@ class Model(GraphProvider):
         print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
         for k, v in _PROFILING_STATS.items():
             print(f"{k} calls: {v}")
-        print("---------------------------------------------------\n")
+        print(f"--- get_mask END ---")
 
         return RangeSet.from_ranges(original_mask.to_ranges())
