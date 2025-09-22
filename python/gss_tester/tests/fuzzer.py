@@ -1,5 +1,7 @@
 import random
 from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
+import json
+import hashlib
 
 from ..interface import GSS, MergeableInt
 
@@ -61,18 +63,28 @@ def run_fuzz_test(
             if len(gss_states) >= max_gss_states:
                 continue
 
-        # Choose an operation
+        # Select GSS state(s) to operate on
+        source_index = rng.randrange(len(gss_states))
+        source_gss = gss_states[source_index]
+        source_stacks = source_gss.to_stacks()
+        
+        # Choose an operation deterministically based on the source GSS state
         can_merge = len(gss_states) >= 2
         operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
         if can_merge:
             operations.append('merge')
         
-        op_choice = rng.choice(operations)
-
-        # Select GSS state(s) to operate on
-        source_index = rng.randrange(len(gss_states))
-        source_gss = gss_states[source_index]
-        source_stacks = source_gss.to_stacks()
+        # To make the choice deterministic based on state, we can hash the state.
+        state_str = json.dumps(source_stacks, sort_keys=True)
+        state_hash = hashlib.sha256(state_str.encode('utf-8')).hexdigest()
+        # We use the hash to derive an index into the operations list.
+        # This makes the choice of operation entirely dependent on the source stack.
+        op_idx = int(state_hash, 16) % len(operations)
+        op_choice = operations[op_idx]
+        op_selection_info = {
+            "source_stacks_hash": state_hash,
+            "op_index": op_idx,
+        }
         
         new_gss: GSS
         args: Dict[str, Any] = {}
@@ -139,6 +151,7 @@ def run_fuzz_test(
             yield new_gss, {
                 "phase": "fuzz",
                 "op": op_choice,
+                "op_selection": op_selection_info,
                 "available_ops": operations,
                 "step": step_idx,
                 "seed": seed,

@@ -131,7 +131,12 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                     if t1 or t2:
                         print("  - Divergence operation details:")
                         if t1:
-                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                            op_sel_info1 = ""
+                            if t1.get("op_selection"):
+                                sel = t1["op_selection"]
+                                op_sel_info1 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                            print(f"    - {impl_name1}: op={t1.get('op')}{op_sel_info1} step={t1.get('step')} seed={t1.get('seed')}")
                             args1 = t1.get("args", {})
                             print(f"      args={json.dumps(args1, ensure_ascii=False)}")
                             ss1 = t1.get("source_stacks")
@@ -143,7 +148,12 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         else:
                             print(f"    - {impl_name1}: No trace info at divergence index.")
                         if t2:
-                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                            op_sel_info2 = ""
+                            if t2.get("op_selection"):
+                                sel = t2["op_selection"]
+                                op_sel_info2 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                            print(f"    - {impl_name2}: op={t2.get('op')}{op_sel_info2} step={t2.get('step')} seed={t2.get('seed')}")
                             args2 = t2.get("args", {})
                             print(f"      args={json.dumps(args2, ensure_ascii=False)}")
                             ss2 = t2.get("source_stacks")
@@ -169,9 +179,13 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         src_idx = tr.get("source_index")
                         src = pretty_stacks(tr.get("source_stacks"))
                         res = pretty_stacks(tr.get("result_stacks"))
+                        op_sel_info = ""
+                        if tr.get("op_selection"):
+                            sel = tr["op_selection"]
+                            op_sel_info = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
                         
                         return [
-                            f"step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}",
+                            f"step={step} op={op}{op_sel_info} args={args} src_idx={src_idx} avail_ops={avail}",
                             f"  src: {src}",
                             f"  res: {res}"
                         ]
@@ -196,9 +210,8 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                     t1 = res1.get("trace") if res1 else None
                     t2 = res2.get("trace") if res2 else None
                     if t1 and t2 and t1.get('op') != t2.get('op'):
-                        print("\n  [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.")
-                        print("              Review the trace diff above to find the first step where 'res' (result_stacks) differs.")
-                        print("              This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').")
+                        print("\n  [Analysis]: The operations differ because they are chosen based on a hash of the source GSS, which has diverged.")
+                        print("              Review the 'Divergence operation details' and the trace diff above to see where 'src' (source_stacks) first differs.")
 
                     break # Show only the first divergence for this pair
 
