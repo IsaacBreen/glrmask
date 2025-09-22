@@ -1202,6 +1202,8 @@ def _merge_children_by_depth(
     c2: Dict[T, Dict[int, Node]],
     merge_func: Callable[[Node, Node], Node],
 ) -> Dict[T, Dict[int, Node]]:
+    if c1 is c2:
+        return c1
     merged_children: Dict[T, Dict[int, Node]] = {}
     all_vals = c1.keys() | c2.keys()
     for v in all_vals:
