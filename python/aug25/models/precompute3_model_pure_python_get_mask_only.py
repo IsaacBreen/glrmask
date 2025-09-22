@@ -117,7 +117,6 @@ class Model(GraphProvider):
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
-                    print(gss_node.stats())
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     if reduced_acc:
                         final_mask = final_mask.union(reduced_acc.llm_mask)
