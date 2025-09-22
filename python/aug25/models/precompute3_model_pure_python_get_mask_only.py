@@ -65,22 +65,24 @@ class Model(GraphProvider):
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            # Compute allowed LLM tokens from allowed terminals for this accumulator
-            allowed_mask: ffi.Bitset = ffi.Bitset.zeros()
-            allowed_map = dict(acc.terminals_union)
+            # Compute allowed LLM tokens from disallowed terminals for this accumulator
+            disallowed_llm_mask = ffi.Bitset.zeros()
+            disallowed_map = dict(acc.terminals_union)
 
-            for tsid, terminals_to_llm in pmc.items():
-                if tsid > max_state:
+            for tsid, disallowed_terminals in disallowed_map.items():
+                if tsid > max_state or tsid not in pmc:
                     continue
-                allowed_terminals_for_tsid = allowed_map.get(tsid, self.all_terminals_bitset)
-                if allowed_terminals_for_tsid.is_empty():
-                    continue
-                for terminal_id_key, llm_tokens in terminals_to_llm.items():
-                    if allowed_terminals_for_tsid.contains(int(terminal_id_key)):
-                        allowed_mask = allowed_mask.union(llm_tokens)
+                terminals_to_llm = pmc[tsid]
+                for terminal_id in disallowed_terminals.to_indices():
+                    if terminal_id in terminals_to_llm:
+                        disallowed_llm_mask = disallowed_llm_mask.union(
+                            terminals_to_llm[terminal_id]
+                        )
+
+            allowed_mask = all_ones.difference(disallowed_llm_mask)
             return PyAcc(
                 terminals_union=tuple(),  # consume
-                llm_mask=allowed_mask
+                llm_mask=allowed_mask,
             )
 
         apply_memo: Dict[PyAcc, PyAcc] = {}

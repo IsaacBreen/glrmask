@@ -183,10 +183,10 @@ class Model(GraphProvider):
     @profile
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
-            allowed_terminals_map = dict(acc.terminals_union)
+            disallowed_terminals_map = dict(acc.terminals_union)
             for state_id, matched_bv in terminals_map.items():
-                allowed_for_state = allowed_terminals_map.get(state_id, self.all_terminals_bitset)
-                if not matched_bv.is_subset(allowed_for_state):
+                disallowed_for_state = disallowed_terminals_map.get(state_id, ffi.Bitset.zeros())
+                if not matched_bv.intersection(disallowed_for_state).is_empty():
                     return False
             return True
         return gss.prune(predicate)
@@ -197,7 +197,7 @@ class Model(GraphProvider):
             old_map = dict(acc.terminals_union)
             new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
             for old_sid, new_sid in state_map.items():
-                bv_source = old_map.get(old_sid, self.all_terminals_bitset)
+                bv_source = old_map.get(old_sid, ffi.Bitset.zeros())
                 new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
             new_map_tuple = tuple(sorted(new_bvs.items()))
@@ -208,11 +208,10 @@ class Model(GraphProvider):
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_map = dict(acc.terminals_union)
-            curr_bv = current_map.get(state_id, self.all_terminals_bitset)
-            if curr_bv.contains(terminal_id):
-                to_remove = ffi.Bitset.from_indices([terminal_id])
-                new_bv = curr_bv.difference(to_remove)
-                current_map[state_id] = new_bv
+            curr_bv = current_map.get(state_id, ffi.Bitset.zeros())
+            to_add = ffi.Bitset.from_indices([terminal_id])
+            new_bv = curr_bv.union(to_add)
+            current_map[state_id] = new_bv
             new_map_tuple = tuple(sorted(current_map.items()))
             return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
@@ -387,33 +386,29 @@ class Model(GraphProvider):
         pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
         max_state = self.tokenizer.max_state()
 
-        def get_allowed_terminals_py(gss: GSS) -> Optional[Dict[int, ffi.Bitset]]:
-            merged_acc = gss.reduce_acc()
-            if merged_acc is None:
-                return None
-            return dict(merged_acc.terminals_union)
-
         # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
         for sid, gss in state_map.items():
-            # Compute allowed LLM tokens from allowed terminals
-            allowed_mask: ffi.Bitset = ffi.Bitset.zeros()
-            allowed_map = get_allowed_terminals_py(gss)
-            if allowed_map is not None:
-                for tsid, terminals_to_llm in pmc.items():
-                    if tsid > max_state:
-                        continue
-                    allowed_terminals_for_tsid = allowed_map.get(tsid, self.all_terminals_bitset)
-                    if allowed_terminals_for_tsid.is_empty():
-                        continue
-                    for terminal_id_str, llm_tokens in terminals_to_llm.items():
-                        if allowed_terminals_for_tsid.contains(int(terminal_id_str)):
-                            allowed_mask = allowed_mask.union(llm_tokens)
-
             # Set initial llm_mask on each accumulator and consume terminals_union
             def initialize_acc(acc: PyAcc) -> PyAcc:
+                # Compute allowed LLM tokens from disallowed terminals
+                disallowed_llm_mask = ffi.Bitset.zeros()
+                disallowed_map = dict(acc.terminals_union)
+                if disallowed_map:
+                    for tsid, disallowed_terminals in disallowed_map.items():
+                        if tsid > max_state or tsid not in pmc:
+                            continue
+                        terminals_to_llm = pmc[tsid]
+                        for terminal_id in disallowed_terminals.to_indices():
+                            if terminal_id in terminals_to_llm:
+                                disallowed_llm_mask = disallowed_llm_mask.union(
+                                    terminals_to_llm[terminal_id]
+                                )
+
+                allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
+
                 return PyAcc(
                     terminals_union=tuple(),  # consume
-                    llm_mask=allowed_mask
+                    llm_mask=allowed_mask,
                 )
 
             gss_initialized = gss.apply(initialize_acc)
