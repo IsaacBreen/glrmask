@@ -1,4 +1,5 @@
 import heapq
+import _sep1 as ffi
 from typing import Dict, List, Set, Optional
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -13,11 +14,11 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
-        self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
+        self.all_terminals_bitset: Optional[ffi.Bitset] = im.all_terminals_bitset
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -46,8 +47,8 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, GSS] = self.state
 
-        all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-        final_mask: RangeSet = RangeSet.empty()
+        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+        final_mask: ffi.Bitset = ffi.Bitset.zeros()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
@@ -59,13 +60,13 @@ class Model(GraphProvider):
         max_depth: Dict[int, int] = self.max_depth
         arena: Dict[int, dict] = self.arena
         is_end = self.is_end
-        pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
+        pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask = RangeSet.empty()
+            disallowed_llm_mask = ffi.Bitset.zeros()
             disallowed_map = dict(acc.terminals_union)
 
             for tsid, disallowed_terminals in disallowed_map.items():
@@ -175,11 +176,9 @@ class Model(GraphProvider):
             todo.pop(depth)
 
         # Convert internal mask back to original IDs
-        original_ids = [
-            self.internal_to_original_map[i]
-            for i in final_mask.to_indices()
-            if i in self.internal_to_original_map
-        ]
-        original_mask = RangeSet.from_indices(original_ids)
+        original_mask: ffi.Bitset = ffi.Bitset.zeros()
+        for i in final_mask.to_indices():
+            if i in self.internal_to_original_map:
+                original_mask.insert(self.internal_to_original_map[i])
 
         return RangeSet.from_ranges(original_mask.to_ranges())
