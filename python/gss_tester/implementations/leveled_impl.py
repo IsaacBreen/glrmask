@@ -818,61 +818,44 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
-        memo_lower_count: Dict[int, int] = {}
-        memo_upper_acc: Dict[int, Optional[Acc]] = {}
+        # 1. Collect unique accumulator objects by their ID to avoid redundant merges
+        # of the same object, and to be proportional to unique accs, not total stacks.
+        unique_acc_objects: Dict[int, Acc] = {}
+        visited_nodes: Set[int] = set()
 
-        def count_stacks_in_lower(node: Lower[T]) -> int:
-            key = id(node)
-            if key in memo_lower_count:
-                return memo_lower_count[key]
+        # Use a queue for iterative traversal to avoid recursion depth issues.
+        queue: List[Upper[T, Acc]] = [self.inner]
 
-            count = (1 if node.empty else 0) + sum(
-                count_stacks_in_lower(child) for child in node._all_children()
-            )
-            memo_lower_count[key] = count
-            return count
+        while queue:
+            node = queue.pop()
+            node_id = id(node)
+            if node_id in visited_nodes:
+                continue
+            visited_nodes.add(node_id)
 
-        def power(base: Acc, exp: int) -> Optional[Acc]:
-            if exp <= 0:
-                return None
-            res: Optional[Acc] = None
-            while exp > 0:
-                if exp & 1:
-                    res = base if res is None else res.merge(base)
-                exp >>= 1
-                if exp > 0:
-                    base = base.merge(base)
-            return res
+            if isinstance(node, Interface):
+                unique_acc_objects[id(node.acc)] = node.acc
+                if node.empty is not None:
+                    unique_acc_objects[id(node.empty)] = node.empty
+                # No need to traverse children, they are Lower nodes without accumulators.
+            elif isinstance(node, UpperBranch):
+                if node.empty is not None:
+                    unique_acc_objects[id(node.empty)] = node.empty
+                # Recurse into children.
+                for children_at_depth in node.children.values():
+                    for child in children_at_depth.values():
+                        queue.append(child)
 
-        def reduce_upper(node: Upper[T, Acc]) -> Optional[Acc]:
-            key = id(node)
-            if key in memo_upper_acc:
-                return memo_upper_acc[key]
+        accumulators = list(unique_acc_objects.values())
 
-            total_acc: Optional[Acc] = None
+        # 2. Merge the collected unique accumulators.
+        if not accumulators:
+            return None
 
-            if isinstance(node, UpperBranch):
-                total_acc = node.empty
-                for child in node._all_children():
-                    child_acc = reduce_upper(child)
-                    total_acc = _merge_optional_acc(total_acc, child_acc)
+        if len(accumulators) == 1:
+            return accumulators[0]
 
-            elif isinstance(node, Interface):
-                total_acc = node.empty
-
-                lower_count = sum(count_stacks_in_lower(child) for child in node._all_children())
-
-                if lower_count > 0:
-                    merged_from_lower = power(node.acc, lower_count)
-                    total_acc = _merge_optional_acc(total_acc, merged_from_lower)
-
-                if not node.children and node.empty is None:
-                    total_acc = _merge_optional_acc(total_acc, node.acc)
-
-            memo_upper_acc[key] = total_acc
-            return total_acc
-
-        return reduce_upper(self.inner)
+        return reduce(_merge_acc, accumulators)
 
     def stats(self) -> LeveledGSSStats[T, Acc]:
         """

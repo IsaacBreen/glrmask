@@ -1,204 +1,9 @@
 local_system:
   attached_files:
-    - python/gss_tester/__init__.py
-    - python/gss_tester/interface.py
     - python/gss_tester/implementations/leveled_impl.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
-
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
-
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
-
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -1020,41 +825,7 @@ local_system:
                   return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
-              def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-                  if node.empty:
-                      yield acc
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          yield from generate_accs_lower(child, acc)
-
-              def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  if isinstance(node, UpperBranch):
-                      if node.empty is not None:
-                          yield node.empty
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs(child)
-                  elif isinstance(node, Interface):
-                      if node.empty is not None:
-                          yield node.empty
-
-                      # The case where the interface itself is a stack end.
-                      if not node.children and node.empty is None:
-                          yield node.acc
-
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs_lower(child, node.acc)
-
-              gen = generate_accs(self.inner)
-              try:
-                  reduced_acc = next(gen)
-              except StopIteration:
-                  return None
-
-              for acc in gen:
-                  reduced_acc = reduced_acc.merge(acc)
-              return reduced_acc
+              raise NotImplementedError
 
           def stats(self) -> LeveledGSSStats[T, Acc]:
               """
@@ -1529,199 +1300,6 @@ local_system:
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
   prev_file_contents:
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
-
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
-
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
-
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -2543,78 +2121,44 @@ local_system:
                   return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
-              memo_lower: Dict[int, int] = {}
-              memo_upper: Dict[int, Optional[Acc]] = {}
+              # 1. Collect unique accumulator objects by their ID to avoid redundant merges
+              # of the same object, and to be proportional to unique accs, not total stacks.
+              unique_acc_objects: Dict[int, Acc] = {}
+              visited_nodes: Set[int] = set()
 
-              def _reduce_acc_lower(node: Lower[T]) -> int:
-                  """Computes total number of stacks in a Lower subtree, with memoization."""
-                  key = id(node)
-                  if key in memo_lower:
-                      return memo_lower[key]
+              # Use a queue for iterative traversal to avoid recursion depth issues.
+              queue: List[Upper[T, Acc]] = [self.inner]
 
-                  count = 1 if node.empty else 0
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          count += _reduce_acc_lower(child)
+              while queue:
+                  node = queue.pop()
+                  node_id = id(node)
+                  if node_id in visited_nodes:
+                      continue
+                  visited_nodes.add(node_id)
 
-                  memo_lower[key] = count
-                  return count
-
-              def _reduce_acc_upper(node: Upper[T, Acc]) -> Optional[Acc]:
-                  """Computes merged accumulator for an Upper subtree, with memoization."""
-                  key = id(node)
-                  if key in memo_upper:
-                      return memo_upper[key]
-
-                  total_acc: Optional[Acc] = None
-
-                  if isinstance(node, UpperBranch):
+                  if isinstance(node, Interface):
+                      unique_acc_objects[id(node.acc)] = node.acc
                       if node.empty is not None:
-                          total_acc = node.empty
-
+                          unique_acc_objects[id(node.empty)] = node.empty
+                      # No need to traverse children, they are Lower nodes without accumulators.
+                  elif isinstance(node, UpperBranch):
+                      if node.empty is not None:
+                          unique_acc_objects[id(node.empty)] = node.empty
+                      # Recurse into children.
                       for children_at_depth in node.children.values():
                           for child in children_at_depth.values():
-                              child_acc = _reduce_acc_upper(child)
-                              if child_acc is not None:
-                                  total_acc = child_acc if total_acc is None else total_acc.merge(child_acc)
+                              queue.append(child)
 
-                  elif isinstance(node, Interface):
-                      if node.empty is not None:
-                          total_acc = node.empty
+              accumulators = list(unique_acc_objects.values())
 
-                      # Stacks going into the lower tree all share `node.acc`.
-                      lower_stack_count = 0
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              lower_stack_count += _reduce_acc_lower(child)
+              # 2. Merge the collected unique accumulators.
+              if not accumulators:
+                  return None
 
-                      merged_from_lower: Optional[Acc] = None
-                      if lower_stack_count > 0:
-                          # Efficiently compute `reduce(merge, [node.acc] * count)`
-                          # using exponentiation by squaring. This assumes merge is associative.
-                          n = lower_stack_count
-                          current_power = node.acc  # Represents acc^(2^i)
+              if len(accumulators) == 1:
+                  return accumulators[0]
 
-                          if n & 1:
-                              merged_from_lower = current_power
-                          n >>= 1
-                          while n > 0:
-                              current_power = current_power.merge(current_power)
-                              if n & 1:
-                                  merged_from_lower = current_power if merged_from_lower is None else merged_from_lower.merge(current_power)
-                              n >>= 1
-
-                      if merged_from_lower is not None:
-                          total_acc = merged_from_lower if total_acc is None else total_acc.merge(merged_from_lower)
-
-                      # Case for interface being a terminal node itself.
-                      if not node.children and node.empty is None:
-                          total_acc = node.acc if total_acc is None else total_acc.merge(node.acc)
-
-                  memo_upper[key] = total_acc
-                  return total_acc
-
-              return _reduce_acc_upper(self.inner)
+              return reduce(_merge_acc, accumulators)
 
           def stats(self) -> LeveledGSSStats[T, Acc]:
               """
@@ -3132,209 +2676,6 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
-  - user: |-
-      ```python 'python/gss_tester/__init__.py'
-      # This file makes 'gss_tester' a Python package.
-
-      ```
-    metadata:
-      filename: python/gss_tester/__init__.py
-  - user: |-
-      ```python 'python/gss_tester/interface.py'
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
-
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
-
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
-
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
-
-      ```
-    metadata:
-      filename: python/gss_tester/interface.py
   - user: |-
       ```python 'python/gss_tester/implementations/leveled_impl.py'
       from __future__ import annotations
@@ -4157,41 +3498,7 @@ messages:
                   return set(self.inner.children.keys())
 
           def reduce_acc(self) -> Optional[Acc]:
-              def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-                  if node.empty:
-                      yield acc
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          yield from generate_accs_lower(child, acc)
-
-              def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                  if isinstance(node, UpperBranch):
-                      if node.empty is not None:
-                          yield node.empty
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs(child)
-                  elif isinstance(node, Interface):
-                      if node.empty is not None:
-                          yield node.empty
-
-                      # The case where the interface itself is a stack end.
-                      if not node.children and node.empty is None:
-                          yield node.acc
-
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              yield from generate_accs_lower(child, node.acc)
-
-              gen = generate_accs(self.inner)
-              try:
-                  reduced_acc = next(gen)
-              except StopIteration:
-                  return None
-
-              for acc in gen:
-                  reduced_acc = reduced_acc.merge(acc)
-              return reduced_acc
+              raise NotImplementedError
 
           def stats(self) -> LeveledGSSStats[T, Acc]:
               """
@@ -4669,9 +3976,9 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: |-
-      Are there any methods here that are needlessly inefficient? e.g. esp methods whose complexity is proportional to the total 'virtual stacks' size, not the number of nodes in the GSS (which is a much more efficient representation than the 'raw' stacks).
-      `generate_accs` is one. Fix it and any others.
+  - user: Implement `reduce_acc`. It shouldn't be too difficult. Just make sure it's
+      proportional to the number of acc instances in the graph, not the number of
+      'virtual stacks'.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4690,208 +3997,114 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I've identified an inefficient method in `LeveledGSS` and will provide instructions and a diff to fix it.
-
-      The `reduce_acc` method in `gss_tester/implementations/leveled_impl.py` is inefficient. Its `generate_accs` helper function traverses every "virtual" stack path in the GSS to yield each stack's accumulator. For a highly-branched GSS, the number of stacks can be exponential in the depth of the graph, while the number of nodes is much smaller. This leads to poor performance.
-
-      I will replace it with an efficient implementation that works directly on the graph structure. The new version uses memoized recursion to visit each node only once. For `Interface` nodes, which can represent a vast number of stacks sharing a single accumulator, it calculates the number of stacks in its `Lower` sub-graph and uses an efficient exponentiation-by-squaring algorithm to merge the accumulator with itself that many times. This reduces the complexity from being proportional to the number of stacks to being proportional to the number of nodes in the GSS graph.
-
-      Here are the step-by-step instructions to apply the fix:
+      Of course. Here are the step-by-step instructions to implement `reduce_acc`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/gss_tester/implementations/leveled_impl.py`.
-      2.  **Find the `reduce_acc` method** inside the `LeveledGSS` class. It starts around line 1008.
-      3.  **Delete the entire body** of the `reduce_acc` method.
-      4.  **Insert the new implementation** provided below in its place.
+      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
 
-      ```python
-              memo_lower: Dict[int, int] = {}
-              memo_upper: Dict[int, Optional[Acc]] = {}
+      2.  **Locate the `reduce_acc` method** within the `LeveledGSS` class. It is currently defined as:
 
-              def _reduce_acc_lower(node: Lower[T]) -> int:
-                  """Computes total number of stacks in a Lower subtree, with memoization."""
-                  key = id(node)
-                  if key in memo_lower:
-                      return memo_lower[key]
+          ```python
+          def reduce_acc(self) -> Optional[Acc]:
+              raise NotImplementedError
+          ```
 
-                  count = 1 if node.empty else 0
-                  for children_at_depth in node.children.values():
-                      for child in children_at_depth.values():
-                          count += _reduce_acc_lower(child)
+      3.  **Replace the body of the `reduce_acc` method** with the following implementation. This new version will traverse the graph, collect all unique accumulator instances, and merge them into a single result.
 
-                  memo_lower[key] = count
-                  return count
+          ```python
+              # 1. Collect unique accumulator objects by their ID to avoid redundant merges
+              # of the same object, and to be proportional to unique accs, not total stacks.
+              unique_acc_objects: Dict[int, Acc] = {}
+              visited_nodes: Set[int] = set()
 
-              def _reduce_acc_upper(node: Upper[T, Acc]) -> Optional[Acc]:
-                  """Computes merged accumulator for an Upper subtree, with memoization."""
-                  key = id(node)
-                  if key in memo_upper:
-                      return memo_upper[key]
+              # Use a queue for iterative traversal to avoid recursion depth issues.
+              queue: List[Upper[T, Acc]] = [self.inner]
 
-                  total_acc: Optional[Acc] = None
+              while queue:
+                  node = queue.pop()
+                  node_id = id(node)
+                  if node_id in visited_nodes:
+                      continue
+                  visited_nodes.add(node_id)
 
-                  if isinstance(node, UpperBranch):
+                  if isinstance(node, Interface):
+                      unique_acc_objects[id(node.acc)] = node.acc
                       if node.empty is not None:
-                          total_acc = node.empty
-
+                          unique_acc_objects[id(node.empty)] = node.empty
+                      # No need to traverse children, they are Lower nodes without accumulators.
+                  elif isinstance(node, UpperBranch):
+                      if node.empty is not None:
+                          unique_acc_objects[id(node.empty)] = node.empty
+                      # Recurse into children.
                       for children_at_depth in node.children.values():
                           for child in children_at_depth.values():
-                              child_acc = _reduce_acc_upper(child)
-                              if child_acc is not None:
-                                  total_acc = child_acc if total_acc is None else total_acc.merge(child_acc)
+                              queue.append(child)
 
-                  elif isinstance(node, Interface):
-                      if node.empty is not None:
-                          total_acc = node.empty
+              accumulators = list(unique_acc_objects.values())
 
-                      # Stacks going into the lower tree all share `node.acc`.
-                      lower_stack_count = 0
-                      for children_at_depth in node.children.values():
-                          for child in children_at_depth.values():
-                              lower_stack_count += _reduce_acc_lower(child)
+              # 2. Merge the collected unique accumulators.
+              if not accumulators:
+                  return None
 
-                      merged_from_lower: Optional[Acc] = None
-                      if lower_stack_count > 0:
-                          # Efficiently compute `reduce(merge, [node.acc] * count)`
-                          # using exponentiation by squaring. This assumes merge is associative.
-                          n = lower_stack_count
-                          current_power = node.acc  # Represents acc^(2^i)
+              if len(accumulators) == 1:
+                  return accumulators[0]
 
-                          if n & 1:
-                              merged_from_lower = current_power
-                          n >>= 1
-                          while n > 0:
-                              current_power = current_power.merge(current_power)
-                              if n & 1:
-                                  merged_from_lower = current_power if merged_from_lower is None else merged_from_lower.merge(current_power)
-                              n >>= 1
-
-                      if merged_from_lower is not None:
-                          total_acc = merged_from_lower if total_acc is None else total_acc.merge(merged_from_lower)
-
-                      # Case for interface being a terminal node itself.
-                      if not node.children and node.empty is None:
-                          total_acc = node.acc if total_acc is None else total_acc.merge(node.acc)
-
-                  memo_upper[key] = total_acc
-                  return total_acc
-
-              return _reduce_acc_upper(self.inner)
-      ```
+              return reduce(_merge_acc, accumulators)
+          ```
 
       ### Git Diff
 
-      Here is the git diff to apply the change automatically.
+      Here is the git diff to apply the changes:
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 9111111..0123456 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1008,38 +1008,70 @@
+      @@ -1100,7 +1100,38 @@
                    return set(self.inner.children.keys())
        
            def reduce_acc(self) -> Optional[Acc]:
-      -        def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-      -            if node.empty:
-      -                yield acc
-      -            for children_at_depth in node.children.values():
-      -                for child in children_at_depth.values():
-      -                    yield from generate_accs_lower(child, acc)
-      -
-      -        def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-      +        memo_lower: Dict[int, int] = {}
-      +        memo_upper: Dict[int, Optional[Acc]] = {}
+      -        raise NotImplementedError
+      +        # 1. Collect unique accumulator objects by their ID to avoid redundant merges
+      +        # of the same object, and to be proportional to unique accs, not total stacks.
+      +        unique_acc_objects: Dict[int, Acc] = {}
+      +        visited_nodes: Set[int] = set()
       +
-      +        def _reduce_acc_lower(node: Lower[T]) -> int:
-      +            """Computes total number of stacks in a Lower subtree, with memoization."""
-      +            key = id(node)
-      +            if key in memo_lower:
-      +                return memo_lower[key]
+      +        # Use a queue for iterative traversal to avoid recursion depth issues.
+      +        queue: List[Upper[T, Acc]] = [self.inner]
       +
-      +            count = 1 if node.empty else 0
-      +            for children_at_depth in node.children.values():
-      +                for child in children_at_depth.values():
-      +                    count += _reduce_acc_lower(child)
+      +        while queue:
+      +            node = queue.pop()
+      +            node_id = id(node)
+      +            if node_id in visited_nodes:
+      +                continue
+      +            visited_nodes.add(node_id)
       +
-      +            memo_lower[key] = count
-      +            return count
-      +
-      +        def _reduce_acc_upper(node: Upper[T, Acc]) -> Optional[Acc]:
-      +            """Computes merged accumulator for an Upper subtree, with memoization."""
-      +            key = id(node)
-      +            if key in memo_upper:
-      +                return memo_upper[key]
-      +
-      +            total_acc: Optional[Acc] = None
-      +
-                   if isinstance(node, UpperBranch):
-                       if node.empty is not None:
-      -                    yield node.empty
-      +                    total_acc = node.empty
-      +
-                       for children_at_depth in node.children.values():
-                           for child in children_at_depth.values():
-      -                        yield from generate_accs(child)
-      +                        child_acc = _reduce_acc_upper(child)
-      +                        if child_acc is not None:
-      +                            total_acc = child_acc if total_acc is None else total_acc.merge(child_acc)
-      +
-                   elif isinstance(node, Interface):
-                       if node.empty is not None:
-      -                    yield node.empty
-      -
-      -                # The case where the interface itself is a stack end.
-      +                    total_acc = node.empty
-      +
-      +                # Stacks going into the lower tree all share `node.acc`.
-      +                lower_stack_count = 0
+      +            if isinstance(node, Interface):
+      +                unique_acc_objects[id(node.acc)] = node.acc
+      +                if node.empty is not None:
+      +                    unique_acc_objects[id(node.empty)] = node.empty
+      +                # No need to traverse children, they are Lower nodes without accumulators.
+      +            elif isinstance(node, UpperBranch):
+      +                if node.empty is not None:
+      +                    unique_acc_objects[id(node.empty)] = node.empty
+      +                # Recurse into children.
       +                for children_at_depth in node.children.values():
       +                    for child in children_at_depth.values():
-      +                        lower_stack_count += _reduce_acc_lower(child)
+      +                        queue.append(child)
       +
-      +                merged_from_lower: Optional[Acc] = None
-      +                if lower_stack_count > 0:
-      +                    # Efficiently compute `reduce(merge, [node.acc] * count)`
-      +                    # using exponentiation by squaring. This assumes merge is associative.
-      +                    n = lower_stack_count
-      +                    current_power = node.acc  # Represents acc^(2^i)
+      +        accumulators = list(unique_acc_objects.values())
       +
-      +                    if n & 1:
-      +                        merged_from_lower = current_power
-      +                    n >>= 1
-      +                    while n > 0:
-      +                        current_power = current_power.merge(current_power)
-      +                        if n & 1:
-      +                            merged_from_lower = current_power if merged_from_lower is None else merged_from_lower.merge(current_power)
-      +                        n >>= 1
+      +        # 2. Merge the collected unique accumulators.
+      +        if not accumulators:
+      +            return None
       +
-      +                if merged_from_lower is not None:
-      +                    total_acc = merged_from_lower if total_acc is None else total_acc.merge(merged_from_lower)
+      +        if len(accumulators) == 1:
+      +            return accumulators[0]
       +
-      +                # Case for interface being a terminal node itself.
-                       if not node.children and node.empty is None:
-      -                    yield node.acc
-      -
-      -                for children_at_depth in node.children.values():
-      -                    for child in children_at_depth.values():
-      -                        yield from generate_accs_lower(child, node.acc)
-      -
-      -        gen = generate_accs(self.inner)
-      -        try:
-      -            reduced_acc = next(gen)
-      -        except StopIteration:
-      -            return None
-      -
-      -        for acc in gen:
-      -            reduced_acc = reduced_acc.merge(acc)
-      -        return reduced_acc
-      +                    total_acc = node.acc if total_acc is None else total_acc.merge(node.acc)
-      +
-      +            memo_upper[key] = total_acc
-      +            return total_acc
-      +
-      +        return _reduce_acc_upper(self.inner)
+      +        return reduce(_merge_acc, accumulators)
        
            def stats(self) -> LeveledGSSStats[T, Acc]:
                """
@@ -4907,7 +4120,6 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Optimize LeveledGSS.reduce_acc
-      with graph traversal and memoization"'
+  - user: 'Changes committed with message: "Implement reduce_acc method in LeveledGSS"'
     metadata:
 ...
