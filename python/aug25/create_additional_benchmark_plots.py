@@ -167,7 +167,6 @@ def generate_plots(data):
 
     # Plot 4: Main Loop Union and Merge Calls (UPDATED)
     plt.figure(figsize=(12, 8))
-    plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
     plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
     plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
     plt.plot(steps, data['acc_merge_calls'], 'd-.', alpha=0.8, label='acc_merge Calls')
