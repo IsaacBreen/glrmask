@@ -155,44 +155,42 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         else:
                             print(f"    - {impl_name2}: No trace info at divergence index.")
 
-                    print("\n  --- Full Trace Comparison ---")
-                    
+                    # --- Trace Diff ---
+                    print(f"\n  --- Trace Diff (-{impl_name1}, +{impl_name2}) ---")
+
                     trace1 = extract_full_trace(all_results[impl_name1], i)
                     trace2 = extract_full_trace(all_results[impl_name2], i)
 
-                    if trace1:
-                        seed1 = trace1[-1][1].get("seed")
-                        print(f"  - Full trace for {impl_name1} (seed={seed1}):")
-                        for idx, tr in trace1:
-                            op = tr.get("op")
-                            step = tr.get("step")
-                            args = json.dumps(tr.get("args", {}), ensure_ascii=False)
-                            avail = tr.get("available_ops")
-                            src_idx = tr.get("source_index")
-                            src = pretty_stacks(tr.get("source_stacks"))
-                            res = pretty_stacks(tr.get("result_stacks"))
-                            print(f"    [{idx}] step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}")
-                            print(f"      src: {src}")
-                            print(f"      res: {res}")
-                    else:
-                        print(f"  - No fuzz trace available for {impl_name1}.")
+                    def format_trace_for_display(tr: Dict[str, Any]) -> List[str]:
+                        op = tr.get("op")
+                        step = tr.get("step")
+                        args = json.dumps(tr.get("args", {}), ensure_ascii=False)
+                        avail = tr.get("available_ops")
+                        src_idx = tr.get("source_index")
+                        src = pretty_stacks(tr.get("source_stacks"))
+                        res = pretty_stacks(tr.get("result_stacks"))
+                        
+                        return [
+                            f"step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}",
+                            f"  src: {src}",
+                            f"  res: {res}"
+                        ]
 
-                    if trace2:
-                        seed2 = trace2[-1][1].get("seed")
-                        print(f"  - Full trace for {impl_name2} (seed={seed2}):")
-                        for idx, tr in trace2:
-                            op = tr.get("op")
-                            step = tr.get("step")
-                            args = json.dumps(tr.get("args", {}), ensure_ascii=False)
-                            avail = tr.get("available_ops")
-                            src_idx = tr.get("source_index")
-                            src = pretty_stacks(tr.get("source_stacks"))
-                            res = pretty_stacks(tr.get("result_stacks"))
-                            print(f"    [{idx}] step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}")
-                            print(f"      src: {src}")
-                            print(f"      res: {res}")
-                    else:
-                        print(f"  - No fuzz trace available for {impl_name2}.")
+                    max_len = max(len(trace1), len(trace2))
+                    for idx in range(max_len):
+                        tr1_data = trace1[idx][1] if idx < len(trace1) else None
+                        tr2_data = trace2[idx][1] if idx < len(trace2) else None
+
+                        lines1 = format_trace_for_display(tr1_data) if tr1_data else None
+                        lines2 = format_trace_for_display(tr2_data) if tr2_data else None
+
+                        if lines1 and lines2 and lines1 == lines2:
+                            print(f"  [{idx: >3}] {lines1[0]}\n       {lines1[1]}\n       {lines1[2]}")
+                        else:
+                            if lines1:
+                                print(f"- [{idx: >3}] {lines1[0]}\n-      {lines1[1]}\n-      {lines1[2]}")
+                            if lines2:
+                                print(f"+ [{idx: >3}] {lines2[0]}\n+      {lines2[1]}\n+      {lines2[2]}")
 
                     # Add explanation
                     t1 = res1.get("trace") if res1 else None
