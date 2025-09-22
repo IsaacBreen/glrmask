@@ -415,7 +415,7 @@ class Model(GraphProvider):
                 # We assume gss.get_all_accs() exists for stats gathering.
                 accs = getattr(gss, 'get_all_accs', lambda: [])()
                 all_initial_accs.update(accs)
-                stats.inc('get_mask.initial.gss_stacks.sum', len(gss))
+                # stats.inc('get_mask.initial.gss_stacks.sum', len(gss))
                 stats.inc('get_mask.initial.gss_heads.sum', len(gss.peek()))
             stats.inc('get_mask.initial.unique_accs', len(all_initial_accs))
             for acc in all_initial_accs:
@@ -456,7 +456,7 @@ class Model(GraphProvider):
                 stats.start('get_mask.initialize_acc.difference')
                 allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
                 stats.stop('get_mask.initialize_acc.difference')
-                stats.inc('get_mask.data.allowed_mask_at_init.len.sum', len(allowed_mask))
+                # stats.inc('get_mask.data.allowed_mask_at_init.len.sum', len(allowed_mask))
                 
                 stats.stop('get_mask.initialize_acc.total')
                 return PyAcc(
@@ -625,5 +625,5 @@ class Model(GraphProvider):
             stats.stop('get_mask.final_conversion')
 
             stats.stop('get_mask.total')
-            stats.report()
+            # stats.report()
             return result
