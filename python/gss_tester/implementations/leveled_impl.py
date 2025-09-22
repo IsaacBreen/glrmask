@@ -446,24 +446,75 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             all_children = list(self.inner._all_children())
             merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
             return LeveledGSS(try_promote(merged))
+
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        gss = self
-        for _ in range(n):
-            all_children = list(gss.inner._all_children())
+        if n <= 0:
+            return self
+        if self.is_empty():
+            return self
 
-            if isinstance(gss.inner, Interface):
-                merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
-                empty_acc = gss.inner.acc if merged.empty else None
+        # Memoization caches to avoid recomputing on shared subtrees
+        memo_upper: Dict[Tuple[int, int], Upper[T, Acc]] = {}
+        memo_lower: Dict[Tuple[int, int], Lower[T]] = {}
 
-                if empty_acc is None and not merged.children:
-                    gss = LeveledGSS(UpperBranch(children={}, empty=None))
+        def _popn_lower(node: Lower[T], k: int) -> Lower[T]:
+            """Recursively pop k levels from a Lower node."""
+            if k == 0:
+                return node
+
+            key = (id(node), k)
+            if key in memo_lower:
+                return memo_lower[key]
+
+            all_children = list(node._all_children())
+            if not all_children:
+                res = Lower(children={}, empty=False)
+                memo_lower[key] = res
+                return res
+
+            # Recursively pop k-1 from all children and merge the results
+            popped_children = [_popn_lower(child, k - 1) for child in all_children]
+            res = reduce(merge_lower, popped_children[1:], popped_children[0])
+            memo_lower[key] = res
+            return res
+
+        def _popn_upper(node: Upper[T, Acc], k: int) -> Upper[T, Acc]:
+            """Recursively pop k levels from an Upper node."""
+            if k == 0:
+                return node
+
+            key = (id(node), k)
+            if key in memo_upper:
+                return memo_upper[key]
+
+            # Base case for recursion: no children to pop from
+            all_children = list(node._all_children())
+            if not all_children:
+                res = UpperBranch(children={}, empty=None)
+                memo_upper[key] = res
+                return res
+
+            if isinstance(node, Interface):
+                # For an Interface, we pop k-1 levels from its Lower children
+                popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
+                merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
+
+                # The result is a new Interface with the same accumulator
+                new_empty = node.acc if merged.empty else None
+                if not merged.children and new_empty is None:
+                    res = UpperBranch(children={}, empty=None)
                 else:
-                    gss = LeveledGSS(Interface(children=merged.children, acc=gss.inner.acc, empty=empty_acc))
-            else:
-                merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-                gss = LeveledGSS(try_promote(merged))
+                    res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
+            else:  # UpperBranch
+                # For an UpperBranch, we pop k-1 levels from its Upper children
+                popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
+                merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
+                res = try_promote(merged)
 
-        return gss
+            memo_upper[key] = res
+            return res
+
+        return LeveledGSS(_popn_upper(self.inner, n))
 
     def is_empty(self) -> bool:
         # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
