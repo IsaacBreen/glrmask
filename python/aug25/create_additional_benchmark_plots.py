@@ -21,8 +21,6 @@ def parse_log_data(log_content):
         python_model_log = re.search(r">>> Running benchmark for: precompute3_model_pure_python_get_mask_only\.py(.*?)>>> Finished benchmark for:", log_content, re.DOTALL).group(1)
 
         # --- Extract GSS Stats ---
-        # THIS IS THE CORRECTED LINE: The regex now stops before "Stats after seeding:"
-        # to prevent capturing duplicate data from the second stats block.
         initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=Stats after seeding:)", python_model_log, re.DOTALL)
 
         data['total_stacks'] = [int(m) for m in re.findall(r"- stacks: total=(\d+)", "\n".join(initial_stats_blocks))]
@@ -32,18 +30,25 @@ def parse_log_data(log_content):
         data['total_accumulator_instances'] = [int(m) for m in re.findall(r"total_accumulator_instances=(\d+)", "\n".join(initial_stats_blocks))]
         data['unique_accumulators'] = [int(m) for m in re.findall(r"unique_accumulators_count=(\d+)", "\n".join(initial_stats_blocks))]
         data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
-        
+
         # --- Extract get_mask() Profiling Stats ---
         profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
-        data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", "\n".join(profiling_blocks))]
-        data['init_time'] = [float(m) for m in re.findall(r"Initialization time:\s+([\d.]+) ms", "\n".join(profiling_blocks))]
-        data['main_loop_time'] = [float(m) for m in re.findall(r"Main loop time:\s+([\d.]+) ms", "\n".join(profiling_blocks))]
-        data['final_conversion_time'] = [float(m) for m in re.findall(r"Final conversion:\s+([\d.]+) ms", "\n".join(profiling_blocks))]
-        data['main_loop_apply_calls'] = [int(m) for m in re.findall(r"Main loop GSS.apply calls: (\d+)", "\n".join(profiling_blocks))]
-        data['main_loop_intersection_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.intersection calls: (\d+)", "\n".join(profiling_blocks))]
-        data['main_loop_union_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.union calls: (\d+)", "\n".join(profiling_blocks))]
-        data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", "\n".join(profiling_blocks))]
-        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", "\n".join(profiling_blocks))]
+        profiling_text = "\n".join(profiling_blocks)
+
+        data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
+        data['init_time'] = [float(m) for m in re.findall(r"Initialization time:\s+([\d.]+) ms", profiling_text)]
+        data['main_loop_time'] = [float(m) for m in re.findall(r"Main loop time:\s+([\d.]+) ms", profiling_text)]
+        data['final_conversion_time'] = [float(m) for m in re.findall(r"Final conversion:\s+([\d.]+) ms", profiling_text)]
+        data['main_loop_apply_calls'] = [int(m) for m in re.findall(r"Main loop GSS.apply calls: (\d+)", profiling_text)]
+        data['main_loop_intersection_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.intersection calls: (\d+)", profiling_text)]
+        data['main_loop_union_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.union calls: (\d+)", profiling_text)]
+        data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
+
+        # --- Extract Detailed Bitset Operation Counts ---
+        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
+        data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
+        data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
+        data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
 
         # --- Extract Commit Times ---
         data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
@@ -54,7 +59,7 @@ def parse_log_data(log_content):
             print("Error: No profiling steps found for the Python model.", file=sys.stderr)
             return None
         data['steps'] = list(range(1, num_steps + 1))
-        
+
         print(f"Successfully parsed {num_steps} steps.", file=sys.stderr)
         return data
 
@@ -89,24 +94,36 @@ def generate_plots(data):
     plt.savefig(os.path.join(plot_dir, "gss_upper_branch_counts.png"))
     plt.close()
 
-    # Plot 3 & 4: Main Loop Calls
+    # Plot 3: Main Loop Apply and Intersection Calls
     plt.figure(figsize=(12, 8))
-    plt.plot(steps, data['main_loop_apply_calls'], 'o-', label='GSS.apply Calls')
-    plt.plot(steps, data['main_loop_intersection_calls'], 'x-', label='Bitset.intersection Calls')
+    plt.plot(steps, data['main_loop_apply_calls'], 'o-', label='Main Loop GSS.apply Calls')
+    plt.plot(steps, data['main_loop_intersection_calls'], 'x-', label='Main Loop Bitset.intersection Calls')
+    plt.plot(steps, data['bitset_intersection_calls'], 's--', alpha=0.7, label='Total bitset_intersection Calls')
     plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Apply & Intersection Calls (Log Scale)')
     plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, "main_loop_apply_intersection.png"))
     plt.close()
 
+    # Plot 4: Main Loop Union and Merge Calls
     plt.figure(figsize=(12, 8))
-    plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Bitset.union Calls')
-    plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='GSS.merge Calls')
+    plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
+    plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
+    plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
     plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Union & Merge Calls (Log Scale)')
     plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, "main_loop_union_merge.png"))
     plt.close()
 
-    # Plot 5: Exponential Growth Plots
+    # Plot 5: New plot for other bitset operations
+    plt.figure(figsize=(12, 8))
+    plt.plot(steps, data['bitset_difference_calls'], 'o-', label='bitset_difference Calls')
+    plt.plot(steps, data['hybrid_complement_calls'], 'x-', label='hybrid_complement Calls')
+    plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Bitset Difference and Hybrid Complement Calls')
+    plt.xticks(steps); plt.ylim(-0.1, 1); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, "other_bitset_calls.png"))
+    plt.close()
+
+    # Plot 6: Exponential Growth Plots
     plt.figure(figsize=(10, 6))
     plt.plot(steps, data['get_mask_total_time'], 'o-')
     plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Exponential Growth in get_mask() Total Time (Log Scale)')
@@ -128,16 +145,16 @@ def generate_plots(data):
     plt.savefig(os.path.join(plot_dir, "exp_growth_bitset_unions.png"))
     plt.close()
 
-    # Plot 6: Time Decomposition
+    # Plot 7: Time Decomposition
     plt.figure(figsize=(12, 8))
-    plt.stackplot(steps, data['init_time'], data['main_loop_time'], data['final_conversion_time'], 
+    plt.stackplot(steps, data['init_time'], data['main_loop_time'], data['final_conversion_time'],
                   labels=['Initialization', 'Main Loop', 'Final Conversion'], colors=['#4c72b0', '#dd8452', '#55a868'])
     plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Decomposition of get_mask() Execution Time')
     plt.legend(loc='upper left'); plt.xticks(steps); plt.grid(True, axis='y', linestyle='--', alpha=0.7); plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, "time_decomposition.png"))
     plt.close()
 
-    # Plot 7: Performance vs. Complexity
+    # Plot 8: Performance vs. Complexity
     plt.figure(figsize=(10, 6))
     total_stacks_np = np.array(data['total_stacks'])
     get_mask_time_np = np.array(data['get_mask_total_time'])
@@ -151,7 +168,7 @@ def generate_plots(data):
     plt.savefig(os.path.join(plot_dir, "performance_vs_complexity.png"))
     plt.close()
 
-    # Plot 8: Efficiency and Sharing
+    # Plot 9: Efficiency and Sharing
     fig, ax1 = plt.subplots(figsize=(12, 8))
     unions_per_stack = np.array(data['bitset_union_calls']) / total_stacks_np
     ax1.plot(steps, unions_per_stack, 'o-', color='tab:blue', label='Bitset Unions per Stack')
