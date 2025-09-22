@@ -186,60 +186,31 @@ class Model(GraphProvider):
                     if popped.is_empty():
                         continue
 
-                    # Pre-fetch the (usually small) set of candidate state IDs once
-                    popped_sids = tuple(popped.peek())
-                    if not popped_sids:
-                        continue
-
-                    # Group dests by the subset of popped_sids they accept (bitmask)
-                    t_group_start = time.time()
-                    dest_groups: Dict[int, List[int]] = {}
-                    t_contains_sum = 0.0
                     for dest_idx, state_bv in dests:
                         stats['dests_processed'] += 1
+
                         t_intersect_start = time.time()
-                        mask = 0
-                        # Given len(state_bv) > len(popped.peek()), iterate popped_sids and test membership
-                        for bit, sid in enumerate(popped_sids):
-                            if state_bv.contains(sid):
-                                mask |= (1 << bit)
-                        t_contains_sum += time.time() - t_intersect_start
-                        if mask:
-                            dest_groups.setdefault(mask, []).append(int(dest_idx))
-                    stats['t_sid_intersection'] += t_contains_sum
-                    stats['t_group_dests'] += time.time() - t_group_start
-                    stats['dest_groups'] += len(dest_groups)
+                        values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
+                        stats['t_sid_intersection'] += time.time() - t_intersect_start
 
-                    if not dest_groups:
-                        continue
+                        if not values_to_keep:
+                            continue
 
-                    # Prepare a reusable memo for the edge-level prune (same llm_bv), so we don't recompute per group
-                    edge_acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-                    # Cache subset sids for each mask we actually saw
-                    mask_to_sids: Dict[int, List[int]] = {}
-                    k = len(popped_sids)
-
-                    for mask, dest_list in dest_groups.items():
-                        # Materialize the subset of sids for this mask
-                        if mask not in mask_to_sids:
-                            subset = [popped_sids[i] for i in range(k) if (mask >> i) & 1]
-                            mask_to_sids[mask] = subset
-
-                        # Isolate once per group
                         stats['isolate_many_calls'] += 1
                         t_isolate_start = time.time()
-                        child_gss: GSS = popped.isolate_many(mask_to_sids[mask])
+                        child_gss: GSS = popped.isolate_many(values_to_keep)
                         stats['t_isolate_many'] += time.time() - t_isolate_start
                         if child_gss.is_empty():
                             continue
 
-                        # Apply edge LLM mask once for the group, reuse across all dests in the group
+                        # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         stats['apply_prune_calls'] += 1
                         t_apply_prune_start = time.time()
+                        acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                         def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                            if acc in edge_acc_memo:
-                                return edge_acc_memo[acc]
+                            if acc in acc_memo:
+                                return acc_memo[acc]
                             new_mask = acc.llm_mask.intersection(llm_bv)
                             if new_mask.is_empty():
                                 result = None
@@ -248,24 +219,26 @@ class Model(GraphProvider):
                                     terminals_union=acc.terminals_union,
                                     llm_mask=new_mask
                                 )
-                            edge_acc_memo[acc] = result
+                            acc_memo[acc] = result
                             return result
 
-                        pruned_gss: GSS = child_gss.apply_and_prune(intersect_and_prune)
+                        child_gss = child_gss.apply_and_prune(intersect_and_prune)
                         stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                        if pruned_gss.is_empty():
+                        if child_gss.is_empty():
                             continue
 
-                        # Fan-out the same pruned GSS to all dests in the group
-                        for d in dest_list:
-                            if d in values:
-                                stats['gss_merges'] += 1
-                                t_merge_start = time.time()
-                                values[d] = values[d].merge(pruned_gss)
-                                stats['t_gss_merge'] += time.time() - t_merge_start
-                            else:
-                                values[d] = pruned_gss
-                            enqueue(max_depth[d], d)
+                        d: int = int(dest_idx)
+                        if d in values:
+                            stats['gss_merges'] += 1
+                            t_merge_start = time.time()
+                            existing_gss = values[d]
+                            new_gss = child_gss
+                            merged_gss = existing_gss.merge(new_gss)
+                            values[d] = merged_gss
+                            stats['t_gss_merge'] += time.time() - t_merge_start
+                        else:
+                            values[d] = child_gss
+                        enqueue(max_depth[d], d)
 
             todo.pop(depth)
         stats['t_main_loop'] = time.time() - t_main_loop_start
