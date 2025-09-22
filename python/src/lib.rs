@@ -632,6 +632,14 @@ impl PyHybridBitset {
         self.inner.is_subset(&other.inner)
     }
 
+    fn is_superset(&self, other: &PyHybridBitset) -> bool {
+        self.inner.is_superset(&other.inner)
+    }
+
+    fn is_disjoint(&self, other: &PyHybridBitset) -> bool {
+        self.inner.is_disjoint(&other.inner)
+    }
+
     fn to_json_string(&self) -> String {
         self.inner.to_json().to_json_string()
     }
