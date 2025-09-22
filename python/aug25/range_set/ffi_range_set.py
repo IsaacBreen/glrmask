@@ -1,7 +1,7 @@
 import _sep1 as ffi
 from typing import List, Tuple, Iterable, cast
 
-class FFIRangeSet:
+class FFIRangeSet(RangeSet[int]):
     """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
 
     __slots__ = ('_bitset',)
