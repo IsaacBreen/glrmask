@@ -132,7 +132,7 @@ def run_fuzz_test(
             result_stacks = new_gss.to_stacks()
             # Add the new state to our pool, but avoid adding empty or duplicate states
             added_to_pool = False
-            if new_gss is not source_gss and not new_gss.is_empty():
+            if new_gss != source_gss and not new_gss.is_empty():
                 gss_states.append(new_gss)
                 added_to_pool = True
 
