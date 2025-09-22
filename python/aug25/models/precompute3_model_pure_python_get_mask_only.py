@@ -66,20 +66,21 @@ class Model(GraphProvider):
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute forbidden LLM tokens from disallowed terminals for this GSS
             forbid: ffi.Bitset = ffi.Bitset.zeros()
-            disallowed_l2 = acc.terminals_union.complement()
-            for (start, end), bv in disallowed_l2.range_values():
+            disallowed_dict = dict(acc.disallowed_terminals)
+            for tsid, bv in disallowed_dict.items():
                 if bv.is_empty():
                     continue
-                for tsid in range(start, min(end, max_state) + 1):
-                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                    if not pm:
-                        continue
-                    for terminal_id_key, llm_tokens in pm.items():
-                        if bv.contains(int(terminal_id_key)):
-                            forbid = forbid.union(llm_tokens)
+                if tsid > max_state:
+                    continue
+                pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                if not pm:
+                    continue
+                for terminal_id_key, llm_tokens in pm.items():
+                    if bv.contains(int(terminal_id_key)):
+                        forbid = forbid.union(llm_tokens)
             allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
             return PyAcc(
-                terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                disallowed_terminals=(),  # consume
                 llm_mask=allowed_mask
             )
 
@@ -151,7 +152,7 @@ class Model(GraphProvider):
                                     result = None
                                 else:
                                     result = PyAcc(
-                                        terminals_union=acc.terminals_union,
+                                        disallowed_terminals=acc.disallowed_terminals,
                                         llm_mask=new_mask
                                     )
                                 acc_memo[acc] = result
