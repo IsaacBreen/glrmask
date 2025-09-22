@@ -1,812 +1,132 @@
 local_system:
   attached_files:
+    - python/aug25/range_set/ffi_range_set.py
     - python/aug25/models/precompute3_model_pure_python.py
     - python/aug25/models/precompute3_model_pure_python_get_mask_only.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
+    python/aug25/range_set/ffi_range_set.py: |
       import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from typing import List, Tuple, Iterable, cast
 
+      from .range_set_abc import RangeSet
 
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
 
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
 
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
+          __slots__ = ('_bitset',)
 
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      @dataclass(frozen=True)
-      class PyAcc:
-          terminals_union: Tuple[Tuple[int, RangeSet], ...]
-          llm_mask: RangeSet
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              d1 = dict(self.terminals_union)
-              d2 = dict(other.terminals_union)
-              new_terminals_union = d1.copy()
-              for k, v in d2.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-
-              return PyAcc(
-                  terminals_union=tuple(sorted(new_terminals_union.items())),
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
-              self.tokenizer_initial_state: Optional[int] = None
-              self.all_terminals_bitset: Optional[RangeSet] = None
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      continue
-
-                  new_children = []
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to RangeSet for ffi-free operations in commit/get_mask
-                      llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              all_terminals = set()
-              for row in model.parser_table.table.values():
-                  all_terminals.update(row.actions.keys())
-              if model.ignore_terminal_id is not None:
-                  all_terminals.add(model.ignore_terminal_id)
-              model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
-
-              initial_acc = PyAcc(terminals_union=tuple(), llm_mask=RangeSet.empty())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to RangeSet
-              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-              pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
-              for tsid, inner in pmc_ffi.items():
-                  mapped: Dict[int, RangeSet] = {}
-                  for term_id, bit in inner.items():
-                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
-                  pmc_rs[int(tsid)] = mapped
-              model.possible_matches_cache = pmc_rs
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              # Convert universe LLM tokens bitset to RangeSet
-              all_internal = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  disallowed_terminals_map = dict(acc.terminals_union)
-                  for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                      if not matched_bv.intersection(disallowed_for_state).is_empty():
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_map = dict(acc.terminals_union)
-                  new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, RangeSet.empty())
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  new_map_tuple = tuple(sorted(new_bvs.items()))
-                  return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_map = dict(acc.terminals_union)
-                  curr_bv = current_map.get(state_id, RangeSet.empty())
-                  to_add = RangeSet.from_indices([terminal_id])
-                  new_bv = curr_bv.union(to_add)
-                  current_map[state_id] = new_bv
-                  new_map_tuple = tuple(sorted(current_map.items()))
-                  return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, RangeSet] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-
-          @profile
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes:
-              - Initialize LLM mask per-accumulator (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map = self.state
-              all_ones_mask: RangeSet = self.all_internal_llm_tokens_bitset if self.all_internal_llm_tokens_bitset is not None else RangeSet.empty()
-              final_mask: RangeSet = RangeSet.empty()
-
-              values: Dict[int, GSS] = {}
-              stopped: set[int] = set()
-              todo: Dict[int, set[int]] = {}
-              depth_heap: List[int] = []
-
-              heappush = heapq.heappush
-              heappop = heapq.heappop
-              roots_map = self.roots_map
-              max_depth = self.max_depth
-              arena = self.arena
-              is_end = self.is_end
-
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state = self.tokenizer.max_state()
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
-              for sid, gss in state_map.items():
-                  # Set initial llm_mask on each accumulator and consume terminals_union
-                  def initialize_acc(acc: PyAcc) -> PyAcc:
-                      # Compute allowed LLM tokens from disallowed terminals
-                      disallowed_llm_mask = RangeSet.empty()
-                      disallowed_map = dict(acc.terminals_union)
-                      if disallowed_map:
-                          for tsid, disallowed_terminals in disallowed_map.items():
-                              if tsid > max_state or tsid not in pmc:
-                                  continue
-                              terminals_to_llm = pmc[tsid]
-                              for terminal_id in disallowed_terminals.to_indices():
-                                  if terminal_id in terminals_to_llm:
-                                      disallowed_llm_mask = disallowed_llm_mask.union(
-                                          terminals_to_llm[terminal_id]
-                                      )
-
-                      allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
-
-                      return PyAcc(
-                          terminals_union=tuple(),  # consume
-                          llm_mask=allowed_mask,
-                      )
-
-                  gss_initialized = gss.apply(initialize_acc)
-
-                  root_idx = roots_map.get(int(sid))
-                  if root_idx is None:
-                      continue
-                  root_idx = int(root_idx)
-
-                  existing = values.get(root_idx)
-                  if existing is not None:
-                      merged_gss = existing.merge(gss_initialized)
-                      values[root_idx] = merged_gss
-                  else:
-                      values[root_idx] = gss_initialized
-
-                  depth = max_depth[root_idx]
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {root_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(root_idx)
-
-              def enqueue(depth: int, node_idx: int) -> None:
-                  bucket = todo.get(depth)
-                  if bucket is None:
-                      todo[depth] = {node_idx}
-                      heappush(depth_heap, depth)
-                  else:
-                      bucket.add(node_idx)
-
-              # Main loop
-              while True:
-                  node_indices: Optional[set[int]] = None
-                  current_depth = -1
-                  while depth_heap:
-                      current_depth = heappop(depth_heap)
-                      node_indices = todo.pop(current_depth, None)
-                      if node_indices:
-                          break
-                  if not node_indices:
-                      break
-
-                  for node_idx in node_indices:
-                      if node_idx in stopped:
-                          continue
-
-                      gss_node = values.pop(node_idx, None)
-                      if gss_node is None:
-                          continue
-
-                      # Compute current allowed LLM tokens at this node by reducing acc
-                      reduced_acc = gss_node.reduce_acc()
-                      if reduced_acc is None or reduced_acc.llm_mask.is_empty():
-                          # No possible tokens here -> stop this branch
-                          stopped.add(node_idx)
-                          continue
-
-                      # End-node handling: just union the allowed LLM tokens
-                      if is_end(node_idx):
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
-
-                      # Transitions grouped by (pop, llm_bv)
-                      node_data = arena.get(node_idx, {})
-                      children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
-                          popped = gss_node.popn(pop)
-                          llm_empty = llm_bv.is_empty()
-
-                          for dest_idx, state_bv in dests:
-                              matched: List[GSS] = []
-                              if not state_bv.is_empty():
-                                  # for sid_val in popped.peek():
-                                  #     if state_bv.contains(sid_val):
-                                  #         matched.append(popped.isolate(sid_val))
-                                  sid_vals = RangeSet.from_indices(popped.peek())
-                                  matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
-                              if not matched:
-                                  continue
-
-                              child_gss_node = GSS.merge_many(matched)
-
-                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_empty:
-                                  def intersect_edge(acc: PyAcc) -> PyAcc:
-                                      return PyAcc(
-                                          terminals_union=acc.terminals_union,
-                                          llm_mask=acc.llm_mask.intersection(llm_bv)
-                                      )
-                                  child_gss_node = child_gss_node.apply(intersect_edge)
-
-                              d = int(dest_idx)
-                              existing_child = values.get(d)
-                              if existing_child is not None:
-                                  merged_gss = existing_child.merge(child_gss_node)
-                                  values[d] = merged_gss
-                              else:
-                                  values[d] = child_gss_node
-
-                              enqueue(max_depth[d], d)
-
-              # Convert internal mask back to original IDs
-              original_indices: List[int] = []
-              for internal_id in final_mask.to_indices():
-                  if internal_id in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[internal_id])
-              return RangeSet.from_indices(original_indices)
-    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
-      import heapq
-      from typing import Dict, List, Set, Optional
-      import time
-      import collections
-      from functools import wraps
-
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
-      from ..common_interface import GraphProvider, RangeSet
-
-
-      RANGESET_STATS = collections.defaultdict(float)
-      RANGESET_CALLS = collections.defaultdict(int)
-
-      def time_rangeset_method(func):
-          """Decorator to time methods of RangeSet."""
-          @wraps(func)
-          def wrapper(*args, **kwargs):
-              t0 = time.time()
-              result = func(*args, **kwargs)
-              RANGESET_STATS[func.__name__] += time.time() - t0
-              RANGESET_CALLS[func.__name__] += 1
-              return result
-          return wrapper
-
-      def print_rangeset_stats():
-          """Prints the collected stats for RangeSet methods."""
-          print("\n--- RangeSet stats ---")
-          total_time = sum(RANGESET_STATS.values())
-          for k, v in sorted(RANGESET_STATS.items()):
-              calls = RANGESET_CALLS[k]
-              if total_time > 1e-6:
-                  print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
-              else:
-                  print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
-          print("----------------------\n")
-
-      # Monkey-patch RangeSet methods for profiling
-      if not hasattr(RangeSet, '_instrumented'):
-          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
-              if hasattr(RangeSet, method_name):
-                  setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
-          RangeSet._instrumented = True
-
-      class Model(GraphProvider):
-          def __init__(self, inner_model: InnerModel):
-              self.inner_model: InnerModel = inner_model
-              im: InnerModel = self.inner_model
-              self.arena: Dict[int, dict] = im.arena
-              self.roots_map: Dict[int, int] = im.roots_map
-              self.max_depth: Dict[int, int] = im.max_depth
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
-              self.tokenizer_max_state: int = im.tokenizer.max_state()
-              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
-              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
-              self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              return Model(InnerModel.from_json_string(s))
-
-          def commit(self, token_id: int) -> None:
-              self.inner_model.commit(token_id)
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
 
           @property
-          def state(self) -> Dict[int, GSS]:
-              return self.inner_model.state
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
 
-          def is_end(self, node: int) -> bool:
-              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+          def to_ranges(self) -> List[List[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [list(r) for r in self._bitset.to_ranges()]
 
-          def get_mask(self) -> RangeSet:
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              return self._bitset.to_indices()
+
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              return self._bitset.contains(x)
+
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self | other
+
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self & other
+
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self - other
+
+          def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.union(other._bitset)
+              return new_set
+
+          def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.intersection(other._bitset)
+              return new_set
+
+          def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.difference(other._bitset)
+              return new_set
+          
+          def is_empty(self) -> bool:
+              return self._bitset.is_empty()
+
+          def __len__(self) -> int:
+              return self._bitset.len()
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self._bitset == other._bitset
+
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              return hash(self._bitset)
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
               """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
               """
-              RANGESET_STATS.clear()
-              RANGESET_CALLS.clear()
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
 
-              state_map: Dict[int, GSS] = self.state
+          @staticmethod
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              return self
 
-              t0 = time.time()
-              stats = collections.defaultdict(float)
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              new_set._bitset = ffi.Bitset.from_indices(list(indices))
+              return new_set
 
-              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-              final_mask: RangeSet = RangeSet.empty()
+          @staticmethod
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              return FFIRangeSet.from_ranges([])
 
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[int, GSS] = {}
-              todo: Dict[int, Set[int]] = {}
-              depth_heap: List[int] = []
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
 
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, int] = self.roots_map
-              max_depth: Dict[int, int] = self.max_depth
-              arena: Dict[int, dict] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              t_init_start = time.time()
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = dict(acc.terminals_union)
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.to_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                  return PyAcc(
-                      terminals_union=tuple(),  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              apply_memo: Dict[PyAcc, PyAcc] = {}
-              for sid, gss in state_map.items():
-                  r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                      stats['init_gss_merges'] += 1
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  bucket: Optional[Set[int]] = todo.get(d)
-                  if bucket is None:
-                      todo[d] = {r}
-                      hp(depth_heap, d)
-                  else:
-                      bucket.add(r)
-              stats['t_init'] = time.time() - t_init_start
-              stats['init_apply_memo_size'] = len(apply_memo)
-              stats['init_gss_count'] = len(state_map)
-
-              def enqueue(d: int, n: int) -> None:
-                  bucket: Optional[Set[int]] = todo.get(d)
-                  if bucket is None:
-                      todo[d] = {n}
-                      hp(depth_heap, d)
-                  else:
-                      bucket.add(n)
-
-              # Main loop
-              t_main_loop_start = time.time()
-              while depth_heap:
-                  depth: int = hpop(depth_heap)
-                  while todo[depth]:
-                      node: int = todo[depth].pop()
-                      gss_node: GSS = values.pop(node)
-                      stats['nodes_processed'] += 1
-
-                      # End-node handling: just union the allowed LLM tokens
-                      if is_end(node):
-                          stats['end_nodes'] += 1
-                          t_reduce_start = time.time()
-                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                          if reduced_acc:
-                              final_mask = final_mask.union(reduced_acc.llm_mask)
-                          stats['t_reduce_acc'] += time.time() - t_reduce_start
-                          stats['reduce_acc_calls'] += 1
-
-                      # Traverse edges and propagate masks
-                      edges = arena.get(node, {}).get("children") or []
-                      stats['edges_traversed'] += len(edges)
-                      for (pop, llm_bv), dests in edges:
-                          stats['popn_calls'] += 1
-                          t_popn_start = time.time()
-                          popped: GSS = gss_node.popn(pop)
-                          stats['t_popn'] += time.time() - t_popn_start
-                          if popped.is_empty():
-                              continue
-
-                          for dest_idx, state_bv in dests:
-                              stats['dests_processed'] += 1
-
-                              t_intersect_start = time.time()
-                              values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
-                              stats['t_sid_intersection'] += time.time() - t_intersect_start
-
-                              if not values_to_keep:
-                                  continue
-
-                              stats['isolate_many_calls'] += 1
-                              t_isolate_start = time.time()
-                              child_gss: GSS = popped.isolate_many(values_to_keep)
-                              stats['t_isolate_many'] += time.time() - t_isolate_start
-                              if child_gss.is_empty():
-                                  continue
-
-                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              stats['apply_prune_calls'] += 1
-                              t_apply_prune_start = time.time()
-                              acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                              def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                  if acc in acc_memo:
-                                      return acc_memo[acc]
-                                  new_mask = acc.llm_mask.intersection(llm_bv)
-                                  if new_mask.is_empty():
-                                      result = None
-                                  else:
-                                      result = PyAcc(
-                                          terminals_union=acc.terminals_union,
-                                          llm_mask=new_mask
-                                      )
-                                  acc_memo[acc] = result
-                                  return result
-
-                              child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                              stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                              if child_gss.is_empty():
-                                  continue
-
-                              d: int = int(dest_idx)
-                              if d in values:
-                                  stats['gss_merges'] += 1
-                                  t_merge_start = time.time()
-                                  existing_gss = values[d]
-                                  new_gss = child_gss
-                                  merged_gss = existing_gss.merge(new_gss)
-                                  values[d] = merged_gss
-                                  stats['t_gss_merge'] += time.time() - t_merge_start
-                              else:
-                                  values[d] = child_gss
-                              enqueue(max_depth[d], d)
-
-                  todo.pop(depth)
-              stats['t_main_loop'] = time.time() - t_main_loop_start
-
-
-              # Convert internal mask back to original IDs
-              t_final_convert_start = time.time()
-              original_indices: List[int] = []
-              for i in final_mask.to_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[i])
-              stats['t_final_convert'] = time.time() - t_final_convert_start
-
-              t_total = time.time() - t0
-              stats['t_total'] = t_total
-              print("\n--- get_mask stats ---")
-              for k, v in sorted(stats.items()):
-                  if k.startswith('t_'):
-                      if t_total > 1e-6:
-                          print(f"{k:<25}: {v:8.4f}s ({v/t_total*100:5.1f}%)")
-                      else:
-                          print(f"{k:<25}: {v:8.4f}s")
-                  else:
-                      print(f"{k:<25}: {int(v)}")
-              print("----------------------\n")
-
-              print_rangeset_stats()
-              return RangeSet.from_indices(original_indices)
-  prev_file_contents:
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
     python/aug25/models/precompute3_model_pure_python.py: |
       import json
       import heapq
@@ -870,7 +190,7 @@ local_system:
 
           def __hash__(self):
               # frozenset of items for hashable dict
-              return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+              return hash((len(self.terminals_union), self.llm_mask))
 
           def merge(self, other: "PyAcc") -> "PyAcc":
               # The dataclass is frozen, so we can't modify in-place.
@@ -1388,7 +708,7 @@ local_system:
 
       # Monkey-patch RangeSet methods for profiling
       if not hasattr(RangeSet, '_instrumented'):
-          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains', '__hash__', '__eq__']:
               if hasattr(RangeSet, method_name):
                   setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
           RangeSet._instrumented = True
@@ -1618,52 +938,129 @@ local_system:
 
               print_rangeset_stats()
               return RangeSet.from_indices(original_indices)
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - cp
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-2.5-flash-lite-preview-06-17
-  diff_correction_model:
-    - qwen3-coder
-    - gpt-oss-120b
-    - gf
-    - gpt-5
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+  prev_file_contents:
+    python/aug25/range_set/ffi_range_set.py: |
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
 
 
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python.py'
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[List[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [list(r) for r in self._bitset.to_ranges()]
+
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              return self._bitset.to_indices()
+
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              return self._bitset.contains(x)
+
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self | other
+
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self & other
+
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self - other
+
+          def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.union(other._bitset)
+              return new_set
+
+          def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.intersection(other._bitset)
+              return new_set
+
+          def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.difference(other._bitset)
+              return new_set
+          
+          def is_empty(self) -> bool:
+              return self._bitset.is_empty()
+
+          def __len__(self) -> int:
+              return self._bitset.len()
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self._bitset == other._bitset
+
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              return hash(self._bitset)
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              return self
+
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              new_set._bitset = ffi.Bitset.from_indices(list(indices))
+              return new_set
+
+          @staticmethod
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
+    python/aug25/models/precompute3_model_pure_python.py: |
       import json
       import heapq
       import collections
@@ -1714,14 +1111,26 @@ messages:
           table: Dict[int, Row]
 
 
-      @dataclass(frozen=True)
+      @dataclass(frozen=True, eq=False)
       class PyAcc:
-          terminals_union: Tuple[Tuple[int, RangeSet], ...]
+          terminals_union: Dict[int, RangeSet]
           llm_mask: RangeSet
 
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              # frozenset of items for hashable dict
+              return hash((len(self.terminals_union), self.llm_mask))
+
           def merge(self, other: "PyAcc") -> "PyAcc":
-              d1 = dict(self.terminals_union)
-              d2 = dict(other.terminals_union)
+              # The dataclass is frozen, so we can't modify in-place.
+              # But terminals_union is a dict, which is mutable.
+              # We must be careful to create copies.
+              d1 = self.terminals_union
+              d2 = other.terminals_union
               new_terminals_union = d1.copy()
               for k, v in d2.items():
                   if k in new_terminals_union:
@@ -1730,7 +1139,7 @@ messages:
                       new_terminals_union[k] = v
 
               return PyAcc(
-                  terminals_union=tuple(sorted(new_terminals_union.items())),
+                  terminals_union=new_terminals_union,
                   llm_mask=self.llm_mask.union(other.llm_mask),
               )
 
@@ -1839,7 +1248,7 @@ messages:
                   all_terminals.add(model.ignore_terminal_id)
               model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-              initial_acc = PyAcc(terminals_union=tuple(), llm_mask=RangeSet.empty())
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
               model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -1862,7 +1271,7 @@ messages:
           @profile
           def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
               def predicate(acc: PyAcc) -> bool:
-                  disallowed_terminals_map = dict(acc.terminals_union)
+                  disallowed_terminals_map = acc.terminals_union
                   for state_id, matched_bv in terminals_map.items():
                       disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                       if not matched_bv.intersection(disallowed_for_state).is_empty():
@@ -1873,26 +1282,24 @@ messages:
           @profile
           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
               def apply_map(acc: PyAcc) -> PyAcc:
-                  old_map = dict(acc.terminals_union)
+                  old_map = acc.terminals_union
                   new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
                   for old_sid, new_sid in state_map.items():
                       bv_source = old_map.get(old_sid, RangeSet.empty())
                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
-                  new_map_tuple = tuple(sorted(new_bvs.items()))
-                  return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
+                  return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
               return gss.apply(apply_map)
 
           @profile
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_map = dict(acc.terminals_union)
+                  current_map = acc.terminals_union.copy()
                   curr_bv = current_map.get(state_id, RangeSet.empty())
                   to_add = RangeSet.from_indices([terminal_id])
                   new_bv = curr_bv.union(to_add)
                   current_map[state_id] = new_bv
-                  new_map_tuple = tuple(sorted(current_map.items()))
-                  return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
+                  return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
               return gss.apply(apply_disallow)
 
           def get_root(self, state_id: int) -> int:
@@ -2069,7 +1476,7 @@ messages:
                   def initialize_acc(acc: PyAcc) -> PyAcc:
                       # Compute allowed LLM tokens from disallowed terminals
                       disallowed_llm_mask = RangeSet.empty()
-                      disallowed_map = dict(acc.terminals_union)
+                      disallowed_map = acc.terminals_union
                       if disallowed_map:
                           for tsid, disallowed_terminals in disallowed_map.items():
                               if tsid > max_state or tsid not in pmc:
@@ -2084,7 +1491,1001 @@ messages:
                       allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
 
                       return PyAcc(
-                          terminals_union=tuple(),  # consume
+                          terminals_union={},  # consume
+                          llm_mask=allowed_mask,
+                      )
+
+                  gss_initialized = gss.apply(initialize_acc)
+
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      merged_gss = existing.merge(gss_initialized)
+                      values[root_idx] = merged_gss
+                  else:
+                      values[root_idx] = gss_initialized
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              # Main loop
+              while True:
+                  node_indices: Optional[set[int]] = None
+                  current_depth = -1
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      break
+
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          continue
+
+                      gss_node = values.pop(node_idx, None)
+                      if gss_node is None:
+                          continue
+
+                      # Compute current allowed LLM tokens at this node by reducing acc
+                      reduced_acc = gss_node.reduce_acc()
+                      if reduced_acc is None or reduced_acc.llm_mask.is_empty():
+                          # No possible tokens here -> stop this branch
+                          stopped.add(node_idx)
+                          continue
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node_idx):
+                          final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      for (pop, llm_bv), dests in children:
+                          popped = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          sid_vals = RangeSet.from_indices(popped.peek())
+                          if sid_vals.is_empty():
+                              continue
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              intersected_sids = sid_vals.intersection(state_bv)
+                              if intersected_sids.is_empty():
+                                  continue
+
+                              child_gss_node = popped.isolate_many(intersected_sids.to_indices())
+                              if child_gss_node.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_empty:
+                                  def intersect_edge(acc: PyAcc) -> PyAcc:
+                                      return PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=acc.llm_mask.intersection(llm_bv)
+                                      )
+                                  child_gss_node = child_gss_node.apply(intersect_edge)
+
+                              d = int(dest_idx)
+                              existing_child = values.get(d)
+                              if existing_child is not None:
+                                  merged_gss = existing_child.merge(child_gss_node)
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss_node
+
+                              enqueue(max_depth[d], d)
+
+              # Convert internal mask back to original IDs
+              original_indices: List[int] = []
+              for internal_id in final_mask.to_indices():
+                  if internal_id in self.internal_to_original_map:
+                      original_indices.append(self.internal_to_original_map[internal_id])
+              return RangeSet.from_indices(original_indices)
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      from typing import Dict, List, Set, Optional
+      import time
+      import collections
+      from functools import wraps
+
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
+
+
+      RANGESET_STATS = collections.defaultdict(float)
+      RANGESET_CALLS = collections.defaultdict(int)
+
+      def time_rangeset_method(func):
+          """Decorator to time methods of RangeSet."""
+          @wraps(func)
+          def wrapper(*args, **kwargs):
+              t0 = time.time()
+              result = func(*args, **kwargs)
+              RANGESET_STATS[func.__name__] += time.time() - t0
+              RANGESET_CALLS[func.__name__] += 1
+              return result
+          return wrapper
+
+      def print_rangeset_stats():
+          """Prints the collected stats for RangeSet methods."""
+          print("\n--- RangeSet stats ---")
+          total_time = sum(RANGESET_STATS.values())
+          for k, v in sorted(RANGESET_STATS.items()):
+              calls = RANGESET_CALLS[k]
+              if total_time > 1e-6:
+                  print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+              else:
+                  print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
+          print("----------------------\n")
+
+      # Monkey-patch RangeSet methods for profiling
+      if not hasattr(RangeSet, '_instrumented'):
+          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains', '__hash__', '__eq__']:
+              if hasattr(RangeSet, method_name):
+                  setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
+          RangeSet._instrumented = True
+
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+
+              state_map: Dict[int, GSS] = self.state
+
+              t0 = time.time()
+              stats = collections.defaultdict(float)
+
+              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
+              final_mask: RangeSet = RangeSet.empty()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              t_init_start = time.time()
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
+                  disallowed_llm_mask = RangeSet.empty()
+                  disallowed_map = acc.terminals_union
+
+                  for tsid, disallowed_terminals in disallowed_map.items():
+                      if tsid > max_state or tsid not in pmc:
+                          continue
+                      terminals_to_llm = pmc[tsid]
+                      for terminal_id in disallowed_terminals.to_indices():
+                          if terminal_id in terminals_to_llm:
+                              disallowed_llm_mask = disallowed_llm_mask.union(
+                                  terminals_to_llm[terminal_id]
+                              )
+
+                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
+                  return PyAcc(
+                      terminals_union={},  # consume
+                      llm_mask=allowed_mask,
+                  )
+
+              apply_memo: Dict[PyAcc, PyAcc] = {}
+              for sid, gss in state_map.items():
+                  r: int = roots_map[int(sid)]
+                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                      stats['init_gss_merges'] += 1
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  bucket: Optional[Set[int]] = todo.get(d)
+                  if bucket is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      bucket.add(r)
+              stats['t_init'] = time.time() - t_init_start
+              stats['init_apply_memo_size'] = len(apply_memo)
+              stats['init_gss_count'] = len(state_map)
+
+              def enqueue(d: int, n: int) -> None:
+                  bucket: Optional[Set[int]] = todo.get(d)
+                  if bucket is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      bucket.add(n)
+
+              # Main loop
+              t_main_loop_start = time.time()
+              while depth_heap:
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+                      stats['nodes_processed'] += 1
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          stats['end_nodes'] += 1
+                          t_reduce_start = time.time()
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+                          stats['t_reduce_acc'] += time.time() - t_reduce_start
+                          stats['reduce_acc_calls'] += 1
+
+                      # Traverse edges and propagate masks
+                      edges = arena.get(node, {}).get("children") or []
+                      stats['edges_traversed'] += len(edges)
+                      for (pop, llm_bv), dests in edges:
+                          stats['popn_calls'] += 1
+                          t_popn_start = time.time()
+                          popped: GSS = gss_node.popn(pop)
+                          stats['t_popn'] += time.time() - t_popn_start
+                          if popped.is_empty():
+                              continue
+
+                          peeked_sids = popped.peek()
+                          if not peeked_sids:
+                              continue
+                          sid_vals = RangeSet.from_indices(peeked_sids)
+
+                          for dest_idx, state_bv in dests:
+                              stats['dests_processed'] += 1
+
+                              t_intersect_start = time.time()
+                              intersected = sid_vals.intersection(state_bv)
+                              if intersected.is_empty():
+                                  stats['t_sid_intersection'] += time.time() - t_intersect_start
+                                  continue
+                              values_to_keep = intersected.to_indices()
+                              stats['t_sid_intersection'] += time.time() - t_intersect_start
+
+                              if not values_to_keep:
+                                  continue
+
+                              stats['isolate_many_calls'] += 1
+                              t_isolate_start = time.time()
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              stats['t_isolate_many'] += time.time() - t_isolate_start
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              stats['apply_prune_calls'] += 1
+                              t_apply_prune_start = time.time()
+                              acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
+                              def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                  if acc in acc_memo:
+                                      return acc_memo[acc]
+                                  new_mask = acc.llm_mask.intersection(llm_bv)
+                                  if new_mask.is_empty():
+                                      result = None
+                                  else:
+                                      result = PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=new_mask
+                                      )
+                                  acc_memo[acc] = result
+                                  return result
+
+                              child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                              stats['t_apply_prune'] += time.time() - t_apply_prune_start
+                              if child_gss.is_empty():
+                                  continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  stats['gss_merges'] += 1
+                                  t_merge_start = time.time()
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+                                  values[d] = merged_gss
+                                  stats['t_gss_merge'] += time.time() - t_merge_start
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+                  todo.pop(depth)
+              stats['t_main_loop'] = time.time() - t_main_loop_start
+
+
+              # Convert internal mask back to original IDs
+              t_final_convert_start = time.time()
+              original_indices: List[int] = []
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices.append(self.internal_to_original_map[i])
+              stats['t_final_convert'] = time.time() - t_final_convert_start
+
+              t_total = time.time() - t0
+              stats['t_total'] = t_total
+              print("\n--- get_mask stats ---")
+              for k, v in sorted(stats.items()):
+                  if k.startswith('t_'):
+                      if t_total > 1e-6:
+                          print(f"{k:<25}: {v:8.4f}s ({v/t_total*100:5.1f}%)")
+                      else:
+                          print(f"{k:<25}: {v:8.4f}s")
+                  else:
+                      print(f"{k:<25}: {int(v)}")
+              print("----------------------\n")
+
+              print_rangeset_stats()
+              return RangeSet.from_indices(original_indices)
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - cp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-2.5-flash-lite-preview-06-17
+  diff_correction_model:
+    - qwen3-coder
+    - gpt-oss-120b
+    - gf
+    - gpt-5
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```python 'python/aug25/range_set/ffi_range_set.py'
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
+
+
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[List[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [list(r) for r in self._bitset.to_ranges()]
+
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              return self._bitset.to_indices()
+
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              return self._bitset.contains(x)
+
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self | other
+
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self & other
+
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self - other
+
+          def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.union(other._bitset)
+              return new_set
+
+          def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.intersection(other._bitset)
+              return new_set
+
+          def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+              new_set = FFIRangeSet.from_ranges([])
+              new_set._bitset = self._bitset.difference(other._bitset)
+              return new_set
+          
+          def is_empty(self) -> bool:
+              return self._bitset.is_empty()
+
+          def __len__(self) -> int:
+              return self._bitset.len()
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              return self._bitset == other._bitset
+
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              return hash(self._bitset)
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              return self
+
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              new_set._bitset = ffi.Bitset.from_indices(list(indices))
+              return new_set
+
+          @staticmethod
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/ffi_range_set.py
+  - user: |-
+      ```python 'python/aug25/models/precompute3_model_pure_python.py'
+      import json
+      import heapq
+      import collections
+      import time
+      from typing import Dict, List, Tuple, Optional, Union
+      from dataclasses import dataclass, field
+
+      from ..common_interface import GraphProvider, RangeSet
+      import _sep1 as ffi
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+
+
+      # Add a dummy profiler for when not running under kernprof
+      try:
+          # This will be injected by the kernprof script.
+          profile
+      except NameError:
+          # If not running under kernprof, create a dummy decorator.
+          def profile(func): return func
+
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
+
+
+      # Action can be a Shift (int), Reduce, or Split
+      Action = Union[int, Reduce, Split]
+
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
+          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
+
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, RangeSet]
+          llm_mask: RangeSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              # frozenset of items for hashable dict
+              return hash((len(self.terminals_union), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              # The dataclass is frozen, so we can't modify in-place.
+              # But terminals_union is a dict, which is mutable.
+              # We must be careful to create copies.
+              d1 = self.terminals_union
+              d2 = other.terminals_union
+              new_terminals_union = d1.copy()
+              for k, v in d2.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation), simplified and concise.
+          """
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+              self.tokenizer: Optional[ffi.Regex] = None
+              self.glr_parser: Optional[ffi.GLRParser] = None
+              self.ignore_terminal_id: Optional[int] = None
+              self.parser_table: Optional[ParserTable] = None
+              self.state: Dict[int, GSS] = {}
+              self.internal_to_original_map: Dict[int, int] = {}
+              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
+              self.tokenizer_initial_state: Optional[int] = None
+              self.all_terminals_bitset: Optional[RangeSet] = None
+
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # Normalize arena children bitsets and cache max_depth
+              for uid, node in self.arena.items():
+                  uid_int = int(uid)
+                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      continue
+
+                  new_children = []
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+                      # Convert to RangeSet for ffi-free operations in commit/get_mask
+                      llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
+                          state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
+                          new_dest_map.append((int(dest_idx), state_bv))
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              model = Model(roots_map, arena)
+
+              # Load tokenizer and parser table from the full constraint JSON
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              model.tokenizer = constraint.tokenizer()
+              model.glr_parser = constraint.glr_parser()
+              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
+              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
+
+              parser_data = data['parser']
+              table_data = parser_data['stage_7_table']
+              start_state_id = parser_data['start_state_id']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in table_data:
+                  state_id = int(state_id_str)
+                  py_row = Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id = int(term_id_str)
+                      variant = action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          pids = tuple(sorted(action_data['production_ids']))
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                      elif variant == 'Split':
+                          shift = action_data['shift']
+                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
+                          for len_str, nts_data in action_data['reduces']:
+                              len_int = int(len_str)
+                              nts: Dict[int, Tuple[int, ...]] = {}
+                              for nt_id_str, pids in nts_data:
+                                  nt_id_int = int(nt_id_str)
+                                  nts[nt_id_int] = tuple(sorted(pids))
+                              reduces[len_int] = nts
+                          py_row.actions[term_id] = Split(shift, reduces)
+                  for nt_id_str, goto_data in row_data['gotos']:
+                      nt_id = int(nt_id_str)
+                      if goto_data['state_id'] is not None:
+                          py_row.gotos[nt_id] = goto_data['state_id']
+                  py_table[state_id] = py_row
+              model.parser_table = ParserTable(start_state_id, py_table)
+
+              all_terminals = set()
+              for row in model.parser_table.table.values():
+                  all_terminals.update(row.actions.keys())
+              if model.ignore_terminal_id is not None:
+                  all_terminals.add(model.ignore_terminal_id)
+              model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
+
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
+              model.state = {model.tokenizer_initial_state: initial_gss}
+
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              # Convert possible_matches_cache to RangeSet
+              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+              pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
+              for tsid, inner in pmc_ffi.items():
+                  mapped: Dict[int, RangeSet] = {}
+                  for term_id, bit in inner.items():
+                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
+                  pmc_rs[int(tsid)] = mapped
+              model.possible_matches_cache = pmc_rs
+              model.internal_to_original_map = constraint.internal_to_original_map()
+              # Convert universe LLM tokens bitset to RangeSet
+              all_internal = constraint.all_internal_llm_tokens_bitset()
+              model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+              return model
+
+          @profile
+          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
+              def predicate(acc: PyAcc) -> bool:
+                  disallowed_terminals_map = acc.terminals_union
+                  for state_id, matched_bv in terminals_map.items():
+                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
+                      if not matched_bv.intersection(disallowed_for_state).is_empty():
+                          return False
+                  return True
+              return gss.prune(predicate)
+
+          @profile
+          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
+              def apply_map(acc: PyAcc) -> PyAcc:
+                  old_map = acc.terminals_union
+                  new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = old_map.get(old_sid, RangeSet.empty())
+                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+
+                  return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
+              return gss.apply(apply_map)
+
+          @profile
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current_map = acc.terminals_union.copy()
+                  curr_bv = current_map.get(state_id, RangeSet.empty())
+                  to_add = RangeSet.from_indices([terminal_id])
+                  new_bv = curr_bv.union(to_add)
+                  current_map[state_id] = new_bv
+                  return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          @profile
+          def commit(self, token_id: int):
+              t0 = time.perf_counter()
+              token_bytes = self.id_to_token[token_id]
+
+              # Build tokenizer maps
+              terminals_map: Dict[int, RangeSet] = {}
+              state_map: Dict[int, int] = {}
+              for tokenizer_sid in self.state.keys():
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+                  if end_state is not None:
+                      state_map[tokenizer_sid] = end_state
+                  matched_terminals = [terminal_id for terminal_id, _ in matches]
+                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
+
+              # Prune and map per-state GSS
+              temp_states: Dict[int, GSS] = {}
+              for tokenizer_sid, gss in self.state.items():
+                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
+                  if not pruned_gss.is_empty():
+                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
+                      temp_states[tokenizer_sid] = mapped_gss
+
+              current_state_for_processing = temp_states
+
+              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state_for_processing.items():
+                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
+
+              visited_q_items: set = set()
+
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+                  q_item_key = (offset, tokenizer_sid, id(gss))
+                  if q_item_key in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item_key)
+
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+
+                  for terminal_id, width in matches:
+                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
+
+                      # Immediate re-match disallow
+                      if end_state is not None:
+                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                          if terminal_id in accessible_terms:
+                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+
+                      if not processed_gss.is_empty():
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+
+              merged_states = {
+                  sid: GSS.merge_many(gss_list)
+                  for sid, gss_list in new_states.items()
+                  if gss_list
+              }
+              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+
+              self.state = merged_states
+
+              t1 = time.perf_counter()
+              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
+
+          @profile
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted_gsses: List[GSS] = []
+
+              while heads_by_state:
+                  state_id, state_gsss = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(state_gsss)
+                  row = self.parser_table.table.get(state_id)
+                  if not row:
+                      continue
+                  action = row.actions.get(terminal_id)
+                  if not action:
+                      continue
+
+                  def handle_shift(shift_to_state_id, gss_to_shift):
+                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
+                      popped_gss = gss_to_reduce
+                      for _ in range(reduce_action.len):
+                          popped_gss = popped_gss.pop()
+                      for from_state_id in popped_gss.peek():
+                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
+                          heads_by_state[goto_state_id].append(goto_gss)
+
+                  if isinstance(action, int):
+                      handle_shift(action, state_gss)
+                  elif isinstance(action, Reduce):
+                      handle_reduce(action, state_gss)
+                  elif isinstance(action, Split):
+                      if action.shift is not None:
+                          handle_shift(action.shift, state_gss)
+                      for length, nts in action.reduces.items():
+                          for nt_id, pids in nts.items():
+                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+              return GSS.merge_many(shifted_gsses)
+
+          @profile
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes:
+              - Initialize LLM mask per-accumulator (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              state_map = self.state
+              all_ones_mask: RangeSet = self.all_internal_llm_tokens_bitset if self.all_internal_llm_tokens_bitset is not None else RangeSet.empty()
+              final_mask: RangeSet = RangeSet.empty()
+
+              values: Dict[int, GSS] = {}
+              stopped: set[int] = set()
+              todo: Dict[int, set[int]] = {}
+              depth_heap: List[int] = []
+
+              heappush = heapq.heappush
+              heappop = heapq.heappop
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+              arena = self.arena
+              is_end = self.is_end
+
+              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
+              max_state = self.tokenizer.max_state()
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
+              for sid, gss in state_map.items():
+                  # Set initial llm_mask on each accumulator and consume terminals_union
+                  def initialize_acc(acc: PyAcc) -> PyAcc:
+                      # Compute allowed LLM tokens from disallowed terminals
+                      disallowed_llm_mask = RangeSet.empty()
+                      disallowed_map = acc.terminals_union
+                      if disallowed_map:
+                          for tsid, disallowed_terminals in disallowed_map.items():
+                              if tsid > max_state or tsid not in pmc:
+                                  continue
+                              terminals_to_llm = pmc[tsid]
+                              for terminal_id in disallowed_terminals.to_indices():
+                                  if terminal_id in terminals_to_llm:
+                                      disallowed_llm_mask = disallowed_llm_mask.union(
+                                          terminals_to_llm[terminal_id]
+                                      )
+
+                      allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
+
+                      return PyAcc(
+                          terminals_union={},  # consume
                           llm_mask=allowed_mask,
                       )
 
@@ -2239,7 +2640,7 @@ messages:
 
       # Monkey-patch RangeSet methods for profiling
       if not hasattr(RangeSet, '_instrumented'):
-          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+          for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains', '__hash__', '__eq__']:
               if hasattr(RangeSet, method_name):
                   setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
           RangeSet._instrumented = True
@@ -2311,7 +2712,7 @@ messages:
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
                   disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = dict(acc.terminals_union)
+                  disallowed_map = acc.terminals_union
 
                   for tsid, disallowed_terminals in disallowed_map.items():
                       if tsid > max_state or tsid not in pmc:
@@ -2325,7 +2726,7 @@ messages:
 
                   allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
                   return PyAcc(
-                      terminals_union=tuple(),  # consume
+                      terminals_union={},  # consume
                       llm_mask=allowed_mask,
                   )
 
@@ -2473,8 +2874,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-  - user: Modify this so PyAcc.terminals_union is a dict. Implement `__hash__` manually
-      instead.
+  - user: 'Optimize get_mask with this in mind: in general, `len(dests) > len(state_bv)
+      > len(popped.peek())`.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2493,184 +2894,289 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify `PyAcc.terminals_union` to be a dictionary and implement a manual `__hash__`, followed by the corresponding git diffs.
+      Here are the step-by-step instructions to optimize `get_mask`, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      #### File: `python/aug25/models/precompute3_model_pure_python.py`
+      I'll optimize the `get_mask` method in two files. The primary issue is an inefficient loop structure that repeatedly calls `popped.peek()` and performs slow intersections. The optimization involves hoisting the creation of a `RangeSet` from `popped.peek()` out of the inner loop and using efficient `RangeSet.intersection` operations.
 
-      1.  **Modify the `PyAcc` dataclass:**
-          -   In the `@dataclass(frozen=True)` line for `PyAcc`, add `eq=False`.
-          -   Change the type hint for `terminals_union` from `Tuple[Tuple[int, RangeSet], ...]` to `Dict[int, RangeSet]`.
-          -   Add custom `__eq__` and `__hash__` methods to `PyAcc` to handle the dictionary field correctly, making the class hashable.
-          -   Update the `merge` method to work directly with dictionaries, removing the conversions from/to tuples.
+      #### 1. `python/aug25/models/precompute3_model_pure_python.py`
 
-      2.  **Update `Model.__init__`:**
-          -   Locate the line `initial_acc = PyAcc(terminals_union=tuple(), ...)` and change it to `initial_acc = PyAcc(terminals_union={}, ...)`.
+      In the `get_mask` method, I will refactor the edge traversal loop. The current implementation re-calculates `sid_vals` inside the loop over destinations (`dests`) and has confusing logic with a `matched` list that can lead to processing empty GSS objects.
 
-      3.  **Update `Model._prune_disallowed_terminals`:**
-          -   Inside the `predicate` function, change `disallowed_terminals_map = dict(acc.terminals_union)` to `disallowed_terminals_map = acc.terminals_union`.
+      The changes will be:
+      1.  After popping the GSS stack (`gss_node.popn(pop)`), immediately get the peeked states and create a `sid_vals` `RangeSet` once.
+      2.  If there are no states on the stack, skip this edge.
+      3.  Inside the loop over `dests`, perform a `RangeSet.intersection` between `sid_vals` and the destination's `state_bv`.
+      4.  If the intersection is not empty, isolate the relevant part of the GSS and proceed. This avoids unnecessary processing of empty GSS objects.
 
-      4.  **Update `Model._map_allowed_terminals_tokenizer_states`:**
-          -   Inside the `apply_map` function, change `old_map = dict(acc.terminals_union)` to `old_map = acc.terminals_union`.
-          -   Change the return statement from `return PyAcc(terminals_union=tuple(sorted(new_bvs.items())), ...)` to `return PyAcc(terminals_union=dict(new_bvs), ...)`.
+      Specifically, replace this block of code (around lines 600-633):
 
-      5.  **Update `Model._disallow_terminal_in_state`:**
-          -   Inside the `apply_disallow` function, change `current_map = dict(acc.terminals_union)` to `current_map = acc.terminals_union.copy()`.
-          -   Change the return statement from `return PyAcc(terminals_union=tuple(sorted(current_map.items())), ...)` to `return PyAcc(terminals_union=current_map, ...)`.
+      ```python
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      for (pop, llm_bv), dests in children:
+                          popped = gss_node.popn(pop)
+                          llm_empty = llm_bv.is_empty()
 
-      6.  **Update `Model.get_mask`:**
-          -   Inside the `initialize_acc` function, change `disallowed_map = dict(acc.terminals_union)` to `disallowed_map = acc.terminals_union`.
-          -   In the same function, when creating the new `PyAcc`, change `terminals_union=tuple()` to `terminals_union={}`.
+                          for dest_idx, state_bv in dests:
+                              matched: List[GSS] = []
+                              if not state_bv.is_empty():
+                                  # for sid_val in popped.peek():
+                                  #     if state_bv.contains(sid_val):
+                                  #         matched.append(popped.isolate(sid_val))
+                                  sid_vals = RangeSet.from_indices(popped.peek())
+                                  matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
+                              if not matched:
+                                  continue
 
-      #### File: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
+                              child_gss_node = GSS.merge_many(matched)
 
-      1.  **Update `Model.get_mask`:**
-          -   Inside the `initialize_acc` function, change `disallowed_map = dict(acc.terminals_union)` to `disallowed_map = acc.terminals_union`.
-          -   In the return statement of `initialize_acc`, change `terminals_union=tuple()` to `terminals_union={}`.
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_empty:
+                                  def intersect_edge(acc: PyAcc) -> PyAcc:
+                                      return PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=acc.llm_mask.intersection(llm_bv)
+                                      )
+                                  child_gss_node = child_gss_node.apply(intersect_edge)
+
+                              d = int(dest_idx)
+                              existing_child = values.get(d)
+                              if existing_child is not None:
+                                  merged_gss = existing_child.merge(child_gss_node)
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss_node
+
+                              enqueue(max_depth[d], d)
+      ```
+
+      with this optimized version:
+
+      ```python
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      for (pop, llm_bv), dests in children:
+                          popped = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          sid_vals = RangeSet.from_indices(popped.peek())
+                          if sid_vals.is_empty():
+                              continue
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              intersected_sids = sid_vals.intersection(state_bv)
+                              if intersected_sids.is_empty():
+                                  continue
+
+                              child_gss_node = popped.isolate_many(intersected_sids.to_indices())
+                              if child_gss_node.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_empty:
+                                  def intersect_edge(acc: PyAcc) -> PyAcc:
+                                      return PyAcc(
+                                          terminals_union=acc.terminals_union,
+                                          llm_mask=acc.llm_mask.intersection(llm_bv)
+                                      )
+                                  child_gss_node = child_gss_node.apply(intersect_edge)
+
+                              d = int(dest_idx)
+                              existing_child = values.get(d)
+                              if existing_child is not None:
+                                  merged_gss = existing_child.merge(child_gss_node)
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss_node
+
+                              enqueue(max_depth[d], d)
+      ```
+
+      #### 2. `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
+
+      This file contains a version of `get_mask` with extensive profiling. The logic for finding matching states is currently implemented with a slow list comprehension: `[sid for sid in popped.peek() if state_bv.contains(sid)]`. This is executed for every destination.
+
+      The changes will be:
+      1.  Hoist the `popped.peek()` call and `RangeSet.from_indices` conversion out of the loop over `dests`.
+      2.  Replace the list comprehension with the much faster `RangeSet.intersection` method.
+      3.  Adjust the profiling timers to correctly measure the new intersection logic.
+
+      Replace this block of code (around lines 201-220):
+
+      ```python
+                      for (pop, llm_bv), dests in edges:
+                          stats['popn_calls'] += 1
+                          t_popn_start = time.time()
+                          popped: GSS = gss_node.popn(pop)
+                          stats['t_popn'] += time.time() - t_popn_start
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              stats['dests_processed'] += 1
+
+                              t_intersect_start = time.time()
+                              values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
+                              stats['t_sid_intersection'] += time.time() - t_intersect_start
+
+                              if not values_to_keep:
+                                  continue
+
+                              stats['isolate_many_calls'] += 1
+                              t_isolate_start = time.time()
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              stats['t_isolate_many'] += time.time() - t_isolate_start
+                              if child_gss.is_empty():
+                                  continue
+      ```
+
+      with this optimized version:
+
+      ```python
+                      for (pop, llm_bv), dests in edges:
+                          stats['popn_calls'] += 1
+                          t_popn_start = time.time()
+                          popped: GSS = gss_node.popn(pop)
+                          stats['t_popn'] += time.time() - t_popn_start
+                          if popped.is_empty():
+                              continue
+
+                          peeked_sids = popped.peek()
+                          if not peeked_sids:
+                              continue
+                          sid_vals = RangeSet.from_indices(peeked_sids)
+
+                          for dest_idx, state_bv in dests:
+                              stats['dests_processed'] += 1
+
+                              t_intersect_start = time.time()
+                              intersected = sid_vals.intersection(state_bv)
+                              if intersected.is_empty():
+                                  stats['t_sid_intersection'] += time.time() - t_intersect_start
+                                  continue
+                              values_to_keep = intersected.to_indices()
+                              stats['t_sid_intersection'] += time.time() - t_intersect_start
+
+                              if not values_to_keep:
+                                  continue
+
+                              stats['isolate_many_calls'] += 1
+                              t_isolate_start = time.time()
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              stats['t_isolate_many'] += time.time() - t_isolate_start
+                              if child_gss.is_empty():
+                                  continue
+      ```
 
       ### Git Diffs
 
-      Here are the git diffs to apply these changes:
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 1111111..2222222 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -38,28 +38,38 @@
-           table: Dict[int, Row]
+      @@ -597,40 +597,40 @@
+                       if is_end(node_idx):
+                           final_mask = final_mask.union(reduced_acc.llm_mask)
        
-       
-      -@dataclass(frozen=True)
-      +@dataclass(frozen=True, eq=False)
-       class PyAcc:
-      -    terminals_union: Tuple[Tuple[int, RangeSet], ...]
-      +    terminals_union: Dict[int, RangeSet]
-           llm_mask: RangeSet
-       
-      +    def __eq__(self, other):
-      +        if not isinstance(other, PyAcc):
-      +            return NotImplemented
-      +        return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+                       # Transitions grouped by (pop, llm_bv)
+                       node_data = arena.get(node_idx, {})
+                       children = node_data.get("children") or []
+                       for (pop, llm_bv), dests in children:
+                           popped = gss_node.popn(pop)
+      +                    if popped.is_empty():
+      +                        continue
       +
-      +    def __hash__(self):
-      +        # frozenset of items for hashable dict
-      +        return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+      +                    sid_vals = RangeSet.from_indices(popped.peek())
+      +                    if sid_vals.is_empty():
+      +                        continue
       +
-           def merge(self, other: "PyAcc") -> "PyAcc":
-      -        d1 = dict(self.terminals_union)
-      -        d2 = dict(other.terminals_union)
-      +        # The dataclass is frozen, so we can't modify in-place.
-      +        # But terminals_union is a dict, which is mutable.
-      +        # We must be careful to create copies.
-      +        d1 = self.terminals_union
-      +        d2 = other.terminals_union
-               new_terminals_union = d1.copy()
-               for k, v in d2.items():
-                   if k in new_terminals_union:
-                       new_terminals_union[k] = new_terminals_union[k].union(v)
-                   else:
-                       new_terminals_union[k] = v
+                           llm_empty = llm_bv.is_empty()
        
-               return PyAcc(
-      -            terminals_union=tuple(sorted(new_terminals_union.items())),
-      +            terminals_union=new_terminals_union,
-                   llm_mask=self.llm_mask.union(other.llm_mask),
-               )
+                           for dest_idx, state_bv in dests:
+      -                        matched: List[GSS] = []
+      -                        if not state_bv.is_empty():
+      -                            # for sid_val in popped.peek():
+      -                            #     if state_bv.contains(sid_val):
+      -                            #         matched.append(popped.isolate(sid_val))
+      -                            sid_vals = RangeSet.from_indices(popped.peek())
+      -                            matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
+      -                        if not matched:
+      +                        intersected_sids = sid_vals.intersection(state_bv)
+      +                        if intersected_sids.is_empty():
+                                   continue
        
+      -                        child_gss_node = GSS.merge_many(matched)
+      +                        child_gss_node = popped.isolate_many(intersected_sids.to_indices())
+      +                        if child_gss_node.is_empty():
+      +                            continue
        
-       class Model(GraphProvider):
-           """
-      @@ -163,7 +173,7 @@
-                   all_terminals.add(model.ignore_terminal_id)
-               model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
+                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                               if not llm_empty:
+                                   def intersect_edge(acc: PyAcc) -> PyAcc:
+                                       return PyAcc(
+                                           terminals_union=acc.terminals_union,
+                                           llm_mask=acc.llm_mask.intersection(llm_bv)
+                                       )
+                                   child_gss_node = child_gss_node.apply(intersect_edge)
        
-      -        initial_acc = PyAcc(terminals_union=tuple(), llm_mask=RangeSet.empty())
-      +        initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-               initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-               model.state = {model.tokenizer_initial_state: initial_gss}
+                               d = int(dest_idx)
+                               existing_child = values.get(d)
+                               if existing_child is not None:
+                                   merged_gss = existing_child.merge(child_gss_node)
+                                   values[d] = merged_gss
+                               else:
+                                   values[d] = child_gss_node
        
-      @@ -183,7 +193,7 @@
-           @profile
-           def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
-               def predicate(acc: PyAcc) -> bool:
-      -            disallowed_terminals_map = dict(acc.terminals_union)
-      +            disallowed_terminals_map = acc.terminals_union
-                   for state_id, matched_bv in terminals_map.items():
-                       disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                       if not matched_bv.intersection(disallowed_for_state).is_empty():
-      @@ -194,25 +204,23 @@
-           @profile
-           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-               def apply_map(acc: PyAcc) -> PyAcc:
-      -            old_map = dict(acc.terminals_union)
-      +            old_map = acc.terminals_union
-                   new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
-                   for old_sid, new_sid in state_map.items():
-                       bv_source = old_map.get(old_sid, RangeSet.empty())
-                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-       
-      -            new_map_tuple = tuple(sorted(new_bvs.items()))
-      -            return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-      +            return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
-               return gss.apply(apply_map)
-       
-           @profile
-           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-               def apply_disallow(acc: PyAcc) -> PyAcc:
-      -            current_map = dict(acc.terminals_union)
-      +            current_map = acc.terminals_union.copy()
-                   curr_bv = current_map.get(state_id, RangeSet.empty())
-                   to_add = RangeSet.from_indices([terminal_id])
-                   new_bv = curr_bv.union(to_add)
-                   current_map[state_id] = new_bv
-      -            new_map_tuple = tuple(sorted(current_map.items()))
-      -            return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-      +            return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
-               return gss.apply(apply_disallow)
-       
-           def get_root(self, state_id: int) -> int:
-      @@ -361,7 +369,7 @@
-                   def initialize_acc(acc: PyAcc) -> PyAcc:
-                       # Compute allowed LLM tokens from disallowed terminals
-                       disallowed_llm_mask = RangeSet.empty()
-      -                disallowed_map = dict(acc.terminals_union)
-      +                disallowed_map = acc.terminals_union
-                       if disallowed_map:
-                           for tsid, disallowed_terminals in disallowed_map.items():
-                               if tsid > max_state or tsid not in pmc:
-      @@ -375,7 +383,7 @@
-                       allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
-       
-                       return PyAcc(
-      -                    terminals_union=tuple(),  # consume
-      +                    terminals_union={},  # consume
-                           llm_mask=allowed_mask,
-                       )
+                               enqueue(max_depth[d], d)
        
 
       ```
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      index 1111111..2222222 100644
       --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
       +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -113,7 +113,7 @@
-               def initialize_acc(acc: PyAcc) -> PyAcc:
-                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                   disallowed_llm_mask = RangeSet.empty()
-      -            disallowed_map = dict(acc.terminals_union)
-      +            disallowed_map = acc.terminals_union
+      @@ -203,20 +203,29 @@
+                           stats['t_popn'] += time.time() - t_popn_start
+                           if popped.is_empty():
+                               continue
        
-                   for tsid, disallowed_terminals in disallowed_map.items():
-                       if tsid > max_state or tsid not in pmc:
-      @@ -126,7 +126,7 @@
+      +                    peeked_sids = popped.peek()
+      +                    if not peeked_sids:
+      +                        continue
+      +                    sid_vals = RangeSet.from_indices(peeked_sids)
+      +
+                           for dest_idx, state_bv in dests:
+                               stats['dests_processed'] += 1
        
-                   allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                   return PyAcc(
-      -                terminals_union=tuple(),  # consume
-      +                terminals_union={},  # consume
-                       llm_mask=allowed_mask,
-                   )
+                               t_intersect_start = time.time()
+      -                        values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
+      +                        intersected = sid_vals.intersection(state_bv)
+      +                        if intersected.is_empty():
+      +                            stats['t_sid_intersection'] += time.time() - t_intersect_start
+      +                            continue
+      +                        values_to_keep = intersected.to_indices()
+                               stats['t_sid_intersection'] += time.time() - t_intersect_start
+       
+                               if not values_to_keep:
+                                   continue
+       
+                               stats['isolate_many_calls'] += 1
+                               t_isolate_start = time.time()
+                               child_gss: GSS = popped.isolate_many(values_to_keep)
+                               stats['t_isolate_many'] += time.time() - t_isolate_start
+                               if child_gss.is_empty():
+                                   continue
        
 
       ```
@@ -2689,7 +3195,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor PyAcc to use dict for terminals_union
-      and implement hashing"'
+  - user: 'Changes committed with message: "Optimize get_mask: Use RangeSet intersection
+      for efficient state matching"'
     metadata:
 ...
