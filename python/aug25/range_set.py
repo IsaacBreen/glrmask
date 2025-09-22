@@ -64,14 +64,20 @@ class RangeSet:
     @staticmethod
     def from_indices(indices: Iterable[int]) -> 'RangeSet':
         """Creates a RangeSet from an iterable of individual indices."""
-        indices_sorted = sorted(indices)
-        intervals = []
-        start = 0
-        for i in range(1, len(indices_sorted)):
-            if indices_sorted[i] != indices_sorted[i - 1] + 1:
-                intervals.append((start, indices_sorted[i - 1]))
-                start = indices_sorted[i]
-        intervals.append((start, indices_sorted[-1]))
+        indices_sorted = sorted(set(indices))
+        if not indices_sorted:
+            return RangeSet.empty()
+        intervals: List[Tuple[int, int]] = []
+        start = indices_sorted[0]
+        prev = start
+        for i in indices_sorted[1:]:
+            if i == prev + 1:
+                prev = i
+            else:
+                intervals.append((start, prev))
+                start = i
+                prev = i
+        intervals.append((start, prev))
         return RangeSet(intervals)
 
     @staticmethod
@@ -113,3 +119,74 @@ class RangeSet:
 
     def __repr__(self):
         return f"RangeSet({self.intervals!r})"
+
+    # New utilities for set-like operations
+    def is_empty(self) -> bool:
+        """Return True if no indices are present."""
+        return not self.intervals
+
+    def contains(self, x: int) -> bool:
+        """Return True if x is contained in the set."""
+        for s, e in self.intervals:
+            if s <= x <= e:
+                return True
+            if x < s:
+                return False
+        return False
+
+    def union(self, other: 'RangeSet') -> 'RangeSet':
+        """Return the union of two RangeSets."""
+        if self.is_empty():
+            return other
+        if other.is_empty():
+            return self
+        return RangeSet(self.intervals + other.intervals)
+
+    def intersection(self, other: 'RangeSet') -> 'RangeSet':
+        """Return the intersection of two RangeSets."""
+        if self.is_empty() or other.is_empty():
+            return RangeSet.empty()
+        a = list(self.intervals)
+        b = list(other.intervals)
+        i = j = 0
+        res: List[Tuple[int, int]] = []
+        while i < len(a) and j < len(b):
+            s1, e1 = a[i]
+            s2, e2 = b[j]
+            s = max(s1, s2)
+            e = min(e1, e2)
+            if s <= e:
+                res.append((s, e))
+            if e1 < e2:
+                i += 1
+            else:
+                j += 1
+        return RangeSet(res)
+
+    def difference(self, other: 'RangeSet') -> 'RangeSet':
+        """Return the set difference self \ other."""
+        if self.is_empty():
+            return RangeSet.empty()
+        if other.is_empty():
+            return self
+        a = list(self.intervals)
+        b = list(other.intervals)
+        res: List[Tuple[int, int]] = []
+        j = 0
+        for s1, e1 in a:
+            curr = s1
+            while j < len(b) and b[j][1] < curr:
+                j += 1
+            k = j
+            while k < len(b) and b[k][0] <= e1:
+                s2, e2 = b[k]
+                if s2 > curr:
+                    res.append((curr, s2 - 1))
+                if e2 + 1 > curr:
+                    curr = e2 + 1
+                if curr > e1:
+                    break
+                k += 1
+            if curr <= e1:
+                res.append((curr, e1))
+        return RangeSet(res)
