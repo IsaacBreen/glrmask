@@ -440,11 +440,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         merged = try_promote(merged)
         return LeveledGSS(merged)
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        # Fast path: popn(0) is a no-op. Preserve identity to match the default
-        # implementation's behavior (crucial for deterministic fuzzing).
-        if n <= 0:
-            # return self
-            return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
         all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
         for _ in range(n):
             def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
