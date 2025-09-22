@@ -33,6 +33,36 @@ class RangeSet(ABC, Generic[T]):
         """Return the total number of elements in the set."""
         raise NotImplementedError
 
+    def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return self.union(other)
+
+    def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return self.union(other)
+
+    def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return self.intersection(other)
+
+    def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return self.intersection(other)
+
+    def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return self.difference(other)
+
+    def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        return other.difference(self)
+
     @abstractmethod
     def contains(self, x: T) -> bool:
         """Return True if x is contained in the set."""

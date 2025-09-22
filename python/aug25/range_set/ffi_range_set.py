@@ -92,21 +92,6 @@ class FFIRangeSet(RangeSet[int]):
             pass
         return res
 
-    def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet.from_ranges([])
-        new_set._bitset = self._bitset.union(other._bitset)
-        return new_set
-
-    def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet.from_ranges([])
-        new_set._bitset = self._bitset.intersection(other._bitset)
-        return new_set
-
-    def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet.from_ranges([])
-        new_set._bitset = self._bitset.difference(other._bitset)
-        return new_set
-    
     @time_method
     def is_empty(self) -> bool:
         res = self._bitset.is_empty()
