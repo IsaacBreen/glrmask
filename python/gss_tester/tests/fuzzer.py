@@ -163,7 +163,24 @@ def run_fuzz_test(
             if len(gss_states) > max_gss_states:
                 gss_states = rng.sample(gss_states, max_gss_states)
 
-        except Exception:
+        except Exception as e:
             # Some operations might fail on some implementations if invariants are broken.
-            # We'll just skip the step and continue fuzzing.
+            # Yield an error trace to keep the number of yields consistent.
+            step_idx += 1
+            yield source_gss, {
+                "phase": "fuzz",
+                "op": op_choice,
+                "step": step_idx,
+                "seed": seed,
+                "args": args,
+                "error": repr(e),
+                "source_index": source_index,
+                "other_index": other_index,
+                "pool_size_before": len(gss_states),
+                "pool_size_after": len(gss_states),
+                "source_stacks": source_stacks,
+                "other_stacks": other_stacks,
+                "result_stacks": None, # No result due to error
+                "added_to_pool": False,
+            }
             continue
