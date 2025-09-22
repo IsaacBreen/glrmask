@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from functools import reduce
+from itertools import chain
 from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
-from collections import Counter
+from collections import Counter, defaultdict
 
 from ..interface import GSS, T, Acc
 from .reference_impl import ReferenceGSS
@@ -475,34 +477,30 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def isolate_many(self, values: Iterable[Optional[T]]) -> LeveledGSS[T, Acc]:
         values_set = set(values)
 
-        # Part 1: handle non-empty stacks
-        gss_for_stacks: LeveledGSS[T, Acc]
+        new_empty: Optional[Acc] = None
+        if None in values_set and isinstance(self.inner, (UpperBranch, Interface)):
+            new_empty = self.inner.empty
+
         if isinstance(self.inner, UpperBranch):
             filtered_children = {
                 v: kids for v, kids in self.inner.children.items() if v in values_set
             }
-            if not filtered_children:
-                gss_for_stacks = self.empty()
-            else:
-                gss_for_stacks = LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
-        elif isinstance(self.inner, Interface):
+            new_inner = try_promote(UpperBranch(children=filtered_children, empty=new_empty))
+            return LeveledGSS(new_inner)
+        else:  # The root is an Interface
             filtered_children = {
                 v: kids for v, kids in self.inner.children.items() if v in values_set
             }
-            if not filtered_children:
-                gss_for_stacks = self.empty()
+
+            if filtered_children:
+                # Children remain, so we build an Interface.
+                new_inner = Interface(children=filtered_children, acc=self.inner.acc, empty=new_empty)
+                return LeveledGSS(new_inner)
             else:
-                gss_for_stacks = LeveledGSS(Interface(children=filtered_children, acc=self.inner.acc, empty=None))
-
-        # Part 2: handle empty stacks
-        if None in values_set:
-            empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
-            if empty_acc is not None:
-                # Promote the singleton-empty representation to keep structure canonical.
-                gss_for_empty = LeveledGSS(try_promote(UpperBranch(children={}, empty=empty_acc)))
-                return gss_for_stacks.merge(gss_for_empty)
-
-        return gss_for_stacks
+                # No children remain. The result only contains the empty stack (if requested).
+                # This is represented by an UpperBranch.
+                new_inner = try_promote(UpperBranch(children={}, empty=new_empty))
+                return LeveledGSS(new_inner)
 
     def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
         if memo is None:
@@ -1125,28 +1123,21 @@ def _merge_children_by_depth(
     c2: Dict[T, Dict[int, Node]],
     merge_func: Callable[[Node, Node], Node],
 ) -> Dict[T, Dict[int, Node]]:
-    """Merges two dictionaries of children, grouping by value and then by depth."""
     merged_children: Dict[T, Dict[int, Node]] = {}
-    all_vals = set(c1.keys()) | set(c2.keys())
+    all_vals = c1.keys() | c2.keys()
     for v in all_vals:
-        map1 = c1.get(v, {})
-        map2 = c2.get(v, {})
-        depth_buckets: Dict[int, List[Node]] = {}
-        for child in map1.values():
-            depth_buckets.setdefault(child._max_depth, []).append(child)
-        for child in map2.values():
-            depth_buckets.setdefault(child._max_depth, []).append(child)
-
-        v_out: Dict[int, Node] = {}
-        for _, nodes in depth_buckets.items():
-            merged_node = nodes[0]
-            for n in nodes[1:]:
-                merged_node = merge_func(merged_node, n)
-            v_out[merged_node._max_depth] = merged_node
-
-        if v_out:
-            merged_children[v] = v_out
-
+        nodes_by_depth: Dict[int, list[Node]] = defaultdict(list)
+        children_c1 = c1.get(v, {}).items()
+        children_c2 = c2.get(v, {}).items()
+        for depth, child in chain(children_c1, children_c2):
+            nodes_by_depth[depth].append(child)
+        if not nodes_by_depth:
+            continue
+        v_out = {
+            (merged := reduce(merge_func, nodes))._max_depth: merged
+            for nodes in nodes_by_depth.values()
+        }
+        merged_children[v] = v_out
     return merged_children
 
 def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
