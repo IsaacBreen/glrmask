@@ -180,4 +180,4 @@ class Model(GraphProvider):
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_indices.append(self.internal_to_original_map[i])
-        return internal_indices
+        return RangeSet.from_indices(original_indices)
