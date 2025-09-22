@@ -62,13 +62,12 @@ def run_fuzz_test(
                 continue
 
         # Choose an operation
-        # Always choose from the full list of operations to keep the RNG stream
-        # consistent across implementations, even if their pool sizes differ.
-        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+        can_merge = len(gss_states) >= 2
+        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+        if can_merge:
+            operations.append('merge')
+        
         op_choice = rng.choice(operations)
-
-        if op_choice == 'merge' and len(gss_states) < 2:
-            continue # Skip step if merge is not possible.
 
         # Select GSS state(s) to operate on
         source_index = rng.randrange(len(gss_states))
@@ -116,7 +115,8 @@ def run_fuzz_test(
                 predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
                 new_gss = source_gss.prune(predicate)
                 args = {"threshold": threshold}
-            elif op_choice == 'merge':
+
+            elif op_choice == 'merge' and can_merge:
                 candidates = [i for i in range(len(gss_states)) if i != source_index]
                 other_index = rng.choice(candidates)
                 other_gss = gss_states[other_index]
@@ -154,8 +154,7 @@ def run_fuzz_test(
 
             # Prune the list of GSS states to keep it manageable
             if len(gss_states) > max_gss_states:
-                # Deterministic pruning: keep the most recently added states.
-                gss_states = gss_states[-max_gss_states:]
+                gss_states = rng.sample(gss_states, max_gss_states)
 
         except Exception:
             # Some operations might fail on some implementations if invariants are broken.

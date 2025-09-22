@@ -1,24 +1,13 @@
 import argparse
-import importlib
 import json
 from pathlib import Path
-import sys
-from typing import List, Dict, Any, Tuple, Optional, Type, Callable
+from typing import List, Dict, Any, Tuple, Optional
 import itertools
-
-# --- Path setup for importing GSS interface and implementations ---
-# This allows the script to be run from the project root.
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from gss_tester.interface import GSS, MergeableInt
 
 MAX_STACKS_PREVIEW = 5
 TRACE_CONTEXT_WINDOW = 10
 
-
-def analyze_results(result_files: List[Path], reference_file: Path = None, minimize: bool = False):
+def analyze_results(result_files: List[Path], reference_file: Path = None):
     all_results: Dict[str, List[Dict[str, Any]]] = {}
     implementations: List[str] = []
 
@@ -108,7 +97,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None, minim
     if len(partitions) > 1:
         print("\n--- Divergence Report ---")
         # Compare every pair of partitions
-        divergence_found = False
         for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
             impl_name1 = sorted(impls1)[0]
             impl_name2 = sorted(impls2)[0]
@@ -126,7 +114,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None, minim
                 sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
 
                 if sig_item1 != sig_item2:
-                    divergence_found = True
                     print(f"  - First divergence at yield index {i}:")
                     if res1:
                         print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
@@ -203,24 +190,7 @@ def analyze_results(result_files: List[Path], reference_file: Path = None, minim
                                 print(f"         src={pretty_stacks(ss)}")
                             if rs is not None:
                                 print(f"         res={pretty_stacks(rs)}")
-
-                    # --- Minimization ---
-                    if minimize:
-                        # Check if this divergence came from a fuzz test
-                        is_fuzz_failure = t1 and t1.get("phase") == "fuzz"
-                        if is_fuzz_failure:
-                            # The reference implementation determines the "correct" trace
-                            ref_impl = ref_impl_name if ref_impl_name in [impl_name1, impl_name2] else impl_name2
-                            other_impl = impl_name1 if ref_impl == impl_name2 else impl_name1
-                            
-                            ref_results = all_results[ref_impl]
-                            full_trace = [r['trace'] for r in ref_results if 'trace' in r and r['trace'].get("phase") == "fuzz"]
-                            
-                            minimize_divergence(ref_impl, other_impl, full_trace)
-
                     break # Show only the first divergence for this pair
-            if divergence_found and minimize:
-                break # Only minimize the first pair found
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
@@ -236,144 +206,14 @@ def main():
         default=None,
         help="Path to a reference result file for comparison."
     )
-    parser.add_argument(
-        "-m", "--minimize",
-        action="store_true",
-        help="Attempt to minimize any found fuzzing divergence to a minimal reproducible trace."
-    )
     args = parser.parse_args()
 
     valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
     if not valid_files:
         print("Error: No valid result files found.")
         return
-    
-    analyze_results(valid_files, args.reference, args.minimize)
 
-
-def _run_replay(gss_class: Type[GSS], trace_log: List[Dict[str, Any]], max_gss_states: int = 10) -> List[Dict[str, Any]]:
-    """
-    Executes a trace log against a GSS implementation and returns the results.
-    This is a non-yielding, replay-only version of the fuzzer.
-    """
-    gss_states: List[GSS] = []
-    results: List[Dict[str, Any]] = []
-
-    for i, trace_op in enumerate(trace_log):
-        op_choice = trace_op["op"]
-
-        if op_choice == 'init' or op_choice == 'restart_empty_pool':
-            new_gss = gss_class.from_stacks([([], MergeableInt(0))])
-            if op_choice == 'init':
-                gss_states = [new_gss]
-            else:
-                gss_states.append(new_gss)
-            results.append({"state": new_gss.to_stacks(), "trace": trace_op})
-            continue
-
-        if not gss_states:
-            break
-
-        source_index = trace_op["source_index"]
-        if source_index is None or source_index >= len(gss_states):
-            break
-        source_gss = gss_states[source_index]
-
-        args = trace_op["args"]
-        new_gss: Optional[GSS] = None
-
-        try:
-            if op_choice == 'push':
-                new_gss = source_gss.push(args["value"])
-            elif op_choice == 'pop':
-                new_gss = source_gss.pop()
-            elif op_choice == 'popn':
-                new_gss = source_gss.popn(args["n"])
-            elif op_choice == 'isolate':
-                new_gss = source_gss.isolate(args["value"])
-            elif op_choice == 'apply':
-                amount = args["amount"]
-                func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
-                new_gss = source_gss.apply(func)
-            elif op_choice == 'prune':
-                threshold = args["threshold"]
-                predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
-                new_gss = source_gss.prune(predicate)
-            elif op_choice == 'merge':
-                can_merge = len(gss_states) >= 2
-                if not can_merge:
-                    continue
-                other_index = trace_op["other_index"]
-                if other_index is None or other_index >= len(gss_states):
-                    break
-                other_gss = gss_states[other_index]
-                new_gss = source_gss.merge(other_gss)
-            else:
-                continue
-
-            if new_gss is not None:
-                if new_gss is not source_gss and not new_gss.is_empty():
-                    gss_states.append(new_gss)
-                results.append({"state": new_gss.to_stacks(), "trace": trace_op})
-
-            if len(gss_states) > max_gss_states:
-                gss_states = gss_states[-max_gss_states:]
-        except Exception:
-            break
-
-    return results
-
-
-def _check_divergence(impl_name1: str, impl_name2: str, trace: List[Dict[str, Any]]) -> bool:
-    """Runs a trace on two implementations and returns True if they diverge."""
-    try:
-        mod_name1, cls_name1 = impl_name1.rsplit('.', 1)
-        gss_class1 = getattr(importlib.import_module(mod_name1), cls_name1)
-
-        mod_name2, cls_name2 = impl_name2.rsplit('.', 1)
-        gss_class2 = getattr(importlib.import_module(mod_name2), cls_name2)
-    except (ImportError, AttributeError) as e:
-        print(f"Error loading implementations for minimization: {e}", file=sys.stderr)
-        return False
-
-    results1 = _run_replay(gss_class1, trace)
-    results2 = _run_replay(gss_class2, trace)
-
-    sig1 = tuple(json.dumps(r['state'], sort_keys=True) for r in results1)
-    sig2 = tuple(json.dumps(r['state'], sort_keys=True) for r in results2)
-
-    return sig1 != sig2
-
-
-def minimize_divergence(ref_impl: str, other_impl: str, full_trace: List[Dict[str, Any]]):
-    """
-    Attempts to find the smallest subset of a trace that still causes a divergence.
-    """
-    print("\n--- Minimizing Divergence ---")
-    print(f"Minimizing trace for '{ref_impl}' vs '{other_impl}' (starting with {len(full_trace)} ops)...")
-
-    minimized_trace = list(full_trace)
-    
-    # Simple forward deletion shrinker
-    i = 0
-    while i < len(minimized_trace):
-        shrunk_trace = minimized_trace[:i] + minimized_trace[i+1:]
-        if not shrunk_trace:
-            i += 1
-            continue
-        
-        if _check_divergence(ref_impl, other_impl, shrunk_trace):
-            minimized_trace = shrunk_trace
-            # Restart scan from the beginning
-            i = 0
-        else:
-            i += 1
-    
-    print(f"\n--- Minimized Failing Trace ({len(minimized_trace)} operations) ---")
-    for i, op in enumerate(minimized_trace):
-        op_name = op['op']
-        args = json.dumps(op['args'])
-        print(f"[{i+1}] op={op_name}, args={args}, source_idx={op['source_index']}, other_idx={op['other_index']}")
+    analyze_results(valid_files, args.reference)
 
 if __name__ == "__main__":
     main()
