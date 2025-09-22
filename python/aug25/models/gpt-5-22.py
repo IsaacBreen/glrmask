@@ -462,7 +462,7 @@ class Model:
             # No states -> empty mask
             return RangeSet.empty()
 
-        all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
+        all_ones: RangeSet = self.all_internal_llm_tokens_bitset if self.all_internal_llm_tokens_bitset is not None else RangeSet.empty()
         final_mask: RangeSet = RangeSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
