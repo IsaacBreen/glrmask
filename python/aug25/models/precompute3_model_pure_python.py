@@ -50,20 +50,14 @@ class ParserTable:
 
 @dataclass(frozen=True)
 class PyAcc:
-    disallowed_terminals: Tuple[Tuple[int, ffi.Bitset], ...]
+    terminals_union: ffi.HybridL2Bitset
     llm_mask: ffi.Bitset
 
     def merge(self, other: "PyAcc") -> "PyAcc":
-        # Merge disallowed_terminals by union.
-        merged_disallowed = collections.defaultdict(ffi.Bitset.zeros)
-        for k, v in self.disallowed_terminals:
-            merged_disallowed[k] = merged_disallowed[k].union(v)
-        for k, v in other.disallowed_terminals:
-            merged_disallowed[k] = merged_disallowed[k].union(v)
-
+        # Merge terminals_union by union (as before).
         # Merge llm_mask by union as well, since overall allowances are a disjunction of paths.
         return PyAcc(
-            disallowed_terminals=tuple(sorted(merged_disallowed.items())),
+            terminals_union=self.terminals_union.union(other.terminals_union),
             llm_mask=self.llm_mask.union(other.llm_mask),
         )
 
@@ -161,7 +155,7 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
 
-        initial_acc = PyAcc(disallowed_terminals=(), llm_mask=ffi.Bitset.zeros())
+        initial_acc = PyAcc(terminals_union=ffi.HybridL2Bitset.all(), llm_mask=ffi.Bitset.zeros())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -174,10 +168,10 @@ class Model(GraphProvider):
     @profile
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, ffi.Bitset]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
-            disallowed_terminals_dict = dict(acc.disallowed_terminals)
+            allowed_terminals_l2 = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
-                disallowed_for_state = disallowed_terminals_dict.get(state_id, ffi.Bitset.zeros())
-                if not matched_bv.is_disjoint(disallowed_for_state):
+                allowed_for_state = allowed_terminals_l2.get_l2_bitset(state_id)
+                if not matched_bv.is_subset(allowed_for_state):
                     return False
             return True
         return gss.prune(predicate)
@@ -185,24 +179,29 @@ class Model(GraphProvider):
     @profile
     def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
-            old_disallowed_dict = dict(acc.disallowed_terminals)
-            new_disallowed_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
+            old_l2 = acc.terminals_union
+            new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
             for old_sid, new_sid in state_map.items():
-                bv_source = old_disallowed_dict.get(old_sid, ffi.Bitset.zeros())
-                new_disallowed_bvs[new_sid] = new_disallowed_bvs[new_sid].union(bv_source)
+                bv_source = old_l2.get_l2_bitset(old_sid)
+                new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
-            new_disallowed_tuple = tuple(sorted(new_disallowed_bvs.items()))
-            return PyAcc(disallowed_terminals=new_disallowed_tuple, llm_mask=acc.llm_mask)
+            new_l2 = ffi.HybridL2Bitset.all()
+            for new_sid, bv in new_bvs.items():
+                new_l2.insert_l2_bitset(new_sid, bv)
+            return PyAcc(terminals_union=new_l2, llm_mask=acc.llm_mask)
         return gss.apply(apply_map)
 
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
-            disallowed_dict = collections.defaultdict(ffi.Bitset.zeros, acc.disallowed_terminals)
-            to_add = ffi.Bitset.from_indices([terminal_id])
-            disallowed_dict[state_id] = disallowed_dict[state_id].union(to_add)
-            new_disallowed_tuple = tuple(sorted(disallowed_dict.items()))
-            return PyAcc(disallowed_terminals=new_disallowed_tuple, llm_mask=acc.llm_mask)
+            current_l2 = acc.terminals_union
+            new_l2 = current_l2.union(current_l2)  # clone
+            curr_bv = current_l2.get_l2_bitset(state_id)
+            if curr_bv.contains(terminal_id):
+                to_remove = ffi.Bitset.from_indices([terminal_id])
+                new_bv = curr_bv.difference(to_remove)
+                new_l2.insert_l2_bitset(state_id, new_bv)
+            return PyAcc(terminals_union=new_l2, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
 
     def get_root(self, state_id: int) -> int:
@@ -375,35 +374,34 @@ class Model(GraphProvider):
         pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
         max_state = self.tokenizer.max_state()
 
-        def get_disallowed_terminals_py(gss: GSS) -> Dict[int, ffi.Bitset]:
+        def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
             merged_acc = gss.reduce_acc()
             if merged_acc is None:
-                return {}
-            return dict(merged_acc.disallowed_terminals)
+                return ffi.HybridL2Bitset.all()
+            return merged_acc.terminals_union.complement()
 
         # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
         for sid, gss in state_map.items():
             # Compute forbidden LLM tokens from disallowed terminals
             forbid: ffi.Bitset = ffi.Bitset.zeros()
-            disallowed_dict = get_disallowed_terminals_py(gss)
-            for tsid, bv in disallowed_dict.items():
+            disallowed_l2 = get_disallowed_terminals_py(gss)
+            for (start, end), bv in disallowed_l2.range_values():
                 if bv.is_empty():
                     continue
-                if tsid > max_state:
-                    continue
-                pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                if not pm:
-                    continue
-                for terminal_id_str, llm_tokens in pm.items():
-                    if bv.contains(int(terminal_id_str)):
-                        forbid = forbid.union(llm_tokens)
+                for tsid in range(start, min(end, max_state) + 1):
+                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                    if not pm:
+                        continue
+                    for terminal_id_str, llm_tokens in pm.items():
+                        if bv.contains(int(terminal_id_str)):
+                            forbid = forbid.union(llm_tokens)
 
             allowed_mask = all_ones_mask.difference(forbid)
 
             # Set initial llm_mask on each accumulator and consume terminals_union
             def initialize_acc(acc: PyAcc) -> PyAcc:
                 return PyAcc(
-                    disallowed_terminals=(),  # consume
+                    terminals_union=ffi.HybridL2Bitset.all(),  # consume
                     llm_mask=allowed_mask
                 )
 
@@ -490,7 +488,7 @@ class Model(GraphProvider):
                         if not llm_empty:
                             def intersect_edge(acc: PyAcc) -> PyAcc:
                                 return PyAcc(
-                                    disallowed_terminals=acc.disallowed_terminals,
+                                    terminals_union=acc.terminals_union,
                                     llm_mask=acc.llm_mask.intersection(llm_bv)
                                 )
                             child_gss_node = child_gss_node.apply(intersect_edge)
