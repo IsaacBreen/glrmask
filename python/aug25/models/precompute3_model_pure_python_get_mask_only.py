@@ -29,7 +29,7 @@ def _profile_method(cls, method_name, counter_name):
     @wraps(original_method)
     def wrapper(*args, **kwargs):
         # Get stack, limit to a few frames, ignore the current one.
-        frames = traceback.extract_stack(limit=5)[:-1]
+        frames = traceback.extract_stack(limit=None)[:-1]
 
         # Format it into a readable string
         call_chain = []
