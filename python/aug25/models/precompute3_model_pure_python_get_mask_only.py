@@ -132,7 +132,10 @@ class Model(GraphProvider):
                         if state_bv.is_empty():
                             continue
 
-                        values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                        # values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                        sid_vals = RangeSet.from_indices(popped.peek())
+                        values_to_keep = sid_vals.intersection(state_bv).to_indices()
+
                         if not values_to_keep:
                             continue
 

@@ -493,9 +493,11 @@ class Model(GraphProvider):
                     for dest_idx, state_bv in dests:
                         matched: List[GSS] = []
                         if not state_bv.is_empty():
-                            for sid_val in popped.peek():
-                                if state_bv.contains(sid_val):
-                                    matched.append(popped.isolate(sid_val))
+                            # for sid_val in popped.peek():
+                            #     if state_bv.contains(sid_val):
+                            #         matched.append(popped.isolate(sid_val))
+                            sid_vals = RangeSet.from_indices(popped.peek())
+                            matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
                         if not matched:
                             continue
 
