@@ -441,20 +441,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
         return LeveledGSS(merged)
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        # Fast path: popn(0) is a no-op. Preserve identity to match the default
-        # implementation's behavior (crucial for deterministic fuzzing).
-        if n <= 0:
-            # return self
-            return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-        all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+        # The optimized implementation of popn has a bug. Fall back to the simple,
+        # correct version from the base class.
+        gss = self
         for _ in range(n):
-            def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-                return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
-            all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
-        all_children: List[Upper[T, Acc]] = list(all_children.values())
-        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-        merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
-        return LeveledGSS(merged)
+            gss = gss.pop()
+        return gss
 
 
     def is_empty(self) -> bool:
