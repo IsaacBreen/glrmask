@@ -443,15 +443,24 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
             return LeveledGSS(try_promote(merged))
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+        all_upper_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+        all_lower_children: Dict[Acc, Dict[int, Lower[T]]] = {}  # acc -> id(node) -> node
         for _ in range(n):
-            def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-                return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
-            all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
-        all_children: List[Upper[T, Acc]] = list(all_children.values())
-        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-        merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
-        return LeveledGSS(merged)
+            new_all_upper_children = {}
+            new_all_lower_children = {}
+            for u in all_upper_children.values():
+                if isinstance(u, Interface):
+                    for lower in u._all_children():
+                        new_all_lower_children.setdefault(u.acc, {})[id(lower)] = lower
+                else:
+                    for upper in u._all_children():
+                        new_all_upper_children[id(upper)] = upper
+            for l in new_all_lower_children.values():
+                new_all_upper_children[id(l)] = l
+            all_upper_children = new_all_upper_children
+            all_lower_children = new_all_lower_children
+        merged_lower = 
+
 
 
     def is_empty(self) -> bool:
