@@ -33,33 +33,33 @@ class FFIRangeSet(RangeSet[int]):
     def union(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the union of two RangeSets."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet(other.intervals)
+            other = FFIRangeSet.from_ranges(other.intervals)
         return self | other
 
     def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the intersection of two RangeSets."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet(other.intervals)
+            other = FFIRangeSet.from_ranges(other.intervals)
         return self & other
 
     def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the set difference self \\ other."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet(other.intervals)
+            other = FFIRangeSet.from_ranges(other.intervals)
         return self - other
 
     def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet()
+        new_set = FFIRangeSet.from_ranges([])
         new_set._bitset = self._bitset.union(other._bitset)
         return new_set
 
     def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet()
+        new_set = FFIRangeSet.from_ranges([])
         new_set._bitset = self._bitset.intersection(other._bitset)
         return new_set
 
     def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
-        new_set = FFIRangeSet()
+        new_set = FFIRangeSet.from_ranges([])
         new_set._bitset = self._bitset.difference(other._bitset)
         return new_set
     
@@ -70,7 +70,7 @@ class FFIRangeSet(RangeSet[int]):
         return self._bitset.len()
 
     def __repr__(self) -> str:
-        return f"FFIRangeSet({self.intervals!r})"
+        return f"FFIRangeSet.from_ranges({self.intervals!r})"
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, FFIRangeSet):
@@ -88,7 +88,7 @@ class FFIRangeSet(RangeSet[int]):
         This can be achieved by creating a temporary FFIRangeSet.
         """
         # The ffi.Bitset constructor handles merging and sorting.
-        temp_rs = FFIRangeSet(ranges)
+        temp_rs = FFIRangeSet.from_ranges(ranges)
         return temp_rs._bitset.to_ranges()
 
     @staticmethod
@@ -99,7 +99,7 @@ class FFIRangeSet(RangeSet[int]):
     @staticmethod
     def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
         """Creates a FFIRangeSet from an iterable of individual indices."""
-        new_set = FFIRangeSet()
+        new_set = FFIRangeSet.from_ranges([])
         # The FFI function expects a list.
         new_set._bitset = ffi.Bitset.from_indices(list(indices))
         return new_set
@@ -107,11 +107,11 @@ class FFIRangeSet(RangeSet[int]):
     @staticmethod
     def empty() -> 'FFIRangeSet':
         """Creates an empty FFIRangeSet."""
-        return FFIRangeSet()
+        return FFIRangeSet.from_ranges([])
 
     @staticmethod
     def from_json(data: List[List[int]]) -> 'FFIRangeSet':
-        return FFIRangeSet(tuple(map(tuple, data)))
+        return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
 
     def to_json(self) -> List[List[int]]:
         return self.to_ranges()
