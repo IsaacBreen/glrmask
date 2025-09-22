@@ -1218,9 +1218,7 @@ def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
 def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     if a is b:
         return a
-    # Merge 'empty'
     new_empty = _merge_optional_acc(a.empty, b.empty)
-
     merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
     return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
@@ -1239,10 +1237,7 @@ def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
     # Fast paths
     if l1 is l2:
         return l1
-
-    # Merge 'empty' flags (logical OR)
     new_empty = l1.empty or l2.empty
-
     merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
     return Lower(children=merged_children, empty=new_empty)
 
