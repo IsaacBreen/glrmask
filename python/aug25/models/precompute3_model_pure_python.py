@@ -374,28 +374,29 @@ class Model(GraphProvider):
         pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
         max_state = self.tokenizer.max_state()
 
-        def get_allowed_terminals_py(gss: GSS) -> Optional[ffi.HybridL2Bitset]:
+        def get_disallowed_terminals_py(gss: GSS) -> ffi.HybridL2Bitset:
             merged_acc = gss.reduce_acc()
             if merged_acc is None:
-                return None
-            return merged_acc.terminals_union
+                return ffi.HybridL2Bitset.all()
+            return merged_acc.terminals_union.complement()
 
         # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
         for sid, gss in state_map.items():
-            # Compute allowed LLM tokens from allowed terminals
-            allowed_mask: ffi.Bitset = ffi.Bitset.zeros()
-            allowed_l2 = get_allowed_terminals_py(gss)
-            if allowed_l2 is not None:
-                for (start, end), bv in allowed_l2.range_values():
-                    if bv.is_empty():
+            # Compute forbidden LLM tokens from disallowed terminals
+            forbid: ffi.Bitset = ffi.Bitset.zeros()
+            disallowed_l2 = get_disallowed_terminals_py(gss)
+            for (start, end), bv in disallowed_l2.range_values():
+                if bv.is_empty():
+                    continue
+                for tsid in range(start, min(end, max_state) + 1):
+                    pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                    if not pm:
                         continue
-                    for tsid in range(start, min(end, max_state) + 1):
-                        pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                        if not pm:
-                            continue
-                        for terminal_id_str, llm_tokens in pm.items():
-                            if bv.contains(int(terminal_id_str)):
-                                allowed_mask = allowed_mask.union(llm_tokens)
+                    for terminal_id_str, llm_tokens in pm.items():
+                        if bv.contains(int(terminal_id_str)):
+                            forbid = forbid.union(llm_tokens)
+
+            allowed_mask = all_ones_mask.difference(forbid)
 
             # Set initial llm_mask on each accumulator and consume terminals_union
             def initialize_acc(acc: PyAcc) -> PyAcc:
