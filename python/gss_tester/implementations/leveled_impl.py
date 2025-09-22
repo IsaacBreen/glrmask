@@ -440,29 +440,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         merged = try_promote(merged)
         return LeveledGSS(merged)
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        # Fast no-op
-        if n <= 0:
-            return self
-
-        # If we need to pop more levels than the structure can possibly support,
-        # the result is empty.
-        if n > self.inner._max_depth:
-            return LeveledGSS(UpperBranch(children={}, empty=None))
-
-        # Work entirely on the inner Upper nodes to avoid constructing intermediate
-        # LeveledGSS objects (and their validations). We mimic repeated pop() by
-        # merging at each step, which preserves correctness while remaining efficient.
-        def to_upperbranch(node: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-            return node if isinstance(node, UpperBranch) else interface_to_upperbranch(node)
-
-        node: Upper[T, Acc] = to_upperbranch(self.inner)
+        all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
         for _ in range(n):
-            kids = list(node._all_children())
-            if not kids:
-                return LeveledGSS(UpperBranch(children={}, empty=None))
-            node = try_promote(reduce(merge_upper, kids[1:], kids[0]))
-            node = to_upperbranch(node) if not isinstance(node, UpperBranch) else node
-        return LeveledGSS(node)
+            def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+                return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
+            all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
+        all_children: List[Upper[T, Acc]] = list(all_children.values())
+        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+        merged = try_promote(merged)
+        return LeveledGSS(merged)
 
 
     def is_empty(self) -> bool:
