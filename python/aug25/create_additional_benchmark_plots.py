@@ -50,11 +50,11 @@ def parse_log_data(log_content):
         data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
         # --- Extract Detailed Bitset Operation Counts ---
-        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
-        data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
-        data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
-        data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
-        data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
+        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union total calls: (\d+)", profiling_text)]
+        data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection total calls: (\d+)", profiling_text)]
+        data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
+        data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
+        data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
 
         # --- Extract Commit Times ---
         data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
