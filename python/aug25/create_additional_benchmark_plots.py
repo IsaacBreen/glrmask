@@ -264,6 +264,53 @@ def generate_plots(data):
         create_merge_scatter_plot('upper', 'Distribution of UpperBranch Nodes in Merges', 'UpperBranch Nodes (Log Scale)')
         create_merge_scatter_plot('lower', 'Distribution of Lower Nodes in Merges', 'Lower Nodes (Log Scale)')
 
+    # Plot 11: Total Merge Stats per Step
+    if data.get('merge_stats'):
+        from collections import defaultdict
+
+        step_totals = defaultdict(lambda: defaultdict(int))
+        stat_keys = ['unique_accs', 'total_acc_instances', 'interfaces', 'upper', 'lower']
+
+        for item in data['merge_stats']:
+            step = item['step']
+            type_name = item['type']
+            for key in stat_keys:
+                step_totals[step][f'{type_name}_{key}'] += item[key]
+
+        # Prepare data for plotting
+        plot_data = defaultdict(list)
+        for step in steps:
+            for type_name in ['existing', 'new', 'merged']:
+                for key in stat_keys:
+                    full_key = f'{type_name}_{key}'
+                    plot_data[full_key].append(step_totals[step].get(full_key, 0))
+
+        def create_merge_total_plot(stat_key, title, y_label, use_log_scale=True):
+            plt.figure(figsize=(12, 8))
+
+            plt.plot(steps, plot_data[f'existing_{stat_key}'], 'o-', label='Sum of "Existing" GSS Stats')
+            plt.plot(steps, plot_data[f'new_{stat_key}'], 'x-', label='Sum of "New" GSS Stats')
+            plt.plot(steps, plot_data[f'merged_{stat_key}'], 's-', label='Sum of "Merged" GSS Stats')
+
+            plt.xlabel('Benchmark Step')
+            plt.ylabel(y_label)
+            plt.title(title)
+            plt.xticks(steps)
+            plt.grid(True, which="both", ls="--")
+            if use_log_scale:
+                plt.yscale('log')
+
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, f"merge_total_{stat_key}.png"))
+            plt.close()
+
+        create_merge_total_plot('unique_accs', 'Total Unique Accumulators in Merges per Step', 'Total Unique Accumulators (Log Scale)')
+        create_merge_total_plot('total_acc_instances', 'Total Accumulator Instances in Merges per Step', 'Total Acc Instances (Log Scale)')
+        create_merge_total_plot('interfaces', 'Total Interface Nodes in Merges per Step', 'Total Interface Nodes (Log Scale)')
+        create_merge_total_plot('upper', 'Total UpperBranch Nodes in Merges per Step', 'Total UpperBranch Nodes (Log Scale)')
+        create_merge_total_plot('lower', 'Total Lower Nodes in Merges per Step', 'Total Lower Nodes (Log Scale)')
+
     print("All plots generated successfully.", file=sys.stderr)
 
 if __name__ == "__main__":
