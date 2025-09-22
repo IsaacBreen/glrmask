@@ -1,6 +1,6 @@
 from typing import Iterable, Optional, Tuple, List
 
-class RangeSet:
+class PyRangeSet:
     """
     Represents a set of integers as a sorted, disjoint list of closed intervals.
     """
@@ -53,20 +53,20 @@ class RangeSet:
         return merged
 
     @staticmethod
-    def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
-        """Creates a RangeSet from a list of [start, end] lists."""
-        return RangeSet(iter(map(tuple, ranges)))
+    def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+        """Creates a PyRangeSet from a list of [start, end] lists."""
+        return PyRangeSet(iter(map(tuple, ranges)))
 
     def to_ranges(self) -> List[List[int]]:
-        """Converts the RangeSet to a list of [start, end] lists."""
+        """Converts the PyRangeSet to a list of [start, end] lists."""
         return [list(interval) for interval in self.intervals]
 
     @staticmethod
-    def from_indices(indices: Iterable[int]) -> 'RangeSet':
-        """Creates a RangeSet from an iterable of individual indices."""
+    def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+        """Creates a PyRangeSet from an iterable of individual indices."""
         indices_sorted = sorted(set(indices))
         if not indices_sorted:
-            return RangeSet.empty()
+            return PyRangeSet.empty()
         intervals: List[Tuple[int, int]] = []
         start = indices_sorted[0]
         prev = start
@@ -78,23 +78,23 @@ class RangeSet:
                 start = i
                 prev = i
         intervals.append((start, prev))
-        return RangeSet(intervals)
+        return PyRangeSet(intervals)
 
     @staticmethod
-    def empty() -> 'RangeSet':
-        """Creates an empty RangeSet."""
-        return RangeSet()
+    def empty() -> 'PyRangeSet':
+        """Creates an empty PyRangeSet."""
+        return PyRangeSet()
 
     def to_indices(self) -> List[int]:
-        """Converts the RangeSet to a list of individual indices."""
+        """Converts the PyRangeSet to a list of individual indices."""
         result = []
         for start, end in self.intervals:
             result.extend(range(start, end + 1))
         return result
 
     @staticmethod
-    def from_numpy(bv) -> 'RangeSet':
-        """Creates a RangeSet from a numpy array of booleans."""
+    def from_numpy(bv) -> 'PyRangeSet':
+        """Creates a PyRangeSet from a numpy array of booleans."""
         intervals = []
         in_range = False
         start = 0
@@ -107,10 +107,10 @@ class RangeSet:
                 in_range = False
         if in_range:
             intervals.append((start, len(bv) - 1))
-        return RangeSet(intervals)
+        return PyRangeSet(intervals)
 
     def __eq__(self, other):
-        if not isinstance(other, RangeSet):
+        if not isinstance(other, PyRangeSet):
             return NotImplemented
         return self.intervals == other.intervals
 
@@ -118,7 +118,7 @@ class RangeSet:
         return hash(self.intervals)
 
     def __repr__(self):
-        return f"RangeSet({self.intervals!r})"
+        return f"PyRangeSet({self.intervals!r})"
 
     # New utilities for set-like operations
     def is_empty(self) -> bool:
@@ -134,18 +134,18 @@ class RangeSet:
                 return False
         return False
 
-    def union(self, other: 'RangeSet') -> 'RangeSet':
-        """Return the union of two RangeSets."""
+    def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
+        """Return the union of two PyRangeSets."""
         if self.is_empty():
             return other
         if other.is_empty():
             return self
-        return RangeSet(self.intervals + other.intervals)
+        return PyRangeSet(self.intervals + other.intervals)
 
-    def intersection(self, other: 'RangeSet') -> 'RangeSet':
-        """Return the intersection of two RangeSets."""
+    def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
+        """Return the intersection of two PyRangeSets."""
         if self.is_empty() or other.is_empty():
-            return RangeSet.empty()
+            return PyRangeSet.empty()
         a = list(self.intervals)
         b = list(other.intervals)
         i = j = 0
@@ -161,12 +161,12 @@ class RangeSet:
                 i += 1
             else:
                 j += 1
-        return RangeSet(res)
+        return PyRangeSet(res)
 
-    def difference(self, other: 'RangeSet') -> 'RangeSet':
+    def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
         """Return the set difference self \ other."""
         if self.is_empty():
-            return RangeSet.empty()
+            return PyRangeSet.empty()
         if other.is_empty():
             return self
         a = list(self.intervals)
@@ -189,4 +189,4 @@ class RangeSet:
                 k += 1
             if curr <= e1:
                 res.append((curr, e1))
-        return RangeSet(res)
+        return PyRangeSet(res)

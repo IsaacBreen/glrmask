@@ -1,8 +1,8 @@
 import _sep1 as ffi
 from typing import List, Tuple, Iterable, cast
 
-class RangeSet:
-    """A RangeSet implementation backed by the Rust ffi.Bitset."""
+class FFIRangeSet:
+    """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
 
     __slots__ = ('_bitset',)
 
@@ -19,18 +19,18 @@ class RangeSet:
         """Returns the intervals as a list of lists for JSON serialization."""
         return [list(r) for r in self._bitset.to_ranges()]
 
-    def __or__(self, other: 'RangeSet') -> 'RangeSet':
-        new_set = RangeSet()
+    def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+        new_set = FFIRangeSet()
         new_set._bitset = self._bitset.union(other._bitset)
         return new_set
 
-    def __and__(self, other: 'RangeSet') -> 'RangeSet':
-        new_set = RangeSet()
+    def __and__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+        new_set = FFIRangeSet()
         new_set._bitset = self._bitset.intersection(other._bitset)
         return new_set
 
-    def __sub__(self, other: 'RangeSet') -> 'RangeSet':
-        new_set = RangeSet()
+    def __sub__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
+        new_set = FFIRangeSet()
         new_set._bitset = self._bitset.difference(other._bitset)
         return new_set
     
@@ -41,10 +41,10 @@ class RangeSet:
         return self._bitset.len()
 
     def __repr__(self) -> str:
-        return f"RangeSet({self.intervals!r})"
+        return f"FFIRangeSet({self.intervals!r})"
 
     def __eq__(self, other) -> bool:
-        if not isinstance(other, RangeSet):
+        if not isinstance(other, FFIRangeSet):
             return NotImplemented
         return self._bitset == other._bitset
 
@@ -56,15 +56,15 @@ class RangeSet:
     def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
         Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
-        This can be achieved by creating a temporary RangeSet.
+        This can be achieved by creating a temporary FFIRangeSet.
         """
         # The ffi.Bitset constructor handles merging and sorting.
-        temp_rs = RangeSet(ranges)
+        temp_rs = FFIRangeSet(ranges)
         return temp_rs._bitset.to_ranges()
 
     @staticmethod
-    def from_json(data: List[List[int]]) -> 'RangeSet':
-        return RangeSet(tuple(map(tuple, data)))
+    def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+        return FFIRangeSet(tuple(map(tuple, data)))
 
     def to_json(self) -> List[List[int]]:
         return self.to_ranges()
