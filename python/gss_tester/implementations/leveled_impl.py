@@ -1246,8 +1246,6 @@ def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
     # Fast paths
     if l1 is l2:
         return l1
-    if l1 == l2:
-        return l1
 
     # Merge 'empty' flags (logical OR)
     new_empty = l1.empty or l2.empty
