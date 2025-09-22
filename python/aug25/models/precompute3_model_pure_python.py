@@ -509,7 +509,7 @@ class Model(GraphProvider):
                     visited_nodes.add(node)
                     gss_node: GSS = values.pop(node)
                     stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
-                    stats.inc('get_mask.gss.at_node.stacks.sum', len(gss_node))
+                    # stats.inc('get_mask.gss.at_node.stacks.sum', len(gss_node))
 
                     # End-node handling: just union the allowed LLM tokens
                     if is_end(node):
@@ -564,7 +564,7 @@ class Model(GraphProvider):
                                     stats.inc('get_mask.intersect_and_prune.memo_hits')
                                     return acc_memo[acc]
                                 
-                                stats.inc('get_mask.data.llm_mask_before_intersect.len.sum', len(acc.llm_mask))
+                                # stats.inc('get_mask.data.llm_mask_before_intersect.len.sum', len(acc.llm_mask))
                                 stats.start('get_mask.intersect_and_prune.intersection')
                                 new_mask = acc.llm_mask.intersection(llm_bv)
                                 stats.stop('get_mask.intersect_and_prune.intersection')
@@ -612,7 +612,7 @@ class Model(GraphProvider):
             stats.stop('get_mask.final_conversion.to_indices')
 
             stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
-            stats.inc('get_mask.data.final_mask.len', len(final_mask))
+            # stats.inc('get_mask.data.final_mask.len', len(final_mask))
             for i in final_indices:
                 if i in self.internal_to_original_map:
                     original_indices.append(self.internal_to_original_map[i])
