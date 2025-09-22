@@ -74,7 +74,7 @@ class FFIRangeSet(RangeSet[int]):
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, FFIRangeSet):
-            return NotImplemented
+            raise TypeError("other must be a FFIRangeSet")
         return self._bitset == other._bitset
 
     def __hash__(self) -> int:
