@@ -72,8 +72,6 @@ class Model(GraphProvider):
                     continue
                 for tsid in range(start, min(end, max_state) + 1):
                     pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
-                    if not pm:
-                        continue
                     for terminal_id_key, llm_tokens in pm.items():
                         if bv.contains(int(terminal_id_key)):
                             allowed_mask = allowed_mask.union(llm_tokens)
