@@ -452,7 +452,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
         all_children: List[Upper[T, Acc]] = list(all_children.values())
         merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-        merged = try_promote(merged)
+        merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
         return LeveledGSS(merged)
 
 
