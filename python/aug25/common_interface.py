@@ -65,7 +65,19 @@ class RangeSet:
     @staticmethod
     def from_indices(indices: Iterable[int]) -> 'RangeSet':
         """Creates a RangeSet from an iterable of individual indices."""
-        return RangeSet((i, i) for i in indices)
+        indices_sorted = sorted(indices)
+        intervals = []
+        start = 0
+        for i in range(1, len(indices_sorted)):
+            if indices_sorted[i] != indices_sorted[i - 1] + 1:
+                intervals.append((start, indices_sorted[i - 1]))
+                start = indices_sorted[i]
+        intervals.append((start, indices_sorted[-1]))
+        return RangeSet(intervals)
+
+    def empty() -> 'RangeSet':
+        """Creates an empty RangeSet."""
+        return RangeSet()
 
     def to_indices(self) -> List[int]:
         """Converts the RangeSet to a list of individual indices."""
