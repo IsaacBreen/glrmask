@@ -88,6 +88,7 @@ class LeveledGSSStats(Generic[T, Acc]):
     distinct_values: Set[T]
     unique_accumulators_count: int
     unique_accumulators: Set[Acc]
+    total_accumulator_instances: int
 
     # "Empty" flags / terminal interfaces
     num_upper_with_empty: int
@@ -140,7 +141,7 @@ class LeveledGSSStats(Generic[T, Acc]):
         lines.append("- values/accumulators:")
         lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
         lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (references to accs)")
+        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
 
         lines.append("- empties/terminals:")
         lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
@@ -1014,6 +1015,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             distinct_values=distinct_values,
             unique_accumulators_count=unique_accumulators_count,
             unique_accumulators=unique_accumulators,
+            total_accumulator_instances=total_accumulator_instances,
             num_upper_with_empty=num_upper_with_empty,
             num_interfaces_with_empty=num_interfaces_with_empty,
             num_lower_terminal_nodes=num_lower_terminal_nodes,
