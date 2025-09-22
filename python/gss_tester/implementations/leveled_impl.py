@@ -818,78 +818,61 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
-        memo_lower: Dict[int, int] = {}
-        memo_upper: Dict[int, Optional[Acc]] = {}
+        memo_lower_count: Dict[int, int] = {}
+        memo_upper_acc: Dict[int, Optional[Acc]] = {}
 
-        def _reduce_acc_lower(node: Lower[T]) -> int:
-            """Computes total number of stacks in a Lower subtree, with memoization."""
+        def count_stacks_in_lower(node: Lower[T]) -> int:
             key = id(node)
-            if key in memo_lower:
-                return memo_lower[key]
+            if key in memo_lower_count:
+                return memo_lower_count[key]
 
-            count = 1 if node.empty else 0
-            for children_at_depth in node.children.values():
-                for child in children_at_depth.values():
-                    count += _reduce_acc_lower(child)
-
-            memo_lower[key] = count
+            count = (1 if node.empty else 0) + sum(
+                count_stacks_in_lower(child) for child in node._all_children()
+            )
+            memo_lower_count[key] = count
             return count
 
-        def _reduce_acc_upper(node: Upper[T, Acc]) -> Optional[Acc]:
-            """Computes merged accumulator for an Upper subtree, with memoization."""
+        def power(base: Acc, exp: int) -> Optional[Acc]:
+            if exp <= 0:
+                return None
+            res: Optional[Acc] = None
+            while exp > 0:
+                if exp & 1:
+                    res = base if res is None else res.merge(base)
+                exp >>= 1
+                if exp > 0:
+                    base = base.merge(base)
+            return res
+
+        def reduce_upper(node: Upper[T, Acc]) -> Optional[Acc]:
             key = id(node)
-            if key in memo_upper:
-                return memo_upper[key]
+            if key in memo_upper_acc:
+                return memo_upper_acc[key]
 
             total_acc: Optional[Acc] = None
 
             if isinstance(node, UpperBranch):
-                if node.empty is not None:
-                    total_acc = node.empty
-
-                for children_at_depth in node.children.values():
-                    for child in children_at_depth.values():
-                        child_acc = _reduce_acc_upper(child)
-                        if child_acc is not None:
-                            total_acc = child_acc if total_acc is None else total_acc.merge(child_acc)
+                total_acc = node.empty
+                for child in node._all_children():
+                    child_acc = reduce_upper(child)
+                    total_acc = _merge_optional_acc(total_acc, child_acc)
 
             elif isinstance(node, Interface):
-                if node.empty is not None:
-                    total_acc = node.empty
+                total_acc = node.empty
 
-                # Stacks going into the lower tree all share `node.acc`.
-                lower_stack_count = 0
-                for children_at_depth in node.children.values():
-                    for child in children_at_depth.values():
-                        lower_stack_count += _reduce_acc_lower(child)
+                lower_count = sum(count_stacks_in_lower(child) for child in node._all_children())
 
-                merged_from_lower: Optional[Acc] = None
-                if lower_stack_count > 0:
-                    # Efficiently compute `reduce(merge, [node.acc] * count)`
-                    # using exponentiation by squaring. This assumes merge is associative.
-                    n = lower_stack_count
-                    current_power = node.acc  # Represents acc^(2^i)
+                if lower_count > 0:
+                    merged_from_lower = power(node.acc, lower_count)
+                    total_acc = _merge_optional_acc(total_acc, merged_from_lower)
 
-                    if n & 1:
-                        merged_from_lower = current_power
-                    n >>= 1
-                    while n > 0:
-                        current_power = current_power.merge(current_power)
-                        if n & 1:
-                            merged_from_lower = current_power if merged_from_lower is None else merged_from_lower.merge(current_power)
-                        n >>= 1
-
-                if merged_from_lower is not None:
-                    total_acc = merged_from_lower if total_acc is None else total_acc.merge(merged_from_lower)
-
-                # Case for interface being a terminal node itself.
                 if not node.children and node.empty is None:
-                    total_acc = node.acc if total_acc is None else total_acc.merge(node.acc)
+                    total_acc = _merge_optional_acc(total_acc, node.acc)
 
-            memo_upper[key] = total_acc
+            memo_upper_acc[key] = total_acc
             return total_acc
 
-        return _reduce_acc_upper(self.inner)
+        return reduce_upper(self.inner)
 
     def stats(self) -> LeveledGSSStats[T, Acc]:
         """
