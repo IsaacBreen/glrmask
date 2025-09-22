@@ -154,12 +154,9 @@ class Model(GraphProvider):
                         if state_bv.is_empty():
                             continue
 
-                        # values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
                         t_intersect_start = time.time()
-                        sid_vals = RangeSet.from_indices(popped.peek())
-                        values_to_keep_rs = sid_vals.intersection(state_bv)
+                        values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
                         stats['t_sid_intersection'] += time.time() - t_intersect_start
-                        values_to_keep = values_to_keep_rs.to_indices()
 
                         if not values_to_keep:
                             continue
