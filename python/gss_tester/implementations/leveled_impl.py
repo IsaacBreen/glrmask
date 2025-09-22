@@ -1118,6 +1118,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 Node = TypeVar("Node")
 
+def _merge_optional_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a.merge(b)
+
+
 def _merge_children_by_depth(
     c1: Dict[T, Dict[int, Node]],
     c2: Dict[T, Dict[int, Node]],
@@ -1211,39 +1219,19 @@ def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper
     if a is b:
         return a
     # Merge 'empty'
-    if a.empty is None:
-        new_empty = b.empty
-    elif b.empty is None:
-        new_empty = a.empty
-    else:
-        new_empty = a.empty.merge(b.empty)
+    new_empty = _merge_optional_acc(a.empty, b.empty)
 
     merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
     return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
 def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
     if a.acc == b.acc:
-        if a.empty is None:
-            new_empty = b.empty
-        elif b.empty is None:
-            new_empty = a.empty
-        else:
-            new_empty = a.empty.merge(b.empty)
+        new_empty = _merge_optional_acc(a.empty, b.empty)
         merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
         return Interface(children=merged_children, acc=a.acc, empty=new_empty)
     if a.children is b.children:
-        if a.acc is None:
-            new_acc = b.acc
-        elif b.acc is None:
-            new_acc = a.acc
-        else:
-            new_acc = a.acc.merge(b.acc)
-        if a.empty is None:
-            new_empty = b.empty
-        elif b.empty is None:
-            new_empty = a.empty
-        else:
-            new_empty = a.empty.merge(b.empty)
+        new_acc = a.acc.merge(b.acc)
+        new_empty = _merge_optional_acc(a.empty, b.empty)
         return Interface(children=a.children, acc=new_acc, empty=new_empty)
     return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
