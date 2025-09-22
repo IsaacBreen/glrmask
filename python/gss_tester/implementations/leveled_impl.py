@@ -818,41 +818,78 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return set(self.inner.children.keys())
 
     def reduce_acc(self) -> Optional[Acc]:
-        def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-            if node.empty:
-                yield acc
+        memo_lower: Dict[int, int] = {}
+        memo_upper: Dict[int, Optional[Acc]] = {}
+
+        def _reduce_acc_lower(node: Lower[T]) -> int:
+            """Computes total number of stacks in a Lower subtree, with memoization."""
+            key = id(node)
+            if key in memo_lower:
+                return memo_lower[key]
+
+            count = 1 if node.empty else 0
             for children_at_depth in node.children.values():
                 for child in children_at_depth.values():
-                    yield from generate_accs_lower(child, acc)
+                    count += _reduce_acc_lower(child)
 
-        def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
+            memo_lower[key] = count
+            return count
+
+        def _reduce_acc_upper(node: Upper[T, Acc]) -> Optional[Acc]:
+            """Computes merged accumulator for an Upper subtree, with memoization."""
+            key = id(node)
+            if key in memo_upper:
+                return memo_upper[key]
+
+            total_acc: Optional[Acc] = None
+
             if isinstance(node, UpperBranch):
                 if node.empty is not None:
-                    yield node.empty
+                    total_acc = node.empty
+
                 for children_at_depth in node.children.values():
                     for child in children_at_depth.values():
-                        yield from generate_accs(child)
+                        child_acc = _reduce_acc_upper(child)
+                        if child_acc is not None:
+                            total_acc = child_acc if total_acc is None else total_acc.merge(child_acc)
+
             elif isinstance(node, Interface):
                 if node.empty is not None:
-                    yield node.empty
+                    total_acc = node.empty
 
-                # The case where the interface itself is a stack end.
-                if not node.children and node.empty is None:
-                    yield node.acc
-
+                # Stacks going into the lower tree all share `node.acc`.
+                lower_stack_count = 0
                 for children_at_depth in node.children.values():
                     for child in children_at_depth.values():
-                        yield from generate_accs_lower(child, node.acc)
+                        lower_stack_count += _reduce_acc_lower(child)
 
-        gen = generate_accs(self.inner)
-        try:
-            reduced_acc = next(gen)
-        except StopIteration:
-            return None
+                merged_from_lower: Optional[Acc] = None
+                if lower_stack_count > 0:
+                    # Efficiently compute `reduce(merge, [node.acc] * count)`
+                    # using exponentiation by squaring. This assumes merge is associative.
+                    n = lower_stack_count
+                    current_power = node.acc  # Represents acc^(2^i)
 
-        for acc in gen:
-            reduced_acc = reduced_acc.merge(acc)
-        return reduced_acc
+                    if n & 1:
+                        merged_from_lower = current_power
+                    n >>= 1
+                    while n > 0:
+                        current_power = current_power.merge(current_power)
+                        if n & 1:
+                            merged_from_lower = current_power if merged_from_lower is None else merged_from_lower.merge(current_power)
+                        n >>= 1
+
+                if merged_from_lower is not None:
+                    total_acc = merged_from_lower if total_acc is None else total_acc.merge(merged_from_lower)
+
+                # Case for interface being a terminal node itself.
+                if not node.children and node.empty is None:
+                    total_acc = node.acc if total_acc is None else total_acc.merge(node.acc)
+
+            memo_upper[key] = total_acc
+            return total_acc
+
+        return _reduce_acc_upper(self.inner)
 
     def stats(self) -> LeveledGSSStats[T, Acc]:
         """
