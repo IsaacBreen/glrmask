@@ -434,10 +434,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         else:
             return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
-        if isinstance(self.inner, Interface):
-            upper_branch = interface_to_upperbranch(self.inner)
-        else:
-            upper_branch = self.inner
+        upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
         all_children = list(upper_branch._all_children())
         if all_children:
             merged = reduce(merge_upper, all_children[1:], all_children[0])
