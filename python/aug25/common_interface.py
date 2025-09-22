@@ -1,7 +1,16 @@
+import os
+import sys
 from typing import Protocol, Iterable, Optional, Tuple
 
-from .range_set.py_range_set import RangeSet
-
+if os.environ.get("USE_FFI_RANGESET", "0") == "1":
+    print("Using FFI-backed RangeSet.", file=sys.stderr)
+    try:
+        from .range_set.ffi_range_set import RangeSet
+    except ImportError:
+        print("Warning: FFI RangeSet not found, falling back to Python implementation.", file=sys.stderr)
+        from .range_set.py_range_set import RangeSet
+else:
+    from .range_set.py_range_set import RangeSet
 
 class GraphProvider(Protocol):
     """
