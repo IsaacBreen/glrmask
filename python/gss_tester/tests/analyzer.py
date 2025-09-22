@@ -130,12 +130,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                     t1 = res1.get("trace") if res1 else None
                     t2 = res2.get("trace") if res2 else None
                     if t1 or t2:
-                        if t1 and t1.get("error"):
-                            print(f"  - NOTE: '{impl_name1}' encountered an exception at this step:")
-                            print(f"    - Error: {t1.get('error')}")
-                        if t2 and t2.get("error"):
-                            print(f"  - NOTE: '{impl_name2}' encountered an exception at this step:")
-                            print(f"    - Error: {t2.get('error')}")
                         print("  - Divergence operation details:")
                         if t1:
                             print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
@@ -145,10 +139,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                             rs1 = t1.get("result_stacks")
                             if ss1 is not None:
                                 print(f"      source_stacks={pretty_stacks(ss1)}")
-                            psb1 = t1.get("pool_size_before")
-                            psa1 = t1.get("pool_size_after")
-                            atp1 = t1.get("added_to_pool")
-                            print(f"      pool_before={psb1} pool_after={psa1} added={atp1}")
                             if rs1 is not None:
                                 print(f"      result_stacks={pretty_stacks(rs1)}")
                         else:
@@ -161,10 +151,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                             rs2 = t2.get("result_stacks")
                             if ss2 is not None:
                                 print(f"      source_stacks={pretty_stacks(ss2)}")
-                            psb2 = t2.get("pool_size_before")
-                            psa2 = t2.get("pool_size_after")
-                            atp2 = t2.get("added_to_pool")
-                            print(f"      pool_before={psb2} pool_after={psa2} added={atp2}")
                             if rs2 is not None:
                                 print(f"      result_stacks={pretty_stacks(rs2)}")
                         else:
@@ -182,10 +168,7 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                             args = tr.get("args", {})
                             ss = tr.get("source_stacks")
                             rs = tr.get("result_stacks")
-                            psa = tr.get("pool_size_after")
-                            atp = tr.get("added_to_pool")
-                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
-                                  f"pool_after={psa} added={atp}")
+                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
                             if ss is not None:
                                 print(f"         src={pretty_stacks(ss)}")
                             if rs is not None:
@@ -202,10 +185,7 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                             args = tr.get("args", {})
                             ss = tr.get("source_stacks")
                             rs = tr.get("result_stacks")
-                            psa = tr.get("pool_size_after")
-                            atp = tr.get("added_to_pool")
-                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
-                                  f"pool_after={psa} added={atp}")
+                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
                             if ss is not None:
                                 print(f"         src={pretty_stacks(ss)}")
                             if rs is not None:

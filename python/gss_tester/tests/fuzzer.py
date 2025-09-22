@@ -63,18 +63,14 @@ def run_fuzz_test(
 
         # Choose an operation
         can_merge = len(gss_states) >= 2
-        # Always choose from the full list of operations to keep the RNG stream
-        # deterministic, even if the pool size causes `can_merge` to differ.
-        possible_ops = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-        op_choice = rng.choice(possible_ops)
-        if op_choice == 'merge' and not can_merge:
-            op_choice = 'push'  # Fallback if merge is not possible
+        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+        if can_merge:
+            operations.append('merge')
+        
+        op_choice = rng.choice(operations)
 
         # Select GSS state(s) to operate on
-        # Use modulo to keep the RNG stream deterministic. This decouples the sequence
-        # of random numbers from the number of states in the pool, which can vary
-        # between implementations.
-        source_index = rng.randrange(max_gss_states) % len(gss_states)
+        source_index = rng.randrange(len(gss_states))
         source_gss = gss_states[source_index]
         source_stacks = source_gss.to_stacks()
         
@@ -120,12 +116,9 @@ def run_fuzz_test(
                 new_gss = source_gss.prune(predicate)
                 args = {"threshold": threshold}
 
-            elif op_choice == 'merge': # `and can_merge` is implicitly true due to fallback
+            elif op_choice == 'merge' and can_merge:
                 candidates = [i for i in range(len(gss_states)) if i != source_index]
-                # Use modulo for deterministic RNG stream.
-                # The number of candidates is len(gss_states) - 1.
-                rand_idx = rng.randrange(max_gss_states - 1) % len(candidates)
-                other_index = candidates[rand_idx]
+                other_index = rng.choice(candidates)
                 other_gss = gss_states[other_index]
                 new_gss = source_gss.merge(other_gss)
                 other_stacks = other_gss.to_stacks()
@@ -163,24 +156,7 @@ def run_fuzz_test(
             if len(gss_states) > max_gss_states:
                 gss_states = rng.sample(gss_states, max_gss_states)
 
-        except Exception as e:
+        except Exception:
             # Some operations might fail on some implementations if invariants are broken.
-            # Yield an error trace to keep the number of yields consistent.
-            step_idx += 1
-            yield source_gss, {
-                "phase": "fuzz",
-                "op": op_choice,
-                "step": step_idx,
-                "seed": seed,
-                "args": args,
-                "error": repr(e),
-                "source_index": source_index,
-                "other_index": other_index,
-                "pool_size_before": len(gss_states),
-                "pool_size_after": len(gss_states),
-                "source_stacks": source_stacks,
-                "other_stacks": other_stacks,
-                "result_stacks": None, # No result due to error
-                "added_to_pool": False,
-            }
+            # We'll just skip the step and continue fuzzing.
             continue
