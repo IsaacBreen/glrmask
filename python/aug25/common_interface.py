@@ -63,6 +63,18 @@ class RangeSet:
         return [list(interval) for interval in self.intervals]
 
     @staticmethod
+    def from_indices(indices: Iterable[int]) -> 'RangeSet':
+        """Creates a RangeSet from an iterable of individual indices."""
+        return RangeSet((i, i) for i in indices)
+
+    def to_indices(self) -> List[int]:
+        """Converts the RangeSet to a list of individual indices."""
+        result = []
+        for start, end in self.intervals:
+            result.extend(range(start, end + 1))
+        return result
+
+    @staticmethod
     def from_numpy(bv) -> 'RangeSet':
         """Creates a RangeSet from a numpy array of booleans."""
         intervals = []
