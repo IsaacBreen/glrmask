@@ -1,5 +1,6 @@
 import random
-from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
+import json
+from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional, Set
 
 from ..interface import GSS, MergeableInt
 
@@ -19,6 +20,10 @@ def run_fuzz_test(
     if value_pool is None:
         value_pool = list(range(20)) + ['a', 'b', 'c']
 
+    def _state_sig(stacks: List[Any]) -> str:
+        # Canonical fingerprint of a GSS state, independent of object identity
+        return json.dumps(stacks, sort_keys=True, ensure_ascii=False)
+
     rng = random.Random(seed)
     gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
     step_idx = 0
@@ -37,6 +42,11 @@ def run_fuzz_test(
         "result_stacks": gss_states[0].to_stacks(),
         "added_to_pool": False,
     }
+
+    # Track pool membership by structural signature so identity-only changes
+    # don’t perturb RNG/control flow.
+    pool_sigs: Set[str] = set()
+    pool_sigs.add(_state_sig(gss_states[0].to_stacks()))
 
     for _ in range(num_steps):
         if not gss_states:
@@ -58,6 +68,8 @@ def run_fuzz_test(
                 "result_stacks": gss_states[0].to_stacks(),
                 "added_to_pool": False,
             }
+            # Reset pool signatures on restart
+            pool_sigs = {_state_sig(gss_states[0].to_stacks())}
             if len(gss_states) >= max_gss_states:
                 continue
 
@@ -130,11 +142,14 @@ def run_fuzz_test(
             pool_size_before = len(gss_states)
             step_idx += 1
             result_stacks = new_gss.to_stacks()
+            new_sig = _state_sig(result_stacks)
             # Add the new state to our pool, but avoid adding empty or duplicate states
             added_to_pool = False
-            if new_gss is not source_gss and not new_gss.is_empty():
-                gss_states.append(new_gss)
-                added_to_pool = True
+            if not new_gss.is_empty():
+                if new_sig not in pool_sigs:
+                    gss_states.append(new_gss)
+                    pool_sigs.add(new_sig)
+                    added_to_pool = True
 
             yield new_gss, {
                 "phase": "fuzz",
@@ -155,6 +170,8 @@ def run_fuzz_test(
             # Prune the list of GSS states to keep it manageable
             if len(gss_states) > max_gss_states:
                 gss_states = rng.sample(gss_states, max_gss_states)
+                # Rebuild the signature set to match the pruned pool
+                pool_sigs = {_state_sig(s.to_stacks()) for s in gss_states}
 
         except Exception:
             # Some operations might fail on some implementations if invariants are broken.
