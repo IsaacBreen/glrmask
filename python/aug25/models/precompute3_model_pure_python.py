@@ -507,7 +507,9 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.nodes_processed')
                     node: int = current_nodes.pop()
                     visited_nodes.add(node)
-                    gss_node: GSS = values.pop(node)
+                    gss_node: GSS = values.pop(node, None)
+                    if gss_node is None:
+                        continue
                     stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
                     # stats.inc('get_mask.gss.at_node.stacks.sum', len(gss_node))
 
