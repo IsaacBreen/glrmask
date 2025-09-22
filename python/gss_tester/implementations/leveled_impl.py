@@ -437,7 +437,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
         all_children = list(upper_branch._all_children())
         merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-        merged = try_promote(merged)
+        # Promote the result if it's an UpperBranch to maintain canonical form.
+        merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
         return LeveledGSS(merged)
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
         # Fast path: popn(0) is a no-op. Preserve identity to match the default

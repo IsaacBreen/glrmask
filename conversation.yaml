@@ -3911,7 +3911,8 @@ local_system:
               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
               all_children = list(upper_branch._all_children())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              # Promote the result if it's an UpperBranch to maintain canonical form.
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
           def popn(self, n: int) -> LeveledGSS[T, Acc]:
               # Fast path: popn(0) is a no-op. Preserve identity to match the default
@@ -7673,5 +7674,269 @@ messages:
     metadata:
   - user: 'Changes committed with message: "fuzz: Make operation selection stateless
       and independent of pool size"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
+      Test results will be saved in: gss_test_results/2025-09-22_12-25-39
+      ---
+      Reference Implementation: gss_tester/implementations/reference_impl.py
+      Other Implementations: gss_tester/implementations/leveled_impl.py
+      ---
+      Starting test runs...
+
+      >>> Running test spec for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
+      Running test specification...
+      Successfully ran 151 checks.
+      Results saved to gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
+
+      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
+      Running test specification...
+      Successfully ran 148 checks.
+      Results saved to gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
+
+      All test runs completed.
+      ---
+      Analyzing results for consistency...
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-25-39/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      --- Consistency Analysis ---
+      Found 2 equivalence class(es) among 2 implementations.
+
+      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+
+      Class 1 (1 implementation(s)) [Ref Match: ❌]
+      --------------------------------------------
+        - gss_tester.implementations.leveled_impl.LeveledGSS
+
+      Class 2 (1 implementation(s)) [Ref Match: ✅]
+      --------------------------------------------
+        - gss_tester.implementations.reference_impl.ReferenceGSS
+
+
+      --- Divergence Report ---
+
+      Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
+        - First divergence at yield index 80:
+          - gss_tester.implementations.leveled_impl.LeveledGSS (L258): [[[6], 24]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS (L258): [[["a"], 9], [[1, "a"], 0], [[6, "a"], 1]]
+        - Divergence operation details:
+          - gss_tester.implementations.leveled_impl.LeveledGSS: op=apply step=30 seed=42
+            args={"amount": 4}
+            source_stacks=[[[6], 20]]
+            result_stacks=[[[6], 24]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS: op=push step=30 seed=42
+            args={"value": "a"}
+            source_stacks=[[[1], 0], [[6], 1], [[], 9]]
+            result_stacks=[[["a"], 9], [[1, "a"], 0], [[6, "a"], 1]]
+        - Trace context for gss_tester.implementations.leveled_impl.LeveledGSS (seed=42, last 10 op(s)):
+          [71] step=21 op=merge args={"other_index": 7}
+               src=[[[12, 2], 0]]
+               res=[[[12, 2], 0], [[6], 0]]
+          [72] step=22 op=apply args={"amount": 9}
+               src=[[[6], 11]]
+               res=[[[6], 20]]
+          [73] step=23 op=merge args={"other_index": 4}
+               src=[[[], 9]]
+               res=[[[1], 0], [[6], 1], [[], 9]]
+          [74] step=24 op=isolate args={"value": null}
+               src=[[[12], 0]]
+               res=[]
+          [75] step=25 op=pop args={}
+               src=[[[1], 0], [[6], 1]]
+               res=[[[], 1]]
+          [76] step=26 op=push args={"value": 3}
+               src=[[[1], 0]]
+               res=[[[1, 3], 0]]
+          [77] step=27 op=apply args={"amount": 2}
+               src=[[[1], 0], [[6], 1], [[], 9]]
+               res=[[[1], 2], [[6], 3], [[], 11]]
+          [78] step=28 op=prune args={"threshold": 16}
+               src=[[[1], 0], [[6], 1], [[], 9]]
+               res=[]
+          [79] step=29 op=merge args={"other_index": 9}
+               src=[[[6], 0]]
+               res=[[[6], 20]]
+          [80] step=30 op=apply args={"amount": 4}
+               src=[[[6], 20]]
+               res=[[[6], 24]]
+        - Trace context for gss_tester.implementations.reference_impl.ReferenceGSS (seed=42, last 10 op(s)):
+          [71] step=21 op=merge args={"other_index": 7}
+               src=[[[12, 2], 0]]
+               res=[[[12, 2], 0], [[6], 0]]
+          [72] step=22 op=apply args={"amount": 9}
+               src=[[[6], 11]]
+               res=[[[6], 20]]
+          [73] step=23 op=merge args={"other_index": 4}
+               src=[[[], 9]]
+               res=[[[1], 0], [[6], 1], [[], 9]]
+          [74] step=24 op=isolate args={"value": null}
+               src=[[[12], 0]]
+               res=[]
+          [75] step=25 op=pop args={}
+               src=[[[1], 0], [[6], 1]]
+               res=[[[], 1]]
+          [76] step=26 op=push args={"value": 3}
+               src=[[[1], 0]]
+               res=[[[1, 3], 0]]
+          [77] step=27 op=apply args={"amount": 2}
+               src=[[[1], 0], [[6], 1], [[], 9]]
+               res=[[[1], 2], [[6], 3], [[], 11]]
+          [78] step=28 op=prune args={"threshold": 16}
+               src=[[[1], 0], [[6], 1], [[], 9]]
+               res=[]
+          [79] step=29 op=merge args={"other_index": 9}
+               src=[[[6], 0]]
+               res=[[[6], 20]]
+          [80] step=30 op=push args={"value": "a"}
+               src=[[[1], 0], [[6], 1], [[], 9]]
+               res=[[["a"], 9], [[1, "a"], 0], [[6, "a"], 1]]
+
+      ---
+      Consistency analysis complete.
+      Reference: gss_tester/implementations/reference_impl.py
+      Summary printed above.
+      Full JSON results are in: gss_test_results/2025-09-22_12-25-39
+    metadata:
+  - user: ??
+    metadata:
+  - assistant: |-
+      You've hit on another subtle and important part of how this fuzzer works. The new failure is happening for a fascinating reason.
+
+      You are correct that we made the *choice of operation* (`'push'`, `'merge'`, etc.) independent of the state pool. However, the test execution can still diverge if one implementation fails in a way the other doesn't.
+
+      Here's the key clue in the test output:
+
+      *   `ReferenceGSS`: `Successfully ran 151 checks.`
+      *   `LeveledGSS`: `Successfully ran 148 checks.`
+
+      `LeveledGSS` is completing fewer steps. This is the smoking gun. It means that for 3 of the fuzz operations, the `LeveledGSS` implementation threw an exception.
+
+      If you look in `fuzzer.py`, you'll see this block at the end of the loop:
+
+      ```python
+              except Exception:
+                  # Some operations might fail...
+                  # We'll just skip the step and continue fuzzing.
+                  continue
+      ```
+
+      This code catches any error, skips the `yield` for that step, and continues to the next loop iteration. When an exception happens:
+
+      1.  No state is yielded for that step (hence the lower check count).
+      2.  The number of random numbers consumed in that step is different from a successful step.
+      3.  This desynchronizes the `random` generator's state between the two implementations.
+      4.  From that point forward, `rng.choice()` will produce a different sequence of operations, causing the divergence you see at step 30.
+
+      **The Underlying Bug**
+
+      The hidden exception is caused by a latent bug in `LeveledGSS.pop`. It unconditionally calls `try_promote(merged)`, but `try_promote` expects its argument to be an `UpperBranch`. Under certain conditions, the `reduce` operation can result in `merged` being an `Interface`, causing a type error.
+
+      Your `popn` implementation already has the correct, safer logic. We just need to apply that same fix to `pop`.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `python/gss_tester/implementations/leveled_impl.py`.
+      2.  **Navigate to the `pop` method** inside the `LeveledGSS` class.
+      3.  **Find this line:**
+          ```python
+              merged = try_promote(merged)
+          ```
+      4.  **Replace it** with the safer version that checks the type before calling, just like in `popn`:
+          ```python
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
+          ```
+
+      This prevents the hidden exception, ensures both implementations complete the same number of steps, and keeps the random number generator synchronized, which will make the tests pass.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 684877e..555f937 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -525,7 +525,8 @@
+               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
+               all_children = list(upper_branch._all_children())
+               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+      -        merged = try_promote(merged)
+      +        # Promote the result if it's an UpperBranch to maintain canonical form.
+      +        merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
+               return LeveledGSS(merged)
+           def popn(self, n: int) -> LeveledGSS[T, Acc]:
+               # Fast path: popn(0) is a no-op. Preserve identity to match the default
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "fix: Add type check to LeveledGSS.pop
+      before try_promote"'
     metadata:
 ...
