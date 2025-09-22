@@ -1196,6 +1196,8 @@ def _merge_optional_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
         return a
     return a.merge(b)
 
+def _merge_acc(a: Acc, b: Acc) -> Acc:
+    return a if a is b else a.merge(b)
 
 def _merge_children_by_depth(
     c1: Dict[T, Dict[int, Node]],
@@ -1296,14 +1298,11 @@ def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper
     return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
 def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
-    if a.acc == b.acc:
-        new_empty = _merge_optional_acc(a.empty, b.empty)
+    if a.acc == b.acc or a.children is b.children:
         merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
-        return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-    if a.children is b.children:
-        new_acc = a.acc.merge(b.acc)
+        new_acc = _merge_acc(a.acc, b.acc)
         new_empty = _merge_optional_acc(a.empty, b.empty)
-        return Interface(children=a.children, acc=new_acc, empty=new_empty)
+        return Interface(children=merged_children, acc=new_acc, empty=new_empty)
     return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
 def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
