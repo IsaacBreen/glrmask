@@ -1253,8 +1253,6 @@ local_system:
           # Fast paths
           if l1 is l2:
               return l1
-          if l1 == l2:
-              return l1
 
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
@@ -2469,12 +2467,8 @@ local_system:
           for v, kids in it.children.items():
               v_map: Dict[int, Upper[T, Acc]] = {}
               for lchild in kids.values():
-                  ci = Interface(
-                      children=lchild.children,
-                      acc=it.acc,
-                      empty=(it.acc if lchild.empty else None),
-                  )
-                  v_map[ci._max_depth] = ci
+                  upper_child = lower_to_upper(lchild, it.acc)
+                  v_map[upper_child._max_depth] = upper_child
               if v_map:
                   children[v] = v_map
           new_empty = it.empty
@@ -3839,8 +3833,6 @@ messages:
           # Fast paths
           if l1 is l2:
               return l1
-          if l1 == l2:
-              return l1
 
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
@@ -3866,16 +3858,9 @@ messages:
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
-      We have some fast paths like this
-      ```python
-      def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
-          # Fast paths
-          if l1 is l2:
-              return l1
-          if l1 == l2:
-              return l1
-      ```
-      `is` checking is good, but equality checking checks the whole subtree, which is really expensive. Don't do that.
+      When `merge` is run between two leveled GSSs, I'm getting:
+      - an unexpectedly high number of acc merges, despite the two GSSs not having that many accs in them (often they're have an interface at the very top level)
+      - an unexpectedly high number of lower nodes - actually, an exponential blowup.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3894,54 +3879,66 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The deep equality check `l1 == l2` can be very slow as it recursively compares the entire subtree. Removing it is a good optimization, relying on the `is` check for the most common case of identical subtrees.
+      Hello! I see you're running into some performance issues with `merge`, specifically an exponential blowup in nodes and an excessive number of accumulator merges. This is a classic sign of losing structural sharing during a recursive operation.
 
-      Here are the step-by-step instructions to make the change:
+      You've correctly identified that this happens when merging GSSs that have an `Interface` at the top level. The root cause is in how two `Interface` nodes with different accumulators are merged. The current logic deconstructs both `Interface` nodes into `UpperBranch` nodes and then merges those. However, the deconstruction process itself is flawed: it creates new `Interface` nodes for every child path, which, when merged, triggers the same expensive deconstruction recursively.
+
+      The fix is to change this deconstruction logic to correctly and efficiently convert the `Lower` tree of an `Interface` into an `Upper` tree without this problematic recursion. Here are the steps to apply the fix:
 
       ### Step-by-step Instructions
 
-      1.  **Open the file**: `python/gss_tester/implementations/leveled_impl.py`
-      2.  **Locate the `merge_lower` function**: This function is near the end of the file.
-      3.  **Remove the equality check**: In the `merge_lower` function, delete the following two lines:
-          ```python
-          if l1 == l2:
-              return l1
-          ```
+      1.  **Open the file** `python/gss_tester/implementations/leveled_impl.py`.
 
-      The function should now look like this:
-      ```python
-      def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
-          # Fast paths
-          if l1 is l2:
-              return l1
+      2.  **Navigate to the `interface_to_upperbranch` function.** This function is responsible for converting an `Interface` node into an `UpperBranch` node, which is the source of the inefficiency.
 
-          # Merge 'empty' flags (logical OR)
-          new_empty = l1.empty or l2.empty
+      3.  **Replace the logic for creating child nodes.** Inside the nested loop `for lchild in kids.values():`, the current code creates new `Interface` nodes. This is what we need to change.
 
-          merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
-          return Lower(children=merged_children, empty=new_empty)
-      ```
+          -   **Delete** the following lines inside the loop:
+              ```python
+                          ci = Interface(
+                              children=lchild.children,
+                              acc=it.acc,
+                              empty=(it.acc if lchild.empty else None),
+                          )
+                          v_map[ci._max_depth] = ci
+              ```
+
+          -   **Insert** these lines in their place, which use the `lower_to_upper` helper function to perform an efficient conversion:
+              ```python
+                          upper_child = lower_to_upper(lchild, it.acc)
+                          v_map[upper_child._max_depth] = upper_child
+              ```
+
+      This change ensures that when an `Interface` is deconstructed, its `Lower` subtree is converted into a proper `Upper` subtree, breaking the recursive cycle that was causing the exponential blowup and excessive merges.
 
       ### Git Diff
 
-      Here is the git diff for the change:
+      Here is the corresponding git diff to apply the change directly:
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 45b85a1..621532f 100644
+      index 455427d..3b81182 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -1218,8 +1218,6 @@
-           # Fast paths
-           if l1 is l2:
-               return l1
-      -    if l1 == l2:
-      -        return l1
-       
-           # Merge 'empty' flags (logical OR)
-           new_empty = l1.empty or l2.empty
+      @@ -1242,13 +1242,8 @@
+           for v, kids in it.children.items():
+               v_map: Dict[int, Upper[T, Acc]] = {}
+               for lchild in kids.values():
+      -            ci = Interface(
+      -                children=lchild.children,
+      -                acc=it.acc,
+      -                empty=(it.acc if lchild.empty else None),
+      -            )
+      -            v_map[ci._max_depth] = ci
+      +            upper_child = lower_to_upper(lchild, it.acc)
+      +            v_map[upper_child._max_depth] = upper_child
+               if v_map:
+                   children[v] = v_map
+           new_empty = it.empty
 
       ```
+
+      After applying this patch, your `merge` operations should be significantly more performant and should no longer cause an exponential increase in node count. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -3952,7 +3949,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Optimize merge_lower by removing expensive
-      equality check"'
+  - user: 'Changes committed with message: "Fix: Optimize interface_to_upperbranch
+      to prevent exponential node blowup during GSS merge"'
     metadata:
 ...

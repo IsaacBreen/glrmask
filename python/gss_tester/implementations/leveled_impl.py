@@ -1190,12 +1190,8 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
     for v, kids in it.children.items():
         v_map: Dict[int, Upper[T, Acc]] = {}
         for lchild in kids.values():
-            ci = Interface(
-                children=lchild.children,
-                acc=it.acc,
-                empty=(it.acc if lchild.empty else None),
-            )
-            v_map[ci._max_depth] = ci
+            upper_child = lower_to_upper(lchild, it.acc)
+            v_map[upper_child._max_depth] = upper_child
         if v_map:
             children[v] = v_map
     new_empty = it.empty
