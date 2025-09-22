@@ -235,7 +235,29 @@ class Model(GraphProvider):
                         d: int = int(dest_idx)
                         if d in values:
                             call_stats['main_loop_merge_calls'] += 1
-                            values[d] = values[d].merge(child_gss)
+
+                            # --- GSS Merge Stats Logging ---
+                            existing_gss = values[d]
+                            new_gss = child_gss
+                            merged_gss = existing_gss.merge(new_gss)
+
+                            stats_existing = existing_gss.stats()
+                            stats_new = new_gss.stats()
+                            stats_merged = merged_gss.stats()
+
+                            def print_merge_stats(label, stats):
+                                print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                      f"unique_accs={stats.unique_accumulators_count} "
+                                      f"total_acc_instances={stats.total_accumulator_instances} "
+                                      f"interfaces={stats.num_interface_nodes} "
+                                      f"upper={stats.num_upperbranch_nodes} "
+                                      f"lower={stats.num_lower_nodes}")
+
+                            print_merge_stats("existing", stats_existing)
+                            print_merge_stats("new", stats_new)
+                            print_merge_stats("merged", stats_merged)
+
+                            values[d] = merged_gss
                         else:
                             values[d] = child_gss
                         enqueue(max_depth[d], d)

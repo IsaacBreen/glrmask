@@ -59,12 +59,33 @@ def parse_log_data(log_content):
         # --- Extract Commit Times ---
         data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
 
+        # --- Extract Merge Stats ---
+        data['merge_stats'] = []
+        merge_stats_matches = re.findall(
+            r"MERGE_STATS: type=(\w+) step=(\d+) unique_accs=(\d+) "
+            r"total_acc_instances=(\d+) interfaces=(\d+) upper=(\d+) lower=(\d+)",
+            python_model_log
+        )
+        for match in merge_stats_matches:
+            data['merge_stats'].append({
+                'type': match[0],
+                'step': int(match[1]),
+                'unique_accs': int(match[2]),
+                'total_acc_instances': int(match[3]),
+                'interfaces': int(match[4]),
+                'upper': int(match[5]),
+                'lower': int(match[6]),
+            })
+
         # --- Final Check and Data Validation ---
         num_steps = len(data['get_mask_total_time'])
         if num_steps == 0:
             print("Error: No profiling steps found for the Python model.", file=sys.stderr)
             return None
         data['steps'] = list(range(1, num_steps + 1))
+
+        if not data.get('merge_stats'):
+            print("Warning: No MERGE_STATS found in log. Merge plots will be empty.", file=sys.stderr)
 
         # Handle optional metrics that might not be in older logs
         if len(data['acc_merge_calls']) == 0 and num_steps > 0:
@@ -193,6 +214,55 @@ def generate_plots(data):
     ax2.legend(lines + lines2, labels + labels2, loc='upper left'); plt.grid(True, which="both", ls="--", alpha=0.6)
     plt.savefig(os.path.join(plot_dir, "efficiency_and_sharing.png"))
     plt.close()
+
+    # Plot 10: Merge Stats Distributions
+    if data.get('merge_stats'):
+        merge_stats = data['merge_stats']
+
+        def create_merge_scatter_plot(stat_key, title, y_label, use_log_scale=True):
+            plt.figure(figsize=(14, 8))
+
+            # Group data by type for easier plotting
+            data_by_type = {'existing': [], 'new': [], 'merged': []}
+            for item in merge_stats:
+                data_by_type[item['type']].append((item['step'], item[stat_key]))
+
+            colors = {'existing': 'blue', 'new': 'green', 'merged': 'red'}
+            markers = {'existing': 'o', 'new': 'x', 'merged': 's'}
+
+            for type_name, points in data_by_type.items():
+                if not points:
+                    continue
+                point_steps, values = zip(*points)
+                # Add small jitter to x-axis to see overlapping points
+                jitter = np.random.normal(0, 0.05, size=len(point_steps))
+                plt.scatter(np.array(point_steps) + jitter, values,
+                            c=colors[type_name],
+                            marker=markers[type_name],
+                            alpha=0.6,
+                            label=f'{type_name.capitalize()} GSS')
+
+            plt.xlabel('Benchmark Step')
+            plt.ylabel(y_label)
+            plt.title(title)
+            plt.xticks(steps)
+            plt.grid(True, which="both", ls="--")
+            if use_log_scale:
+                plt.yscale('log')
+                ax = plt.gca()
+                # Set a bottom limit to handle zero values gracefully
+                ax.set_ylim(bottom=0.5)
+
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, f"merge_dist_{stat_key}.png"))
+            plt.close()
+
+        create_merge_scatter_plot('unique_accs', 'Distribution of Unique Accumulators in Merges', 'Unique Accumulators (Log Scale)')
+        create_merge_scatter_plot('total_acc_instances', 'Distribution of Total Accumulator Instances in Merges', 'Total Accumulator Instances (Log Scale)')
+        create_merge_scatter_plot('interfaces', 'Distribution of Interface Nodes in Merges', 'Interface Nodes (Log Scale)')
+        create_merge_scatter_plot('upper', 'Distribution of UpperBranch Nodes in Merges', 'UpperBranch Nodes (Log Scale)')
+        create_merge_scatter_plot('lower', 'Distribution of Lower Nodes in Merges', 'Lower Nodes (Log Scale)')
 
     print("All plots generated successfully.", file=sys.stderr)
 

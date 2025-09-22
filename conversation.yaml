@@ -1,457 +1,491 @@
 local_system:
   attached_files:
-    - python/gss_tester/tests/test_spec.py
-    - python/gss_tester/__init__.py
-    - python/gss_tester/interface.py
+    - python/aug25/create_additional_benchmark_plots.py
+    - python/aug25/models/precompute3_model_pure_python_get_mask_only.py
     - python/gss_tester/implementations/leveled_impl.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
-    python/gss_tester/tests/test_spec.py: |
-      import inspect
-      from typing import Generator, Tuple, Any, Type
-      from ..interface import GSS, MergeableInt
-      from .fuzzer import run_fuzz_test
+    python/aug25/create_additional_benchmark_plots.py: |-
+      #!/usr/bin/env python
+      """
+      ```bash
+      DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee .temp && python python/aug25/create_additional_benchmark_plots.py < .temp
+      ```
+      """
+      import sys
+      import re
+      import os
+      import matplotlib.pyplot as plt
+      import numpy as np
+      from sklearn.linear_model import LinearRegression
 
-      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-          """
-          A generator that defines a sequence of GSS operations and yields states at
-          various points for consistency checking.
+      def parse_log_data(log_content):
+          """Parses the benchmark log content to extract all necessary data."""
+          data = {}
+          try:
+              # Find the main output directory for the benchmark run
+              output_dir_match = re.search(r"Benchmark results will be saved in: (benchmark_results/\S+)", log_content)
+              if not output_dir_match:
+                  print("Error: Could not find the benchmark output directory in the log.", file=sys.stderr)
+                  return None
+              data['output_dir'] = output_dir_match.group(1)
 
-          Yields:
-              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-          """
-          
-          # For this test, the accumulator is an integer and stack items are integers.
-          acc_factory = lambda: MergeableInt(0)
+              # Isolate the detailed log for the Python model
+              python_model_log = re.search(r">>> Running benchmark for: precompute3_model_pure_python_get_mask_only\.py(.*?)>>> Finished benchmark for:", log_content, re.DOTALL).group(1)
 
-          def _yield_state(gss_state: GSS):
-              """Helper to yield the state and the caller's line number."""
-              caller_frame = inspect.currentframe().f_back
-              line_no = caller_frame.f_lineno
-              yield (gss_state.to_stacks(), line_no)
+              # --- Extract GSS Stats ---
+              initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=Stats after seeding:)", python_model_log, re.DOTALL)
 
-          # --- Test 1: Basic push/pop/construction ---
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              data['total_stacks'] = [int(m) for m in re.findall(r"- stacks: total=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_upper_branch_nodes'] = [int(m) for m in re.findall(r"nodes: UpperBranch=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_interface_nodes'] = [int(m) for m in re.findall(r"Interface=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_lower_nodes'] = [int(m) for m in re.findall(r"Lower=(\d+)", "\n".join(initial_stats_blocks))]
+              data['total_accumulator_instances'] = [int(m) for m in re.findall(r"total_accumulator_instances=(\d+)", "\n".join(initial_stats_blocks))]
+              data['unique_accumulators'] = [int(m) for m in re.findall(r"unique_accumulators_count=(\d+)", "\n".join(initial_stats_blocks))]
+              data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
 
-          gss1 = gss1.push(10)
-          yield from _yield_state(gss1)
+              # --- Extract get_mask() Profiling Stats ---
+              profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+              profiling_text = "\n".join(profiling_blocks)
 
-          gss1 = gss1.push(20)
-          yield from _yield_state(gss1)
+              data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
+              data['init_time'] = [float(m) for m in re.findall(r"Initialization time:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_time'] = [float(m) for m in re.findall(r"Main loop time:\s+([\d.]+) ms", profiling_text)]
+              data['final_conversion_time'] = [float(m) for m in re.findall(r"Final conversion:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_apply_calls'] = [int(m) for m in re.findall(r"Main loop GSS.apply calls: (\d+)", profiling_text)]
+              data['main_loop_intersection_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.intersection calls: (\d+)", profiling_text)]
+              data['main_loop_union_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.union calls: (\d+)", profiling_text)]
+              data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
-          gss_popped_20 = gss1.isolate(20).pop()
-          yield from _yield_state(gss_popped_20)
+              # --- Extract Detailed Bitset Operation Counts ---
+              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
+              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
+              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
+              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
+              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
 
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-          yield from _yield_state(gss_popped_10)
+              # --- Extract Commit Times ---
+              data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
 
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              # --- Final Check and Data Validation ---
+              num_steps = len(data['get_mask_total_time'])
+              if num_steps == 0:
+                  print("Error: No profiling steps found for the Python model.", file=sys.stderr)
+                  return None
+              data['steps'] = list(range(1, num_steps + 1))
 
-          gss1 = gss_class.from_stacks([([10], acc_factory())])
-          yield from _yield_state(gss1)
+              # Handle optional metrics that might not be in older logs
+              if len(data['acc_merge_calls']) == 0 and num_steps > 0:
+                  print("Info: 'acc_merge calls' not found in log. Assuming zero for all steps.", file=sys.stderr)
+                  data['acc_merge_calls'] = [0] * num_steps
 
-          # --- Test 2: Forking and Merging ---
-          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
-          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
-          
-          merged1 = gss_a.merge(gss_b)
-          yield from _yield_state(merged1)
-          
-          # Merge a stack that already exists to test accumulator merging
-          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-          merged2 = merged1.merge(gss_c)
-          yield from _yield_state(merged2)
+              print(f"Successfully parsed {num_steps} steps.", file=sys.stderr)
+              return data
 
-          # --- Test 3: Apply accumulator function ---
-          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
-          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
-          yield from _yield_state(gss_to_apply)
+          except Exception as e:
+              print(f"An error occurred during parsing: {e}", file=sys.stderr)
+              return None
 
-          # --- Test 4: Pop with no match ---
-          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-          yield from _yield_state(gss_after_failed_pop)
+      def generate_plots(data):
+          """Generates and saves all the plots."""
+          plot_dir = os.path.join(data['output_dir'], "custom_plots")
+          os.makedirs(plot_dir, exist_ok=True)
+          print(f"Saving custom plots to: {plot_dir}", file=sys.stderr)
 
-          # --- Test 5: Complex sequence (diamond pattern) ---
-          s0 = gss_class.from_stacks([([], acc_factory())])
-          s1 = s0.push(1)
-          s2 = s1.push(2)
-          s3 = s1.push(3)
-          s4 = s2.merge(s3)
-          yield from _yield_state(s4)
-          
-          s5 = s4.push(4)
-          yield from _yield_state(s5)
-          
-          s6 = s5.isolate(4).pop()
-          yield from _yield_state(s6) # should be same as s4
-          
-          s7 = s6.isolate(2).pop()
-          s8 = s6.isolate(3).pop()
-          yield from _yield_state(s7)
-          yield from _yield_state(s8)
-          
-          s9 = s7.merge(s8)
-          yield from _yield_state(s9) # should be same as s1
-          
-          # --- Test 6: Merging empty GSS ---
-          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
-          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-          yield from _yield_state(gss_empty)
-          
-          merged_with_empty = gss_d.merge(gss_empty)
-          yield from _yield_state(merged_with_empty) # should be same as gss_d
+          steps = data['steps']
 
-          # --- Test 7: Pruning ---
-          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
-          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
-          gss_to_prune = gss_e.merge(gss_f)
-          yield from _yield_state(gss_to_prune)
+          # Plot 1: GSS Node and Accumulator Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['initial_interface_nodes'], 'o-', label='Interface Nodes')
+          plt.plot(steps, data['initial_lower_nodes'], 'x-', label='Lower Nodes')
+          plt.plot(steps, data['total_accumulator_instances'], 's-', label='Total Accumulator Instances')
+          plt.plot(steps, data['unique_accumulators'], '^-', label='Unique Accumulators')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('GSS Node and Accumulator Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_node_counts.png"))
+          plt.close()
 
-          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
-          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+          # Plot 2: UpperBranch Node Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, np.array(data['initial_upper_branch_nodes']) + 0.1, 'o-', label='UpperBranch Nodes')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count (0 plotted as 0.1)'); plt.title('UpperBranch Node Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.yticks([0.1, 1.1], ['0', '1']); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_upper_branch_counts.png"))
+          plt.close()
 
-          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+          # Plot 3: Main Loop Apply and Intersection Calls
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_apply_calls'], 'o-', label='Main Loop GSS.apply Calls')
+          plt.plot(steps, data['main_loop_intersection_calls'], 'x-', label='Main Loop Bitset.intersection Calls')
+          plt.plot(steps, data['bitset_intersection_calls'], 's--', alpha=0.7, label='Total bitset_intersection Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Apply & Intersection Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_apply_intersection.png"))
+          plt.close()
 
-          # --- Test 8: Pop operations on merged stacks ---
-          # Case 8a: Pop to a common parent, should result in one stack.
-          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
-          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
-          s_branch1 = s_base.push(101)
-          s_branch2 = s_base.push(102)
-          s_merged = s_branch1.merge(s_branch2)
-          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+          # Plot 4: Main Loop Union and Merge Calls (UPDATED)
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
+          plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
+          plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
+          plt.plot(steps, data['acc_merge_calls'], 'd-.', alpha=0.8, label='acc_merge Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Union & Merge Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_union_merge.png"))
+          plt.close()
 
-          s_popped = s_merged.pop()
-          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+          # Plot 5: New plot for other bitset operations
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['bitset_difference_calls'], 'o-', label='bitset_difference Calls')
+          plt.plot(steps, data['hybrid_complement_calls'], 'x-', label='hybrid_complement Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Bitset Difference and Hybrid Complement Calls')
+          plt.xticks(steps); plt.ylim(-0.1, 1); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "other_bitset_calls.png"))
+          plt.close()
 
-          # Case 8b: Push after a pop that should have merged.
-          # This further highlights the divergence from the duplicate stacks.
-          s_pushed_after_pop = s_popped.push(103)
-          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+          # Plot 6: Exponential Growth Plots
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['get_mask_total_time'], 'o-')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Exponential Growth in get_mask() Total Time (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_get_mask_time.png"))
+          plt.close()
 
-          # Case 8c: Pop to a common parent with different accumulators.
-          # This exposes a bug in FastGSS which loses accumulator information on pop.
-          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
-          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
-          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
-          s_merged2 = s_branch3.merge(s_branch4)
-          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['total_stacks'], 's-', color='green')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('Exponential Growth in Total GSS Stacks (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_total_stacks.png"))
+          plt.close()
 
-          s_popped2 = s_merged2.pop()
-          # Should have two stacks: [200] acc 7, and [200] acc 8
-          yield from _yield_state(s_popped2)
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['bitset_union_calls'], '^-', color='red')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Exponential Growth in bitset_union Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_bitset_unions.png"))
+          plt.close()
 
-          # --- Test 9: popn ---
-          # Case 9a: popn less than stack depth
-          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
-          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
-          gss_pn_merged = gss_pn1.merge(gss_pn2)
-          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+          # Plot 7: Time Decomposition
+          plt.figure(figsize=(12, 8))
+          plt.stackplot(steps, data['init_time'], data['main_loop_time'], data['final_conversion_time'],
+                        labels=['Initialization', 'Main Loop', 'Final Conversion'], colors=['#4c72b0', '#dd8452', '#55a868'])
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Decomposition of get_mask() Execution Time')
+          plt.legend(loc='upper left'); plt.xticks(steps); plt.grid(True, axis='y', linestyle='--', alpha=0.7); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "time_decomposition.png"))
+          plt.close()
 
-          gss_pn_pop2 = gss_pn_merged.popn(2)
-          yield from _yield_state(gss_pn_pop2) # has [1] and []
+          # Plot 8: Performance vs. Complexity
+          plt.figure(figsize=(10, 6))
+          total_stacks_np = np.array(data['total_stacks'])
+          get_mask_time_np = np.array(data['get_mask_total_time'])
+          plt.scatter(total_stacks_np, get_mask_time_np, label='Data Points')
+          log_x = np.log(total_stacks_np).reshape(-1, 1); log_y = np.log(get_mask_time_np)
+          model = LinearRegression().fit(log_x, log_y)
+          y_pred = np.exp(model.predict(log_x))
+          plt.plot(total_stacks_np, y_pred, color='red', linestyle='--', label=f'Trend Line (R²={model.score(log_x, log_y):.3f})')
+          plt.xlabel('Total Stacks in GSS'); plt.ylabel('get_mask() Total Time (ms)'); plt.title('Performance vs. GSS Complexity (Log-Log Scale)')
+          plt.xscale('log'); plt.yscale('log'); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "performance_vs_complexity.png"))
+          plt.close()
 
-          # Case 9b: popn more than stack depth
+          # Plot 9: Efficiency and Sharing
+          fig, ax1 = plt.subplots(figsize=(12, 8))
+          unions_per_stack = np.array(data['bitset_union_calls']) / total_stacks_np
+          ax1.plot(steps, unions_per_stack, 'o-', color='tab:blue', label='Bitset Unions per Stack')
+          ax1.set_xlabel('Benchmark Step'); ax1.set_ylabel('Bitset Union Calls per Stack', color='tab:blue'); ax1.tick_params(axis='y', labelcolor='tab:blue'); ax1.set_ylim(bottom=0)
+          ax2 = ax1.twinx()
+          ax2.plot(steps, data['structural_sharing_factor'], 's--', color='tab:green', label='Structural Sharing Factor')
+          ax2.set_ylabel('Structural Sharing Factor', color='tab:green'); ax2.tick_params(axis='y', labelcolor='tab:green'); ax2.set_ylim(bottom=0)
+          plt.title('Algorithmic Efficiency and GSS Sharing Factor'); plt.xticks(steps); fig.tight_layout()
+          lines, labels = ax1.get_legend_handles_labels(); lines2, labels2 = ax2.get_legend_handles_labels()
+          ax2.legend(lines + lines2, labels + labels2, loc='upper left'); plt.grid(True, which="both", ls="--", alpha=0.6)
+          plt.savefig(os.path.join(plot_dir, "efficiency_and_sharing.png"))
+          plt.close()
 
-          gss_pn_pop4 = gss_pn_merged.popn(4)
-          yield from _yield_state(gss_pn_pop4) # has []
+          print("All plots generated successfully.", file=sys.stderr)
 
-          # --- Test 10: Isolate empty stacks ---
-          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
-          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
-          gss_i_merged = gss_i1.merge(gss_i2)
-          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+      if __name__ == "__main__":
+          log_content = sys.stdin.read()
+          parsed_data = parse_log_data(log_content)
+          if parsed_data:
+              generate_plots(parsed_data)
+          else:
+              print("Failed to parse log data. No plots were generated.", file=sys.stderr)
+              sys.exit(1)
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      import _sep1 as ffi
+      import time
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
 
-          gss_isolated_empty = gss_i_merged.isolate(None)
-          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
 
-          gss_isolated_10 = gss_i_merged.isolate(10)
-          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
-
-          # --- Test 11: reduce_acc and peek ---
-          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
-          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
-          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
-          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
-          yield from _yield_state(gss_rp_merged)
-
-          # peek() should return {2, 3}
-          peek_result = gss_rp_merged.peek()
-          # reduce_acc() should be 3 + 4 + 5 = 12
-          reduce_result = gss_rp_merged.reduce_acc()
-          
-          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
-          # This is a bit of a hack, but it allows us to check for consistency.
-          # A GSS with a single empty stack and the peek result as the accumulator.
-          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
-          yield from _yield_state(gss_peek_check)
-
-          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
-          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
-          yield from _yield_state(gss_reduce_check)
-
-          # Test on empty GSS
-          gss_rp_empty = gss_class.from_stacks([])
-          yield from _yield_state(gss_rp_empty)
-          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
-          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
-          yield from _yield_state(gss_reduce_empty_check)
-
-
-          # --- Test 12: merge_many ---
-          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
-          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
-          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
-          
-          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
-          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
-          yield from _yield_state(gss_merged_many)
-
-          # --- Test 13: Pop from GSS containing an empty stack ---
-          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
-          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
-          gss_pe_merged = gss_pe1.merge(gss_pe2)
-          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
-
-          gss_pe_popped = gss_pe_merged.pop()
-          # pop should discard the empty stack and pop the non-empty one.
-          # Expected: `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
-          yield from _yield_state(gss_pe_popped)
-
-          # --- Test 14: String values and popn(0) ---
-          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
-          yield from _yield_state(gss_s1)
-
-          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
-          yield from _yield_state(gss_s_pop0)
-
-          gss_s_pop1 = gss_s1.popn(1)
-          yield from _yield_state(gss_s_pop1)
-
-          # --- Test 15: Operations on Empty GSS ---
-          gss_empty_start = gss_class.from_stacks([])
-          yield from _yield_state(gss_empty_start)
-
-          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
-          yield from _yield_state(gss_empty_pushed)
-
-          gss_empty_popped = gss_empty_start.pop() # Should still be empty
-          yield from _yield_state(gss_empty_popped)
-
-          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
-          yield from _yield_state(gss_empty_isolated)
-
-          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
-          yield from _yield_state(gss_empty_applied)
-
-          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
-          yield from _yield_state(gss_empty_pruned)
-
-          # --- Test 16: Fuzz tests ---
-          # Run a short, seeded fuzz test to catch more complex interactions.
-          # The seed ensures the test is deterministic.
-          fuzz_seed = 42
-          fuzz_steps = 100
-          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-              yield from _yield_state(gss_state)
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
 
 
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': 0,
+          'bitset_intersection': 0,
+          'bitset_difference': 0,
+          'hybrid_complement': 0,
+          'acc_merge': 0,
+      }
 
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              _PROFILING_STATS[counter_name] += 1
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
 
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
 
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
 
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
 
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
 
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
 
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
               """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
               """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
+              print("\n--- get_mask START ---")
 
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
 
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
 
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
 
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
 
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
 
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
 
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
 
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
 
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
 
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
 
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
 
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
 
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
+              t_init_done = time.perf_counter_ns()
 
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
 
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
 
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+                                  values[d] = values[d].merge(child_gss)
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v in _PROFILING_STATS.items():
+                  print(f"{k} calls: {v}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -790,8 +824,8 @@ local_system:
                       end_acc = e.get("end")
                       sub = e.get("sub", {})
                       if end_acc is not None:
-                          # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty'
-                          nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
+                          # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty', then promote
+                          nodes_for_v.append(try_promote(UpperBranch(children={}, empty=end_acc)))
                       if sub:
                           nodes_for_v.append(build(sub))
                       if nodes_for_v:
@@ -912,7 +946,9 @@ local_system:
                       empty_acc = self.inner.empty
                   else:
                       empty_acc = self.inner.empty
-                  return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                  new_root = UpperBranch(children={}, empty=empty_acc)
+                  # Promote to canonical form if applicable (avoids validator errors).
+                  return LeveledGSS(try_promote(new_root))
 
               # Keep stacks with `value` at the top.
               if isinstance(self.inner, UpperBranch):
@@ -951,7 +987,8 @@ local_system:
               if None in values_set:
                   empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
                   if empty_acc is not None:
-                      gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                      # Promote the singleton-empty representation to keep structure canonical.
+                      gss_for_empty = LeveledGSS(try_promote(UpperBranch(children={}, empty=empty_acc)))
                       return gss_for_stacks.merge(gss_for_empty)
 
               return gss_for_stacks
@@ -1031,8 +1068,9 @@ local_system:
 
                       if not keep_acc and keep_empty:
                           res = UpperBranch(children={}, empty=new_empty)
-                          memo[id(node)] = res
-                          return res
+                          promoted = try_promote(res)
+                          memo[id(node)] = promoted
+                          return promoted
 
                       # keep_acc is True, but empty might have been pruned.
                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
@@ -1122,10 +1160,11 @@ local_system:
 
                       if not keep_acc and keep_empty:
                           # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-                          # Becomes an UpperBranch leaf with only 'empty'.
+                          # Promote the leaf to maintain canonical form (Interface with no children).
                           res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
-                          memo[nid] = res
-                          return res
+                          promoted = try_promote(res)
+                          memo[nid] = promoted
+                          return promoted
 
                       # keep_acc is True
                       new_acc = new_acc_opt  # type: ignore[assignment]
@@ -1602,6 +1641,10 @@ local_system:
       def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
           all_children = list(node._all_children())
           if not all_children:
+              # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
+              # it can be represented canonically as an Interface with no children.
+              if node.empty is not None:
+                  return Interface(children={}, acc=node.empty, empty=node.empty)
               return node
           if not all(isinstance(c, Interface) for c in all_children):
               return node
@@ -1715,451 +1758,578 @@ local_system:
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
   prev_file_contents:
-    python/gss_tester/tests/test_spec.py: |
-      import inspect
-      from typing import Generator, Tuple, Any, Type
-      from ..interface import GSS, MergeableInt
-      from .fuzzer import run_fuzz_test
+    python/aug25/create_additional_benchmark_plots.py: |-
+      #!/usr/bin/env python
+      """
+      ```bash
+      DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee .temp && python python/aug25/create_additional_benchmark_plots.py < .temp
+      ```
+      """
+      import sys
+      import re
+      import os
+      import matplotlib.pyplot as plt
+      import numpy as np
+      from sklearn.linear_model import LinearRegression
 
-      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-          """
-          A generator that defines a sequence of GSS operations and yields states at
-          various points for consistency checking.
+      def parse_log_data(log_content):
+          """Parses the benchmark log content to extract all necessary data."""
+          data = {}
+          try:
+              # Find the main output directory for the benchmark run
+              output_dir_match = re.search(r"Benchmark results will be saved in: (benchmark_results/\S+)", log_content)
+              if not output_dir_match:
+                  print("Error: Could not find the benchmark output directory in the log.", file=sys.stderr)
+                  return None
+              data['output_dir'] = output_dir_match.group(1)
 
-          Yields:
-              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-          """
-          
-          # For this test, the accumulator is an integer and stack items are integers.
-          acc_factory = lambda: MergeableInt(0)
+              # Isolate the detailed log for the Python model
+              python_model_log = re.search(r">>> Running benchmark for: precompute3_model_pure_python_get_mask_only\.py(.*?)>>> Finished benchmark for:", log_content, re.DOTALL).group(1)
 
-          def _yield_state(gss_state: GSS):
-              """Helper to yield the state and the caller's line number."""
-              caller_frame = inspect.currentframe().f_back
-              line_no = caller_frame.f_lineno
-              yield (gss_state.to_stacks(), line_no)
+              # --- Extract GSS Stats ---
+              initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=Stats after seeding:)", python_model_log, re.DOTALL)
 
-          # --- Test 1: Basic push/pop/construction ---
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              data['total_stacks'] = [int(m) for m in re.findall(r"- stacks: total=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_upper_branch_nodes'] = [int(m) for m in re.findall(r"nodes: UpperBranch=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_interface_nodes'] = [int(m) for m in re.findall(r"Interface=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_lower_nodes'] = [int(m) for m in re.findall(r"Lower=(\d+)", "\n".join(initial_stats_blocks))]
+              data['total_accumulator_instances'] = [int(m) for m in re.findall(r"total_accumulator_instances=(\d+)", "\n".join(initial_stats_blocks))]
+              data['unique_accumulators'] = [int(m) for m in re.findall(r"unique_accumulators_count=(\d+)", "\n".join(initial_stats_blocks))]
+              data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
 
-          gss1 = gss1.push(10)
-          yield from _yield_state(gss1)
+              # --- Extract get_mask() Profiling Stats ---
+              profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+              profiling_text = "\n".join(profiling_blocks)
 
-          gss1 = gss1.push(20)
-          yield from _yield_state(gss1)
+              data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
+              data['init_time'] = [float(m) for m in re.findall(r"Initialization time:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_time'] = [float(m) for m in re.findall(r"Main loop time:\s+([\d.]+) ms", profiling_text)]
+              data['final_conversion_time'] = [float(m) for m in re.findall(r"Final conversion:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_apply_calls'] = [int(m) for m in re.findall(r"Main loop GSS.apply calls: (\d+)", profiling_text)]
+              data['main_loop_intersection_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.intersection calls: (\d+)", profiling_text)]
+              data['main_loop_union_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.union calls: (\d+)", profiling_text)]
+              data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
-          gss_popped_20 = gss1.isolate(20).pop()
-          yield from _yield_state(gss_popped_20)
+              # --- Extract Detailed Bitset Operation Counts ---
+              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
+              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
+              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
+              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
+              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
 
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-          yield from _yield_state(gss_popped_10)
+              # --- Extract Commit Times ---
+              data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
 
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              # --- Extract Merge Stats ---
+              data['merge_stats'] = []
+              merge_stats_matches = re.findall(
+                  r"MERGE_STATS: type=(\w+) step=(\d+) unique_accs=(\d+) "
+                  r"total_acc_instances=(\d+) interfaces=(\d+) upper=(\d+) lower=(\d+)",
+                  python_model_log
+              )
+              for match in merge_stats_matches:
+                  data['merge_stats'].append({
+                      'type': match[0],
+                      'step': int(match[1]),
+                      'unique_accs': int(match[2]),
+                      'total_acc_instances': int(match[3]),
+                      'interfaces': int(match[4]),
+                      'upper': int(match[5]),
+                      'lower': int(match[6]),
+                  })
 
-          gss1 = gss_class.from_stacks([([10], acc_factory())])
-          yield from _yield_state(gss1)
+              # --- Final Check and Data Validation ---
+              num_steps = len(data['get_mask_total_time'])
+              if num_steps == 0:
+                  print("Error: No profiling steps found for the Python model.", file=sys.stderr)
+                  return None
+              data['steps'] = list(range(1, num_steps + 1))
 
-          # --- Test 2: Forking and Merging ---
-          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
-          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
-          
-          merged1 = gss_a.merge(gss_b)
-          yield from _yield_state(merged1)
-          
-          # Merge a stack that already exists to test accumulator merging
-          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-          merged2 = merged1.merge(gss_c)
-          yield from _yield_state(merged2)
+              if not data.get('merge_stats'):
+                  print("Warning: No MERGE_STATS found in log. Merge plots will be empty.", file=sys.stderr)
 
-          # --- Test 3: Apply accumulator function ---
-          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
-          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
-          yield from _yield_state(gss_to_apply)
+              # Handle optional metrics that might not be in older logs
+              if len(data['acc_merge_calls']) == 0 and num_steps > 0:
+                  print("Info: 'acc_merge calls' not found in log. Assuming zero for all steps.", file=sys.stderr)
+                  data['acc_merge_calls'] = [0] * num_steps
 
-          # --- Test 4: Pop with no match ---
-          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-          yield from _yield_state(gss_after_failed_pop)
+              print(f"Successfully parsed {num_steps} steps.", file=sys.stderr)
+              return data
 
-          # --- Test 5: Complex sequence (diamond pattern) ---
-          s0 = gss_class.from_stacks([([], acc_factory())])
-          s1 = s0.push(1)
-          s2 = s1.push(2)
-          s3 = s1.push(3)
-          s4 = s2.merge(s3)
-          yield from _yield_state(s4)
-          
-          s5 = s4.push(4)
-          yield from _yield_state(s5)
-          
-          s6 = s5.isolate(4).pop()
-          yield from _yield_state(s6) # should be same as s4
-          
-          s7 = s6.isolate(2).pop()
-          s8 = s6.isolate(3).pop()
-          yield from _yield_state(s7)
-          yield from _yield_state(s8)
-          
-          s9 = s7.merge(s8)
-          yield from _yield_state(s9) # should be same as s1
-          
-          # --- Test 6: Merging empty GSS ---
-          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
-          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-          yield from _yield_state(gss_empty)
-          
-          merged_with_empty = gss_d.merge(gss_empty)
-          yield from _yield_state(merged_with_empty) # should be same as gss_d
+          except Exception as e:
+              print(f"An error occurred during parsing: {e}", file=sys.stderr)
+              return None
 
-          # --- Test 7: Pruning ---
-          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
-          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
-          gss_to_prune = gss_e.merge(gss_f)
-          yield from _yield_state(gss_to_prune)
+      def generate_plots(data):
+          """Generates and saves all the plots."""
+          plot_dir = os.path.join(data['output_dir'], "custom_plots")
+          os.makedirs(plot_dir, exist_ok=True)
+          print(f"Saving custom plots to: {plot_dir}", file=sys.stderr)
 
-          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
-          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+          steps = data['steps']
 
-          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+          # Plot 1: GSS Node and Accumulator Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['initial_interface_nodes'], 'o-', label='Interface Nodes')
+          plt.plot(steps, data['initial_lower_nodes'], 'x-', label='Lower Nodes')
+          plt.plot(steps, data['total_accumulator_instances'], 's-', label='Total Accumulator Instances')
+          plt.plot(steps, data['unique_accumulators'], '^-', label='Unique Accumulators')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('GSS Node and Accumulator Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_node_counts.png"))
+          plt.close()
 
-          # --- Test 8: Pop operations on merged stacks ---
-          # Case 8a: Pop to a common parent, should result in one stack.
-          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
-          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
-          s_branch1 = s_base.push(101)
-          s_branch2 = s_base.push(102)
-          s_merged = s_branch1.merge(s_branch2)
-          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+          # Plot 2: UpperBranch Node Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, np.array(data['initial_upper_branch_nodes']) + 0.1, 'o-', label='UpperBranch Nodes')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count (0 plotted as 0.1)'); plt.title('UpperBranch Node Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.yticks([0.1, 1.1], ['0', '1']); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_upper_branch_counts.png"))
+          plt.close()
 
-          s_popped = s_merged.pop()
-          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+          # Plot 3: Main Loop Apply and Intersection Calls
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_apply_calls'], 'o-', label='Main Loop GSS.apply Calls')
+          plt.plot(steps, data['main_loop_intersection_calls'], 'x-', label='Main Loop Bitset.intersection Calls')
+          plt.plot(steps, data['bitset_intersection_calls'], 's--', alpha=0.7, label='Total bitset_intersection Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Apply & Intersection Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_apply_intersection.png"))
+          plt.close()
 
-          # Case 8b: Push after a pop that should have merged.
-          # This further highlights the divergence from the duplicate stacks.
-          s_pushed_after_pop = s_popped.push(103)
-          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+          # Plot 4: Main Loop Union and Merge Calls (UPDATED)
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
+          plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
+          plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
+          plt.plot(steps, data['acc_merge_calls'], 'd-.', alpha=0.8, label='acc_merge Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Union & Merge Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_union_merge.png"))
+          plt.close()
 
-          # Case 8c: Pop to a common parent with different accumulators.
-          # This exposes a bug in FastGSS which loses accumulator information on pop.
-          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
-          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
-          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
-          s_merged2 = s_branch3.merge(s_branch4)
-          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+          # Plot 5: New plot for other bitset operations
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['bitset_difference_calls'], 'o-', label='bitset_difference Calls')
+          plt.plot(steps, data['hybrid_complement_calls'], 'x-', label='hybrid_complement Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Bitset Difference and Hybrid Complement Calls')
+          plt.xticks(steps); plt.ylim(-0.1, 1); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "other_bitset_calls.png"))
+          plt.close()
 
-          s_popped2 = s_merged2.pop()
-          # Should have two stacks: [200] acc 7, and [200] acc 8
-          yield from _yield_state(s_popped2)
+          # Plot 6: Exponential Growth Plots
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['get_mask_total_time'], 'o-')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Exponential Growth in get_mask() Total Time (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_get_mask_time.png"))
+          plt.close()
 
-          # --- Test 9: popn ---
-          # Case 9a: popn less than stack depth
-          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
-          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
-          gss_pn_merged = gss_pn1.merge(gss_pn2)
-          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['total_stacks'], 's-', color='green')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('Exponential Growth in Total GSS Stacks (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_total_stacks.png"))
+          plt.close()
 
-          gss_pn_pop2 = gss_pn_merged.popn(2)
-          yield from _yield_state(gss_pn_pop2) # has [1] and []
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['bitset_union_calls'], '^-', color='red')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Exponential Growth in bitset_union Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_bitset_unions.png"))
+          plt.close()
 
-          # Case 9b: popn more than stack depth
+          # Plot 7: Time Decomposition
+          plt.figure(figsize=(12, 8))
+          plt.stackplot(steps, data['init_time'], data['main_loop_time'], data['final_conversion_time'],
+                        labels=['Initialization', 'Main Loop', 'Final Conversion'], colors=['#4c72b0', '#dd8452', '#55a868'])
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Decomposition of get_mask() Execution Time')
+          plt.legend(loc='upper left'); plt.xticks(steps); plt.grid(True, axis='y', linestyle='--', alpha=0.7); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "time_decomposition.png"))
+          plt.close()
 
-          gss_pn_pop4 = gss_pn_merged.popn(4)
-          yield from _yield_state(gss_pn_pop4) # has []
+          # Plot 8: Performance vs. Complexity
+          plt.figure(figsize=(10, 6))
+          total_stacks_np = np.array(data['total_stacks'])
+          get_mask_time_np = np.array(data['get_mask_total_time'])
+          plt.scatter(total_stacks_np, get_mask_time_np, label='Data Points')
+          log_x = np.log(total_stacks_np).reshape(-1, 1); log_y = np.log(get_mask_time_np)
+          model = LinearRegression().fit(log_x, log_y)
+          y_pred = np.exp(model.predict(log_x))
+          plt.plot(total_stacks_np, y_pred, color='red', linestyle='--', label=f'Trend Line (R²={model.score(log_x, log_y):.3f})')
+          plt.xlabel('Total Stacks in GSS'); plt.ylabel('get_mask() Total Time (ms)'); plt.title('Performance vs. GSS Complexity (Log-Log Scale)')
+          plt.xscale('log'); plt.yscale('log'); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "performance_vs_complexity.png"))
+          plt.close()
 
-          # --- Test 10: Isolate empty stacks ---
-          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
-          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
-          gss_i_merged = gss_i1.merge(gss_i2)
-          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
+          # Plot 9: Efficiency and Sharing
+          fig, ax1 = plt.subplots(figsize=(12, 8))
+          unions_per_stack = np.array(data['bitset_union_calls']) / total_stacks_np
+          ax1.plot(steps, unions_per_stack, 'o-', color='tab:blue', label='Bitset Unions per Stack')
+          ax1.set_xlabel('Benchmark Step'); ax1.set_ylabel('Bitset Union Calls per Stack', color='tab:blue'); ax1.tick_params(axis='y', labelcolor='tab:blue'); ax1.set_ylim(bottom=0)
+          ax2 = ax1.twinx()
+          ax2.plot(steps, data['structural_sharing_factor'], 's--', color='tab:green', label='Structural Sharing Factor')
+          ax2.set_ylabel('Structural Sharing Factor', color='tab:green'); ax2.tick_params(axis='y', labelcolor='tab:green'); ax2.set_ylim(bottom=0)
+          plt.title('Algorithmic Efficiency and GSS Sharing Factor'); plt.xticks(steps); fig.tight_layout()
+          lines, labels = ax1.get_legend_handles_labels(); lines2, labels2 = ax2.get_legend_handles_labels()
+          ax2.legend(lines + lines2, labels + labels2, loc='upper left'); plt.grid(True, which="both", ls="--", alpha=0.6)
+          plt.savefig(os.path.join(plot_dir, "efficiency_and_sharing.png"))
+          plt.close()
 
-          gss_isolated_empty = gss_i_merged.isolate(None)
-          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
+          # Plot 10: Merge Stats Distributions
+          if data.get('merge_stats'):
+              merge_stats = data['merge_stats']
 
-          gss_isolated_10 = gss_i_merged.isolate(10)
-          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
+              def create_merge_scatter_plot(stat_key, title, y_label, use_log_scale=True):
+                  plt.figure(figsize=(14, 8))
 
-          # --- Test 11: reduce_acc and peek ---
-          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
-          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
-          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
-          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
-          yield from _yield_state(gss_rp_merged)
+                  # Group data by type for easier plotting
+                  data_by_type = {'existing': [], 'new': [], 'merged': []}
+                  for item in merge_stats:
+                      data_by_type[item['type']].append((item['step'], item[stat_key]))
 
-          # peek() should return {2, 3}
-          peek_result = gss_rp_merged.peek()
-          # reduce_acc() should be 3 + 4 + 5 = 12
-          reduce_result = gss_rp_merged.reduce_acc()
-          
-          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
-          # This is a bit of a hack, but it allows us to check for consistency.
-          # A GSS with a single empty stack and the peek result as the accumulator.
-          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
-          yield from _yield_state(gss_peek_check)
+                  colors = {'existing': 'blue', 'new': 'green', 'merged': 'red'}
+                  markers = {'existing': 'o', 'new': 'x', 'merged': 's'}
 
-          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
-          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
-          yield from _yield_state(gss_reduce_check)
+                  for type_name, points in data_by_type.items():
+                      if not points:
+                          continue
+                      point_steps, values = zip(*points)
+                      # Add small jitter to x-axis to see overlapping points
+                      jitter = np.random.normal(0, 0.05, size=len(point_steps))
+                      plt.scatter(np.array(point_steps) + jitter, values,
+                                  c=colors[type_name],
+                                  marker=markers[type_name],
+                                  alpha=0.6,
+                                  label=f'{type_name.capitalize()} GSS')
 
-          # Test on empty GSS
-          gss_rp_empty = gss_class.from_stacks([])
-          yield from _yield_state(gss_rp_empty)
-          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
-          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
-          yield from _yield_state(gss_reduce_empty_check)
+                  plt.xlabel('Benchmark Step')
+                  plt.ylabel(y_label)
+                  plt.title(title)
+                  plt.xticks(steps)
+                  plt.grid(True, which="both", ls="--")
+                  if use_log_scale:
+                      plt.yscale('log')
+                      ax = plt.gca()
+                      # Set a bottom limit to handle zero values gracefully
+                      ax.set_ylim(bottom=0.5)
 
+                  plt.legend()
+                  plt.tight_layout()
+                  plt.savefig(os.path.join(plot_dir, f"merge_dist_{stat_key}.png"))
+                  plt.close()
 
-          # --- Test 12: merge_many ---
-          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
-          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
-          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
-          
-          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
-          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
-          yield from _yield_state(gss_merged_many)
+              create_merge_scatter_plot('unique_accs', 'Distribution of Unique Accumulators in Merges', 'Unique Accumulators (Log Scale)')
+              create_merge_scatter_plot('total_acc_instances', 'Distribution of Total Accumulator Instances in Merges', 'Total Accumulator Instances (Log Scale)')
+              create_merge_scatter_plot('interfaces', 'Distribution of Interface Nodes in Merges', 'Interface Nodes (Log Scale)')
+              create_merge_scatter_plot('upper', 'Distribution of UpperBranch Nodes in Merges', 'UpperBranch Nodes (Log Scale)')
+              create_merge_scatter_plot('lower', 'Distribution of Lower Nodes in Merges', 'Lower Nodes (Log Scale)')
 
-          # --- Test 13: Pop from GSS containing an empty stack ---
-          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
-          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
-          gss_pe_merged = gss_pe1.merge(gss_pe2)
-          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
+          print("All plots generated successfully.", file=sys.stderr)
 
-          gss_pe_popped = gss_pe_merged.pop()
-          # pop should discard the empty stack and pop the non-empty one.
-          # Expected: `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
-          yield from _yield_state(gss_pe_popped)
+      if __name__ == "__main__":
+          log_content = sys.stdin.read()
+          parsed_data = parse_log_data(log_content)
+          if parsed_data:
+              generate_plots(parsed_data)
+          else:
+              print("Failed to parse log data. No plots were generated.", file=sys.stderr)
+              sys.exit(1)
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      import _sep1 as ffi
+      import time
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
 
-          # --- Test 14: String values and popn(0) ---
-          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
-          yield from _yield_state(gss_s1)
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
 
-          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
-          yield from _yield_state(gss_s_pop0)
-
-          gss_s_pop1 = gss_s1.popn(1)
-          yield from _yield_state(gss_s_pop1)
-
-          # --- Test 15: Operations on Empty GSS ---
-          gss_empty_start = gss_class.from_stacks([])
-          yield from _yield_state(gss_empty_start)
-
-          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
-          yield from _yield_state(gss_empty_pushed)
-
-          gss_empty_popped = gss_empty_start.pop() # Should still be empty
-          yield from _yield_state(gss_empty_popped)
-
-          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
-          yield from _yield_state(gss_empty_isolated)
-
-          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
-          yield from _yield_state(gss_empty_applied)
-
-          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
-          yield from _yield_state(gss_empty_pruned)
-
-          # --- Test 16: Fuzz tests ---
-          # Run a short, seeded fuzz test to catch more complex interactions.
-          # The seed ensures the test is deterministic.
-          fuzz_seed = 42
-          fuzz_steps = 100
-          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-              yield from _yield_state(gss_state)
-    python/gss_tester/__init__.py: |
-      # This file makes 'gss_tester' a Python package.
-    python/gss_tester/interface.py: |
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
 
 
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': 0,
+          'bitset_intersection': 0,
+          'bitset_difference': 0,
+          'hybrid_complement': 0,
+          'acc_merge': 0,
+      }
 
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              _PROFILING_STATS[counter_name] += 1
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
 
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
 
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
 
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
 
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
 
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
 
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
               """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
               """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
+              print("\n--- get_mask START ---")
 
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
 
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
 
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
 
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
 
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
 
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
 
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
 
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
 
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
 
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
 
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
 
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
 
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
+              t_init_done = time.perf_counter_ns()
 
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
 
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
 
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+
+                                  # --- GSS Merge Stats Logging ---
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+
+                                  stats_existing = existing_gss.stats()
+                                  stats_new = new_gss.stats()
+                                  stats_merged = merged_gss.stats()
+
+                                  def print_merge_stats(label, stats):
+                                      print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                            f"unique_accs={stats.unique_accumulators_count} "
+                                            f"total_acc_instances={stats.total_accumulator_instances} "
+                                            f"interfaces={stats.num_interface_nodes} "
+                                            f"upper={stats.num_upperbranch_nodes} "
+                                            f"lower={stats.num_lower_nodes}")
+
+                                  print_merge_stats("existing", stats_existing)
+                                  print_merge_stats("new", stats_new)
+                                  print_merge_stats("merged", stats_merged)
+
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v in _PROFILING_STATS.items():
+                  print(f"{k} calls: {v}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -3441,7 +3611,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -3476,465 +3646,494 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```python 'python/gss_tester/tests/test_spec.py'
-      import inspect
-      from typing import Generator, Tuple, Any, Type
-      from ..interface import GSS, MergeableInt
-      from .fuzzer import run_fuzz_test
+      ```python 'python/aug25/create_additional_benchmark_plots.py'
+      #!/usr/bin/env python
+      """
+      ```bash
+      DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee .temp && python python/aug25/create_additional_benchmark_plots.py < .temp
+      ```
+      """
+      import sys
+      import re
+      import os
+      import matplotlib.pyplot as plt
+      import numpy as np
+      from sklearn.linear_model import LinearRegression
 
-      def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-          """
-          A generator that defines a sequence of GSS operations and yields states at
-          various points for consistency checking.
+      def parse_log_data(log_content):
+          """Parses the benchmark log content to extract all necessary data."""
+          data = {}
+          try:
+              # Find the main output directory for the benchmark run
+              output_dir_match = re.search(r"Benchmark results will be saved in: (benchmark_results/\S+)", log_content)
+              if not output_dir_match:
+                  print("Error: Could not find the benchmark output directory in the log.", file=sys.stderr)
+                  return None
+              data['output_dir'] = output_dir_match.group(1)
 
-          Yields:
-              Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-          """
-          
-          # For this test, the accumulator is an integer and stack items are integers.
-          acc_factory = lambda: MergeableInt(0)
+              # Isolate the detailed log for the Python model
+              python_model_log = re.search(r">>> Running benchmark for: precompute3_model_pure_python_get_mask_only\.py(.*?)>>> Finished benchmark for:", log_content, re.DOTALL).group(1)
 
-          def _yield_state(gss_state: GSS):
-              """Helper to yield the state and the caller's line number."""
-              caller_frame = inspect.currentframe().f_back
-              line_no = caller_frame.f_lineno
-              yield (gss_state.to_stacks(), line_no)
+              # --- Extract GSS Stats ---
+              initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=Stats after seeding:)", python_model_log, re.DOTALL)
 
-          # --- Test 1: Basic push/pop/construction ---
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              data['total_stacks'] = [int(m) for m in re.findall(r"- stacks: total=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_upper_branch_nodes'] = [int(m) for m in re.findall(r"nodes: UpperBranch=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_interface_nodes'] = [int(m) for m in re.findall(r"Interface=(\d+)", "\n".join(initial_stats_blocks))]
+              data['initial_lower_nodes'] = [int(m) for m in re.findall(r"Lower=(\d+)", "\n".join(initial_stats_blocks))]
+              data['total_accumulator_instances'] = [int(m) for m in re.findall(r"total_accumulator_instances=(\d+)", "\n".join(initial_stats_blocks))]
+              data['unique_accumulators'] = [int(m) for m in re.findall(r"unique_accumulators_count=(\d+)", "\n".join(initial_stats_blocks))]
+              data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
 
-          gss1 = gss1.push(10)
-          yield from _yield_state(gss1)
+              # --- Extract get_mask() Profiling Stats ---
+              profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+              profiling_text = "\n".join(profiling_blocks)
 
-          gss1 = gss1.push(20)
-          yield from _yield_state(gss1)
+              data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
+              data['init_time'] = [float(m) for m in re.findall(r"Initialization time:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_time'] = [float(m) for m in re.findall(r"Main loop time:\s+([\d.]+) ms", profiling_text)]
+              data['final_conversion_time'] = [float(m) for m in re.findall(r"Final conversion:\s+([\d.]+) ms", profiling_text)]
+              data['main_loop_apply_calls'] = [int(m) for m in re.findall(r"Main loop GSS.apply calls: (\d+)", profiling_text)]
+              data['main_loop_intersection_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.intersection calls: (\d+)", profiling_text)]
+              data['main_loop_union_calls'] = [int(m) for m in re.findall(r"Main loop Bitset.union calls: (\d+)", profiling_text)]
+              data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
-          gss_popped_20 = gss1.isolate(20).pop()
-          yield from _yield_state(gss_popped_20)
+              # --- Extract Detailed Bitset Operation Counts ---
+              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
+              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
+              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
+              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
+              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
 
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-          yield from _yield_state(gss_popped_10)
+              # --- Extract Commit Times ---
+              data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
 
-          gss1 = gss_class.from_stacks([([], acc_factory())])
-          yield from _yield_state(gss1)
+              # --- Final Check and Data Validation ---
+              num_steps = len(data['get_mask_total_time'])
+              if num_steps == 0:
+                  print("Error: No profiling steps found for the Python model.", file=sys.stderr)
+                  return None
+              data['steps'] = list(range(1, num_steps + 1))
 
-          gss1 = gss_class.from_stacks([([10], acc_factory())])
-          yield from _yield_state(gss1)
+              # Handle optional metrics that might not be in older logs
+              if len(data['acc_merge_calls']) == 0 and num_steps > 0:
+                  print("Info: 'acc_merge calls' not found in log. Assuming zero for all steps.", file=sys.stderr)
+                  data['acc_merge_calls'] = [0] * num_steps
 
-          # --- Test 2: Forking and Merging ---
-          gss_a = gss_class.from_stacks([([], acc_factory())]).push(1).push(2)
-          gss_b = gss_class.from_stacks([([], acc_factory())]).push(1).push(3)
-          
-          merged1 = gss_a.merge(gss_b)
-          yield from _yield_state(merged1)
-          
-          # Merge a stack that already exists to test accumulator merging
-          gss_c = gss_class.from_stacks([([], acc_factory())]).push(1).push(2).apply(lambda acc: acc + 5)
-          merged2 = merged1.merge(gss_c)
-          yield from _yield_state(merged2)
+              print(f"Successfully parsed {num_steps} steps.", file=sys.stderr)
+              return data
 
-          # --- Test 3: Apply accumulator function ---
-          gss_to_apply = gss_class.from_stacks([([], acc_factory())]).push(5)
-          gss_to_apply = gss_to_apply.apply(lambda acc: acc + 100)
-          yield from _yield_state(gss_to_apply)
+          except Exception as e:
+              print(f"An error occurred during parsing: {e}", file=sys.stderr)
+              return None
 
-          # --- Test 4: Pop with no match ---
-          gss_no_match = gss_class.from_stacks([([], acc_factory())]).push(88).push(99)
-          gss_after_failed_pop = gss_no_match.isolate(1).pop() # This should result in an empty GSS
-          yield from _yield_state(gss_after_failed_pop)
+      def generate_plots(data):
+          """Generates and saves all the plots."""
+          plot_dir = os.path.join(data['output_dir'], "custom_plots")
+          os.makedirs(plot_dir, exist_ok=True)
+          print(f"Saving custom plots to: {plot_dir}", file=sys.stderr)
 
-          # --- Test 5: Complex sequence (diamond pattern) ---
-          s0 = gss_class.from_stacks([([], acc_factory())])
-          s1 = s0.push(1)
-          s2 = s1.push(2)
-          s3 = s1.push(3)
-          s4 = s2.merge(s3)
-          yield from _yield_state(s4)
-          
-          s5 = s4.push(4)
-          yield from _yield_state(s5)
-          
-          s6 = s5.isolate(4).pop()
-          yield from _yield_state(s6) # should be same as s4
-          
-          s7 = s6.isolate(2).pop()
-          s8 = s6.isolate(3).pop()
-          yield from _yield_state(s7)
-          yield from _yield_state(s8)
-          
-          s9 = s7.merge(s8)
-          yield from _yield_state(s9) # should be same as s1
-          
-          # --- Test 6: Merging empty GSS ---
-          gss_d = gss_class.from_stacks([([], acc_factory())]).push(1)
-          gss_empty = gss_d.isolate(2).pop() # creates an empty GSS
-          yield from _yield_state(gss_empty)
-          
-          merged_with_empty = gss_d.merge(gss_empty)
-          yield from _yield_state(merged_with_empty) # should be same as gss_d
+          steps = data['steps']
 
-          # --- Test 7: Pruning ---
-          gss_e = gss_class.from_stacks([([], acc_factory())]).push(1).apply(lambda acc: MergeableInt(5))
-          gss_f = gss_class.from_stacks([([], acc_factory())]).push(2).apply(lambda acc: MergeableInt(10))
-          gss_to_prune = gss_e.merge(gss_f)
-          yield from _yield_state(gss_to_prune)
+          # Plot 1: GSS Node and Accumulator Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['initial_interface_nodes'], 'o-', label='Interface Nodes')
+          plt.plot(steps, data['initial_lower_nodes'], 'x-', label='Lower Nodes')
+          plt.plot(steps, data['total_accumulator_instances'], 's-', label='Total Accumulator Instances')
+          plt.plot(steps, data['unique_accumulators'], '^-', label='Unique Accumulators')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('GSS Node and Accumulator Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_node_counts.png"))
+          plt.close()
 
-          pruned_gss = gss_to_prune.prune(lambda acc: acc > 7)
-          yield from _yield_state(pruned_gss) # Should only contain stack [2] with acc 10
+          # Plot 2: UpperBranch Node Counts
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, np.array(data['initial_upper_branch_nodes']) + 0.1, 'o-', label='UpperBranch Nodes')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count (0 plotted as 0.1)'); plt.title('UpperBranch Node Counts (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.yticks([0.1, 1.1], ['0', '1']); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "gss_upper_branch_counts.png"))
+          plt.close()
 
-          pruned_all_gss = gss_to_prune.prune(lambda acc: acc > 100)
-          yield from _yield_state(pruned_all_gss) # Should be an empty GSS
+          # Plot 3: Main Loop Apply and Intersection Calls
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_apply_calls'], 'o-', label='Main Loop GSS.apply Calls')
+          plt.plot(steps, data['main_loop_intersection_calls'], 'x-', label='Main Loop Bitset.intersection Calls')
+          plt.plot(steps, data['bitset_intersection_calls'], 's--', alpha=0.7, label='Total bitset_intersection Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Apply & Intersection Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_apply_intersection.png"))
+          plt.close()
 
-          # --- Test 8: Pop operations on merged stacks ---
-          # Case 8a: Pop to a common parent, should result in one stack.
-          # This exposes a bug in ReferenceGSS which creates duplicate stacks.
-          s_base = gss_class.from_stacks([([], acc_factory())]).push(100)
-          s_branch1 = s_base.push(101)
-          s_branch2 = s_base.push(102)
-          s_merged = s_branch1.merge(s_branch2)
-          yield from _yield_state(s_merged) # has [100, 101] and [100, 102], both acc 0
+          # Plot 4: Main Loop Union and Merge Calls (UPDATED)
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
+          plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
+          plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
+          plt.plot(steps, data['acc_merge_calls'], 'd-.', alpha=0.8, label='acc_merge Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Union & Merge Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "main_loop_union_merge.png"))
+          plt.close()
 
-          s_popped = s_merged.pop()
-          yield from _yield_state(s_popped) # Should have one stack: [100] with acc 0
+          # Plot 5: New plot for other bitset operations
+          plt.figure(figsize=(12, 8))
+          plt.plot(steps, data['bitset_difference_calls'], 'o-', label='bitset_difference Calls')
+          plt.plot(steps, data['hybrid_complement_calls'], 'x-', label='hybrid_complement Calls')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Bitset Difference and Hybrid Complement Calls')
+          plt.xticks(steps); plt.ylim(-0.1, 1); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "other_bitset_calls.png"))
+          plt.close()
 
-          # Case 8b: Push after a pop that should have merged.
-          # This further highlights the divergence from the duplicate stacks.
-          s_pushed_after_pop = s_popped.push(103)
-          yield from _yield_state(s_pushed_after_pop) # Should have one stack: [100, 103] acc 0
+          # Plot 6: Exponential Growth Plots
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['get_mask_total_time'], 'o-')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Exponential Growth in get_mask() Total Time (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_get_mask_time.png"))
+          plt.close()
 
-          # Case 8c: Pop to a common parent with different accumulators.
-          # This exposes a bug in FastGSS which loses accumulator information on pop.
-          s_base2 = gss_class.from_stacks([([], acc_factory())]).push(200)
-          s_branch3 = s_base2.push(201).apply(lambda _: MergeableInt(7))
-          s_branch4 = s_base2.push(202).apply(lambda _: MergeableInt(8))
-          s_merged2 = s_branch3.merge(s_branch4)
-          yield from _yield_state(s_merged2) # has [200, 201] acc 7 and [200, 202] acc 8
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['total_stacks'], 's-', color='green')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Count'); plt.title('Exponential Growth in Total GSS Stacks (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_total_stacks.png"))
+          plt.close()
 
-          s_popped2 = s_merged2.pop()
-          # Should have two stacks: [200] acc 7, and [200] acc 8
-          yield from _yield_state(s_popped2)
+          plt.figure(figsize=(10, 6))
+          plt.plot(steps, data['bitset_union_calls'], '^-', color='red')
+          plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Exponential Growth in bitset_union Calls (Log Scale)')
+          plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "exp_growth_bitset_unions.png"))
+          plt.close()
 
-          # --- Test 9: popn ---
-          # Case 9a: popn less than stack depth
-          gss_pn1 = gss_class.from_stacks([([], MergeableInt(0))]).push(1).push(2).push(3)
-          gss_pn2 = gss_class.from_stacks([([], MergeableInt(0))]).push(4).push(5)
-          gss_pn_merged = gss_pn1.merge(gss_pn2)
-          yield from _yield_state(gss_pn_merged) # has [1,2,3] and [4,5]
+          # Plot 7: Time Decomposition
+          plt.figure(figsize=(12, 8))
+          plt.stackplot(steps, data['init_time'], data['main_loop_time'], data['final_conversion_time'],
+                        labels=['Initialization', 'Main Loop', 'Final Conversion'], colors=['#4c72b0', '#dd8452', '#55a868'])
+          plt.xlabel('Benchmark Step'); plt.ylabel('Time (ms)'); plt.title('Decomposition of get_mask() Execution Time')
+          plt.legend(loc='upper left'); plt.xticks(steps); plt.grid(True, axis='y', linestyle='--', alpha=0.7); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "time_decomposition.png"))
+          plt.close()
 
-          gss_pn_pop2 = gss_pn_merged.popn(2)
-          yield from _yield_state(gss_pn_pop2) # has [1] and []
+          # Plot 8: Performance vs. Complexity
+          plt.figure(figsize=(10, 6))
+          total_stacks_np = np.array(data['total_stacks'])
+          get_mask_time_np = np.array(data['get_mask_total_time'])
+          plt.scatter(total_stacks_np, get_mask_time_np, label='Data Points')
+          log_x = np.log(total_stacks_np).reshape(-1, 1); log_y = np.log(get_mask_time_np)
+          model = LinearRegression().fit(log_x, log_y)
+          y_pred = np.exp(model.predict(log_x))
+          plt.plot(total_stacks_np, y_pred, color='red', linestyle='--', label=f'Trend Line (R²={model.score(log_x, log_y):.3f})')
+          plt.xlabel('Total Stacks in GSS'); plt.ylabel('get_mask() Total Time (ms)'); plt.title('Performance vs. GSS Complexity (Log-Log Scale)')
+          plt.xscale('log'); plt.yscale('log'); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
+          plt.savefig(os.path.join(plot_dir, "performance_vs_complexity.png"))
+          plt.close()
 
-          # Case 9b: popn more than stack depth
+          # Plot 9: Efficiency and Sharing
+          fig, ax1 = plt.subplots(figsize=(12, 8))
+          unions_per_stack = np.array(data['bitset_union_calls']) / total_stacks_np
+          ax1.plot(steps, unions_per_stack, 'o-', color='tab:blue', label='Bitset Unions per Stack')
+          ax1.set_xlabel('Benchmark Step'); ax1.set_ylabel('Bitset Union Calls per Stack', color='tab:blue'); ax1.tick_params(axis='y', labelcolor='tab:blue'); ax1.set_ylim(bottom=0)
+          ax2 = ax1.twinx()
+          ax2.plot(steps, data['structural_sharing_factor'], 's--', color='tab:green', label='Structural Sharing Factor')
+          ax2.set_ylabel('Structural Sharing Factor', color='tab:green'); ax2.tick_params(axis='y', labelcolor='tab:green'); ax2.set_ylim(bottom=0)
+          plt.title('Algorithmic Efficiency and GSS Sharing Factor'); plt.xticks(steps); fig.tight_layout()
+          lines, labels = ax1.get_legend_handles_labels(); lines2, labels2 = ax2.get_legend_handles_labels()
+          ax2.legend(lines + lines2, labels + labels2, loc='upper left'); plt.grid(True, which="both", ls="--", alpha=0.6)
+          plt.savefig(os.path.join(plot_dir, "efficiency_and_sharing.png"))
+          plt.close()
 
-          gss_pn_pop4 = gss_pn_merged.popn(4)
-          yield from _yield_state(gss_pn_pop4) # has []
+          print("All plots generated successfully.", file=sys.stderr)
 
-          # --- Test 10: Isolate empty stacks ---
-          gss_i1 = gss_class.from_stacks([([], MergeableInt(1))]) # An empty stack
-          gss_i2 = gss_class.from_stacks([([10], MergeableInt(2))]) # A non-empty stack
-          gss_i_merged = gss_i1.merge(gss_i2)
-          yield from _yield_state(gss_i_merged) # has [] acc 1 and [10] acc 2
-
-          gss_isolated_empty = gss_i_merged.isolate(None)
-          yield from _yield_state(gss_isolated_empty) # should have only [] acc 1
-
-          gss_isolated_10 = gss_i_merged.isolate(10)
-          yield from _yield_state(gss_isolated_10) # should have only [10] acc 2
-
-          # --- Test 11: reduce_acc and peek ---
-          gss_rp1 = gss_class.from_stacks([([1, 2], MergeableInt(3))])
-          gss_rp2 = gss_class.from_stacks([([1, 3], MergeableInt(4))])
-          gss_rp3 = gss_class.from_stacks([([], MergeableInt(5))])
-          gss_rp_merged = gss_class.merge_many([gss_rp1, gss_rp2, gss_rp3])
-          yield from _yield_state(gss_rp_merged)
-
-          # peek() should return {2, 3}
-          peek_result = gss_rp_merged.peek()
-          # reduce_acc() should be 3 + 4 + 5 = 12
-          reduce_result = gss_rp_merged.reduce_acc()
-          
-          # We can't yield non-GSS objects, so we'll create GSSs that represent the result
-          # This is a bit of a hack, but it allows us to check for consistency.
-          # A GSS with a single empty stack and the peek result as the accumulator.
-          gss_peek_check = gss_class.from_stacks([([], MergeableInt(len(peek_result)))])
-          yield from _yield_state(gss_peek_check)
-
-          # A GSS with a single empty stack and the reduce_acc result as the accumulator.
-          gss_reduce_check = gss_class.from_stacks([([], reduce_result if reduce_result is not None else MergeableInt(-1))])
-          yield from _yield_state(gss_reduce_check)
-
-          # Test on empty GSS
-          gss_rp_empty = gss_class.from_stacks([])
-          yield from _yield_state(gss_rp_empty)
-          reduce_empty_result = gss_rp_empty.reduce_acc() # Should be None
-          gss_reduce_empty_check = gss_class.from_stacks([([], MergeableInt(-1 if reduce_empty_result is None else 999))])
-          yield from _yield_state(gss_reduce_empty_check)
-
-
-          # --- Test 12: merge_many ---
-          gss_m1 = gss_class.from_stacks([(['a'], MergeableInt(1))])
-          gss_m2 = gss_class.from_stacks([(['a'], MergeableInt(2)), (['b'], MergeableInt(3))])
-          gss_m3 = gss_class.from_stacks([(['c'], MergeableInt(4))])
-          
-          gss_merged_many = gss_class.merge_many([gss_m1, gss_m2, gss_m3])
-          # Expected: [a] acc 3, [b] acc 3, [c] acc 4
-          yield from _yield_state(gss_merged_many)
-
-          # --- Test 13: Pop from GSS containing an empty stack ---
-          gss_pe1 = gss_class.from_stacks([([], MergeableInt(1))])
-          gss_pe2 = gss_class.from_stacks([([10], MergeableInt(2))])
-          gss_pe_merged = gss_pe1.merge(gss_pe2)
-          yield from _yield_state(gss_pe_merged) # has [] acc 1 and [10] acc 2
-
-          gss_pe_popped = gss_pe_merged.pop()
-          # pop should discard the empty stack and pop the non-empty one.
-          # Expected: `([10], 2)` becomes `([], 2)`. `([], 1)` is discarded.
-          yield from _yield_state(gss_pe_popped)
-
-          # --- Test 14: String values and popn(0) ---
-          gss_s1 = gss_class.from_stacks([(['x', 'y'], MergeableInt(1))])
-          yield from _yield_state(gss_s1)
-
-          gss_s_pop0 = gss_s1.popn(0) # Should be a no-op
-          yield from _yield_state(gss_s_pop0)
-
-          gss_s_pop1 = gss_s1.popn(1)
-          yield from _yield_state(gss_s_pop1)
-
-          # --- Test 15: Operations on Empty GSS ---
-          gss_empty_start = gss_class.from_stacks([])
-          yield from _yield_state(gss_empty_start)
-
-          gss_empty_pushed = gss_empty_start.push(1) # Should still be empty
-          yield from _yield_state(gss_empty_pushed)
-
-          gss_empty_popped = gss_empty_start.pop() # Should still be empty
-          yield from _yield_state(gss_empty_popped)
-
-          gss_empty_isolated = gss_empty_start.isolate(1) # Should still be empty
-          yield from _yield_state(gss_empty_isolated)
-
-          gss_empty_applied = gss_empty_start.apply(lambda acc: acc + 1) # Should still be empty
-          yield from _yield_state(gss_empty_applied)
-
-          gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
-          yield from _yield_state(gss_empty_pruned)
-
-          # --- Test 16: Fuzz tests ---
-          # Run a short, seeded fuzz test to catch more complex interactions.
-          # The seed ensures the test is deterministic.
-          fuzz_seed = 42
-          fuzz_steps = 100
-          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-              yield from _yield_state(gss_state)
-
+      if __name__ == "__main__":
+          log_content = sys.stdin.read()
+          parsed_data = parse_log_data(log_content)
+          if parsed_data:
+              generate_plots(parsed_data)
+          else:
+              print("Failed to parse log data. No plots were generated.", file=sys.stderr)
+              sys.exit(1)
       ```
     metadata:
-      filename: python/gss_tester/tests/test_spec.py
+      filename: python/aug25/create_additional_benchmark_plots.py
   - user: |-
-      ```python 'python/gss_tester/__init__.py'
-      # This file makes 'gss_tester' a Python package.
+      ```python 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py'
+      import heapq
+      import _sep1 as ffi
+      import time
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
+
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
+
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
+
+
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': 0,
+          'bitset_intersection': 0,
+          'bitset_difference': 0,
+          'hybrid_complement': 0,
+          'acc_merge': 0,
+      }
+
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              _PROFILING_STATS[counter_name] += 1
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
+
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
+
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              print("\n--- get_mask START ---")
+
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
+
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
+
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
+
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
+
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
+
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
+
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
+
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
+
+              t_init_done = time.perf_counter_ns()
+
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+                                  values[d] = values[d].merge(child_gss)
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v in _PROFILING_STATS.items():
+                  print(f"{k} calls: {v}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
 
       ```
     metadata:
-      filename: python/gss_tester/__init__.py
-  - user: |-
-      ```python 'python/gss_tester/interface.py'
-      from __future__ import annotations
-      from abc import ABC, abstractmethod
-      from functools import reduce
-      from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
-
-
-      class Mergeable(Protocol):
-          """Protocol for accumulator types that can be merged."""
-          @abstractmethod
-          def merge(self, other: 'Mergeable') -> 'Mergeable':
-              ...
-
-      class MergeableInt(int):
-          """
-          An integer that is mergeable (for testing `Acc` typevars) and
-          returns itself from arithmetic operations to satisfy `Callable[[Acc], Acc]`.
-          """
-          def merge(self, other: 'MergeableInt') -> 'MergeableInt':
-              return MergeableInt(super().__add__(other))
-
-          def __add__(self, other: int) -> 'MergeableInt':
-              if isinstance(other, int):
-                  return MergeableInt(super().__add__(other))
-              return NotImplemented
-
-      T = TypeVar('T')  # Stack item type
-      Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
-      GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
-
-      class GSS(ABC, Generic[T, Acc]):
-          """Abstract Base Class for a Graph-Structured Stack (GSS)."""
-
-          @classmethod
-          def empty(cls: Type[GSSType]) -> GSSType:
-              """Creates an empty GSS with no active stacks."""
-              return cls.from_stacks([])
-
-          @classmethod
-          @abstractmethod
-          def from_stacks(cls: Type[GSSType], stacks: List[Tuple[List[T], Acc]]) -> GSSType:
-              """Creates a GSS from a list of explicit stacks."""
-              pass
-
-          @abstractmethod
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """
-              Converts the GSS to its canonical representation as a sorted list of stacks.
-              This involves merging accumulators for identical stacks and sorting.
-              """
-              pass
-
-          @abstractmethod
-          def push(self: GSSType, value: T) -> GSSType:
-              """Pushes a value onto all active stack heads, returning a new GSS state."""
-              pass
-
-          @classmethod
-          def push_many(cls: Type[GSSType], items: Iterable[Tuple[GSSType, T]]) -> GSSType:
-              """Pushes multiple values onto all active stack heads, returning a new GSS state."""
-              dest = cls.empty()
-              for gss_item, value in items:
-                  dest = dest.merge(gss_item.push(value))
-              return dest
-
-          @abstractmethod
-          def pop(self: GSSType) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top value.
-              Returns a new GSS state containing the popped stacks.
-              """
-              pass
-
-          def popn(self: GSSType, n: int) -> GSSType:
-              """
-              For all active stacks, creates new stacks by removing the top `n` values.
-              Returns a new GSS state containing the popped stacks.
-              """
-              gss = self
-              for _ in range(n):
-                  gss = gss.pop()
-              return gss
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Checks if the GSS contains no active stacks."""
-              pass
-
-          @abstractmethod
-          def isolate(self: GSSType, value: Optional[T]) -> GSSType:
-              """
-              Keeps only the stacks that have `value` at the top.
-              If `value` is None, it keeps only the empty stacks.
-              Returns a new GSS state containing only these stacks.
-              """
-              pass
-
-          def isolate_many(self: GSSType, values: Iterable[Optional[T]]) -> GSSType:
-              """
-              Keeps only the stacks that have any of the `values` at the top.
-              If `None` is in `values`, it keeps only the empty stacks as well.
-              Returns a new GSS state containing only these stacks.
-              """
-              dest = self.empty()
-              for v in values:
-                  dest = dest.merge(self.isolate(v))
-              return dest
-
-          @abstractmethod
-          def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
-              """Applies a function to each accumulator, returning a new GSS state."""
-              pass
-
-          @abstractmethod
-          def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
-              """
-              Removes stacks from the GSS based on a predicate on their accumulator.
-              If `predicate(acc)` returns False, the stack is removed.
-              """
-              pass
-
-          def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
-              """
-              Combined transform that applies a mutate-and-prune function to each stack's accumulator.
-              The `mutator` must return:
-                - a new (or unchanged) accumulator to keep the stack, or
-                - None to prune the stack.
-
-              Default implementation composes prune + apply, with memoization to avoid
-              invoking `mutator` more than once per accumulator instance when possible.
-              Concrete implementations can override for a faster single-pass transform.
-              """
-              cache: Dict[int, Optional[Acc]] = {}
-
-              def decide(a: Acc) -> Optional[Acc]:
-                  k = id(a)
-                  if k in cache:
-                      return cache[k]
-                  r = mutator(a)
-                  cache[k] = r
-                  return r
-
-              pruned = self.prune(lambda a: decide(a) is not None)
-              def map_acc(a: Acc) -> Acc:
-                  r = decide(a)
-                  return r if r is not None else a
-              return pruned.apply(map_acc)
-          @abstractmethod
-          def merge(self: GSSType, other: GSSType) -> GSSType:
-              """Merges this GSS with another, combining accumulators for identical stacks."""
-              pass
-
-          @classmethod
-          def merge_many(cls: Type[GSSType], gss_list: Iterable[GSSType]) -> GSSType:
-              """
-              Merges multiple GSS instances into one.
-              This default implementation uses functools.reduce with the instance `merge` method.
-              """
-              # Start with an empty GSS of the target class `cls` to ensure the correct
-              # return type and to handle an empty gss_list.
-              initial = cls.empty()
-              return reduce(lambda acc_gss, next_gss: acc_gss.merge(next_gss), gss_list, initial)
-
-          @abstractmethod
-          def peek(self) -> Set[T]:
-              """Returns the set of all values at the top of any stack."""
-              pass
-
-          @abstractmethod
-          def reduce_acc(self) -> Optional[Acc]:
-              """
-              Merges the accumulators of all active stacks into a single optional value.
-              Returns None if there are no active stacks.
-              """
-              pass
-
-          def to_reference_impl(self) -> 'GSS[T, Acc]':
-              """
-              Converts the GSS to its canonical ReferenceGSS representation.
-              This involves merging accumulators for identical stacks.
-              """
-              from .implementations.reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          def __str__(self) -> str:
-              """Provides a human-readable string representation for debugging."""
-              return f"{self.__class__.__name__}({self.to_stacks()})"
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous string representation of the GSS."""
-              return f"{self.__class__.__name__}({self.to_stacks()!r})"
-
-      ```
-    metadata:
-      filename: python/gss_tester/interface.py
+      filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
   - user: |-
       ```python 'python/gss_tester/implementations/leveled_impl.py'
       from __future__ import annotations
@@ -4274,8 +4473,8 @@ messages:
                       end_acc = e.get("end")
                       sub = e.get("sub", {})
                       if end_acc is not None:
-                          # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty'
-                          nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
+                          # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty', then promote
+                          nodes_for_v.append(try_promote(UpperBranch(children={}, empty=end_acc)))
                       if sub:
                           nodes_for_v.append(build(sub))
                       if nodes_for_v:
@@ -4396,7 +4595,9 @@ messages:
                       empty_acc = self.inner.empty
                   else:
                       empty_acc = self.inner.empty
-                  return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                  new_root = UpperBranch(children={}, empty=empty_acc)
+                  # Promote to canonical form if applicable (avoids validator errors).
+                  return LeveledGSS(try_promote(new_root))
 
               # Keep stacks with `value` at the top.
               if isinstance(self.inner, UpperBranch):
@@ -4435,7 +4636,8 @@ messages:
               if None in values_set:
                   empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
                   if empty_acc is not None:
-                      gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
+                      # Promote the singleton-empty representation to keep structure canonical.
+                      gss_for_empty = LeveledGSS(try_promote(UpperBranch(children={}, empty=empty_acc)))
                       return gss_for_stacks.merge(gss_for_empty)
 
               return gss_for_stacks
@@ -4515,8 +4717,9 @@ messages:
 
                       if not keep_acc and keep_empty:
                           res = UpperBranch(children={}, empty=new_empty)
-                          memo[id(node)] = res
-                          return res
+                          promoted = try_promote(res)
+                          memo[id(node)] = promoted
+                          return promoted
 
                       # keep_acc is True, but empty might have been pruned.
                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
@@ -4606,10 +4809,11 @@ messages:
 
                       if not keep_acc and keep_empty:
                           # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-                          # Becomes an UpperBranch leaf with only 'empty'.
+                          # Promote the leaf to maintain canonical form (Interface with no children).
                           res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
-                          memo[nid] = res
-                          return res
+                          promoted = try_promote(res)
+                          memo[nid] = promoted
+                          return promoted
 
                       # keep_acc is True
                       new_acc = new_acc_opt  # type: ignore[assignment]
@@ -5086,6 +5290,10 @@ messages:
       def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
           all_children = list(node._all_children())
           if not all_children:
+              # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
+              # it can be represented canonically as an Interface with no children.
+              if node.empty is not None:
+                  return Interface(children={}, acc=node.empty, empty=node.empty)
               return node
           if not all(isinstance(c, Interface) for c in all_children):
               return node
@@ -5203,75 +5411,20 @@ messages:
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
-      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-21_17-39-09
-      ---
-      Reference Implementation: gss_tester/implementations/reference_impl.py
-      Other Implementations: gss_tester/implementations/leveled_impl.py
-      ---
-      Starting test runs...
-
-      >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-21_17-39-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-21_17-39-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
-
-      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-21_17-39-09/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
-      Running test specification...
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/runner.py", line 60, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/runner.py", line 41, in main
-          for state, line_no in run_test_spec(gss_class):
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/test_spec.py", line 37, in run_test_spec
-          gss_popped_10 = gss_popped_20.isolate(10).pop()
-                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 444, in pop
-          return LeveledGSS(merged)
-                 ^^^^^^^^^^^^^^^^^^
-        File "<string>", line 4, in __init__
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 188, in __post_init__
-          self._validate()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 192, in _validate
-          self._validate_no_promotions()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 234, in _validate_no_promotions
-          self._validate_promotion_node(self.inner)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 260, in _validate_promotion_node
-          raise ValueError(
-      ValueError: LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, indicating a non-canonical structure. Node: UpperBranch(children={}, empty=0, _max_depth=0)
-
-      >>> Test for gss_tester/implementations/leveled_impl.py failed with exit code 1. Skipping.
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-21_17-39-09/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-21_17-39-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 1 equivalence class(es) among 1 implementations.
-
-      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-
-      Class 1 (1 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.implementations.reference_impl.ReferenceGSS
-
-
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/implementations/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-21_17-39-09
-    metadata:
-  - user: "Fix this. Note: The validation function is CORRECT. A promotion SHOULD
-      HAVE occured but didn't. We need to carefully look at the rest of the code to
-      figure out who allowed a promotion to go missed."
+      I want to gather GSS stats in here, just before merge
+      ```python
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+                                  values[d] = values[d].merge(child_gss)
+      ```
+      I want the existing `values[d]` and `child_gss` stats, and the merged `values[d].merge(child_gss)`.
+      In the logs, I want to be able to identify these stats as belonging to `values[d]`, `child_gss`, or `values[d].merge(child_gss)`.
+      Then in `create_additional_benchmark_plots.py` I want to get plots that show me how some of these stats evolve over steps.
+      I should get a 'distribution' of points for each step, since each step (call to get_mask) has multiple merges. And I guess I'll need a way to distinguish between `values[d]`, `child_gss`, or `values[d].merge(child_gss)`.
+      Important stats include:
+          num unique accs
+          total accs
+          num interface nodes, upper branches, or lower
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5290,333 +5443,288 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s how to fix the missed promotion so that LeveledGSS always maintains a canonical structure (and therefore passes validation):
+      Of course. Here are the step-by-step instructions to implement the requested GSS merge statistics logging and plotting, followed by the corresponding git diffs.
 
-      Step-by-step instructions
+      ### Step-by-step Instructions
 
-      1) Update try_promote to handle the “leaf with only empty accumulator” case
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - Find the function try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc].
-      - Currently, when a node has no children, it returns the node unchanged. Change this so that if node.empty is not None and there are no children, we promote it to an Interface with no children, carrying that accumulator. This mirrors the shape produced by from_stacks in the empty-stack case and avoids validator errors.
+      #### 1. Instrument GSS Merges in the Model
 
-      What to change:
-      - Replace the early return inside if not all_children with logic that returns Interface(children={}, acc=node.empty, empty=node.empty) when node.empty is not None.
+      In `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`, you will modify the `get_mask` method to log detailed statistics before and after each GSS merge operation in the main loop.
 
-      2) Ensure isolate(None) returns a promoted/canonical node
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - Find LeveledGSS.isolate. In the branch where value is None, it currently constructs a raw UpperBranch(children={}, empty=empty_acc) and wraps it directly into a LeveledGSS. This can violate the “no missed promotions” invariant on initialization.
-      - Fix: After constructing the UpperBranch, run it through try_promote and then construct LeveledGSS with the promoted node.
+      *   **Open the file:** `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`.
+      *   **Navigate** to the `get_mask` method.
+      *   **Find the following line** inside the main processing loop:
+          ```python
+                                  values[d] = values[d].merge(child_gss)
+          ```
+      *   **Replace that single line** with the following block of code. This new block explicitly calculates stats for the two GSS objects being merged (`existing` and `new`) and for the `merged` result, printing them in a machine-parsable format before updating `values[d]`.
 
-      3) Ensure isolate_many handles empty stacks canonically
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - Find LeveledGSS.isolate_many. In the branch handling None in values_set (the “empty stacks” case), it currently creates a LeveledGSS(UpperBranch(children={}, empty=empty_acc)).
-      - Fix: Promote that UpperBranch via try_promote before wrapping it in LeveledGSS.
+          ```python
+                                  # --- GSS Merge Stats Logging ---
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
 
-      4) Fix prune to promote leaf UpperBranch results when the acc is pruned but the explicit empty survives
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - In LeveledGSS.prune, in the Interface case when not keep_acc and keep_empty, it currently returns an UpperBranch(children={}, empty=new_empty). This can immediately violate validation at the root or produce a non-canonical subgraph.
-      - Fix: call try_promote(res) in this branch, cache and return the promoted node.
+                                  stats_existing = existing_gss.stats()
+                                  stats_new = new_gss.stats()
+                                  stats_merged = merged_gss.stats()
 
-      5) Fix apply_and_prune similarly
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - In LeveledGSS.apply_and_prune, in the Interface case when not keep_acc and keep_empty, it currently returns an UpperBranch(children={}, empty=new_empty_opt). Promote this via try_promote before returning.
+                                  def print_merge_stats(label, stats):
+                                      print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                            f"unique_accs={stats.unique_accumulators_count} "
+                                            f"total_acc_instances={stats.total_accumulator_instances} "
+                                            f"interfaces={stats.num_interface_nodes} "
+                                            f"upper={stats.num_upperbranch_nodes} "
+                                            f"lower={stats.num_lower_nodes}")
 
-      Why these changes are correct
-      - The validator intentionally flags any UpperBranch that could be represented as an Interface. A leaf UpperBranch containing only an explicit “empty” accumulator is exactly one such case (it represents a terminal stack and can be represented as an Interface with no children).
-      - Centralizing the conversion via try_promote ensures consistent canonicalization across operations, including pop, isolate, prune, and apply_and_prune.
-      - to_stacks behavior remains unchanged (canonical lists produced via ReferenceGSS), so the external behavior is consistent.
+                                  print_merge_stats("existing", stats_existing)
+                                  print_merge_stats("new", stats_new)
+                                  print_merge_stats("merged", stats_merged)
 
-      Git diffs
+                                  values[d] = merged_gss
+          ```
+
+      #### 2. Update Plotting Script to Parse and Visualize Merge Stats
+
+      In `python/aug25/create_additional_benchmark_plots.py`, you will add logic to parse the new `MERGE_STATS` from the logs and generate scatter plots to visualize the distribution of these metrics.
+
+      *   **Open the file:** `python/aug25/create_additional_benchmark_plots.py`.
+
+      *   **In the `parse_log_data` function:**
+          *   Just before the `"# --- Final Check and Data Validation ---"` comment, **insert** the following code to find and parse all `MERGE_STATS` lines:
+          ```python
+              # --- Extract Merge Stats ---
+              data['merge_stats'] = []
+              merge_stats_matches = re.findall(
+                  r"MERGE_STATS: type=(\w+) step=(\d+) unique_accs=(\d+) "
+                  r"total_acc_instances=(\d+) interfaces=(\d+) upper=(\d+) lower=(\d+)",
+                  python_model_log
+              )
+              for match in merge_stats_matches:
+                  data['merge_stats'].append({
+                      'type': match[0],
+                      'step': int(match[1]),
+                      'unique_accs': int(match[2]),
+                      'total_acc_instances': int(match[3]),
+                      'interfaces': int(match[4]),
+                      'upper': int(match[5]),
+                      'lower': int(match[6]),
+                  })
+          ```
+          *   A few lines down, after `data['steps'] = list(range(1, num_steps + 1))`, **add** a check to warn the user if no merge stats were found:
+          ```python
+              if not data.get('merge_stats'):
+                  print("Warning: No MERGE_STATS found in log. Merge plots will be empty.", file=sys.stderr)
+          ```
+
+      *   **In the `generate_plots` function:**
+          *   Go to the very **end of the function**, just before the line `print("All plots generated successfully.", file=sys.stderr)`.
+          *   **Insert** the following code block. This adds a new section for "Plot 10" which defines a helper function to create scatter plots and then calls it for each of the collected GSS statistics.
+
+          ```python
+          # Plot 10: Merge Stats Distributions
+          if data.get('merge_stats'):
+              merge_stats = data['merge_stats']
+
+              def create_merge_scatter_plot(stat_key, title, y_label, use_log_scale=True):
+                  plt.figure(figsize=(14, 8))
+
+                  # Group data by type for easier plotting
+                  data_by_type = {'existing': [], 'new': [], 'merged': []}
+                  for item in merge_stats:
+                      data_by_type[item['type']].append((item['step'], item[stat_key]))
+
+                  colors = {'existing': 'blue', 'new': 'green', 'merged': 'red'}
+                  markers = {'existing': 'o', 'new': 'x', 'merged': 's'}
+
+                  for type_name, points in data_by_type.items():
+                      if not points:
+                          continue
+                      point_steps, values = zip(*points)
+                      # Add small jitter to x-axis to see overlapping points
+                      jitter = np.random.normal(0, 0.05, size=len(point_steps))
+                      plt.scatter(np.array(point_steps) + jitter, values,
+                                  c=colors[type_name],
+                                  marker=markers[type_name],
+                                  alpha=0.6,
+                                  label=f'{type_name.capitalize()} GSS')
+
+                  plt.xlabel('Benchmark Step')
+                  plt.ylabel(y_label)
+                  plt.title(title)
+                  plt.xticks(steps)
+                  plt.grid(True, which="both", ls="--")
+                  if use_log_scale:
+                      plt.yscale('log')
+                      ax = plt.gca()
+                      # Set a bottom limit to handle zero values gracefully
+                      ax.set_ylim(bottom=0.5)
+
+                  plt.legend()
+                  plt.tight_layout()
+                  plt.savefig(os.path.join(plot_dir, f"merge_dist_{stat_key}.png"))
+                  plt.close()
+
+              create_merge_scatter_plot('unique_accs', 'Distribution of Unique Accumulators in Merges', 'Unique Accumulators (Log Scale)')
+              create_merge_scatter_plot('total_acc_instances', 'Distribution of Total Accumulator Instances in Merges', 'Total Accumulator Instances (Log Scale)')
+              create_merge_scatter_plot('interfaces', 'Distribution of Interface Nodes in Merges', 'Interface Nodes (Log Scale)')
+              create_merge_scatter_plot('upper', 'Distribution of UpperBranch Nodes in Merges', 'UpperBranch Nodes (Log Scale)')
+              create_merge_scatter_plot('lower', 'Distribution of Lower Nodes in Merges', 'Lower Nodes (Log Scale)')
+          ```
+
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 3fd3a9e..8b7c7e0 100644
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -362,12 +362,15 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-                   return set(self.inner.children.keys())
+      diff --git a/python/aug25/create_additional_benchmark_plots.py b/python/aug25/create_additional_benchmark_plots.py
+      index 9217647..3320c2b 100644
+      --- a/python/aug25/create_additional_benchmark_plots.py
+      +++ b/python/aug25/create_additional_benchmark_plots.py
+      @@ -70,12 +70,34 @@
+               # --- Extract Commit Times ---
+               data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
        
-           def reduce_acc(self) -> Optional[Acc]:
-               def generate_accs_lower(node: Lower[T], acc: Acc) -> Generator[Acc, None, None]:
-                   if node.empty:
-                       yield acc
-                   for children_at_depth in node.children.values():
-                       for child in children_at_depth.values():
-                           yield from generate_accs_lower(child, acc)
+      +        # --- Extract Merge Stats ---
+      +        data['merge_stats'] = []
+      +        merge_stats_matches = re.findall(
+      +            r"MERGE_STATS: type=(\w+) step=(\d+) unique_accs=(\d+) "
+      +            r"total_acc_instances=(\d+) interfaces=(\d+) upper=(\d+) lower=(\d+)",
+      +            python_model_log
+      +        )
+      +        for match in merge_stats_matches:
+      +            data['merge_stats'].append({
+      +                'type': match[0],
+      +                'step': int(match[1]),
+      +                'unique_accs': int(match[2]),
+      +                'total_acc_instances': int(match[3]),
+      +                'interfaces': int(match[4]),
+      +                'upper': int(match[5]),
+      +                'lower': int(match[6]),
+      +            })
+      +
+               # --- Final Check and Data Validation ---
+               num_steps = len(data['get_mask_total_time'])
+               if num_steps == 0:
+                   print("Error: No profiling steps found for the Python model.", file=sys.stderr)
+                   return None
+               data['steps'] = list(range(1, num_steps + 1))
+      +
+      +        if not data.get('merge_stats'):
+      +            print("Warning: No MERGE_STATS found in log. Merge plots will be empty.", file=sys.stderr)
        
-               def generate_accs(node: Upper[T, Acc]) -> Generator[Acc, None, None]:
-                   if isinstance(node, UpperBranch):
-                       if node.empty is not None:
-                           yield node.empty
-                       for children_at_depth in node.children.values():
-                           for child in children_at_depth.values():
-                               yield from generate_accs(child)
-                   elif isinstance(node, Interface):
-                       if node.empty is not None:
-                           yield node.empty
-      @@ -406,7 +409,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-               return LeveledGSS(merge_upper(self.inner, other.inner))
-           def peek(self) -> Set[T]:
-               if isinstance(self.inner, Interface):
-                   return set(self.inner.children.keys())
-               else:
-                   return set(self.inner.children.keys())
-      @@ -427,7 +433,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-               return reduced_acc
+               # Handle optional metrics that might not be in older logs
+               if len(data['acc_merge_calls']) == 0 and num_steps > 0:
+      @@ -211,6 +233,55 @@
+           ax2.legend(lines + lines2, labels + labels2, loc='upper left'); plt.grid(True, which="both", ls="--", alpha=0.6)
+           plt.savefig(os.path.join(plot_dir, "efficiency_and_sharing.png"))
+           plt.close()
+      +
+      +    # Plot 10: Merge Stats Distributions
+      +    if data.get('merge_stats'):
+      +        merge_stats = data['merge_stats']
+      +
+      +        def create_merge_scatter_plot(stat_key, title, y_label, use_log_scale=True):
+      +            plt.figure(figsize=(14, 8))
+      +
+      +            # Group data by type for easier plotting
+      +            data_by_type = {'existing': [], 'new': [], 'merged': []}
+      +            for item in merge_stats:
+      +                data_by_type[item['type']].append((item['step'], item[stat_key]))
+      +
+      +            colors = {'existing': 'blue', 'new': 'green', 'merged': 'red'}
+      +            markers = {'existing': 'o', 'new': 'x', 'merged': 's'}
+      +
+      +            for type_name, points in data_by_type.items():
+      +                if not points:
+      +                    continue
+      +                point_steps, values = zip(*points)
+      +                # Add small jitter to x-axis to see overlapping points
+      +                jitter = np.random.normal(0, 0.05, size=len(point_steps))
+      +                plt.scatter(np.array(point_steps) + jitter, values,
+      +                            c=colors[type_name],
+      +                            marker=markers[type_name],
+      +                            alpha=0.6,
+      +                            label=f'{type_name.capitalize()} GSS')
+      +
+      +            plt.xlabel('Benchmark Step')
+      +            plt.ylabel(y_label)
+      +            plt.title(title)
+      +            plt.xticks(steps)
+      +            plt.grid(True, which="both", ls="--")
+      +            if use_log_scale:
+      +                plt.yscale('log')
+      +                ax = plt.gca()
+      +                # Set a bottom limit to handle zero values gracefully
+      +                ax.set_ylim(bottom=0.5)
+      +
+      +            plt.legend()
+      +            plt.tight_layout()
+      +            plt.savefig(os.path.join(plot_dir, f"merge_dist_{stat_key}.png"))
+      +            plt.close()
+      +
+      +        create_merge_scatter_plot('unique_accs', 'Distribution of Unique Accumulators in Merges', 'Unique Accumulators (Log Scale)')
+      +        create_merge_scatter_plot('total_acc_instances', 'Distribution of Total Accumulator Instances in Merges', 'Total Accumulator Instances (Log Scale)')
+      +        create_merge_scatter_plot('interfaces', 'Distribution of Interface Nodes in Merges', 'Interface Nodes (Log Scale)')
+      +        create_merge_scatter_plot('upper', 'Distribution of UpperBranch Nodes in Merges', 'UpperBranch Nodes (Log Scale)')
+      +        create_merge_scatter_plot('lower', 'Distribution of Lower Nodes in Merges', 'Lower Nodes (Log Scale)')
        
-           def stats(self) -> LeveledGSSStats[T, Acc]:
-               """
-               Compute a comprehensive set of statistics for this LeveledGSS without flattening to stacks.
-               Where possible, dynamic programming is used to avoid enumerating all stacks.
-               """
-               # --------------------
-      @@ -726,12 +735,16 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-      -    all_children = list(node._all_children())
-      -    if not all_children:
-      -        return node
-      +    all_children = list(node._all_children())
-      +    if not all_children:
-      +        # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
-      +        # it can be represented canonically as an Interface with no children.
-      +        if node.empty is not None:
-      +            return Interface(children={}, acc=node.empty, empty=node.empty)
-      +        return node
-           if not all(isinstance(c, Interface) for c in all_children):
-               return node
+           print("All plots generated successfully.", file=sys.stderr)
        
-           accs: Set[Acc] = set()
-           if node.empty is not None:
-               accs.add(node.empty)
-           for c in all_children:
-      @@ -766,7 +779,7 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
-           new_empty = it.empty
-           if not it.children and new_empty is None:
-               new_empty = it.acc
-           return UpperBranch(children=children, empty=new_empty)
-       
-       def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
-      @@ -429,14 +442,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-           def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
-               if value is None:
-                   # Keep only empty stacks.
-                   if isinstance(self.inner, UpperBranch):
-                       empty_acc = self.inner.empty
-                   else:
-                       empty_acc = self.inner.empty
-      -            return LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-      +            new_root = UpperBranch(children={}, empty=empty_acc)
-      +            # Promote to canonical form if applicable (avoids validator errors).
-      +            return LeveledGSS(try_promote(new_root))
-       
-               # Keep stacks with `value` at the top.
-               if isinstance(self.inner, UpperBranch):
-                   filtered_children = {value: self.inner.children[value]} if value in self.inner.children else {}
-                   return LeveledGSS(try_promote(UpperBranch(children=filtered_children, empty=None)))
-               else:
-                   if value not in self.inner.children:
-      @@ -456,12 +471,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-       
-               # Part 2: handle empty stacks
-               if None in values_set:
-                   empty_acc = self.inner.empty if isinstance(self.inner, (UpperBranch, Interface)) else None
-                   if empty_acc is not None:
-      -                gss_for_empty = LeveledGSS(UpperBranch(children={}, empty=empty_acc))
-      +                # Promote the singleton-empty representation to keep structure canonical.
-      +                gss_for_empty = LeveledGSS(try_promote(UpperBranch(children={}, empty=empty_acc)))
-                       return gss_for_stacks.merge(gss_for_empty)
-       
-               return gss_for_stacks
-       
-           def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
-               if memo is None:
-      @@ -558,9 +574,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-                       if not keep_acc and not keep_empty:
-                           memo[id(node)] = None
-                           return None
-       
-                       if not keep_acc and keep_empty:
-      -                    res = UpperBranch(children={}, empty=new_empty)
-      -                    memo[id(node)] = res
-      -                    return res
-      +                    res = UpperBranch(children={}, empty=new_empty)
-      +                    promoted = try_promote(res)
-      +                    memo[id(node)] = promoted
-      +                    return promoted
-       
-                       # keep_acc is True, but empty might have been pruned.
-                       res = Interface(children=node.children, acc=node.acc, empty=new_empty)
-                       memo[id(node)] = res
-                       return res
-      @@ -648,12 +666,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-                       if not keep_acc and not keep_empty:
-                           memo[nid] = None
-                           return None
-       
-                       if not keep_acc and keep_empty:
-      -                    # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-      -                    # Becomes an UpperBranch leaf with only 'empty'.
-      -                    res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
-      -                    memo[nid] = res
-      -                    return res
-      +                    # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-      +                    # Promote the leaf to maintain canonical form (Interface with no children).
-      +                    res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
-      +                    promoted = try_promote(res)
-      +                    memo[nid] = promoted
-      +                    return promoted
-       
-                       # keep_acc is True
-                       new_acc = new_acc_opt  # type: ignore[assignment]
-                       # Detect if anything changed; children are reused verbatim.
-                       changed = (new_acc != node.acc) or (
+
+      ``````diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      index 237699d..3513b63 100644
+      --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      @@ -253,7 +253,25 @@
+                               d: int = int(dest_idx)
+                               if d in values:
+                                   call_stats['main_loop_merge_calls'] += 1
+      -                            values[d] = values[d].merge(child_gss)
+      +
+      +                            # --- GSS Merge Stats Logging ---
+      +                            existing_gss = values[d]
+      +                            new_gss = child_gss
+      +                            merged_gss = existing_gss.merge(new_gss)
+      +
+      +                            stats_existing = existing_gss.stats()
+      +                            stats_new = new_gss.stats()
+      +                            stats_merged = merged_gss.stats()
+      +
+      +                            def print_merge_stats(label, stats):
+      +                                print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+      +                                      f"unique_accs={stats.unique_accumulators_count} "
+      +                                      f"total_acc_instances={stats.total_accumulator_instances} "
+      +                                      f"interfaces={stats.num_interface_nodes} "
+      +                                      f"upper={stats.num_upperbranch_nodes} "
+      +                                      f"lower={stats.num_lower_nodes}")
+      +
+      +                            print_merge_stats("existing", stats_existing)
+      +                            print_merge_stats("new", stats_new)
+      +                            print_merge_stats("merged", stats_merged)
+      +
+      +                            values[d] = merged_gss
+                               else:
+                                   values[d] = child_gss
+                               enqueue(max_depth[d], d)
+
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+      Identified target file: python/aug25/create_additional_benchmark_plots.py
+      Applying patch to 'python/aug25/create_additional_benchmark_plots.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/create_additional_benchmark_plots.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: |-
-      Diff of python/gss_tester/tests/test_spec.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/interface.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-21_17-41-52
-      ---
-      Reference Implementation: gss_tester/implementations/reference_impl.py
-      Other Implementations: gss_tester/implementations/leveled_impl.py
-      ---
-      Starting test runs...
-
-      >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-21_17-41-52/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-21_17-41-52/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
-
-      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-21_17-41-52/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
-      Running test specification...
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/runner.py", line 60, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/runner.py", line 41, in main
-          for state, line_no in run_test_spec(gss_class):
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/tests/test_spec.py", line 43, in run_test_spec
-          gss1 = gss_class.from_stacks([([10], acc_factory())])
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 383, in from_stacks
-          return LeveledGSS(build(trie, empty_acc))
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "<string>", line 4, in __init__
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 188, in __post_init__
-          self._validate()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 192, in _validate
-          self._validate_no_promotions()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 234, in _validate_no_promotions
-          self._validate_promotion_node(self.inner)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 245, in _validate_promotion_node
-          self._validate_promotion_node(child)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 260, in _validate_promotion_node
-          raise ValueError(
-      ValueError: LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, indicating a non-canonical structure. Node: UpperBranch(children={}, empty=0, _max_depth=0)
-
-      >>> Test for gss_tester/implementations/leveled_impl.py failed with exit code 1. Skipping.
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-21_17-41-52/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-21_17-41-52/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 1 equivalence class(es) among 1 implementations.
-
-      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-
-      Class 1 (1 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.implementations.reference_impl.ReferenceGSS
-
-
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/implementations/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-21_17-41-52
-    metadata:
-  - assistant: |-
-      Step-by-step instructions
-
-      1) Promote leaf end-of-stack nodes during construction in from_stacks
-      - File: python/gss_tester/implementations/leveled_impl.py
-      - In LeveledGSS.from_stacks, inside the nested build(...) function, when you handle an end-of-stack entry (end_acc is not None), you currently create a leaf UpperBranch(children={}, empty=end_acc).
-      - This is a non-canonical representation because such a leaf UpperBranch is always promotable to an Interface. Wrap that construction with try_promote so the child becomes an Interface immediately. This ensures the parent “all children are Interface” promotion can trigger and keeps the structure canonical from the start.
-
-      What to edit:
-      - Replace nodes_for_v.append(UpperBranch(children={}, empty=end_acc)) with nodes_for_v.append(try_promote(UpperBranch(children={}, empty=end_acc))).
-
-      Why this fixes the failure:
-      - The validator reported that a promotion was missed for a leaf UpperBranch with an “empty” accumulator. That leaf was created in from_stacks. Promoting it immediately avoids emitting a non-canonical shape, satisfying the validator and preventing later operations from inheriting the non-canonical node.
-
-      Git diff
-
-      ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 8b7c7e0..d3e0c54 100644
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -339,7 +339,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-                       end_acc = e.get("end")
-                       sub = e.get("sub", {})
-                       if end_acc is not None:
-      -                    # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty'
-      -                    nodes_for_v.append(UpperBranch(children={}, empty=end_acc))
-      +                    # Represent a leaf/end-of-stack using an UpperBranch with the accumulator in 'empty', then promote
-      +                    nodes_for_v.append(try_promote(UpperBranch(children={}, empty=end_acc)))
-                       if sub:
-                           nodes_for_v.append(build(sub))
-                       if nodes_for_v:
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Ensure canonical structure in LeveledGSS
-      via improved node promotion"'
+  - user: 'Changes committed with message: "feat: Log and plot GSS merge statistics"'
     metadata:
 ...
