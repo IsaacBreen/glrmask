@@ -396,18 +396,16 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     for child in kids.values():
                         dfs_upper(child, pref + [v])
             elif isinstance(u, Interface):
-                # The interface's `empty` flag indicates an explicit stack ending at `pref` with `acc`.
-                if u.empty:
+                # An Interface can represent a terminal stack, and also have children.
+                # It's terminal if `empty` is true, or if it has no children (implicit terminal).
+                if u.empty or not u.children:
                     res.append((list(reversed(pref)), u.acc))
-                elif not u.children:
-                    # No children and no explicit empty: implicit terminal represented by acc.
-                    res.append((list(reversed(pref)), u.acc))
-                else:
-                    # The interface's `children` are for stacks extending `pref`.
-                    # All these stacks share accumulator `u.acc`.
-                    for v, kids in u.children.items():
-                        for child in kids.values():
-                            dfs_lower(child, pref + [v], u.acc)
+
+                # The interface's `children` are for stacks extending `pref`.
+                # All these stacks share accumulator `u.acc`.
+                for v, kids in u.children.items():
+                    for child in kids.values():
+                        dfs_lower(child, pref + [v], u.acc)
 
         dfs_upper(self.inner, [])
 
