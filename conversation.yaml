@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python.py
     - python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python.py: |
@@ -709,17 +709,17 @@ local_system:
 
               return RangeSet.from_ranges(original_mask.to_ranges())
   prev_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
+    python/aug25/models/precompute3_model_pure_python.py: |+
       import json
       import heapq
       import collections
-      import portion as P
       import time
       from typing import Dict, List, Tuple, Optional, Union, Iterable
       from dataclasses import dataclass, field
 
       from ..common_interface import GraphProvider, RangeSet
       import _sep1 as ffi
+      import portion as P
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
 
@@ -730,12 +730,6 @@ local_system:
       except NameError:
           # If not running under kernprof, create a dummy decorator.
           def profile(func): return func
-
-
-      def _interval_from_ranges(ranges: Iterable[Tuple[int, int]]) -> P.Interval:
-          if not ranges:
-              return P.empty()
-          return P.Interval(*[P.closed(s, e) for s, e in ranges])
 
 
       @dataclass(frozen=True)
@@ -775,7 +769,7 @@ local_system:
           def merge(self, other: "PyAcc") -> "PyAcc":
               d1 = dict(self.terminals_union)
               d2 = dict(other.terminals_union)
-              new_terminals_union = d1.copy()
+              new_terminals_union: Dict[int, P.Interval] = d1.copy()
               for k, v in d2.items():
                   if k in new_terminals_union:
                       new_terminals_union[k] = new_terminals_union[k] | v
@@ -788,6 +782,42 @@ local_system:
               )
 
 
+      def bitset_to_interval(bv: ffi.Bitset) -> P.Interval:
+          """
+          Convert an ffi.Bitset into a portion interval (as a union of closed integer intervals).
+          """
+          iv = P.empty()
+          for start, end in bv.to_ranges():
+              iv = iv | P.closed(int(start), int(end))
+          return iv
+
+
+      def ints_to_interval(indices: Iterable[int]) -> P.Interval:
+          iv = P.empty()
+          for i in indices:
+              iv = iv | P.singleton(int(i))
+          return iv
+
+
+      def interval_to_int_ranges(iv: P.Interval) -> List[Tuple[int, int]]:
+          """
+          Convert a portion interval (union of intervals) into a list of closed integer ranges (start, end).
+          Open endpoints are adjusted to integers (e.g., (1,3) -> [2,2]).
+          """
+          ranges: List[Tuple[int, int]] = []
+          for atom in iv:
+              # Determine integer inclusive lower/upper
+              lower = atom.lower
+              upper = atom.upper
+              if atom.left is P.OPEN:
+                  lower = lower + 1
+              if atom.right is P.OPEN:
+                  upper = upper - 1
+              if lower <= upper:
+                  ranges.append((int(lower), int(upper)))
+          return ranges
+
+
       class Model(GraphProvider):
           """
           Precomputed trie model (third-generation), simplified and concise.
@@ -797,17 +827,20 @@ local_system:
               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
               self.arena: Dict[int, dict] = arena
               self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}        
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, P.Interval]]] = None
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
               self.tokenizer: Optional[ffi.Regex] = None
               self.glr_parser: Optional[ffi.GLRParser] = None
               self.ignore_terminal_id: Optional[int] = None
               self.parser_table: Optional[ParserTable] = None
               self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}        
+              self.internal_to_original_map: Dict[int, int] = {}
               self.all_internal_llm_tokens_bitset: Optional[P.Interval] = None
               self.tokenizer_initial_state: Optional[int] = None
               self.all_terminals_bitset: Optional[P.Interval] = None
+
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
 
               # Normalize arena children bitsets and cache max_depth
               for uid, node in self.arena.items():
@@ -822,20 +855,18 @@ local_system:
                   new_children = []
                   for edge_key, dest_map in children:
                       pop, llm_bv_json = edge_key
-                      llm_bv = _interval_from_ranges(llm_bv_json)
+                      # Convert to portion interval
+                      llm_bv = bitset_to_interval(bs_from_json(dumps(llm_bv_json)))
                       new_dest_map = []
                       for dest_idx, state_bv_json in dest_map:
-                          state_bv = _interval_from_ranges(state_bv_json)
+                          # Convert to portion interval
+                          state_bv = bitset_to_interval(bs_from_json(dumps(state_bv_json)))
                           new_dest_map.append((int(dest_idx), state_bv))
+                      # Store llm_bv and state_bv as portion intervals
                       new_children.append(((int(pop), llm_bv), new_dest_map))
                   node["children"] = new_children
 
           @staticmethod
-          def _bitset_to_interval(bitset: ffi.Bitset) -> P.Interval:
-              if bitset.is_empty():
-                  return P.empty()
-              return P.Interval(*[P.closed(s, e) for s, e in bitset.to_ranges()])
-
           def from_json_string(s: str) -> 'Model':
               data = json.loads(s)
               roots_map = data["precomputed3"]
@@ -889,26 +920,25 @@ local_system:
                   all_terminals.update(row.actions.keys())
               if model.ignore_terminal_id is not None:
                   all_terminals.add(model.ignore_terminal_id)
-              model.all_terminals_bitset = P.Interval(*[P.singleton(i) for i in all_terminals])
+              model.all_terminals_bitset = ints_to_interval(list(all_terminals))
 
               initial_acc = PyAcc(terminals_union=tuple(), llm_mask=P.empty())
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
               model.state = {model.tokenizer_initial_state: initial_gss}
 
               model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-
-              pmc_ffi = constraint.possible_matches()
-              pmc_portion = {}
-              for tsid, terminals_to_llm_ffi in pmc_ffi.items():
-                  terminals_to_llm_portion = {}
-                  for term_id, bitset_ffi in terminals_to_llm_ffi.items():
-                      terminals_to_llm_portion[term_id] = model._bitset_to_interval(bitset_ffi)
-                  pmc_portion[tsid] = terminals_to_llm_portion
-              model.possible_matches_cache = pmc_portion
-
+              # Convert possible_matches_cache to use portion intervals
+              pmc_raw: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+              pmc_conv: Dict[int, Dict[int, P.Interval]] = {}
+              for tsid, inner in pmc_raw.items():
+                  tsid_int = int(tsid)
+                  pm_conv: Dict[int, P.Interval] = {}
+                  for term_id, bitset in inner.items():
+                      pm_conv[int(term_id)] = bitset_to_interval(bitset)
+                  pmc_conv[tsid_int] = pm_conv
+              model.possible_matches_cache = pmc_conv
               model.internal_to_original_map = constraint.internal_to_original_map()
-              all_llm_bs = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = model._bitset_to_interval(all_llm_bs)
+              model.all_internal_llm_tokens_bitset = bitset_to_interval(constraint.all_internal_llm_tokens_bitset())
               return model
 
           @profile
@@ -926,10 +956,13 @@ local_system:
           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
               def apply_map(acc: PyAcc) -> PyAcc:
                   old_map = dict(acc.terminals_union)
-                  new_bvs: Dict[int, P.Interval] = collections.defaultdict(P.empty)
+                  new_bvs: Dict[int, P.Interval] = {}
                   for old_sid, new_sid in state_map.items():
                       bv_source = old_map.get(old_sid, P.empty())
-                      new_bvs[new_sid] = new_bvs[new_sid] | bv_source
+                      if new_sid in new_bvs:
+                          new_bvs[new_sid] = new_bvs[new_sid] | bv_source
+                      else:
+                          new_bvs[new_sid] = bv_source
 
                   new_map_tuple = tuple(sorted(new_bvs.items()))
                   return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
@@ -939,10 +972,8 @@ local_system:
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               def apply_disallow(acc: PyAcc) -> PyAcc:
                   current_map = dict(acc.terminals_union)
-                  curr_bv = current_map.get(state_id, P.empty())
-                  to_add = P.singleton(terminal_id)
-                  new_bv = curr_bv | to_add
-                  current_map[state_id] = new_bv
+                  curr_iv = current_map.get(state_id, P.empty())
+                  current_map[state_id] = curr_iv | P.singleton(int(terminal_id))
                   new_map_tuple = tuple(sorted(current_map.items()))
                   return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
               return gss.apply(apply_disallow)
@@ -958,15 +989,23 @@ local_system:
               Explode packed transitions into (pop, state_id or None, dest_idx).
               """
               children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if token in llm_bv:
-                      for dest_idx, state_bv in dests:
-                          if state_bv.empty:
+              for (pop, llm_iv), dests in children:
+                  if token in llm_iv:
+                      for dest_idx, state_iv in dests:
+                          if state_iv.empty:
                               yield (int(pop), None, int(dest_idx))
                           else:
-                              for atomic in state_bv:
-                                  for sid in range(atomic.lower, atomic.upper + 1):
-                                      yield (int(pop), sid, int(dest_idx))
+                              # Iterate over integer states covered by the interval
+                              for atom in state_iv:
+                                  lower = atom.lower
+                                  upper = atom.upper
+                                  if atom.left is P.OPEN:
+                                      lower = lower + 1
+                                  if atom.right is P.OPEN:
+                                      upper = upper - 1
+                                  if lower <= upper:
+                                      for sid in range(int(lower), int(upper) + 1):
+                                          yield (int(pop), sid, int(dest_idx))
 
           @profile
           def commit(self, token_id: int):
@@ -982,7 +1021,7 @@ local_system:
                       state_map[tokenizer_sid] = end_state
                   terminals = P.empty()
                   for terminal_id, _ in matches:
-                      terminals |= P.singleton(terminal_id)
+                      terminals = terminals | P.singleton(int(terminal_id))
                   terminals_map[tokenizer_sid] = terminals
 
               # Prune and map per-state GSS
@@ -1099,8 +1138,8 @@ local_system:
               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
               """
               state_map = self.state
-              all_ones_mask = self.all_internal_llm_tokens_bitset
-              final_mask = P.empty()
+              all_ones_mask: P.Interval = self.all_internal_llm_tokens_bitset or P.empty()
+              final_mask: P.Interval = P.empty()
 
               values: Dict[int, GSS] = {}
               stopped: set[int] = set()
@@ -1122,17 +1161,21 @@ local_system:
                   # Set initial llm_mask on each accumulator and consume terminals_union
                   def initialize_acc(acc: PyAcc) -> PyAcc:
                       # Compute allowed LLM tokens from disallowed terminals
-                      disallowed_llm_mask = P.empty()
+                      disallowed_llm_mask: P.Interval = P.empty()
                       disallowed_map = dict(acc.terminals_union)
                       if disallowed_map:
-                          for tsid, disallowed_terminals in disallowed_map.items():
+                          for tsid, disallowed_terminals_iv in disallowed_map.items():
                               if tsid > max_state or tsid not in pmc:
                                   continue
-                              terminals_to_llm = pmc[tsid]
-                              for atomic in disallowed_terminals:
-                                  for terminal_id in range(atomic.lower, atomic.upper + 1):
+                              terminals_to_llm: Dict[int, P.Interval] = pmc[tsid]
+                              # Iterate integer terminals contained in the interval
+                              for atom in disallowed_terminals_iv:
+                                  low, up = atom.lower, atom.upper
+                                  if atom.left is P.OPEN: low += 1
+                                  if atom.right is P.OPEN: up -= 1
+                                  for terminal_id in range(int(low), int(up) + 1):
                                       if terminal_id in terminals_to_llm:
-                                          disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                                          disallowed_llm_mask = disallowed_llm_mask | terminals_to_llm[terminal_id]
 
                       allowed_mask = all_ones_mask - disallowed_llm_mask
 
@@ -1200,14 +1243,14 @@ local_system:
 
                       # End-node handling: just union the allowed LLM tokens
                       if is_end(node_idx):
-                          final_mask |= reduced_acc.llm_mask
+                          final_mask = final_mask.union(reduced_acc.llm_mask)
 
                       # Transitions grouped by (pop, llm_bv)
                       node_data = arena.get(node_idx, {})
                       children = node_data.get("children") or []
-                      for (pop, llm_bv), dests in children:
+                      for (pop, llm_iv), dests in children:
                           popped = gss_node.popn(pop)
-                          llm_empty = llm_bv.empty
+                          llm_empty = llm_iv.empty
 
                           for dest_idx, state_bv in dests:
                               matched: List[GSS] = []
@@ -1225,7 +1268,7 @@ local_system:
                                   def intersect_edge(acc: PyAcc) -> PyAcc:
                                       return PyAcc(
                                           terminals_union=acc.terminals_union,
-                                          llm_mask=acc.llm_mask & llm_bv
+                                          llm_mask=acc.llm_mask & llm_iv
                                       )
                                   child_gss_node = child_gss_node.apply(intersect_edge)
 
@@ -1239,22 +1282,60 @@ local_system:
 
                               enqueue(max_depth[d], d)
 
-              # Convert internal mask back to original IDs
-              original_mask = P.empty()
-              for atomic in final_mask:
-                  for internal_id in range(atomic.lower, atomic.upper + 1):
-                      if internal_id in self.internal_to_original_map:
-                          original_mask |= P.singleton(self.internal_to_original_map[internal_id])
-              return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+              # Convert internal mask back to original IDs and then to RangeSet
+              original_iv: P.Interval = P.empty()
+              for atom in final_mask:
+                  low, up = atom.lower, atom.upper
+                  if atom.left is P.OPEN: low += 1
+                  if atom.right is P.OPEN: up -= 1
+                  if low <= up:
+                      for internal_id in range(int(low), int(up) + 1):
+                          if internal_id in self.internal_to_original_map:
+                              original_iv = original_iv | P.singleton(self.internal_to_original_map[internal_id])
+              return RangeSet.from_ranges(interval_to_int_ranges(original_iv))
+
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |+
       import heapq
-      import portion as P
-      import _sep1 as ffi # For some types
       from typing import Dict, List, Set, Optional
+      import portion as P
 
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from .precompute3_model_pure_python import Model as InnerModel, PyAcc
       from ..common_interface import GraphProvider, RangeSet
+
+
+      def ints_to_interval(indices) -> P.Interval:
+          iv = P.empty()
+          for i in indices:
+              iv = iv | P.singleton(int(i))
+          return iv
+
+
+      def interval_to_int_ranges(iv: P.Interval):
+          ranges = []
+          for atom in iv:
+              lower = atom.lower
+              upper = atom.upper
+              if atom.left is P.OPEN:
+                  lower += 1
+              if atom.right is P.OPEN:
+                  upper -= 1
+              if lower <= upper:
+                  ranges.append((int(lower), int(upper)))
+          return ranges
+
+
+      def iterate_interval_ints(iv: P.Interval):
+          for atom in iv:
+              lower = atom.lower
+              upper = atom.upper
+              if atom.left is P.OPEN:
+                  lower += 1
+              if atom.right is P.OPEN:
+                  upper -= 1
+              if lower <= upper:
+                  for i in range(int(lower), int(upper) + 1):
+                      yield i
 
 
       class Model(GraphProvider):
@@ -1297,7 +1378,7 @@ local_system:
               """
               state_map: Dict[int, GSS] = self.state
 
-              all_ones: Optional[P.Interval] = self.all_internal_llm_tokens_bitset
+              all_ones: P.Interval = self.all_internal_llm_tokens_bitset or P.empty()
               final_mask: P.Interval = P.empty()
 
               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
@@ -1316,16 +1397,20 @@ local_system:
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = P.empty()
+                  disallowed_llm_mask: P.Interval = P.empty()
                   disallowed_map = dict(acc.terminals_union)
 
                   for tsid, disallowed_terminals in disallowed_map.items():
                       if tsid > max_state or tsid not in pmc:
                           continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in P.iterate(disallowed_terminals, step=1):
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                      terminals_to_llm: Dict[int, P.Interval] = pmc[tsid]
+                      for atom in disallowed_terminals:
+                          low, up = atom.lower, atom.upper
+                          if atom.left is P.OPEN: low += 1
+                          if atom.right is P.OPEN: up -= 1
+                          for terminal_id in range(int(low), int(up) + 1):
+                              if terminal_id in terminals_to_llm:
+                                  disallowed_llm_mask = disallowed_llm_mask | terminals_to_llm[terminal_id]
 
                   allowed_mask = all_ones - disallowed_llm_mask
                   return PyAcc(
@@ -1369,10 +1454,10 @@ local_system:
                       if is_end(node):
                           reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                           if reduced_acc:
-                              final_mask |= reduced_acc.llm_mask
+                              final_mask = final_mask | reduced_acc.llm_mask
 
                       # Traverse edges and propagate masks
-                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                      for (pop, llm_iv), dests in (arena.get(node, {}).get("children") or []):
                           popped: GSS = gss_node.popn(pop)
                           if popped.is_empty():
                               continue
@@ -1390,13 +1475,13 @@ local_system:
                                   continue
 
                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                              if not llm_bv.empty:
+                              if not llm_iv.empty:
                                   acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                                   def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                                       if acc in acc_memo:
                                           return acc_memo[acc]
-                                      new_mask = acc.llm_mask & llm_bv
+                                      new_mask = acc.llm_mask & llm_iv
                                       if new_mask.empty:
                                           result = None
                                       else:
@@ -1421,16 +1506,16 @@ local_system:
                                   values[d] = child_gss
                               enqueue(max_depth[d], d)
 
+                  todo.pop(depth)
 
-              todo.pop(depth)
-
-              # Convert internal mask back to original IDs
-              original_mask: P.Interval = P.empty()
-              for i in P.iterate(final_mask, step=1):
+              # Convert internal mask back to original IDs and return as a RangeSet
+              original_iv: P.Interval = P.empty()
+              for i in iterate_interval_ints(final_mask):
                   if i in self.internal_to_original_map:
-                      original_mask |= P.singleton(self.internal_to_original_map[i])
+                      original_iv = original_iv | P.singleton(self.internal_to_original_map[i])
 
-              return RangeSet.from_ranges(original_mask.to_ranges())
+              return RangeSet.from_ranges(interval_to_int_ranges(original_iv))
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1441,7 +1526,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -3164,7 +3249,8 @@ messages:
       ```
 
     metadata:
-  - user: |-
+  - user: |2-
+
       ---
 
       https://github.com/AlexandreDecan/portion/blob/master/README.md
@@ -3189,80 +3275,61 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify your code, followed by the corresponding git diffs.
+      Below are the exact steps and patches to remove ffi dependencies from commit and get_mask, and switch the bitset operations in those methods to use portion intervals instead. Other parts of the code may still load/convert ffi data at initialization time; the change ensures commit() and get_mask() in both classes use portion exclusively.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      First, I'll outline the changes for `python/aug25/models/precompute3_model_pure_python.py` to replace `ffi.Bitset` with `portion.Interval`.
+      1) In python/aug25/models/precompute3_model_pure_python.py:
+      - Add import for portion as P.
+      - Change PyAcc to use portion intervals for both terminals_union values and llm_mask, and update its merge method to operate with portion intervals.
+      - Add helper functions to convert ffi bitsets to portion intervals and to work with integer ranges:
+        - bitset_to_interval
+        - ints_to_interval
+        - interval_to_int_ranges
+      - In Model.__init__, convert llm_bv and state_bv to portion intervals when normalizing arena children.
+      - In Model.from_json_string:
+        - Convert all_terminals_bitset to a portion interval.
+        - Initialize PyAcc.llm_mask with P.empty().
+        - Convert possible_matches_cache to a mapping of int -> {int -> P.Interval}.
+        - Convert all_internal_llm_tokens_bitset to a portion interval.
+      - Update iter_edges to use portion interval membership and iteration over integer ranges.
+      - Rewrite _prune_disallowed_terminals, _map_allowed_terminals_tokenizer_states, and _disallow_terminal_in_state to use portion intervals.
+      - Rewrite commit to use portion intervals (no ffi usage).
+      - Rewrite get_mask to use portion intervals everywhere (no ffi usage), including set operations and the final conversion to RangeSet via interval_to_int_ranges.
 
-      #### File: `python/aug25/models/precompute3_model_pure_python.py`
+      2) In python/aug25/models/precompute3_model_pure_python_get_mask_only.py:
+      - Remove import _sep1 as ffi and import portion as P.
+      - Update attribute types to use portion intervals.
+      - Add helper functions:
+        - ints_to_interval
+        - interval_to_int_ranges
+        - iterate_interval_ints
+      - Rewrite get_mask to use portion intervals completely, including mask propagation and the final conversion to RangeSet via interval_to_int_ranges.
 
-      1.  **Update Imports and Add Helpers**:
-          *   Add `import portion as P` at the top of the file.
-          *   Modify the `typing` import to include `Iterable`.
-          *   After the imports, define a new helper function `_interval_from_ranges` to create `portion.Interval` objects from lists of ranges.
-          *   Inside the `Model` class, add a helper method `_bitset_to_interval` to convert `ffi.Bitset` objects to `portion.Interval`.
-
-      2.  **Modify `PyAcc` Dataclass**:
-          *   Update the type hints for `terminals_union` and `llm_mask` to use `P.Interval`.
-          *   In the `merge` method, replace the `.union()` method call with the `|` operator for interval union.
-
-      3.  **Update `Model` Class**:
-          *   In `__init__`, update the type hints for `possible_matches_cache`, `all_internal_llm_tokens_bitset`, and `all_terminals_bitset` to `P.Interval`.
-          *   In `__init__`, remove the `bs_from_json` and `dumps` variables. Use the new `_interval_from_ranges` helper to process `llm_bv_json` and `state_bv_json`.
-          *   In `from_json_string`, use the `_bitset_to_interval` helper to convert data from `constraint` methods. Use `P.Interval`, `P.empty()`, and `P.singleton()` where `ffi.Bitset` was previously used.
-          *   In `_prune_disallowed_terminals`, `_map_allowed_terminals_tokenizer_states`, and `_disallow_terminal_in_state`, replace `ffi.Bitset` and its methods with `portion.Interval` equivalents (`P.empty()`, `&`, `|`, `.empty`).
-          *   In `iter_edges`, update the logic to work with `portion.Interval` objects: use `in` for containment checks, `.empty` for emptiness, and iterate through atomic intervals for ranges.
-          *   In `commit`, replace `ffi.Bitset` usage with `P.Interval` and `P.singleton()`.
-          *   In `get_mask`, replace all `ffi.Bitset` operations with their `portion.Interval` counterparts (`P.empty()`, `|`, `-`, `&`, `.empty`, `in`). Update range extraction from `to_indices()` and `to_ranges()` to iterate over atomic intervals.
-
-      ---
-
-      Next, here are the changes for `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`.
-
-      #### File: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
-
-      1.  **Update Imports**:
-          *   Replace `import _sep1 as ffi` with `import portion as P`.
-          *   Add `import _sep1 as ffi` to retain access to other types from that module.
-
-      2.  **Update `Model` Class**:
-          *   In `__init__`, update the type hints for `possible_matches_cache`, `all_internal_llm_tokens_bitset`, and `all_terminals_bitset` to `P.Interval`.
-          *   In `get_mask`, apply the same `ffi.Bitset` to `portion.Interval` replacements as in the other file. This includes using `P.empty()`, `|`, `-`, `&`, `.empty`, `in`, and iterating over atomic intervals for ranges.
-
-      ### Git Diffs
-
-      Here are the git diffs to apply these changes.
+      Git diffs
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index aee2187..9e834ab 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1,8 +1,9 @@
+      @@ -1,11 +1,12 @@
        import json
        import heapq
        import collections
-      +import portion as P
        import time
       -from typing import Dict, List, Tuple, Optional, Union
       +from typing import Dict, List, Tuple, Optional, Union, Iterable
        from dataclasses import dataclass, field
        
        from ..common_interface import GraphProvider, RangeSet
-      @@ -16,6 +17,12 @@
-           # If not running under kernprof, create a dummy decorator.
-           def profile(func): return func
+       import _sep1 as ffi
+      +import portion as P
+       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
        
-      +
-      +def _interval_from_ranges(ranges: Iterable[Tuple[int, int]]) -> P.Interval:
-      +    if not ranges:
-      +        return P.empty()
-      +    return P.Interval(*[P.closed(s, e) for s, e in ranges])
-      +
        
-       @dataclass(frozen=True)
-       class Reduce:
-      @@ -44,8 +51,8 @@
+      @@ -39,17 +40,51 @@ class ParserTable:
+       
        
        @dataclass(frozen=True)
        class PyAcc:
@@ -3272,101 +3339,131 @@ messages:
       +    llm_mask: P.Interval
        
            def merge(self, other: "PyAcc") -> "PyAcc":
-               d1 = dict(self.terminals_union)
-      @@ -53,13 +60,13 @@
-               new_terminals_union = d1.copy()
-               for k, v in d2.items():
-                   if k in new_terminals_union:
+      -        d1 = dict(self.terminals_union)
+      -        d2 = dict(other.terminals_union)
+      -        new_terminals_union = d1.copy()
+      -        for k, v in d2.items():
+      -            if k in new_terminals_union:
       -                new_terminals_union[k] = new_terminals_union[k].union(v)
-      +                new_terminals_union[k] = new_terminals_union[k] | v
-                   else:
-                       new_terminals_union[k] = v
-       
-               return PyAcc(
-                   terminals_union=tuple(sorted(new_terminals_union.items())),
+      -            else:
+      -                new_terminals_union[k] = v
+      -
+      -        return PyAcc(
+      -            terminals_union=tuple(sorted(new_terminals_union.items())),
       -            llm_mask=self.llm_mask.union(other.llm_mask),
+      -        )
+      +        d1 = dict(self.terminals_union)
+      +        d2 = dict(other.terminals_union)
+      +        new_terminals_union: Dict[int, P.Interval] = d1.copy()
+      +        for k, v in d2.items():
+      +            if k in new_terminals_union:
+      +                new_terminals_union[k] = new_terminals_union[k] | v
+      +            else:
+      +                new_terminals_union[k] = v
+      +
+      +        return PyAcc(
+      +            terminals_union=tuple(sorted(new_terminals_union.items())),
       +            llm_mask=self.llm_mask | other.llm_mask,
-               )
+      +        )
+      +
+      +
+      +def bitset_to_interval(bv: ffi.Bitset) -> P.Interval:
+      +    """
+      +    Convert an ffi.Bitset into a portion interval (as a union of closed integer intervals).
+      +    """
+      +    iv = P.empty()
+      +    for start, end in bv.to_ranges():
+      +        iv = iv | P.closed(int(start), int(end))
+      +    return iv
+      +
+      +
+      +def ints_to_interval(indices: Iterable[int]) -> P.Interval:
+      +    iv = P.empty()
+      +    for i in indices:
+      +        iv = iv | P.singleton(int(i))
+      +    return iv
+      +
+      +
+      +def interval_to_int_ranges(iv: P.Interval) -> List[Tuple[int, int]]:
+      +    """
+      +    Convert a portion interval (union of intervals) into a list of closed integer ranges (start, end).
+      +    Open endpoints are adjusted to integers (e.g., (1,3) -> [2,2]).
+      +    """
+      +    ranges: List[Tuple[int, int]] = []
+      +    for atom in iv:
+      +        # Determine integer inclusive lower/upper
+      +        lower = atom.lower
+      +        upper = atom.upper
+      +        if atom.left is P.OPEN:
+      +            lower = lower + 1
+      +        if atom.right is P.OPEN:
+      +            upper = upper - 1
+      +        if lower <= upper:
+      +            ranges.append((int(lower), int(upper)))
+      +    return ranges
        
        
-      @@ -72,17 +79,14 @@
-               self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-               self.arena: Dict[int, dict] = arena
-               self.id_to_token: Dict[int, bytes] = {}
-      -        self.max_depth: Dict[int, int] = {}
-      -        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
-      +        self.max_depth: Dict[int, int] = {}        
-      +        self.possible_matches_cache: Optional[Dict[int, Dict[int, P.Interval]]] = None
-               self.tokenizer: Optional[ffi.Regex] = None
-               self.glr_parser: Optional[ffi.GLRParser] = None
-               self.ignore_terminal_id: Optional[int] = None
+       class Model(GraphProvider):
+      @@ -69,8 +104,8 @@ class Model(GraphProvider):
                self.parser_table: Optional[ParserTable] = None
                self.state: Dict[int, GSS] = {}
-      -        self.internal_to_original_map: Dict[int, int] = {}
+               self.internal_to_original_map: Dict[int, int] = {}
       -        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = None
-      +        self.internal_to_original_map: Dict[int, int] = {}        
       +        self.all_internal_llm_tokens_bitset: Optional[P.Interval] = None
                self.tokenizer_initial_state: Optional[int] = None
       -        self.all_terminals_bitset: Optional[ffi.Bitset] = None
-      -
-      -        dumps = json.dumps
-      -        bs_from_json = ffi.Bitset.from_json_string
       +        self.all_terminals_bitset: Optional[P.Interval] = None
        
-               # Normalize arena children bitsets and cache max_depth
-               for uid, node in self.arena.items():
-      @@ -96,15 +100,20 @@
+               dumps = json.dumps
+               bs_from_json = ffi.Bitset.from_json_string
+      @@ -88,12 +123,15 @@ class Model(GraphProvider):
                    new_children = []
                    for edge_key, dest_map in children:
                        pop, llm_bv_json = edge_key
       -                llm_bv = bs_from_json(dumps(llm_bv_json))
-      +                llm_bv = _interval_from_ranges(llm_bv_json)
+      +                # Convert to portion interval
+      +                llm_bv = bitset_to_interval(bs_from_json(dumps(llm_bv_json)))
                        new_dest_map = []
                        for dest_idx, state_bv_json in dest_map:
       -                    state_bv = bs_from_json(dumps(state_bv_json))
-      +                    state_bv = _interval_from_ranges(state_bv_json)
+      +                    # Convert to portion interval
+      +                    state_bv = bitset_to_interval(bs_from_json(dumps(state_bv_json)))
                            new_dest_map.append((int(dest_idx), state_bv))
-                       new_children.append(((int(pop), llm_bv), new_dest_map))
+      -                new_children.append(((int(pop), llm_bv), new_dest_map))
+      +                # Store llm_bv and state_bv as portion intervals
+      +                new_children.append(((int(pop), llm_bv), new_dest_map))
                    node["children"] = new_children
        
            @staticmethod
-      +    def _bitset_to_interval(bitset: ffi.Bitset) -> P.Interval:
-      +        if bitset.is_empty():
-      +            return P.empty()
-      +        return P.Interval(*[P.closed(s, e) for s, e in bitset.to_ranges()])
-      +
-           def from_json_string(s: str) -> 'Model':
-               data = json.loads(s)
-               roots_map = data["precomputed3"]
-      @@ -153,39 +162,50 @@
+      @@ -141,21 +179,30 @@ class Model(GraphProvider):
+               all_terminals = set()
+               for row in model.parser_table.table.values():
                    all_terminals.update(row.actions.keys())
                if model.ignore_terminal_id is not None:
                    all_terminals.add(model.ignore_terminal_id)
       -        model.all_terminals_bitset = ffi.Bitset.from_indices(list(all_terminals))
-      -
+      +        model.all_terminals_bitset = ints_to_interval(list(all_terminals))
+       
       -        initial_acc = PyAcc(terminals_union=tuple(), llm_mask=ffi.Bitset.zeros())
-      +        model.all_terminals_bitset = P.Interval(*[P.singleton(i) for i in all_terminals])
-      +
       +        initial_acc = PyAcc(terminals_union=tuple(), llm_mask=P.empty())
                initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
                model.state = {model.tokenizer_initial_state: initial_gss}
        
                model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
       -        model.possible_matches_cache = constraint.possible_matches()
-      +
-      +        pmc_ffi = constraint.possible_matches()
-      +        pmc_portion = {}
-      +        for tsid, terminals_to_llm_ffi in pmc_ffi.items():
-      +            terminals_to_llm_portion = {}
-      +            for term_id, bitset_ffi in terminals_to_llm_ffi.items():
-      +                terminals_to_llm_portion[term_id] = model._bitset_to_interval(bitset_ffi)
-      +            pmc_portion[tsid] = terminals_to_llm_portion
-      +        model.possible_matches_cache = pmc_portion
-      +
+      +        # Convert possible_matches_cache to use portion intervals
+      +        pmc_raw: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+      +        pmc_conv: Dict[int, Dict[int, P.Interval]] = {}
+      +        for tsid, inner in pmc_raw.items():
+      +            tsid_int = int(tsid)
+      +            pm_conv: Dict[int, P.Interval] = {}
+      +            for term_id, bitset in inner.items():
+      +                pm_conv[int(term_id)] = bitset_to_interval(bitset)
+      +            pmc_conv[tsid_int] = pm_conv
+      +        model.possible_matches_cache = pmc_conv
                model.internal_to_original_map = constraint.internal_to_original_map()
       -        model.all_internal_llm_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
-      +        all_llm_bs = constraint.all_internal_llm_tokens_bitset()
-      +        model.all_internal_llm_tokens_bitset = model._bitset_to_interval(all_llm_bs)
+      +        model.all_internal_llm_tokens_bitset = bitset_to_interval(constraint.all_internal_llm_tokens_bitset())
                return model
        
            @profile
@@ -3384,51 +3481,75 @@ messages:
                return gss.prune(predicate)
        
            @profile
-           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
+      @@ -163,24 +210,24 @@ class Model(GraphProvider):
                def apply_map(acc: PyAcc) -> PyAcc:
                    old_map = dict(acc.terminals_union)
       -            new_bvs: Dict[int, ffi.Bitset] = collections.defaultdict(ffi.Bitset.zeros)
-      +            new_bvs: Dict[int, P.Interval] = collections.defaultdict(P.empty)
+      +            new_bvs: Dict[int, P.Interval] = {}
                    for old_sid, new_sid in state_map.items():
       -                bv_source = old_map.get(old_sid, ffi.Bitset.zeros())
       -                new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
       +                bv_source = old_map.get(old_sid, P.empty())
-      +                new_bvs[new_sid] = new_bvs[new_sid] | bv_source
+      +                if new_sid in new_bvs:
+      +                    new_bvs[new_sid] = new_bvs[new_sid] | bv_source
+      +                else:
+      +                    new_bvs[new_sid] = bv_source
        
                    new_map_tuple = tuple(sorted(new_bvs.items()))
                    return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-      @@ -195,9 +215,9 @@
+               return gss.apply(apply_map)
+       
+           @profile
            def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
                def apply_disallow(acc: PyAcc) -> PyAcc:
                    current_map = dict(acc.terminals_union)
       -            curr_bv = current_map.get(state_id, ffi.Bitset.zeros())
       -            to_add = ffi.Bitset.from_indices([terminal_id])
       -            new_bv = curr_bv.union(to_add)
-      +            curr_bv = current_map.get(state_id, P.empty())
-      +            to_add = P.singleton(terminal_id)
-      +            new_bv = curr_bv | to_add
-                   current_map[state_id] = new_bv
+      -            current_map[state_id] = new_bv
+      +            curr_iv = current_map.get(state_id, P.empty())
+      +            current_map[state_id] = curr_iv | P.singleton(int(terminal_id))
                    new_map_tuple = tuple(sorted(current_map.items()))
                    return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
-      @@ -214,13 +234,12 @@
+               return gss.apply(apply_disallow)
+       
+           def get_root(self, state_id: int) -> int:
+      @@ -192,17 +239,28 @@ class Model(GraphProvider):
+           def iter_edges(self, node: int, token: int):
+               """
+               Explode packed transitions into (pop, state_id or None, dest_idx).
                """
                children = self.arena.get(node, {}).get("children") or []
-               for (pop, llm_bv), dests in children:
+      -        for (pop, llm_bv), dests in children:
       -            if llm_bv.contains(token):
-      +            if token in llm_bv:
-                       for dest_idx, state_bv in dests:
+      -                for dest_idx, state_bv in dests:
       -                    if state_bv.is_empty():
-      +                    if state_bv.empty:
-                               yield (int(pop), None, int(dest_idx))
-                           else:
+      -                        yield (int(pop), None, int(dest_idx))
+      -                    else:
       -                        for start, end in state_bv.to_ranges():
       -                            for sid in range(start, end + 1):
-      +                        for atomic in state_bv:
-      +                            for sid in range(atomic.lower, atomic.upper + 1):
-                                       yield (int(pop), sid, int(dest_idx))
+      -                                yield (int(pop), sid, int(dest_idx))
+      +        for (pop, llm_iv), dests in children:
+      +            if token in llm_iv:
+      +                for dest_idx, state_iv in dests:
+      +                    if state_iv.empty:
+      +                        yield (int(pop), None, int(dest_idx))
+      +                    else:
+      +                        # Iterate over integer states covered by the interval
+      +                        for atom in state_iv:
+      +                            lower = atom.lower
+      +                            upper = atom.upper
+      +                            if atom.left is P.OPEN:
+      +                                lower = lower + 1
+      +                            if atom.right is P.OPEN:
+      +                                upper = upper - 1
+      +                            if lower <= upper:
+      +                                for sid in range(int(lower), int(upper) + 1):
+      +                                    yield (int(pop), sid, int(dest_idx))
        
            @profile
-      @@ -229,14 +248,14 @@
+           def commit(self, token_id: int):
+               t0 = time.perf_counter()
                token_bytes = self.id_to_token[token_id]
        
                # Build tokenizer maps
@@ -3443,20 +3564,42 @@ messages:
       +            terminals = P.empty()
                    for terminal_id, _ in matches:
       -                terminals.insert(terminal_id)
-      +                terminals |= P.singleton(terminal_id)
+      +                terminals = terminals | P.singleton(int(terminal_id))
                    terminals_map[tokenizer_sid] = terminals
        
                # Prune and map per-state GSS
-      @@ -341,7 +360,7 @@
+               temp_states: Dict[int, GSS] = {}
+               for tokenizer_sid, gss in self.state.items():
+      @@ -239,7 +297,7 @@ class Model(GraphProvider):
+                               processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+       
+                       if not processed_gss.is_empty():
+                           new_offset = offset + width
+                           next_tokenizer_sid = self.tokenizer_initial_state
+      -                    if new_offset == len(token_bytes):
+      +                    if new_offset == len(token_bytes):
+                               new_states[next_tokenizer_sid].append(processed_gss)
+                           else:
+                               q.append((new_offset, next_tokenizer_sid, processed_gss))
+       
+                   if end_state is not None:
+      @@ -281,15 +339,15 @@ class Model(GraphProvider):
+               - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
                """
                state_map = self.state
-               all_ones_mask = self.all_internal_llm_tokens_bitset
+      -        all_ones_mask = self.all_internal_llm_tokens_bitset
       -        final_mask = ffi.Bitset.zeros()
-      +        final_mask = P.empty()
+      +        all_ones_mask: P.Interval = self.all_internal_llm_tokens_bitset or P.empty()
+      +        final_mask: P.Interval = P.empty()
        
                values: Dict[int, GSS] = {}
                stopped: set[int] = set()
-      @@ -355,7 +374,7 @@
+               todo: Dict[int, set[int]] = {}
+               depth_heap: List[int] = []
+       
+      @@ -301,8 +359,8 @@ class Model(GraphProvider):
                arena = self.arena
                is_end = self.is_end
        
@@ -3465,35 +3608,42 @@ messages:
                max_state = self.tokenizer.max_state()
        
                # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
-      @@ -363,20 +382,19 @@
+               for sid, gss in state_map.items():
                    # Set initial llm_mask on each accumulator and consume terminals_union
-                   def initialize_acc(acc: PyAcc) -> PyAcc:
+      @@ -310,21 +368,20 @@ class Model(GraphProvider):
                        # Compute allowed LLM tokens from disallowed terminals
       -                disallowed_llm_mask = ffi.Bitset.zeros()
-      +                disallowed_llm_mask = P.empty()
+      +                disallowed_llm_mask: P.Interval = P.empty()
                        disallowed_map = dict(acc.terminals_union)
                        if disallowed_map:
-                           for tsid, disallowed_terminals in disallowed_map.items():
+      -                    for tsid, disallowed_terminals in disallowed_map.items():
+      +                    for tsid, disallowed_terminals_iv in disallowed_map.items():
                                if tsid > max_state or tsid not in pmc:
                                    continue
-                               terminals_to_llm = pmc[tsid]
+      -                        terminals_to_llm = pmc[tsid]
       -                        for terminal_id in disallowed_terminals.to_indices():
       -                            if terminal_id in terminals_to_llm:
       -                                disallowed_llm_mask = disallowed_llm_mask.union(
       -                                    terminals_to_llm[terminal_id]
       -                                )
-      -
-      -                allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
-      +                        for atomic in disallowed_terminals:
-      +                            for terminal_id in range(atomic.lower, atomic.upper + 1):
+      +                        terminals_to_llm: Dict[int, P.Interval] = pmc[tsid]
+      +                        # Iterate integer terminals contained in the interval
+      +                        for atom in disallowed_terminals_iv:
+      +                            low, up = atom.lower, atom.upper
+      +                            if atom.left is P.OPEN: low += 1
+      +                            if atom.right is P.OPEN: up -= 1
+      +                            for terminal_id in range(int(low), int(up) + 1):
       +                                if terminal_id in terminals_to_llm:
-      +                                    disallowed_llm_mask |= terminals_to_llm[terminal_id]
-      +
+      +                                    disallowed_llm_mask = disallowed_llm_mask | terminals_to_llm[terminal_id]
+       
+      -                allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
       +                allowed_mask = all_ones_mask - disallowed_llm_mask
        
                        return PyAcc(
                            terminals_union=tuple(),  # consume
-      @@ -431,26 +449,26 @@
+                           llm_mask=allowed_mask,
+                       )
+      @@ -356,7 +413,7 @@ class Model(GraphProvider):
        
                        # Compute current allowed LLM tokens at this node by reducing acc
                        reduced_acc = gss_node.reduce_acc()
@@ -3502,19 +3652,15 @@ messages:
                            # No possible tokens here -> stop this branch
                            stopped.add(node_idx)
                            continue
-       
-                       # End-node handling: just union the allowed LLM tokens
-                       if is_end(node_idx):
-      -                    final_mask = final_mask.union(reduced_acc.llm_mask)
-      +                    final_mask |= reduced_acc.llm_mask
-       
+      @@ -369,26 +426,35 @@ class Model(GraphProvider):
                        # Transitions grouped by (pop, llm_bv)
                        node_data = arena.get(node_idx, {})
                        children = node_data.get("children") or []
-                       for (pop, llm_bv), dests in children:
+      -                for (pop, llm_bv), dests in children:
+      +                for (pop, llm_iv), dests in children:
                            popped = gss_node.popn(pop)
       -                    llm_empty = llm_bv.is_empty()
-      +                    llm_empty = llm_bv.empty
+      +                    llm_empty = llm_iv.empty
        
                            for dest_idx, state_bv in dests:
                                matched: List[GSS] = []
@@ -3526,45 +3672,103 @@ messages:
                                            matched.append(popped.isolate(sid_val))
                                if not matched:
                                    continue
-      @@ -462,7 +480,7 @@
+       
+                               child_gss_node = GSS.merge_many(matched)
+       
+                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                               if not llm_empty:
                                    def intersect_edge(acc: PyAcc) -> PyAcc:
                                        return PyAcc(
                                            terminals_union=acc.terminals_union,
       -                                    llm_mask=acc.llm_mask.intersection(llm_bv)
-      +                                    llm_mask=acc.llm_mask & llm_bv
+      +                                    llm_mask=acc.llm_mask & llm_iv
                                        )
                                    child_gss_node = child_gss_node.apply(intersect_edge)
        
-      @@ -477,9 +495,10 @@
+                               d = int(dest_idx)
+                               existing_child = values.get(d)
+                               if existing_child is not None:
+                                   merged_gss = existing_child.merge(child_gss_node)
+                                   values[d] = merged_gss
+                               else:
+                                   values[d] = child_gss_node
+       
                                enqueue(max_depth[d], d)
        
-               # Convert internal mask back to original IDs
+      -        # Convert internal mask back to original IDs
       -        original_mask = ffi.Bitset.zeros()
       -        for internal_id in final_mask.to_indices():
       -            if internal_id in self.internal_to_original_map:
       -                original_mask.insert(self.internal_to_original_map[internal_id])
       -        return RangeSet.from_ranges(original_mask.to_ranges())
-      +        original_mask = P.empty()
-      +        for atomic in final_mask:
-      +            for internal_id in range(atomic.lower, atomic.upper + 1):
-      +                if internal_id in self.internal_to_original_map:
-      +                    original_mask |= P.singleton(self.internal_to_original_map[internal_id])
-      +        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-
+      +        # Convert internal mask back to original IDs and then to RangeSet
+      +        original_iv: P.Interval = P.empty()
+      +        for atom in final_mask:
+      +            low, up = atom.lower, atom.upper
+      +            if atom.left is P.OPEN: low += 1
+      +            if atom.right is P.OPEN: up -= 1
+      +            if low <= up:
+      +                for internal_id in range(int(low), int(up) + 1):
+      +                    if internal_id in self.internal_to_original_map:
+      +                        original_iv = original_iv | P.singleton(self.internal_to_original_map[internal_id])
+      +        return RangeSet.from_ranges(interval_to_int_ranges(original_iv))
+       
       ```
+
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      index 3e5d1d2..b4a7b6d 100644
       --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
       +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -1,5 +1,6 @@
+      @@ -1,35 +1,70 @@
        import heapq
       -import _sep1 as ffi
-      +import portion as P
-      +import _sep1 as ffi # For some types
        from typing import Dict, List, Set, Optional
+      +import portion as P
        
        from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      @@ -14,11 +15,11 @@
+       from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+       from ..common_interface import GraphProvider, RangeSet
+       
+       
+      +def ints_to_interval(indices) -> P.Interval:
+      +    iv = P.empty()
+      +    for i in indices:
+      +        iv = iv | P.singleton(int(i))
+      +    return iv
+      +
+      +
+      +def interval_to_int_ranges(iv: P.Interval):
+      +    ranges = []
+      +    for atom in iv:
+      +        lower = atom.lower
+      +        upper = atom.upper
+      +        if atom.left is P.OPEN:
+      +            lower += 1
+      +        if atom.right is P.OPEN:
+      +            upper -= 1
+      +        if lower <= upper:
+      +            ranges.append((int(lower), int(upper)))
+      +    return ranges
+      +
+      +
+      +def iterate_interval_ints(iv: P.Interval):
+      +    for atom in iv:
+      +        lower = atom.lower
+      +        upper = atom.upper
+      +        if atom.left is P.OPEN:
+      +            lower += 1
+      +        if atom.right is P.OPEN:
+      +            upper -= 1
+      +        if lower <= upper:
+      +            for i in range(int(lower), int(upper) + 1):
+      +                yield i
+      +
+      +
+       class Model(GraphProvider):
+           def __init__(self, inner_model: InnerModel):
+               self.inner_model: InnerModel = inner_model
+               im: InnerModel = self.inner_model
                self.arena: Dict[int, dict] = im.arena
                self.roots_map: Dict[int, int] = im.roots_map
                self.max_depth: Dict[int, int] = im.max_depth
@@ -3579,18 +3783,40 @@ messages:
        
            @staticmethod
            def from_json_string(s: str) -> 'Model':
-      @@ -46,8 +47,8 @@
+               return Model(InnerModel.from_json_string(s))
+       
+           def commit(self, token_id: int) -> None:
+               self.inner_model.commit(token_id)
+       
+           @property
+           def state(self) -> Dict[int, GSS]:
+               return self.inner_model.state
+       
+           def is_end(self, node: int) -> bool:
+               return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+       
+           def get_mask(self) -> RangeSet:
+      @@ -40,24 +75,24 @@ class Model(GraphProvider):
+                 the forbidden terminals -> forbidden LLM tokens and taking the complement.
+               - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
                """
-               state_map: Dict[int, GSS] = self.state
+      -        state_map: Dict[int, GSS] = self.state
+      +        state_map: Dict[int, GSS] = self.state
        
       -        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
       -        final_mask: ffi.Bitset = ffi.Bitset.zeros()
-      +        all_ones: Optional[P.Interval] = self.all_internal_llm_tokens_bitset
+      +        all_ones: P.Interval = self.all_internal_llm_tokens_bitset or P.empty()
       +        final_mask: P.Interval = P.empty()
        
                # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
                values: Dict[int, GSS] = {}
-      @@ -59,25 +60,24 @@
+               todo: Dict[int, Set[int]] = {}
+               depth_heap: List[int] = []
+       
+               hp, hpop = heapq.heappush, heapq.heappop
+               roots_map: Dict[int, int] = self.roots_map
                max_depth: Dict[int, int] = self.max_depth
                arena: Dict[int, dict] = self.arena
                is_end = self.is_end
@@ -3602,40 +3828,47 @@ messages:
                def initialize_acc(acc: PyAcc) -> PyAcc:
                    # Compute allowed LLM tokens from disallowed terminals for this accumulator
       -            disallowed_llm_mask = ffi.Bitset.zeros()
-      +            disallowed_llm_mask = P.empty()
+      +            disallowed_llm_mask: P.Interval = P.empty()
                    disallowed_map = dict(acc.terminals_union)
        
-                   for tsid, disallowed_terminals in disallowed_map.items():
+      -            for tsid, disallowed_terminals in disallowed_map.items():
+      +            for tsid, disallowed_terminals in disallowed_map.items():
                        if tsid > max_state or tsid not in pmc:
                            continue
-                       terminals_to_llm = pmc[tsid]
+      -                terminals_to_llm = pmc[tsid]
       -                for terminal_id in disallowed_terminals.to_indices():
       -                    if terminal_id in terminals_to_llm:
       -                        disallowed_llm_mask = disallowed_llm_mask.union(
       -                            terminals_to_llm[terminal_id]
       -                        )
-      +                for atomic in disallowed_terminals:
-      +                    for terminal_id in range(atomic.lower, atomic.upper + 1):
-      +                        if terminal_id in terminals_to_llm:
-      +                            disallowed_llm_mask |= terminals_to_llm[terminal_id]
-       
+      -
       -            allowed_mask = all_ones.difference(disallowed_llm_mask)
+      +                terminals_to_llm: Dict[int, P.Interval] = pmc[tsid]
+      +                for atom in disallowed_terminals:
+      +                    low, up = atom.lower, atom.upper
+      +                    if atom.left is P.OPEN: low += 1
+      +                    if atom.right is P.OPEN: up -= 1
+      +                    for terminal_id in range(int(low), int(up) + 1):
+      +                        if terminal_id in terminals_to_llm:
+      +                            disallowed_llm_mask = disallowed_llm_mask | terminals_to_llm[terminal_id]
+      +
       +            allowed_mask = all_ones - disallowed_llm_mask
                    return PyAcc(
                        terminals_union=tuple(),  # consume
                        llm_mask=allowed_mask,
-      @@ -117,40 +117,40 @@
-                       if is_end(node):
+                   )
+       
+      @@ -88,7 +123,7 @@ class Model(GraphProvider):
                            reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                            if reduced_acc:
       -                        final_mask = final_mask.union(reduced_acc.llm_mask)
-      +                        final_mask |= reduced_acc.llm_mask
+      +                        final_mask = final_mask | reduced_acc.llm_mask
        
                        # Traverse edges and propagate masks
-                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+      -                for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+      +                for (pop, llm_iv), dests in (arena.get(node, {}).get("children") or []):
                            popped: GSS = gss_node.popn(pop)
-      -                    if popped.is_empty():
-      +                    if popped.empty:
+                           if popped.is_empty():
                                continue
        
                            for dest_idx, state_bv in dests:
@@ -3649,13 +3882,12 @@ messages:
                                    continue
        
                                child_gss: GSS = popped.isolate_many(values_to_keep)
-      -                        if child_gss.is_empty():
-      +                        if child_gss.empty:
+                               if child_gss.is_empty():
                                    continue
        
                                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
       -                        if not llm_bv.is_empty():
-      +                        if not llm_bv.empty:
+      +                        if not llm_iv.empty:
                                    acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
        
                                    def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
@@ -3663,7 +3895,7 @@ messages:
                                            return acc_memo[acc]
       -                                new_mask = acc.llm_mask.intersection(llm_bv)
       -                                if new_mask.is_empty():
-      +                                new_mask = acc.llm_mask & llm_bv
+      +                                new_mask = acc.llm_mask & llm_iv
       +                                if new_mask.empty:
                                            result = None
                                        else:
@@ -3675,28 +3907,36 @@ messages:
                                        return result
        
                                    child_gss = child_gss.apply_and_prune(intersect_and_prune)
-      -                            if child_gss.is_empty():
-      +                            if child_gss.empty:
+                                   if child_gss.is_empty():
                                        continue
        
                                d: int = int(dest_idx)
-      @@ -165,11 +165,12 @@
+                               if d in values:
+                                   existing_gss = values[d]
+                                   new_gss = child_gss
+                                   merged_gss = existing_gss.merge(new_gss)
+                                   values[d] = merged_gss
+                               else:
+                                   values[d] = child_gss
+                               enqueue(max_depth[d], d)
+       
                    todo.pop(depth)
        
-               # Convert internal mask back to original IDs
+      -        # Convert internal mask back to original IDs
       -        original_mask: ffi.Bitset = ffi.Bitset.zeros()
       -        for i in final_mask.to_indices():
       -            if i in self.internal_to_original_map:
       -                original_mask.insert(self.internal_to_original_map[i])
-      +        original_mask: P.Interval = P.empty()
-      +        for atomic in final_mask:
-      +            for i in range(atomic.lower, atomic.upper + 1):
-      +                if i in self.internal_to_original_map:
-      +                    original_mask |= P.singleton(self.internal_to_original_map[i])
-       
+      -
       -        return RangeSet.from_ranges(original_mask.to_ranges())
-      +        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-
+      +        # Convert internal mask back to original IDs and return as a RangeSet
+      +        original_iv: P.Interval = P.empty()
+      +        for i in iterate_interval_ints(final_mask):
+      +            if i in self.internal_to_original_map:
+      +                original_iv = original_iv | P.singleton(self.internal_to_original_map[i])
+      +
+      +        return RangeSet.from_ranges(interval_to_int_ranges(original_iv))
+       
       ```
     metadata:
   - user: |
@@ -3713,336 +3953,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_get_mask_only.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: We get mismatches
-    metadata:
-  - assistant: |-
-      I see, it seems my previous changes introduced a subtle bug. The manual iteration over interval elements did not correctly handle all boundary conditions that can arise from interval operations. Additionally, I mistakenly changed some method calls for checking if a `GSS` is empty.
-
-      Here are the detailed instructions and diffs to correct the behavior.
-
-      ### Step-by-step Instructions
-
-      I'll start with the corrections for `python/aug25/models/precompute3_model_pure_python.py`.
-
-      #### File: `python/aug25/models/precompute3_model_pure_python.py`
-
-      1.  **In the `iter_edges` method:**
-          The manual iteration over `state_bv` is incorrect for intervals with open boundaries. Replace it with `portion.iterate` to correctly handle all interval types.
-          *   Find the `else` block inside the `for dest_idx, state_bv in dests:` loop.
-          *   Replace `for atomic in state_bv: for sid in range(atomic.lower, atomic.upper + 1):` with `for sid in P.iterate(state_bv, step=1):`.
-
-      2.  **In the `get_mask` method:**
-          There are two places where manual iteration over intervals needs to be fixed.
-          *   Inside the `initialize_acc` nested function, find the loop over `disallowed_terminals`. Replace the nested loops `for atomic in disallowed_terminals: for terminal_id in range(atomic.lower, atomic.upper + 1):` with a single loop: `for terminal_id in P.iterate(disallowed_terminals, step=1):`.
-          *   At the end of the method, where `original_mask` is computed, find the loop over `final_mask`. Replace the nested loops `for atomic in final_mask: for internal_id in range(atomic.lower, atomic.upper + 1):` with `for internal_id in P.iterate(final_mask, step=1):`.
-
-      ---
-
-      Next, here are the corrections for `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`.
-
-      #### File: `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`
-
-      1.  **In the `get_mask` method:**
-          *   I incorrectly changed `gss.is_empty()` to `gss.empty`. You need to change these back. There are three occurrences to fix in the main traversal loop:
-              *   `if popped.empty:` should be `if popped.is_empty():`.
-              *   The first `if child_gss.empty:` should be `if child_gss.is_empty():`.
-              *   The second `if child_gss.empty:` should be `if child_gss.is_empty():`.
-          *   Similar to the other file, the manual iteration over intervals needs to be replaced with `portion.iterate`.
-              *   Inside `initialize_acc`, replace `for atomic in disallowed_terminals: for terminal_id in range(atomic.lower, atomic.upper + 1):` with `for terminal_id in P.iterate(disallowed_terminals, step=1):`.
-              *   At the end of the method, replace `for atomic in final_mask: for i in range(atomic.lower, atomic.upper + 1):` with `for i in P.iterate(final_mask, step=1):`.
-
-      ### Git Diffs
-
-      Here are the git diffs to apply these corrections.
-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -230,9 +230,8 @@
-                           if state_bv.empty:
-                               yield (int(pop), None, int(dest_idx))
-                           else:
-      -                        for atomic in state_bv:
-      -                            for sid in range(atomic.lower, atomic.upper + 1):
-      -                                yield (int(pop), sid, int(dest_idx))
-      +                        for sid in P.iterate(state_bv, step=1):
-      +                            yield (int(pop), sid, int(dest_idx))
-       
-           @profile
-           def commit(self, token_id: int):
-      @@ -374,13 +373,9 @@
-                               if tsid > max_state or tsid not in pmc:
-                                   continue
-                               terminals_to_llm = pmc[tsid]
-      -                        for atomic in disallowed_terminals:
-      -                            for terminal_id in range(atomic.lower, atomic.upper + 1):
-      -                                if terminal_id in terminals_to_llm:
-      -                                    disallowed_llm_mask |= terminals_to_llm[terminal_id]
-      +                        for terminal_id in P.iterate(disallowed_terminals, step=1):
-      +                            if terminal_id in terminals_to_llm:
-      +                                disallowed_llm_mask |= terminals_to_llm[terminal_id]
-       
-                       allowed_mask = all_ones_mask - disallowed_llm_mask
-       
-      @@ -486,10 +481,9 @@
-                               enqueue(max_depth[d], d)
-       
-               # Convert internal mask back to original IDs
-      -        original_mask = P.empty()
-      -        for atomic in final_mask:
-      -            for internal_id in range(atomic.lower, atomic.upper + 1):
-      -                if internal_id in self.internal_to_original_map:
-      -                    original_mask |= P.singleton(self.internal_to_original_map[internal_id])
-      -        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-      +        original_mask: P.Interval = P.empty()
-      +        for internal_id in P.iterate(final_mask, step=1):
-      +            if internal_id in self.internal_to_original_map:
-      +                original_mask |= P.singleton(self.internal_to_original_map[internal_id])
-      +        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-
-      ```
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -79,12 +79,9 @@
-                       if tsid > max_state or tsid not in pmc:
-                           continue
-                       terminals_to_llm = pmc[tsid]
-      -                for atomic in disallowed_terminals:
-      -                    for terminal_id in range(atomic.lower, atomic.upper + 1):
-      -                        if terminal_id in terminals_to_llm:
-      -                            disallowed_llm_mask |= terminals_to_llm[terminal_id]
-      +                for terminal_id in P.iterate(disallowed_terminals, step=1):
-      +                    if terminal_id in terminals_to_llm:
-      +                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
-       
-      -            allowed_mask = all_ones - disallowed_llm_mask
-      +            allowed_mask = all_ones - disallowed_llm_mask
-                   return PyAcc(
-                       terminals_union=tuple(),  # consume
-                       llm_mask=allowed_mask,
-      @@ -124,25 +121,25 @@
-                       # Traverse edges and propagate masks
-                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                           popped: GSS = gss_node.popn(pop)
-      -                    if popped.empty:
-      +                    if popped.is_empty():
-                               continue
-       
-                           for dest_idx, state_bv in dests:
-      -                        if state_bv.empty:
-      +                        if state_bv.empty:
-                                   continue
-       
-      -                        values_to_keep = [s for s in popped.peek() if s in state_bv]
-      +                        values_to_keep = [s for s in popped.peek() if s in state_bv]
-                               if not values_to_keep:
-                                   continue
-       
-                               child_gss: GSS = popped.isolate_many(values_to_keep)
-      -                        if child_gss.empty:
-      +                        if child_gss.is_empty():
-                                   continue
-       
-                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-      -                        if not llm_bv.empty:
-      +                        if not llm_bv.empty:
-                                   acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-       
-                                   def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-      @@ -159,7 +156,7 @@
-                                       return result
-       
-                                   child_gss = child_gss.apply_and_prune(intersect_and_prune)
-      -                            if child_gss.empty:
-      +                            if child_gss.is_empty():
-                                       continue
-       
-                               d: int = int(dest_idx)
-      @@ -174,11 +171,9 @@
-                   todo.pop(depth)
-       
-               # Convert internal mask back to original IDs
-      -        original_mask: ffi.Bitset = ffi.Bitset.zeros()
-      -        for atomic in final_mask:
-      -            for i in range(atomic.lower, atomic.upper + 1):
-      -                if i in self.internal_to_original_map:
-      -                    original_mask |= P.singleton(self.internal_to_original_map[i])
-      +        original_mask: P.Interval = P.empty()
-      +        for i in P.iterate(final_mask, step=1):
-      +            if i in self.internal_to_original_map:
-      +                original_mask |= P.singleton(self.internal_to_original_map[i])
-       
-      -        return RangeSet.from_ranges(original_mask.to_ranges())
-      +        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -174,11 +171,9 @@
-                   todo.pop(depth)
-       
-               # Convert internal mask back to original IDs
-      -        original_mask: ffi.Bitset = ffi.Bitset.zeros()
-      -        for atomic in final_mask:
-      -            for i in range(atomic.lower, atomic.upper + 1):
-      -                if i in self.internal_to_original_map:
-      -                    original_mask |= P.singleton(self.internal_to_original_map[i])
-      +        original_mask: P.Interval = P.empty()
-      +        for i in P.iterate(final_mask, step=1):
-      +            if i in self.internal_to_original_map:
-      +                original_mask |= P.singleton(self.internal_to_original_map[i])
-       
-      -        return RangeSet.from_ranges(original_mask.to_ranges())
-      +        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-                  todo.pop(depth)
-
-              # Convert internal mask back to original IDs
-              original_mask: ffi.Bitset = ffi.Bitset.zeros()
-              for atomic in final_mask:
-                  for i in range(atomic.lower, atomic.upper + 1):
-                      if i in self.internal_to_original_map:
-                          original_mask |= P.singleton(self.internal_to_original_map[i])
-
-              return RangeSet.from_ranges(original_mask.to_ranges())
-      ```
-
-      Nearest Match in `python/aug25/models/precompute3_model_pure_python_get_mask_only.py` (found at line 174 with 80.00% similarity, shown with padding):
-
-      ```python
-                                  merged_gss = existing_gss.merge(new_gss)
-                                  values[d] = merged_gss
-                              else:
-                                  values[d] = child_gss
-                              enqueue(max_depth[d], d)
-
-                  todo.pop(depth)
-
-              # Convert internal mask back to original IDs
-              original_mask: P.Interval = P.empty()
-              for atomic in final_mask:
-                  for i in range(atomic.lower, atomic.upper + 1):
-                      if i in self.internal_to_original_map:
-                          original_mask |= P.singleton(self.internal_to_original_map[i])
-
-              return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-      ```
-
-      The git diff hunk above failed to apply to the file `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      @@ -79,12 +79,9 @@
-                       if tsid > max_state or tsid not in pmc:
-                           continue
-                       terminals_to_llm = pmc[tsid]
-      -                for atomic in disallowed_terminals:
-      -                    for terminal_id in range(atomic.lower, atomic.upper + 1):
-      -                        if terminal_id in terminals_to_llm:
-      -                            disallowed_llm_mask |= terminals_to_llm[terminal_id]
-      +                for terminal_id in P.iterate(disallowed_terminals, step=1):
-      +                    if terminal_id in terminals_to_llm:
-      +                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
-       
-      -            allowed_mask = all_ones - disallowed_llm_mask
-      +            allowed_mask = all_ones - disallowed_llm_mask
-                   return PyAcc(
-                       terminals_union=tuple(),  # consume
-                       llm_mask=allowed_mask,
-      @@ -124,25 +121,25 @@
-                       # Traverse edges and propagate masks
-                       for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
-                           popped: GSS = gss_node.popn(pop)
-      -                    if popped.empty:
-      +                    if popped.is_empty():
-                               continue
-       
-                           for dest_idx, state_bv in dests:
-      -                        if state_bv.empty:
-      +                        if state_bv.empty:
-                                   continue
-       
-      -                        values_to_keep = [s for s in popped.peek() if s in state_bv]
-      +                        values_to_keep = [s for s in popped.peek() if s in state_bv]
-                               if not values_to_keep:
-                                   continue
-       
-                               child_gss: GSS = popped.isolate_many(values_to_keep)
-      -                        if child_gss.empty:
-      +                        if child_gss.is_empty():
-                                   continue
-       
-                               # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-      -                        if not llm_bv.empty:
-      +                        if not llm_bv.empty:
-                                   acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-       
-                                   def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-      @@ -159,7 +156,7 @@
-                                       return result
-       
-                                   child_gss = child_gss.apply_and_prune(intersect_and_prune)
-      -                            if child_gss.empty:
-      +                            if child_gss.is_empty():
-                                       continue
-       
-                               d: int = int(dest_idx)
-      @@ -170,13 +170,13 @@
-       
-               todo.pop(depth)
-       
-               # Convert internal mask back to original IDs
-      -        original_mask: P.Interval = P.empty()
-      -        for atomic in final_mask:
-      -            for i in range(atomic.lower, atomic.upper + 1):
-      -                if i in self.internal_to_original_map:
-      -                    original_mask |= P.singleton(self.internal_to_original_map[i])
-      -
-      -        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
-      +        original_mask: P.Interval = P.empty()
-      +        for i in P.iterate(final_mask, step=1):
-      +            if i in self.internal_to_original_map:
-      +                original_mask |= P.singleton(self.internal_to_original_map[i])
-      +
-      +        return RangeSet.from_ranges(original_mask.to_ranges())
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
-    metadata:
-  - user: 'Changes committed with message: "No changes applied in this turn."'
+  - user: 'Changes committed with message: "Refactor: Replace ffi.Bitset with portion
+      for bitset operations in commit and get_mask"'
     metadata:
 ...
