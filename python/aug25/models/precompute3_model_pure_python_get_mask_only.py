@@ -186,20 +186,11 @@ class Model(GraphProvider):
                     if popped.is_empty():
                         continue
 
-                    peeked_sids = popped.peek()
-                    if not peeked_sids:
-                        continue
-                    sid_vals = RangeSet.from_indices(peeked_sids)
-
                     for dest_idx, state_bv in dests:
                         stats['dests_processed'] += 1
 
                         t_intersect_start = time.time()
-                        intersected = sid_vals.intersection(state_bv)
-                        if intersected.is_empty():
-                            stats['t_sid_intersection'] += time.time() - t_intersect_start
-                            continue
-                        values_to_keep = intersected.to_indices()
+                        values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
                         stats['t_sid_intersection'] += time.time() - t_intersect_start
 
                         if not values_to_keep:

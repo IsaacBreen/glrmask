@@ -498,23 +498,20 @@ class Model(GraphProvider):
                 children = node_data.get("children") or []
                 for (pop, llm_bv), dests in children:
                     popped = gss_node.popn(pop)
-                    if popped.is_empty():
-                        continue
-
-                    sid_vals = RangeSet.from_indices(popped.peek())
-                    if sid_vals.is_empty():
-                        continue
-
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
-                        intersected_sids = sid_vals.intersection(state_bv)
-                        if intersected_sids.is_empty():
+                        matched: List[GSS] = []
+                        if not state_bv.is_empty():
+                            # for sid_val in popped.peek():
+                            #     if state_bv.contains(sid_val):
+                            #         matched.append(popped.isolate(sid_val))
+                            sid_vals = RangeSet.from_indices(popped.peek())
+                            matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
+                        if not matched:
                             continue
 
-                        child_gss_node = popped.isolate_many(intersected_sids.to_indices())
-                        if child_gss_node.is_empty():
-                            continue
+                        child_gss_node = GSS.merge_many(matched)
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_empty:
