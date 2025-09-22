@@ -1,4 +1,4 @@
-from typing import Protocol, Iterable, Optional, Tuple, List
+from typing import Iterable, Optional, Tuple, List
 
 class RangeSet:
     """
@@ -55,7 +55,7 @@ class RangeSet:
     @staticmethod
     def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
         """Creates a RangeSet from a list of [start, end] lists."""
-        return RangeSet(tuple(map(tuple, ranges)))
+        return RangeSet(iter(map(tuple, ranges)))
 
     def to_ranges(self) -> List[List[int]]:
         """Converts the RangeSet to a list of [start, end] lists."""
