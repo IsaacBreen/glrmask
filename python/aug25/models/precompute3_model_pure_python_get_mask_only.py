@@ -1,5 +1,6 @@
 import heapq
-import _sep1 as ffi
+import portion as P
+import _sep1 as ffi # For some types
 from typing import Dict, List, Set, Optional
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -14,11 +15,11 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = im.arena
         self.roots_map: Dict[int, int] = im.roots_map
         self.max_depth: Dict[int, int] = im.max_depth
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, P.Interval]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
-        self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+        self.all_internal_llm_tokens_bitset: Optional[P.Interval] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
-        self.all_terminals_bitset: Optional[ffi.Bitset] = im.all_terminals_bitset
+        self.all_terminals_bitset: Optional[P.Interval] = im.all_terminals_bitset
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -47,8 +48,8 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, GSS] = self.state
 
-        all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
-        final_mask: ffi.Bitset = ffi.Bitset.zeros()
+        all_ones: Optional[P.Interval] = self.all_internal_llm_tokens_bitset
+        final_mask: P.Interval = P.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
@@ -60,26 +61,25 @@ class Model(GraphProvider):
         max_depth: Dict[int, int] = self.max_depth
         arena: Dict[int, dict] = self.arena
         is_end = self.is_end
-        pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+        pmc: Dict[int, Dict[int, P.Interval]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask = ffi.Bitset.zeros()
+            disallowed_llm_mask = P.empty()
             disallowed_map = dict(acc.terminals_union)
 
             for tsid, disallowed_terminals in disallowed_map.items():
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
-                for terminal_id in disallowed_terminals.to_indices():
-                    if terminal_id in terminals_to_llm:
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+                for atomic in disallowed_terminals:
+                    for terminal_id in range(atomic.lower, atomic.upper + 1):
+                        if terminal_id in terminals_to_llm:
+                            disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
-            allowed_mask = all_ones.difference(disallowed_llm_mask)
+            allowed_mask = all_ones - disallowed_llm_mask
             return PyAcc(
                 terminals_union=tuple(),  # consume
                 llm_mask=allowed_mask,
@@ -121,35 +121,35 @@ class Model(GraphProvider):
                 if is_end(node):
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     if reduced_acc:
-                        final_mask = final_mask.union(reduced_acc.llm_mask)
+                        final_mask |= reduced_acc.llm_mask
 
                 # Traverse edges and propagate masks
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                     popped: GSS = gss_node.popn(pop)
-                    if popped.is_empty():
+                    if popped.empty:
                         continue
 
                     for dest_idx, state_bv in dests:
-                        if state_bv.is_empty():
+                        if state_bv.empty:
                             continue
 
-                        values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                        values_to_keep = [s for s in popped.peek() if s in state_bv]
                         if not values_to_keep:
                             continue
 
                         child_gss: GSS = popped.isolate_many(values_to_keep)
-                        if child_gss.is_empty():
+                        if child_gss.empty:
                             continue
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                        if not llm_bv.is_empty():
+                        if not llm_bv.empty:
                             acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                             def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                                 if acc in acc_memo:
                                     return acc_memo[acc]
-                                new_mask = acc.llm_mask.intersection(llm_bv)
-                                if new_mask.is_empty():
+                                new_mask = acc.llm_mask & llm_bv
+                                if new_mask.empty:
                                     result = None
                                 else:
                                     result = PyAcc(
@@ -160,7 +160,7 @@ class Model(GraphProvider):
                                 return result
 
                             child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                            if child_gss.is_empty():
+                            if child_gss.empty:
                                 continue
 
                         d: int = int(dest_idx)
@@ -176,9 +176,10 @@ class Model(GraphProvider):
             todo.pop(depth)
 
         # Convert internal mask back to original IDs
-        original_mask: ffi.Bitset = ffi.Bitset.zeros()
-        for i in final_mask.to_indices():
-            if i in self.internal_to_original_map:
-                original_mask.insert(self.internal_to_original_map[i])
+        original_mask: P.Interval = P.empty()
+        for atomic in final_mask:
+            for i in range(atomic.lower, atomic.upper + 1):
+                if i in self.internal_to_original_map:
+                    original_mask |= P.singleton(self.internal_to_original_map[i])
 
-        return RangeSet.from_ranges(original_mask.to_ranges())
+        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
