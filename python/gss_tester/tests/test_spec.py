@@ -15,11 +15,15 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     # For this test, the accumulator is an integer and stack items are integers.
     acc_factory = lambda: MergeableInt(0)
 
-    def _yield_state(gss_state: GSS):
+    def _yield_state(gss_state: GSS, trace: Any = None):
         """Helper to yield the state and the caller's line number."""
         caller_frame = inspect.currentframe().f_back
         line_no = caller_frame.f_lineno
-        yield (gss_state.to_stacks(), line_no)
+        if trace is None:
+            yield (gss_state.to_stacks(), line_no)
+        else:
+            # Forward optional fuzz trace alongside state+line
+            yield (gss_state.to_stacks(), line_no, trace)
 
     # --- Test 1: Basic push/pop/construction ---
     gss1 = gss_class.from_stacks([([], acc_factory())])
@@ -247,5 +251,13 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     # The seed ensures the test is deterministic.
     fuzz_seed = 42
     fuzz_steps = 100
-    for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-        yield from _yield_state(gss_state)
+    for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+        # The fuzzer yields (gss_state, trace). For compatibility, accept a bare gss_state too.
+        if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
+            gss_state, trace = item
+            yield from _yield_state(gss_state, trace)
+        else:
+            # Fallback (older fuzzer behavior)
+            gss_state = item  # type: ignore[assignment]
+            yield from _yield_state(gss_state)
+

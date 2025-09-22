@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import json
+from typing import Tuple
 from pathlib import Path
 import sys
 import os
@@ -38,11 +39,27 @@ def main():
 
     print("Running test specification...")
     results = []
-    for state, line_no in run_test_spec(gss_class):
-        results.append({
-            "line": line_no,
-            "state": state
-        })
+    for yielded in run_test_spec(gss_class):
+        # Support (state, line) and (state, line, trace) tuples from the test spec.
+        if isinstance(yielded, tuple):
+            if len(yielded) == 2:
+                state, line_no = yielded
+                item = {
+                    "line": line_no,
+                    "state": state
+                }
+            elif len(yielded) >= 3:
+                state, line_no, trace = yielded[0], yielded[1], yielded[2]
+                item = {
+                    "line": line_no,
+                    "state": state,
+                    "trace": trace
+                }
+            else:
+                # Unexpected tuple arity; fallback to legacy behavior.
+                state, line_no = yielded[0], yielded[1]
+                item = {"line": line_no, "state": state}
+            results.append(item)
 
     output_data = {
         "implementation": f"{args.implementation_module}.{args.implementation_class}",

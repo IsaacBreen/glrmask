@@ -1,8 +1,11 @@
 import argparse
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import itertools
+
+MAX_STACKS_PREVIEW = 5
+TRACE_CONTEXT_WINDOW = 10
 
 def analyze_results(result_files: List[Path], reference_file: Path = None):
     all_results: Dict[str, List[Dict[str, Any]]] = {}
@@ -17,7 +20,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
         except (json.JSONDecodeError, KeyError) as e:
             print(f"Warning: Skipping invalid result file {file_path}: {e}")
 
-
     if not implementations:
         print("No valid result files found to analyze.")
         return
@@ -31,6 +33,28 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
         return tuple(
             (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
         )
+
+    def pretty_stacks(stacks: Any, max_items: int = MAX_STACKS_PREVIEW) -> str:
+        try:
+            if not isinstance(stacks, list):
+                return json.dumps(stacks, ensure_ascii=False)
+            shown = stacks[:max_items]
+            s = json.dumps(shown, ensure_ascii=False)
+            if len(stacks) > max_items:
+                s += " ..."
+            return s
+        except Exception:
+            return repr(stacks)
+
+    def extract_trace_window(results: List[Dict[str, Any]], up_to_index: int, window: int = TRACE_CONTEXT_WINDOW) -> List[Tuple[int, Dict[str, Any]]]:
+        start = max(0, up_to_index - window + 1)
+        items: List[Tuple[int, Dict[str, Any]]] = []
+        for i in range(start, up_to_index + 1):
+            r = results[i]
+            t = r.get("trace")
+            if isinstance(t, dict):
+                items.append((i, t))
+        return items[-window:]
 
     partitions: Dict[Signature, List[str]] = {}
     for impl_name, results in all_results.items():
@@ -100,6 +124,72 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
                     else:
                         print(f"    - {impl_name2}: No yield at this index.")
+
+                    # Rich trace context (if available)
+                    # Immediate operation at divergence index
+                    t1 = res1.get("trace") if res1 else None
+                    t2 = res2.get("trace") if res2 else None
+                    if t1 or t2:
+                        print("  - Divergence operation details:")
+                        if t1:
+                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                            args1 = t1.get("args", {})
+                            print(f"      args={json.dumps(args1, ensure_ascii=False)}")
+                            ss1 = t1.get("source_stacks")
+                            rs1 = t1.get("result_stacks")
+                            if ss1 is not None:
+                                print(f"      source_stacks={pretty_stacks(ss1)}")
+                            if rs1 is not None:
+                                print(f"      result_stacks={pretty_stacks(rs1)}")
+                        else:
+                            print(f"    - {impl_name1}: No trace info at divergence index.")
+                        if t2:
+                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                            args2 = t2.get("args", {})
+                            print(f"      args={json.dumps(args2, ensure_ascii=False)}")
+                            ss2 = t2.get("source_stacks")
+                            rs2 = t2.get("result_stacks")
+                            if ss2 is not None:
+                                print(f"      source_stacks={pretty_stacks(ss2)}")
+                            if rs2 is not None:
+                                print(f"      result_stacks={pretty_stacks(rs2)}")
+                        else:
+                            print(f"    - {impl_name2}: No trace info at divergence index.")
+
+                    # Rolling window of previous fuzz ops for each impl (up to TRACE_CONTEXT_WINDOW)
+                    ctx1 = extract_trace_window(all_results[impl_name1], i, TRACE_CONTEXT_WINDOW)
+                    ctx2 = extract_trace_window(all_results[impl_name2], i, TRACE_CONTEXT_WINDOW)
+                    if ctx1:
+                        seed1 = ctx1[-1][1].get("seed")
+                        print(f"  - Trace context for {impl_name1} (seed={seed1}, last {len(ctx1)} op(s)):")
+                        for idx, tr in ctx1:
+                            op = tr.get("op")
+                            step = tr.get("step")
+                            args = tr.get("args", {})
+                            ss = tr.get("source_stacks")
+                            rs = tr.get("result_stacks")
+                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                            if ss is not None:
+                                print(f"         src={pretty_stacks(ss)}")
+                            if rs is not None:
+                                print(f"         res={pretty_stacks(rs)}")
+                    else:
+                        print(f"  - No fuzz trace context available for {impl_name1}.")
+
+                    if ctx2:
+                        seed2 = ctx2[-1][1].get("seed")
+                        print(f"  - Trace context for {impl_name2} (seed={seed2}, last {len(ctx2)} op(s)):")
+                        for idx, tr in ctx2:
+                            op = tr.get("op")
+                            step = tr.get("step")
+                            args = tr.get("args", {})
+                            ss = tr.get("source_stacks")
+                            rs = tr.get("result_stacks")
+                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                            if ss is not None:
+                                print(f"         src={pretty_stacks(ss)}")
+                            if rs is not None:
+                                print(f"         res={pretty_stacks(rs)}")
                     break # Show only the first divergence for this pair
 
 def main():
