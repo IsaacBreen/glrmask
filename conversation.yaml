@@ -1553,7 +1553,7 @@ local_system:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -2510,6 +2510,10 @@ local_system:
                                   rs1 = t1.get("result_stacks")
                                   if ss1 is not None:
                                       print(f"      source_stacks={pretty_stacks(ss1)}")
+                                  psb1 = t1.get("pool_size_before")
+                                  psa1 = t1.get("pool_size_after")
+                                  atp1 = t1.get("added_to_pool")
+                                  print(f"      pool_before={psb1} pool_after={psa1} added={atp1}")
                                   if rs1 is not None:
                                       print(f"      result_stacks={pretty_stacks(rs1)}")
                               else:
@@ -2522,6 +2526,10 @@ local_system:
                                   rs2 = t2.get("result_stacks")
                                   if ss2 is not None:
                                       print(f"      source_stacks={pretty_stacks(ss2)}")
+                                  psb2 = t2.get("pool_size_before")
+                                  psa2 = t2.get("pool_size_after")
+                                  atp2 = t2.get("added_to_pool")
+                                  print(f"      pool_before={psb2} pool_after={psa2} added={atp2}")
                                   if rs2 is not None:
                                       print(f"      result_stacks={pretty_stacks(rs2)}")
                               else:
@@ -2539,7 +2547,10 @@ local_system:
                                   args = tr.get("args", {})
                                   ss = tr.get("source_stacks")
                                   rs = tr.get("result_stacks")
-                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  psa = tr.get("pool_size_after")
+                                  atp = tr.get("added_to_pool")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
+                                        f"pool_after={psa} added={atp}")
                                   if ss is not None:
                                       print(f"         src={pretty_stacks(ss)}")
                                   if rs is not None:
@@ -2556,7 +2567,10 @@ local_system:
                                   args = tr.get("args", {})
                                   ss = tr.get("source_stacks")
                                   rs = tr.get("result_stacks")
-                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  psa = tr.get("pool_size_after")
+                                  atp = tr.get("added_to_pool")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
+                                        f"pool_after={psa} added={atp}")
                                   if ss is not None:
                                       print(f"         src={pretty_stacks(ss)}")
                                   if rs is not None:
@@ -2654,14 +2668,18 @@ local_system:
 
               # Choose an operation
               can_merge = len(gss_states) >= 2
-              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-              if can_merge:
-                  operations.append('merge')
-              
-              op_choice = rng.choice(operations)
+              # Always choose from the full list of operations to keep the RNG stream
+              # deterministic, even if the pool size causes `can_merge` to differ.
+              possible_ops = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+              op_choice = rng.choice(possible_ops)
+              if op_choice == 'merge' and not can_merge:
+                  op_choice = 'push'  # Fallback if merge is not possible
 
               # Select GSS state(s) to operate on
-              source_index = rng.randrange(len(gss_states))
+              # Use modulo to keep the RNG stream deterministic. This decouples the sequence
+              # of random numbers from the number of states in the pool, which can vary
+              # between implementations.
+              source_index = rng.randrange(max_gss_states) % len(gss_states)
               source_gss = gss_states[source_index]
               source_stacks = source_gss.to_stacks()
               
@@ -2707,9 +2725,12 @@ local_system:
                       new_gss = source_gss.prune(predicate)
                       args = {"threshold": threshold}
 
-                  elif op_choice == 'merge' and can_merge:
+                  elif op_choice == 'merge': # `and can_merge` is implicitly true due to fallback
                       candidates = [i for i in range(len(gss_states)) if i != source_index]
-                      other_index = rng.choice(candidates)
+                      # Use modulo for deterministic RNG stream.
+                      # The number of candidates is len(gss_states) - 1.
+                      rand_idx = rng.randrange(max_gss_states - 1) % len(candidates)
+                      other_index = candidates[rand_idx]
                       other_gss = gss_states[other_index]
                       new_gss = source_gss.merge(other_gss)
                       other_stacks = other_gss.to_stacks()
@@ -3882,26 +3903,25 @@ local_system:
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               if self.is_empty():
-                  return type(self).empty()
+                  return self
               if isinstance(self.inner, Interface):
                   lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
                   new_children = {value: {lower_node._max_depth: lower_node}}
                   return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
               else:
                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
-
           def pop(self) -> LeveledGSS[T, Acc]:
               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
               all_children = list(upper_branch._all_children())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
               merged = try_promote(merged)
               return LeveledGSS(merged)
-
           def popn(self, n: int) -> LeveledGSS[T, Acc]:
               # Fast path: popn(0) is a no-op. Preserve identity to match the default
               # implementation's behavior (crucial for deterministic fuzzing).
               if n <= 0:
-                  return self
+                  # return self
+                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
               for _ in range(n):
                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
@@ -3909,7 +3929,7 @@ local_system:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -6348,7 +6368,7 @@ messages:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -7167,7 +7187,7 @@ messages:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-22_12-01-10
+      Test results will be saved in: gss_test_results/2025-09-22_12-38-25
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -7175,25 +7195,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-38-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -7290,30 +7310,10 @@ messages:
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-22_12-01-10
+      Full JSON results are in: gss_test_results/2025-09-22_12-38-25
     metadata:
-  - user: |-
-      When I add this:
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  # return self
-                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-      ```
-      Suddenly I get this failure.
-      When I change it back to this
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  return self
-      ```
-      the test succeeds.
-      WTF?? What on earth would cause this?
-      (I know I can just use return self. But this indicates a big error somewhere in my program that could be causing other major problems that I don't know about yet.)
+  - user: The test output here is really confusing. We can see that all of a sudden
+      two different ops have been chosen, but we have no clue as to why.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7332,120 +7332,238 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. This is a fascinating and subtle bug that's a great example of why testing with a deterministic fuzzer is so powerful. The behavior you're seeing is not random; it's a direct consequence of how the fuzzer detects changes between operations.
+      Of course. The confusing output from the fuzzer is a classic sign of its internal random state becoming desynchronized between test runs of different implementations. I can help make the fuzzer more robust and its output clearer.
 
-      Here is the step-by-step explanation and the fixes.
+      The core issue is that the fuzzer's random choices (which operation to run, which GSS state to operate on) depend on the size of its internal pool of GSS states. If a bug in one implementation causes its pool size to differ from the reference implementation's (e.g., by incorrectly creating an empty GSS when it shouldn't), the subsequent random choices will diverge. This leads to the confusing report you saw, where both implementations suddenly start executing completely different operations.
 
-      ### The "WTF" Explained: Object Identity vs. Equality
+      To fix this, we'll make two key changes:
+      1.  **Make the fuzzer's operation sequence deterministic:** We will modify `fuzzer.py` to ensure the sequence of random operations is generated independently of the state of the implementation being tested. This guarantees that every implementation is subjected to the exact same test sequence.
+      2.  **Improve the analyzer's reporting:** We will update `analyzer.py` to display more diagnostic information from the fuzzer's trace, specifically about the size of the GSS pool. This will make it immediately obvious when the pools diverge, pointing directly to the operation that caused the problem.
 
-      The root cause of the failure is the difference between object identity (`is`) and equality (`==`). Your fuzzer uses object identity to determine if an operation was a "no-op" (an operation that resulted in no change).
+      Here are the step-by-step instructions to apply these changes.
 
-      1.  **Fuzzer Synchronization:** The fuzzer (`fuzzer.py`) runs the same sequence of pseudo-random operations against both your `LeveledGSS` and the `ReferenceGSS`. This is controlled by a single starting `seed`. For the test results to be comparable, the sequence of operations must be identical.
+      ### Step-by-step Instructions
 
-      2.  **State Pool:** The fuzzer maintains a pool of GSS states (`gss_states`). In each step, it picks a state from this pool to operate on. The size of this pool is critical. If the pool sizes diverge between the two test runs, the next call to `rng.randrange(len(gss_states))` will likely pick a different index, the random number generator's state will de-synchronize, and the two implementations will start executing completely different test sequences.
+      #### 1. Modify the Fuzzer for Deterministic Operation Selection
 
-      3.  **The Identity Check:** The fuzzer decides whether to add the result of an operation (`new_gss`) to the state pool using this logic:
+      In `python/gss_tester/tests/fuzzer.py`, we need to change how random choices are made.
+
+      1.  **Locate the main fuzzing loop** inside the `run_fuzz_test` function.
+      2.  **Change the operation selection:** Replace the block that chooses an operation with a new one that always selects from a fixed list of all possible operations. If `merge` is chosen when it's not possible, it will deterministically fall back to `push`.
+
           ```python
-          if new_gss is not source_gss and not new_gss.is_empty():
-              gss_states.append(new_gss)
+          # Replace this block:
+          can_merge = len(gss_states) >= 2
+          operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+          if can_merge:
+              operations.append('merge')
+          
+          op_choice = rng.choice(operations)
+
+          # With this:
+          can_merge = len(gss_states) >= 2
+          # Always choose from the full list of operations to keep the RNG stream
+          # deterministic, even if the pool size causes `can_merge` to differ.
+          possible_ops = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+          op_choice = rng.choice(possible_ops)
+          if op_choice == 'merge' and not can_merge:
+              op_choice = 'push'  # Fallback if merge is not possible
           ```
-          The key here is `new_gss is not source_gss`. It's checking if the operation returned a *new object* in memory, not just an object that is *equal* to the source.
 
-      4.  **How `popn(0)` Breaks Everything:**
-          *   **ReferenceGSS:** The default `popn(n)` implementation in the `GSS` interface is used. When `n=0`, the loop doesn't run, and it correctly returns `self`. The identity check `new_gss is source_gss` is `True`, and the state is **not** added to the pool. The pool size remains unchanged.
-          *   **Your Failing LeveledGSS:** Your implementation of `popn(0)` does this: `return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self`. When the GSS happens to be rooted with an `Interface` node, you create a *brand new* `LeveledGSS` object. Although this new object is `==` to the original, it is not the *same* object. The identity check `new_gss is source_gss` is `False`. The fuzzer thinks a change occurred and **adds the new object to the pool**.
+      3.  **Change the source GSS selection:** Modify the line that selects `source_index` to use modulo arithmetic. This makes the call to the random number generator independent of the pool size.
 
-      At step 112 of the fuzz test, `popn(0)` is called. For `LeveledGSS`, this adds a duplicate state to the pool. The pool size for `LeveledGSS` is now different from the pool size for `ReferenceGSS`. At step 113, the fuzzer generates a different operation, and the test fails.
+          ```python
+          # Replace this line:
+          source_index = rng.randrange(len(gss_states))
 
-      The "big error" you were worried about is this inconsistent handling of object identity for no-op methods. An operation that does nothing should return `self` to signal its no-op nature to callers like the fuzzer.
+          # With this:
+          # Use modulo to keep the RNG stream deterministic. This decouples the sequence
+          # of random numbers from the number of states in the pool, which can vary
+          # between implementations.
+          source_index = rng.randrange(max_gss_states) % len(gss_states)
+          ```
 
-      ### The Fixes
+      4.  **Change the `merge` operand selection:** In the `elif op_choice == 'merge'` block, modify how the `other_index` is chosen, again using modulo arithmetic for determinism.
 
-      Here are two changes to make your implementation more robust and consistent with the reference.
+          ```python
+          # Replace this line:
+          other_index = rng.choice(candidates)
 
-      #### Step 1: Fix `popn()` to Preserve Identity
+          # With this:
+          # Use modulo for deterministic RNG stream.
+          # The number of candidates is len(gss_states) - 1.
+          rand_idx = rng.randrange(max_gss_states - 1) % len(candidates)
+          other_index = candidates[rand_idx]
+          ```
+          Also, update the `elif` condition to remove the `and can_merge` check, as it's now handled by the fallback logic.
 
-      First, we'll fix the immediate problem by ensuring `popn(0)` always returns `self`.
+      #### 2. Enhance the Analyzer's Divergence Report
 
-      *   **File:** `python/gss_tester/implementations/leveled_impl.py`
-      *   **Method:** `LeveledGSS.popn`
-      *   **Action:** Replace the conditional logic for `n <= 0` with a simple `return self`.
+      In `python/gss_tester/tests/analyzer.py`, we'll add more details to the printed report within the `analyze_results` function.
 
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  return self
-      ```
+      1.  **Find the "Divergence operation details" section:** This is inside the main loop of the "Divergence Report".
+      2.  **Add pool size details for the first implementation:** After the line that prints `source_stacks`, add lines to print `pool_size_before`, `pool_size_after`, and `added_to_pool`.
 
-      #### Step 2: Fix `push()` on Empty GSS for Consistency
+          ```python
+          # After this line:
+          print(f"      source_stacks={pretty_stacks(ss1)}")
+          # Add this:
+          psb1 = t1.get("pool_size_before")
+          psa1 = t1.get("pool_size_after")
+          atp1 = t1.get("added_to_pool")
+          print(f"      pool_before={psb1} pool_after={psa1} added={atp1}")
+          ```
 
-      To address your concern about other potential issues, there is a similar inconsistency in the `push` method. When called on an empty GSS, it returns `self`, whereas the reference implementation returns a *new* empty GSS. This doesn't break the current test (because the fuzzer doesn't add empty states to the pool), but it's best to fix it for consistency.
+      3.  **Add pool size details for the second implementation:** Do the same for the second implementation (`impl_name2`).
 
-      *   **File:** `python/gss_tester/implementations/leveled_impl.py`
-      *   **Method:** `LeveledGSS.push`
-      *   **Action:** Change the `is_empty` check to return a new empty GSS instance using the class's `empty()` constructor.
+          ```python
+          # After this line:
+          print(f"      source_stacks={pretty_stacks(ss2)}")
+          # Add this:
+          psb2 = t2.get("pool_size_before")
+          psa2 = t2.get("pool_size_after")
+          atp2 = t2.get("added_to_pool")
+          print(f"      pool_before={psb2} pool_after={psa2} added={atp2}")
+          ```
 
-      ```python
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              if self.is_empty():
-                  return type(self).empty()
-      ```
+      4.  **Find the "Trace context" section:** This is where the rolling window of previous operations is printed.
+      5.  **Add pool size to the trace context line:** Modify the `print` statement inside the loop for both implementations to include `pool_after` and `added`.
 
-      These two changes will resolve the test failure and make your implementation's behavior more correct and predictable.
+          ```python
+          # Replace this line:
+          print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+          # With this:
+          psa = tr.get("pool_size_after")
+          atp = tr.get("added_to_pool")
+          print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
+                f"pool_after={psa} added={atp}")
+          ```
+          Make this change for both `ctx1` and `ctx2`.
 
       ### Git Diffs
 
-      Here are the changes in `git diff` format.
+      Here are the changes in `diff` format for you to apply.
 
       ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -507,19 +507,19 @@
-       
-           def push(self, value: T) -> LeveledGSS[T, Acc]:
-               if self.is_empty():
-      -            return self
-      +            return type(self).empty()
-               if isinstance(self.inner, Interface):
-                   lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-                   new_children = {value: {lower_node._max_depth: lower_node}}
-                   return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-               else:
-                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
-      +
-           def pop(self) -> LeveledGSS[T, Acc]:
-               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
-               all_children = list(upper_branch._all_children())
-               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-               merged = try_promote(merged)
-               return LeveledGSS(merged)
-      +
-           def popn(self, n: int) -> LeveledGSS[T, Acc]:
-               # Fast path: popn(0) is a no-op. Preserve identity to match the default
-               # implementation's behavior (crucial for deterministic fuzzing).
-               if n <= 0:
-      -            # return self
-      -            return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-      +            return self
-               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-               for _ in range(n):
-                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+      diff --git a/python/gss_tester/tests/analyzer.py b/python/gss_tester/tests/analyzer.py
+      index 201161c..1151180 100644
+      --- a/python/gss_tester/tests/analyzer.py
+      +++ b/python/gss_tester/tests/analyzer.py
+      @@ -140,6 +140,10 @@
+                                   rs1 = t1.get("result_stacks")
+                                   if ss1 is not None:
+                                       print(f"      source_stacks={pretty_stacks(ss1)}")
+      +                            psb1 = t1.get("pool_size_before")
+      +                            psa1 = t1.get("pool_size_after")
+      +                            atp1 = t1.get("added_to_pool")
+      +                            print(f"      pool_before={psb1} pool_after={psa1} added={atp1}")
+                                   if rs1 is not None:
+                                       print(f"      result_stacks={pretty_stacks(rs1)}")
+                               else:
+      @@ -152,6 +156,10 @@
+                                   rs2 = t2.get("result_stacks")
+                                   if ss2 is not None:
+                                       print(f"      source_stacks={pretty_stacks(ss2)}")
+      +                            psb2 = t2.get("pool_size_before")
+      +                            psa2 = t2.get("pool_size_after")
+      +                            atp2 = t2.get("added_to_pool")
+      +                            print(f"      pool_before={psb2} pool_after={psa2} added={atp2}")
+                                   if rs2 is not None:
+                                       print(f"      result_stacks={pretty_stacks(rs2)}")
+                               else:
+      @@ -169,7 +177,10 @@
+                                   args = tr.get("args", {})
+                                   ss = tr.get("source_stacks")
+                                   rs = tr.get("result_stacks")
+      -                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+      +                            psa = tr.get("pool_size_after")
+      +                            atp = tr.get("added_to_pool")
+      +                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
+      +                                  f"pool_after={psa} added={atp}")
+                                   if ss is not None:
+                                       print(f"         src={pretty_stacks(ss)}")
+                                   if rs is not None:
+      @@ -186,7 +197,10 @@
+                                   args = tr.get("args", {})
+                                   ss = tr.get("source_stacks")
+                                   rs = tr.get("result_stacks")
+      -                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+      +                            psa = tr.get("pool_size_after")
+      +                            atp = tr.get("added_to_pool")
+      +                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)} "
+      +                                  f"pool_after={psa} added={atp}")
+                                   if ss is not None:
+                                       print(f"         src={pretty_stacks(ss)}")
+                                   if rs is not None:
 
       ```
+
+      ```diff
+      diff --git a/python/gss_tester/tests/fuzzer.py b/python/gss_tester/tests/fuzzer.py
+      index 281115c..0111119 100644
+      --- a/python/gss_tester/tests/fuzzer.py
+      +++ b/python/gss_tester/tests/fuzzer.py
+      @@ -61,14 +61,19 @@
+       
+               # Choose an operation
+               can_merge = len(gss_states) >= 2
+      -        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+      -        if can_merge:
+      -            operations.append('merge')
+      -        
+      -        op_choice = rng.choice(operations)
+      +        # Always choose from the full list of operations to keep the RNG stream
+      +        # deterministic, even if the pool size causes `can_merge` to differ.
+      +        possible_ops = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+      +        op_choice = rng.choice(possible_ops)
+      +        if op_choice == 'merge' and not can_merge:
+      +            op_choice = 'push'  # Fallback if merge is not possible
+       
+               # Select GSS state(s) to operate on
+      -        source_index = rng.randrange(len(gss_states))
+      +        # Use modulo to keep the RNG stream deterministic. This decouples the sequence
+      +        # of random numbers from the number of states in the pool, which can vary
+      +        # between implementations.
+      +        source_index = rng.randrange(max_gss_states) % len(gss_states)
+               source_gss = gss_states[source_index]
+               source_stacks = source_gss.to_stacks()
+               
+      @@ -110,9 +115,12 @@
+                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                       new_gss = source_gss.prune(predicate)
+                       args = {"threshold": threshold}
+       
+      -            elif op_choice == 'merge' and can_merge:
+      +            elif op_choice == 'merge': # `and can_merge` is implicitly true due to fallback
+                       candidates = [i for i in range(len(gss_states)) if i != source_index]
+      -                other_index = rng.choice(candidates)
+      +                # Use modulo for deterministic RNG stream.
+      +                # The number of candidates is len(gss_states) - 1.
+      +                rand_idx = rng.randrange(max_gss_states - 1) % len(candidates)
+      +                other_index = candidates[rand_idx]
+                       other_gss = gss_states[other_index]
+                       new_gss = source_gss.merge(other_gss)
+                       other_stacks = other_gss.to_stacks()
+
+      ```
+
+      After applying these changes, when you re-run the tests, the fuzzer will apply the exact same sequence of operations to both implementations. If a divergence occurs, the report will clearly show the same operation being applied to both, but with different outcomes, and the new trace information will help you quickly identify why the internal state (the GSS pool) diverged.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+      Identified target file: python/gss_tester/tests/analyzer.py
+      Applying patch to 'python/gss_tester/tests/analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/tests/analyzer.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/tests/fuzzer.py
+      Applying patch to 'python/gss_tester/tests/fuzzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/tests/fuzzer.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure popn(0) returns self and push
-      on empty GSS returns new empty GSS"'
+  - user: 'Changes committed with message: "Refactor fuzzer for deterministic operation
+      selection and enhanced trace logging"'
     metadata:
 ...

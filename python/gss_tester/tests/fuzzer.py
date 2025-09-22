@@ -63,14 +63,18 @@ def run_fuzz_test(
 
         # Choose an operation
         can_merge = len(gss_states) >= 2
-        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-        if can_merge:
-            operations.append('merge')
-        
-        op_choice = rng.choice(operations)
+        # Always choose from the full list of operations to keep the RNG stream
+        # deterministic, even if the pool size causes `can_merge` to differ.
+        possible_ops = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+        op_choice = rng.choice(possible_ops)
+        if op_choice == 'merge' and not can_merge:
+            op_choice = 'push'  # Fallback if merge is not possible
 
         # Select GSS state(s) to operate on
-        source_index = rng.randrange(len(gss_states))
+        # Use modulo to keep the RNG stream deterministic. This decouples the sequence
+        # of random numbers from the number of states in the pool, which can vary
+        # between implementations.
+        source_index = rng.randrange(max_gss_states) % len(gss_states)
         source_gss = gss_states[source_index]
         source_stacks = source_gss.to_stacks()
         
@@ -116,9 +120,12 @@ def run_fuzz_test(
                 new_gss = source_gss.prune(predicate)
                 args = {"threshold": threshold}
 
-            elif op_choice == 'merge' and can_merge:
+            elif op_choice == 'merge': # `and can_merge` is implicitly true due to fallback
                 candidates = [i for i in range(len(gss_states)) if i != source_index]
-                other_index = rng.choice(candidates)
+                # Use modulo for deterministic RNG stream.
+                # The number of candidates is len(gss_states) - 1.
+                rand_idx = rng.randrange(max_gss_states - 1) % len(candidates)
+                other_index = candidates[rand_idx]
                 other_gss = gss_states[other_index]
                 new_gss = source_gss.merge(other_gss)
                 other_stacks = other_gss.to_stacks()
