@@ -1,7 +1,6 @@
 import heapq
 import _sep1 as ffi
 import time
-import traceback
 from functools import wraps
 from typing import Dict, List, Set, Tuple, Optional
 
@@ -17,33 +16,18 @@ except NameError:
 
 # --- Profiling infrastructure ---
 _PROFILING_STATS = {
-    'bitset_union': {},
-    'bitset_intersection': {},
-    'bitset_difference': {},
-    'hybrid_complement': {},
-    'acc_merge': {},
+    'bitset_union': 0,
+    'bitset_intersection': 0,
+    'bitset_difference': 0,
+    'hybrid_complement': 0,
+    'acc_merge': 0,
 }
 
 def _profile_method(cls, method_name, counter_name):
     original_method = getattr(cls, method_name)
     @wraps(original_method)
     def wrapper(*args, **kwargs):
-        # Get stack, limit to a few frames, ignore the current one.
-        frames = traceback.extract_stack(limit=None)[:-1]
-
-        # Format it into a readable string
-        call_chain = []
-        for frame in reversed(frames):
-            # Don't include the profiler wrapper in the output
-            if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
-                continue
-            call_chain.append(f"{frame.filename.split('/')[-1]}:{frame.lineno} ({frame.name})")
-
-        stack_key = " -> ".join(call_chain)
-
-        stats_dict = _PROFILING_STATS[counter_name]
-        stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
-
+        _PROFILING_STATS[counter_name] += 1
         return original_method(*args, **kwargs)
     setattr(cls, method_name, wrapper)
 
@@ -189,7 +173,7 @@ class Model(GraphProvider):
 
         # Reset per-call stats
         for k in _PROFILING_STATS:
-            _PROFILING_STATS[k] = {}
+            _PROFILING_STATS[k] = 0
 
         # Main loop
         while depth_heap:
@@ -303,17 +287,8 @@ class Model(GraphProvider):
         print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
         print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
         print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
-        for k, v_dict in _PROFILING_STATS.items():
-            total_calls = sum(v_dict.values())
-            print(f"{k} total calls: {total_calls}")
-            if total_calls > 0:
-                # Sort by count, descending, and take top 10
-                sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
-                for i, (stack, count) in enumerate(sorted_callers):
-                    # if i >= 10:
-                    #     print(f"  ... and {len(sorted_callers) - 10} more call sites.")
-                    #     break
-                    print(f"  - {count:<7} calls from: {stack}")
+        for k, v in _PROFILING_STATS.items():
+            print(f"{k} calls: {v}")
         print(f"--- get_mask END ---")
 
         return RangeSet.from_ranges(original_mask.to_ranges())
