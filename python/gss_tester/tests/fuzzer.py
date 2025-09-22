@@ -1,5 +1,4 @@
 import random
-import json
 from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
 
 from ..interface import GSS, MergeableInt
@@ -22,7 +21,6 @@ def run_fuzz_test(
 
     rng = random.Random(seed)
     gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
-    known_signatures = {json.dumps(gss_states[0].to_stacks(), sort_keys=True)}
     step_idx = 0
     yield gss_states[0], {
         "phase": "fuzz",
@@ -44,7 +42,6 @@ def run_fuzz_test(
         if not gss_states:
             # All states were pruned or became empty, start over.
             gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
-            known_signatures = {json.dumps(gss_states[0].to_stacks(), sort_keys=True)}
             step_idx += 1
             yield gss_states[0], {
                 "phase": "fuzz",
@@ -135,12 +132,9 @@ def run_fuzz_test(
             result_stacks = new_gss.to_stacks()
             # Add the new state to our pool, but avoid adding empty or duplicate states
             added_to_pool = False
-            if result_stacks:  # A non-empty GSS will have a non-empty list of stacks
-                new_sig = json.dumps(result_stacks, sort_keys=True)
-                if new_sig not in known_signatures:
-                    gss_states.append(new_gss)
-                    known_signatures.add(new_sig)
-                    added_to_pool = True
+            if new_gss is not source_gss and not new_gss.is_empty():
+                gss_states.append(new_gss)
+                added_to_pool = True
 
             yield new_gss, {
                 "phase": "fuzz",
@@ -161,7 +155,6 @@ def run_fuzz_test(
             # Prune the list of GSS states to keep it manageable
             if len(gss_states) > max_gss_states:
                 gss_states = rng.sample(gss_states, max_gss_states)
-                known_signatures = {json.dumps(gss.to_stacks(), sort_keys=True) for gss in gss_states}
 
         except Exception:
             # Some operations might fail on some implementations if invariants are broken.
