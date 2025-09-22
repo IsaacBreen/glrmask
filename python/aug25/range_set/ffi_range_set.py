@@ -1,6 +1,9 @@
 import _sep1 as ffi
 from typing import List, Tuple, Iterable, cast
 
+from .range_set_abc import RangeSet
+
+
 class FFIRangeSet(RangeSet[int]):
     """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
 
