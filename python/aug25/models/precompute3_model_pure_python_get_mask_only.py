@@ -185,8 +185,6 @@ class Model(GraphProvider):
 
                     for dest_idx, state_bv in dests:
                         stats['dests_processed'] += 1
-                        if state_bv.is_empty():
-                            continue
 
                         t_intersect_start = time.time()
                         values_to_keep = [sid for sid in popped.peek() if state_bv.contains(sid)]
@@ -203,29 +201,28 @@ class Model(GraphProvider):
                             continue
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                        if not llm_bv.is_empty():
-                            stats['apply_prune_calls'] += 1
-                            t_apply_prune_start = time.time()
-                            acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                        stats['apply_prune_calls'] += 1
+                        t_apply_prune_start = time.time()
+                        acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
-                            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                if acc in acc_memo:
-                                    return acc_memo[acc]
-                                new_mask = acc.llm_mask.intersection(llm_bv)
-                                if new_mask.is_empty():
-                                    result = None
-                                else:
-                                    result = PyAcc(
-                                        terminals_union=acc.terminals_union,
-                                        llm_mask=new_mask
-                                    )
-                                acc_memo[acc] = result
-                                return result
+                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                            if acc in acc_memo:
+                                return acc_memo[acc]
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            if new_mask.is_empty():
+                                result = None
+                            else:
+                                result = PyAcc(
+                                    terminals_union=acc.terminals_union,
+                                    llm_mask=new_mask
+                                )
+                            acc_memo[acc] = result
+                            return result
 
-                            child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                            stats['t_apply_prune'] += time.time() - t_apply_prune_start
-                            if child_gss.is_empty():
-                                continue
+                        child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                        stats['t_apply_prune'] += time.time() - t_apply_prune_start
+                        if child_gss.is_empty():
+                            continue
 
                         d: int = int(dest_idx)
                         if d in values:
