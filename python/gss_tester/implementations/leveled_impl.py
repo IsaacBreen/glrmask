@@ -434,22 +434,29 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         else:
             return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
     def pop(self) -> LeveledGSS[T, Acc]:
-        """
-        Canonical pop: flatten to explicit stacks, pop all non-empty stacks,
-        and rebuild. This matches ReferenceGSS semantics exactly and avoids
-        corner cases in structural popping over merged DAGs.
-        """
-        stacks = self.to_stacks()
-        if not stacks:
-            return LeveledGSS(UpperBranch(children={}, empty=None))
-        new_stacks = [(vals[:-1], acc) for vals, acc in stacks if vals]
-        return LeveledGSS.from_stacks(new_stacks)
+        upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
+        all_children = list(upper_branch._all_children())
+        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+        merged = try_promote(merged)
+        return LeveledGSS(merged)
+    def popn(self, n: int) -> LeveledGSS[T, Acc]:
+        all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+        for _ in range(n):
+            def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+                return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
+            all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
+        all_children: List[Upper[T, Acc]] = list(all_children.values())
+        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+        merged = try_promote(merged)
+        return LeveledGSS(merged)
 
 
     def is_empty(self) -> bool:
-        # Accurate emptiness check: no active stacks if and only if no terminal
-        # accumulator is reachable anywhere in the structure.
-        return self.reduce_acc() is None
+        # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
+        if isinstance(self.inner, UpperBranch):
+            return not self.inner.children and self.inner.empty is None
+        # An Interface always represents at least one stack, as it has an accumulator.
+        return False
 
     def isolate(self, value: Optional[T]) -> LeveledGSS[T, Acc]:
         if value is None:
