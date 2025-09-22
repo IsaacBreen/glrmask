@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+"""
+```bash
+DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee .temp && python python/aug25/create_additional_benchmark_plots.py < .temp
+```
+"""
 import sys
 import re
 import os
