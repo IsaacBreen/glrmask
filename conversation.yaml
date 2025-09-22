@@ -3747,12 +3747,17 @@ local_system:
                       self._validate_promotion_node(child)
 
               # Now, check for promotion condition on the current node
+              # A node can only be promoted if all its children are Interfaces.
+              all_children = list(node._all_children())
+              if not all_children or not all(isinstance(child, Interface) for child in all_children):
+                  return
+
               # All children are Interfaces. Gather all accumulators.
               accs: Set[Acc] = set()
               if node.empty is not None:
                   accs.add(node.empty)
 
-              for child in node._all_children():
+              for child in all_children:
                   interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
                   accs.add(interface_child.acc)
                   if interface_child.empty is not None:
@@ -8107,5 +8112,294 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Enhance analyzer to report fuzzer errors
       and include pool state details in divergence reports"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/fuzzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/tests/test_spec.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/reference_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
+      Test results will be saved in: gss_test_results/2025-09-22_12-48-09
+      ---
+      Reference Implementation: gss_tester/implementations/reference_impl.py
+      Other Implementations: gss_tester/implementations/leveled_impl.py
+      ---
+      Starting test runs...
+
+      >>> Running test spec for: gss_tester/implementations/reference_impl.py
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
+      Running test specification...
+      Successfully ran 151 checks.
+      Results saved to gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
+
+      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
+      Running test specification...
+      Successfully ran 151 checks.
+      Results saved to gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
+
+      All test runs completed.
+      ---
+      Analyzing results for consistency...
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-48-09/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      --- Consistency Analysis ---
+      Found 2 equivalence class(es) among 2 implementations.
+
+      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
+
+      Class 1 (1 implementation(s)) [Ref Match: ❌]
+      --------------------------------------------
+        - gss_tester.implementations.leveled_impl.LeveledGSS
+
+      Class 2 (1 implementation(s)) [Ref Match: ✅]
+      --------------------------------------------
+        - gss_tester.implementations.reference_impl.ReferenceGSS
+
+
+      --- Divergence Report ---
+
+      Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
+        - First divergence at yield index 97:
+          - gss_tester.implementations.leveled_impl.LeveledGSS (L258): [[[13], 7], [[], 1]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS (L258): [[[13, 5], 7], [[5], 1]]
+        - NOTE: 'gss_tester.implementations.leveled_impl.LeveledGSS' encountered an exception at this step:
+          - Error: AttributeError("'UpperBranch' object has no attribute 'acc'")
+        - Divergence operation details:
+          - gss_tester.implementations.leveled_impl.LeveledGSS: op=push step=47 seed=42
+            args={}
+            source_stacks=[[[13], 7], [[], 1]]
+            pool_before=10 pool_after=10 added=False
+          - gss_tester.implementations.reference_impl.ReferenceGSS: op=push step=47 seed=42
+            args={"value": 5}
+            source_stacks=[[[13], 7], [[], 1]]
+            pool_before=10 pool_after=11 added=True
+            result_stacks=[[[13, 5], 7], [[5], 1]]
+        - Trace context for gss_tester.implementations.leveled_impl.LeveledGSS (seed=42, last 10 op(s)):
+          [88] step=38 op=apply args={"amount": 10} pool_after=11 added=True
+               src=[[[3], 0]]
+               res=[[[3], 10]]
+          [89] step=39 op=popn args={"n": 1} pool_after=11 added=True
+               src=[[[13], 7], [[], 1]]
+               res=[[[], 7]]
+          [90] step=40 op=prune args={"threshold": 11} pool_after=10 added=False
+               src=[[[13], 0], [[], 0]]
+               res=[]
+          [91] step=41 op=isolate args={"value": 1} pool_after=10 added=False
+               src=[[[13], 0], [[], 0]]
+               res=[]
+          [92] step=42 op=prune args={"threshold": 1} pool_after=10 added=False
+               src=[[[], 0]]
+               res=[]
+          [93] step=43 op=isolate args={"value": 3} pool_after=10 added=False
+               src=[[[], 7]]
+               res=[]
+          [94] step=44 op=pop args={} pool_after=11 added=True
+               src=[[[13], 0], [[], 1]]
+               res=[[[], 0]]
+          [95] step=45 op=isolate args={"value": null} pool_after=10 added=False
+               src=[[[13], 0]]
+               res=[]
+          [96] step=46 op=prune args={"threshold": 0} pool_after=10 added=False
+               src=[[[13], 0]]
+               res=[]
+          [97] step=47 op=push args={} pool_after=10 added=False
+               src=[[[13], 7], [[], 1]]
+        - Trace context for gss_tester.implementations.reference_impl.ReferenceGSS (seed=42, last 10 op(s)):
+          [88] step=38 op=apply args={"amount": 10} pool_after=11 added=True
+               src=[[[3], 0]]
+               res=[[[3], 10]]
+          [89] step=39 op=popn args={"n": 1} pool_after=11 added=True
+               src=[[[13], 7], [[], 1]]
+               res=[[[], 7]]
+          [90] step=40 op=prune args={"threshold": 11} pool_after=10 added=False
+               src=[[[13], 0], [[], 0]]
+               res=[]
+          [91] step=41 op=isolate args={"value": 1} pool_after=10 added=False
+               src=[[[13], 0], [[], 0]]
+               res=[]
+          [92] step=42 op=prune args={"threshold": 1} pool_after=10 added=False
+               src=[[[], 0]]
+               res=[]
+          [93] step=43 op=isolate args={"value": 3} pool_after=10 added=False
+               src=[[[], 7]]
+               res=[]
+          [94] step=44 op=pop args={} pool_after=11 added=True
+               src=[[[13], 0], [[], 1]]
+               res=[[[], 0]]
+          [95] step=45 op=isolate args={"value": null} pool_after=10 added=False
+               src=[[[13], 0]]
+               res=[]
+          [96] step=46 op=prune args={"threshold": 0} pool_after=10 added=False
+               src=[[[13], 0]]
+               res=[]
+          [97] step=47 op=push args={"value": 5} pool_after=11 added=True
+               src=[[[13], 7], [[], 1]]
+               res=[[[13, 5], 7], [[5], 1]]
+
+      ---
+      Consistency analysis complete.
+      Reference: gss_tester/implementations/reference_impl.py
+      Summary printed above.
+      Full JSON results are in: gss_test_results/2025-09-22_12-48-09
+    metadata:
+  - assistant: |-
+      Excellent! The new test output is perfectly clear. We now see the exact point of failure and the reason for it.
+
+      The problem is not with the core logic of `LeveledGSS`, but with the expensive, test-only validation code that runs alongside it.
+
+      **Analysis of the Error:**
+
+      1.  **Operation:** `push`
+      2.  **Error:** `AttributeError: 'UpperBranch' object has no attribute 'acc'`
+      3.  **Location:** The error is triggered inside the `LeveledGSS` implementation when the fuzzer calls the `push` method. The `push` method creates a new `LeveledGSS` instance, which in turn runs its validation checks (because `GSS_TESTER_VALIDATE` is set).
+      4.  **Root Cause:** The bug is in the `_validate_no_promotions` helper function. This validator checks for a specific non-canonical state: an `UpperBranch` node whose children are all `Interface` nodes that could be collapsed into a single parent `Interface`. The bug is that the code *assumes* all children are `Interface` nodes and tries to access their `.acc` attribute without first checking their type. When the `push` operation creates a new `UpperBranch` that has another `UpperBranch` as a child, this faulty assumption causes the `AttributeError`.
+
+      We will fix this by adding the missing type check to the validator.
+
+      ### Step-by-step Instructions
+
+      #### 1. Fix the Validator in `leveled_impl.py`
+
+      1.  **Open `python/gss_tester/implementations/leveled_impl.py`**.
+      2.  **Locate the `_validate_promotion_node` method.**
+      3.  **Add a guard clause** at the beginning of the promotion check to ensure we only inspect nodes whose children are all `Interface`s.
+
+          ```python
+          # In the _validate_promotion_node method...
+          # Find this block of code:
+          # Now, check for promotion condition on the current node
+          # All children are Interfaces. Gather all accumulators.
+          accs: Set[Acc] = set()
+          if node.empty is not None:
+              accs.add(node.empty)
+
+          for child in node._all_children():
+              interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+              accs.add(interface_child.acc)
+              if interface_child.empty is not None:
+                  accs.add(interface_child.empty)
+
+          # And insert the new guard clause before it, like this:
+          # Now, check for promotion condition on the current node
+          # A node can only be promoted if all its children are Interfaces.
+          all_children = list(node._all_children())
+          if not all_children or not all(isinstance(child, Interface) for child in all_children):
+              return
+
+          # All children are Interfaces. Gather all accumulators.
+          accs: Set[Acc] = set()
+          if node.empty is not None:
+              accs.add(node.empty)
+
+          for child in all_children:
+              interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+              accs.add(interface_child.acc)
+              if interface_child.empty is not None:
+                  accs.add(interface_child.empty)
+          ```
+
+      This change ensures the validator only attempts to access the `.acc` attribute on nodes that actually have it, fixing the crash.
+
+      ### Git Diff
+
+      Here is the corresponding diff to apply the fix.
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 92b512c..e245100 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -321,17 +321,22 @@
+                       self._validate_promotion_node(child)
+       
+               # Now, check for promotion condition on the current node
+      -        # All children are Interfaces. Gather all accumulators.
+      +        # A node can only be promoted if all its children are Interfaces.
+      +        all_children = list(node._all_children())
+      +        if not all_children or not all(isinstance(child, Interface) for child in all_children):
+      +            return
+      +
+      +        # All children are Interfaces. Gather all accumulators.
+               accs: Set[Acc] = set()
+               if node.empty is not None:
+                   accs.add(node.empty)
+       
+      -        for child in node._all_children():
+      +        for child in all_children:
+                   interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+                   accs.add(interface_child.acc)
+                   if interface_child.empty is not None:
+                       accs.add(interface_child.empty)
+       
+               if len(accs) == 1:
+                   raise ValueError(
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix LeveledGSS validation: Add type check
+      for Interface nodes in _validate_promotion_node"'
     metadata:
 ...
