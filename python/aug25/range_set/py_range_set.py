@@ -1,16 +1,23 @@
+from __future__ import annotations
 from typing import Iterable, Optional, Tuple, List
+from .range_set_abc import RangeSet
 
-class PyRangeSet:
+class PyRangeSet(RangeSet[int]):
     """
     Represents a set of integers as a sorted, disjoint list of closed intervals.
+    Implements the generic RangeSet[int] interface.
     """
-    __slots__ = ('intervals',)
+    __slots__ = ('_intervals',)
 
     def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
         if intervals:
-            self.intervals = self._normalize(intervals)
+            self._intervals = self._normalize(intervals)
         else:
-            self.intervals = tuple()
+            self._intervals = tuple()
+
+    @property
+    def intervals(self) -> Tuple[Tuple[int, int], ...]:
+        return self._intervals
 
     @staticmethod
     def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
@@ -110,9 +117,12 @@ class PyRangeSet:
         return PyRangeSet(intervals)
 
     def __eq__(self, other):
-        if not isinstance(other, PyRangeSet):
-            return NotImplemented
-        return self.intervals == other.intervals
+        if isinstance(other, PyRangeSet):
+            return self.intervals == other.intervals
+        if isinstance(other, RangeSet):
+            # Compare by normalized intervals for any RangeSet implementation
+            return self.intervals == other.intervals
+        return NotImplemented
 
     def __hash__(self):
         return hash(self.intervals)
@@ -134,16 +144,17 @@ class PyRangeSet:
                 return False
         return False
 
-    def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
-        """Return the union of two PyRangeSets."""
+    def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+        """Return the union of two RangeSets as a PyRangeSet."""
         if self.is_empty():
-            return other
+            # Ensure return type is PyRangeSet even if 'other' is a different implementation
+            return PyRangeSet(other.intervals)
         if other.is_empty():
             return self
         return PyRangeSet(self.intervals + other.intervals)
 
-    def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
-        """Return the intersection of two PyRangeSets."""
+    def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+        """Return the intersection of two RangeSets as a PyRangeSet."""
         if self.is_empty() or other.is_empty():
             return PyRangeSet.empty()
         a = list(self.intervals)
@@ -163,8 +174,8 @@ class PyRangeSet:
                 j += 1
         return PyRangeSet(res)
 
-    def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
-        """Return the set difference self \ other."""
+    def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+        """Return the set difference self \\ other as a PyRangeSet."""
         if self.is_empty():
             return PyRangeSet.empty()
         if other.is_empty():

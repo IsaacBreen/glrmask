@@ -1,47 +1,14 @@
 local_system:
   attached_files:
-    - python/aug25/common_interface.py
     - python/aug25/range_set/py_range_set.py
-    - python/aug25/range_set/__init__.py
+    - python/aug25/range_set/range_set_abc.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/common_interface.py: |
-      from typing import Protocol, Iterable, Optional, Tuple
-
-      from .range_set.py_range_set import RangeSet
-
-
-      class GraphProvider(Protocol):
-          """
-          A common interface for different graph-based model implementations to be
-          used in equivalence checking and other analysis tools.
-          """
-          def get_root(self, state_id: int) -> int:
-              """Get the root node index for a given tokenizer state ID."""
-              ...
-
-          def is_end(self, node: int) -> bool:
-              """Check if a given node is an accepting/end state."""
-              ...
-
-          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
-              """
-              For a given node and token, iterate over all possible transitions.
-              Yields tuples of (pop_count, state_id_or_none, destination_node_index).
-              - pop_count: Number of items to pop from the GSS.
-              - state_id_or_none: The state ID required at the top of the GSS for this
-                transition, or None for an epsilon transition on the GSS.
-              - destination_node_index: The index of the node to transition to.
-              """
-              ...
-
-
-      __all__ = ["GraphProvider", "RangeSet"]
     python/aug25/range_set/py_range_set.py: |
       from typing import Iterable, Optional, Tuple, List
 
-      class RangeSet:
+      class PyRangeSet:
           """
           Represents a set of integers as a sorted, disjoint list of closed intervals.
           """
@@ -94,20 +61,20 @@ local_system:
               return merged
 
           @staticmethod
-          def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
-              """Creates a RangeSet from a list of [start, end] lists."""
-              return RangeSet(iter(map(tuple, ranges)))
+          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists."""
+              return PyRangeSet(iter(map(tuple, ranges)))
 
           def to_ranges(self) -> List[List[int]]:
-              """Converts the RangeSet to a list of [start, end] lists."""
+              """Converts the PyRangeSet to a list of [start, end] lists."""
               return [list(interval) for interval in self.intervals]
 
           @staticmethod
-          def from_indices(indices: Iterable[int]) -> 'RangeSet':
-              """Creates a RangeSet from an iterable of individual indices."""
+          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from an iterable of individual indices."""
               indices_sorted = sorted(set(indices))
               if not indices_sorted:
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               intervals: List[Tuple[int, int]] = []
               start = indices_sorted[0]
               prev = start
@@ -119,23 +86,23 @@ local_system:
                       start = i
                       prev = i
               intervals.append((start, prev))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           @staticmethod
-          def empty() -> 'RangeSet':
-              """Creates an empty RangeSet."""
-              return RangeSet()
+          def empty() -> 'PyRangeSet':
+              """Creates an empty PyRangeSet."""
+              return PyRangeSet()
 
           def to_indices(self) -> List[int]:
-              """Converts the RangeSet to a list of individual indices."""
+              """Converts the PyRangeSet to a list of individual indices."""
               result = []
               for start, end in self.intervals:
                   result.extend(range(start, end + 1))
               return result
 
           @staticmethod
-          def from_numpy(bv) -> 'RangeSet':
-              """Creates a RangeSet from a numpy array of booleans."""
+          def from_numpy(bv) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a numpy array of booleans."""
               intervals = []
               in_range = False
               start = 0
@@ -148,10 +115,10 @@ local_system:
                       in_range = False
               if in_range:
                   intervals.append((start, len(bv) - 1))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           def __eq__(self, other):
-              if not isinstance(other, RangeSet):
+              if not isinstance(other, PyRangeSet):
                   return NotImplemented
               return self.intervals == other.intervals
 
@@ -159,7 +126,7 @@ local_system:
               return hash(self.intervals)
 
           def __repr__(self):
-              return f"RangeSet({self.intervals!r})"
+              return f"PyRangeSet({self.intervals!r})"
 
           # New utilities for set-like operations
           def is_empty(self) -> bool:
@@ -175,18 +142,18 @@ local_system:
                       return False
               return False
 
-          def union(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the union of two RangeSets."""
+          def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
+              """Return the union of two PyRangeSets."""
               if self.is_empty():
                   return other
               if other.is_empty():
                   return self
-              return RangeSet(self.intervals + other.intervals)
+              return PyRangeSet(self.intervals + other.intervals)
 
-          def intersection(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the intersection of two RangeSets."""
+          def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
+              """Return the intersection of two PyRangeSets."""
               if self.is_empty() or other.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               a = list(self.intervals)
               b = list(other.intervals)
               i = j = 0
@@ -202,12 +169,12 @@ local_system:
                       i += 1
                   else:
                       j += 1
-              return RangeSet(res)
+              return PyRangeSet(res)
 
-          def difference(self, other: 'RangeSet') -> 'RangeSet':
+          def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
               """Return the set difference self \ other."""
               if self.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               if other.is_empty():
                   return self
               a = list(self.intervals)
@@ -230,67 +197,79 @@ local_system:
                       k += 1
                   if curr <= e1:
                       res.append((curr, e1))
-              return RangeSet(res)
-    python/aug25/range_set/__init__.py: |
-      from .py_range_set import RangeSet
+              return PyRangeSet(res)
+    python/aug25/range_set/range_set_abc.py: |
+      from __future__ import annotations
 
-      __all__ = ["RangeSet"]
+      from abc import ABC, abstractmethod
+      from typing import Generic, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
   prev_file_contents:
-    python/aug25/common_interface.py: |
-      import os
-      import sys
-      from typing import Protocol, Iterable, Optional, Tuple
-
-      from .range_set import RangeSet
-          print("Using FFI-backed RangeSet.", file=sys.stderr)
-          try:
-              from .range_set.ffi_range_set import RangeSet
-          except ImportError:
-              print("Warning: FFI RangeSet not found, falling back to Python implementation.", file=sys.stderr)
-              from .range_set.py_range_set import RangeSet
-      else:
-          from .range_set.py_range_set import RangeSet
-
-      class GraphProvider(Protocol):
-          """
-          A common interface for different graph-based model implementations to be
-          used in equivalence checking and other analysis tools.
-          """
-          def get_root(self, state_id: int) -> int:
-              """Get the root node index for a given tokenizer state ID."""
-              ...
-
-          def is_end(self, node: int) -> bool:
-              """Check if a given node is an accepting/end state."""
-              ...
-
-          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
-              """
-              For a given node and token, iterate over all possible transitions.
-              Yields tuples of (pop_count, state_id_or_none, destination_node_index).
-              - pop_count: Number of items to pop from the GSS.
-              - state_id_or_none: The state ID required at the top of the GSS for this
-                transition, or None for an epsilon transition on the GSS.
-              - destination_node_index: The index of the node to transition to.
-              """
-              ...
-
-
-      __all__ = ["GraphProvider", "RangeSet"]
     python/aug25/range_set/py_range_set.py: |
+      from __future__ import annotations
       from typing import Iterable, Optional, Tuple, List
+      from .range_set_abc import RangeSet
 
-      class RangeSet:
+      class PyRangeSet(RangeSet[int]):
           """
           Represents a set of integers as a sorted, disjoint list of closed intervals.
+          Implements the generic RangeSet[int] interface.
           """
-          __slots__ = ('intervals',)
+          __slots__ = ('_intervals',)
 
           def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
               if intervals:
-                  self.intervals = self._normalize(intervals)
+                  self._intervals = self._normalize(intervals)
               else:
-                  self.intervals = tuple()
+                  self._intervals = tuple()
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              return self._intervals
 
           @staticmethod
           def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
@@ -333,20 +312,20 @@ local_system:
               return merged
 
           @staticmethod
-          def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
-              """Creates a RangeSet from a list of [start, end] lists."""
-              return RangeSet(iter(map(tuple, ranges)))
+          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists."""
+              return PyRangeSet(iter(map(tuple, ranges)))
 
           def to_ranges(self) -> List[List[int]]:
-              """Converts the RangeSet to a list of [start, end] lists."""
+              """Converts the PyRangeSet to a list of [start, end] lists."""
               return [list(interval) for interval in self.intervals]
 
           @staticmethod
-          def from_indices(indices: Iterable[int]) -> 'RangeSet':
-              """Creates a RangeSet from an iterable of individual indices."""
+          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from an iterable of individual indices."""
               indices_sorted = sorted(set(indices))
               if not indices_sorted:
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               intervals: List[Tuple[int, int]] = []
               start = indices_sorted[0]
               prev = start
@@ -358,23 +337,23 @@ local_system:
                       start = i
                       prev = i
               intervals.append((start, prev))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           @staticmethod
-          def empty() -> 'RangeSet':
-              """Creates an empty RangeSet."""
-              return RangeSet()
+          def empty() -> 'PyRangeSet':
+              """Creates an empty PyRangeSet."""
+              return PyRangeSet()
 
           def to_indices(self) -> List[int]:
-              """Converts the RangeSet to a list of individual indices."""
+              """Converts the PyRangeSet to a list of individual indices."""
               result = []
               for start, end in self.intervals:
                   result.extend(range(start, end + 1))
               return result
 
           @staticmethod
-          def from_numpy(bv) -> 'RangeSet':
-              """Creates a RangeSet from a numpy array of booleans."""
+          def from_numpy(bv) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a numpy array of booleans."""
               intervals = []
               in_range = False
               start = 0
@@ -387,18 +366,21 @@ local_system:
                       in_range = False
               if in_range:
                   intervals.append((start, len(bv) - 1))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           def __eq__(self, other):
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              return self.intervals == other.intervals
+              if isinstance(other, PyRangeSet):
+                  return self.intervals == other.intervals
+              if isinstance(other, RangeSet):
+                  # Compare by normalized intervals for any RangeSet implementation
+                  return self.intervals == other.intervals
+              return NotImplemented
 
           def __hash__(self):
               return hash(self.intervals)
 
           def __repr__(self):
-              return f"RangeSet({self.intervals!r})"
+              return f"PyRangeSet({self.intervals!r})"
 
           # New utilities for set-like operations
           def is_empty(self) -> bool:
@@ -414,18 +396,19 @@ local_system:
                       return False
               return False
 
-          def union(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the union of two RangeSets."""
+          def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the union of two RangeSets as a PyRangeSet."""
               if self.is_empty():
-                  return other
+                  # Ensure return type is PyRangeSet even if 'other' is a different implementation
+                  return PyRangeSet(other.intervals)
               if other.is_empty():
                   return self
-              return RangeSet(self.intervals + other.intervals)
+              return PyRangeSet(self.intervals + other.intervals)
 
-          def intersection(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the intersection of two RangeSets."""
+          def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the intersection of two RangeSets as a PyRangeSet."""
               if self.is_empty() or other.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               a = list(self.intervals)
               b = list(other.intervals)
               i = j = 0
@@ -441,12 +424,12 @@ local_system:
                       i += 1
                   else:
                       j += 1
-              return RangeSet(res)
+              return PyRangeSet(res)
 
-          def difference(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the set difference self \ other."""
+          def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the set difference self \\ other as a PyRangeSet."""
               if self.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               if other.is_empty():
                   return self
               a = list(self.intervals)
@@ -469,11 +452,57 @@ local_system:
                       k += 1
                   if curr <= e1:
                       res.append((curr, e1))
-              return RangeSet(res)
-    python/aug25/range_set/__init__.py: |
-      from .py_range_set import RangeSet
+              return PyRangeSet(res)
+    python/aug25/range_set/range_set_abc.py: |
+      from __future__ import annotations
 
-      __all__ = ["RangeSet"]
+      from abc import ABC, abstractmethod
+      from typing import Generic, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -484,7 +513,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -519,47 +548,10 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```python 'python/aug25/common_interface.py'
-      from typing import Protocol, Iterable, Optional, Tuple
-
-      from .range_set.py_range_set import RangeSet
-
-
-      class GraphProvider(Protocol):
-          """
-          A common interface for different graph-based model implementations to be
-          used in equivalence checking and other analysis tools.
-          """
-          def get_root(self, state_id: int) -> int:
-              """Get the root node index for a given tokenizer state ID."""
-              ...
-
-          def is_end(self, node: int) -> bool:
-              """Check if a given node is an accepting/end state."""
-              ...
-
-          def iter_edges(self, node: int, token: int) -> Iterable[Tuple[int, Optional[int], int]]:
-              """
-              For a given node and token, iterate over all possible transitions.
-              Yields tuples of (pop_count, state_id_or_none, destination_node_index).
-              - pop_count: Number of items to pop from the GSS.
-              - state_id_or_none: The state ID required at the top of the GSS for this
-                transition, or None for an epsilon transition on the GSS.
-              - destination_node_index: The index of the node to transition to.
-              """
-              ...
-
-
-      __all__ = ["GraphProvider", "RangeSet"]
-
-      ```
-    metadata:
-      filename: python/aug25/common_interface.py
-  - user: |-
       ```python 'python/aug25/range_set/py_range_set.py'
       from typing import Iterable, Optional, Tuple, List
 
-      class RangeSet:
+      class PyRangeSet:
           """
           Represents a set of integers as a sorted, disjoint list of closed intervals.
           """
@@ -612,20 +604,20 @@ messages:
               return merged
 
           @staticmethod
-          def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
-              """Creates a RangeSet from a list of [start, end] lists."""
-              return RangeSet(iter(map(tuple, ranges)))
+          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists."""
+              return PyRangeSet(iter(map(tuple, ranges)))
 
           def to_ranges(self) -> List[List[int]]:
-              """Converts the RangeSet to a list of [start, end] lists."""
+              """Converts the PyRangeSet to a list of [start, end] lists."""
               return [list(interval) for interval in self.intervals]
 
           @staticmethod
-          def from_indices(indices: Iterable[int]) -> 'RangeSet':
-              """Creates a RangeSet from an iterable of individual indices."""
+          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from an iterable of individual indices."""
               indices_sorted = sorted(set(indices))
               if not indices_sorted:
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               intervals: List[Tuple[int, int]] = []
               start = indices_sorted[0]
               prev = start
@@ -637,23 +629,23 @@ messages:
                       start = i
                       prev = i
               intervals.append((start, prev))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           @staticmethod
-          def empty() -> 'RangeSet':
-              """Creates an empty RangeSet."""
-              return RangeSet()
+          def empty() -> 'PyRangeSet':
+              """Creates an empty PyRangeSet."""
+              return PyRangeSet()
 
           def to_indices(self) -> List[int]:
-              """Converts the RangeSet to a list of individual indices."""
+              """Converts the PyRangeSet to a list of individual indices."""
               result = []
               for start, end in self.intervals:
                   result.extend(range(start, end + 1))
               return result
 
           @staticmethod
-          def from_numpy(bv) -> 'RangeSet':
-              """Creates a RangeSet from a numpy array of booleans."""
+          def from_numpy(bv) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a numpy array of booleans."""
               intervals = []
               in_range = False
               start = 0
@@ -666,10 +658,10 @@ messages:
                       in_range = False
               if in_range:
                   intervals.append((start, len(bv) - 1))
-              return RangeSet(intervals)
+              return PyRangeSet(intervals)
 
           def __eq__(self, other):
-              if not isinstance(other, RangeSet):
+              if not isinstance(other, PyRangeSet):
                   return NotImplemented
               return self.intervals == other.intervals
 
@@ -677,7 +669,7 @@ messages:
               return hash(self.intervals)
 
           def __repr__(self):
-              return f"RangeSet({self.intervals!r})"
+              return f"PyRangeSet({self.intervals!r})"
 
           # New utilities for set-like operations
           def is_empty(self) -> bool:
@@ -693,18 +685,18 @@ messages:
                       return False
               return False
 
-          def union(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the union of two RangeSets."""
+          def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
+              """Return the union of two PyRangeSets."""
               if self.is_empty():
                   return other
               if other.is_empty():
                   return self
-              return RangeSet(self.intervals + other.intervals)
+              return PyRangeSet(self.intervals + other.intervals)
 
-          def intersection(self, other: 'RangeSet') -> 'RangeSet':
-              """Return the intersection of two RangeSets."""
+          def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
+              """Return the intersection of two PyRangeSets."""
               if self.is_empty() or other.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               a = list(self.intervals)
               b = list(other.intervals)
               i = j = 0
@@ -720,12 +712,12 @@ messages:
                       i += 1
                   else:
                       j += 1
-              return RangeSet(res)
+              return PyRangeSet(res)
 
-          def difference(self, other: 'RangeSet') -> 'RangeSet':
+          def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
               """Return the set difference self \ other."""
               if self.is_empty():
-                  return RangeSet.empty()
+                  return PyRangeSet.empty()
               if other.is_empty():
                   return self
               a = list(self.intervals)
@@ -748,13 +740,12 @@ messages:
                       k += 1
                   if curr <= e1:
                       res.append((curr, e1))
-              return RangeSet(res)
+              return PyRangeSet(res)
 
       ```
     metadata:
       filename: python/aug25/range_set/py_range_set.py
-  - user: Make it so there's a default rangeset implementation and `__init__.py` specifies
-      which one it is. Then in `common_interface.py` import that default.
+  - user: Add a generic RangeSet ABC and modify PyRangeSet to implement it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -773,117 +764,364 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and corresponding git diffs to make `RangeSet` a default implementation specified by `__init__.py`.
+      Below are step-by-step instructions to add a generic RangeSet ABC and modify PyRangeSet to implement it, followed by git diffs you can apply directly.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      1.  **Create a new package initializer file.**
-          Create a new file named `__init__.py` inside the `python/aug25/range_set/` directory. This will make the directory a Python package.
+      1) Add a new ABC for range-based sets
+      - Create a new file at: python/aug25/range_set/range_set_abc.py
+      - Define a generic abstract base class RangeSet[T] with:
+        - An abstract read-only property intervals that returns a tuple of (start, end) pairs
+        - Abstract methods: is_empty, contains, union, intersection, difference
 
-      2.  **Populate the new `__init__.py` file.**
-          In the newly created file `python/aug25/range_set/__init__.py`, add the following content. This code imports `RangeSet` from the `py_range_set` module and exposes it at the package level, effectively making it the default implementation.
+      2) Update PyRangeSet to implement the ABC
+      - Open python/aug25/range_set/py_range_set.py
+      - Add an import for the new ABC: from .range_set_abc import RangeSet
+      - Change the class definition to subclass RangeSet[int]
+      - Replace the direct intervals attribute with a read-only property:
+        - Change __slots__ from ('intervals',) to ('_intervals',)
+        - In __init__, assign to self._intervals instead of self.intervals
+        - Add a @property def intervals(...) that returns self._intervals
+      - Update method signatures to accept the abstract RangeSet[int] where appropriate:
+        - union(self, other: RangeSet[int]) -> PyRangeSet
+        - intersection(self, other: RangeSet[int]) -> PyRangeSet
+        - difference(self, other: RangeSet[int]) -> PyRangeSet
+      - Adjust union’s early return so it always returns a PyRangeSet:
+        - If self is empty, return PyRangeSet(other.intervals) rather than other
+      - Enhance __eq__ to compare equality with any RangeSet, not only PyRangeSet:
+        - If other is an instance of RangeSet, compare intervals; otherwise return NotImplemented
 
-          ```python
-          from .py_range_set import RangeSet
+      3) Do not change any other logic; the rest of the methods and normalization are left intact.
 
-          __all__ = ["RangeSet"]
-          ```
-
-      3.  **Update the import in `common_interface.py`**.
-          In `python/aug25/common_interface.py`, modify the `RangeSet` import to use the new package-based path.
-          -   **Delete** the line: `from .range_set.py_range_set import RangeSet`
-          -   **Add** the line: `from .range_set import RangeSet` in its place.
-
-      This change will allow you to easily swap out the `RangeSet` implementation in the future by just changing the `__init__.py` file.
-
-      ### Git Diffs
-
-      Here are the git diffs for the changes described above.
-
-      ```diff
-      diff --git a/python/aug25/common_interface.py b/python/aug25/common_interface.py
-      --- a/python/aug25/common_interface.py
-      +++ b/python/aug25/common_interface.py
-      @@ -1,6 +1,6 @@
-       from typing import Protocol, Iterable, Optional, Tuple
-       
-      -from .range_set.py_range_set import RangeSet
-      +from .range_set import RangeSet
-       
-       
-       class GraphProvider(Protocol):
-
-      ```
+      Git diffs
 
       ```diff
-      diff --git a/python/aug25/range_set/__init__.py b/python/aug25/range_set/__init__.py
+      diff --git a/python/aug25/range_set/range_set_abc.py b/python/aug25/range_set/range_set_abc.py
       new file mode 100644
-      index 0000000..82e93de
+      index 0000000..e69de29
       --- /dev/null
-      +++ b/python/aug25/range_set/__init__.py
-      @@ -0,0 +1,3 @@
-      +from .py_range_set import RangeSet
+      +++ b/python/aug25/range_set/range_set_abc.py
+      @@ -0,0 +1,52 @@
+      +from __future__ import annotations
       +
-      +__all__ = ["RangeSet"]
-
+      +from abc import ABC, abstractmethod
+      +from typing import Generic, Tuple, TypeVar
+      +
+      +T = TypeVar("T")
+      +
+      +
+      +class RangeSet(ABC, Generic[T]):
+      +    """
+      +    Abstract base class for range-based sets of comparable elements.
+      +    Implementations represent sets as normalized, sorted, disjoint closed intervals.
+      +    """
+      +
+      +    @property
+      +    @abstractmethod
+      +    def intervals(self) -> Tuple[Tuple[T, T], ...]:
+      +        """
+      +        The normalized, sorted, disjoint closed intervals representing the set.
+      +        Implementations should guarantee:
+      +        - intervals are sorted by start
+      +        - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+      +        """
+      +        raise NotImplementedError
+      +
+      +    @abstractmethod
+      +    def is_empty(self) -> bool:
+      +        """Return True if the set is empty."""
+      +        raise NotImplementedError
+      +
+      +    @abstractmethod
+      +    def contains(self, x: T) -> bool:
+      +        """Return True if x is contained in the set."""
+      +        raise NotImplementedError
+      +
+      +    @abstractmethod
+      +    def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+      +        """Return the union of two RangeSets."""
+      +        raise NotImplementedError
+      +
+      +    @abstractmethod
+      +    def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+      +        """Return the intersection of two RangeSets."""
+      +        raise NotImplementedError
+      +
+      +    @abstractmethod
+      +    def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+      +        """Return the set difference self \\ other."""
+      +        raise NotImplementedError
       ```
+
+      ```diff
+      diff --git a/python/aug25/range_set/py_range_set.py b/python/aug25/range_set/py_range_set.py
+      index 2c4a9a5..79f4c56 100644
+      --- a/python/aug25/range_set/py_range_set.py
+      +++ b/python/aug25/range_set/py_range_set.py
+      @@ -1,17 +1,20 @@
+      +from __future__ import annotations
+       from typing import Iterable, Optional, Tuple, List
+      +from .range_set_abc import RangeSet
+       
+      -class PyRangeSet:
+      +class PyRangeSet(RangeSet[int]):
+           """
+      -    Represents a set of integers as a sorted, disjoint list of closed intervals.
+      +    Represents a set of integers as a sorted, disjoint list of closed intervals.
+      +    Implements the generic RangeSet[int] interface.
+           """
+      -    __slots__ = ('intervals',)
+      +    __slots__ = ('_intervals',)
+       
+           def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+               if intervals:
+      -            self.intervals = self._normalize(intervals)
+      +            self._intervals = self._normalize(intervals)
+               else:
+      -            self.intervals = tuple()
+      +            self._intervals = tuple()
+       
+      +    @property
+      +    def intervals(self) -> Tuple[Tuple[int, int], ...]:
+      +        return self._intervals
+      +
+           @staticmethod
+           def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+               """
+      @@ -91,21 +94,27 @@ class PyRangeSet:
+               """Return True if x is contained in the set."""
+               for s, e in self.intervals:
+                   if s <= x <= e:
+                       return True
+                   if x < s:
+                       return False
+               return False
+       
+      -    def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the union of two PyRangeSets."""
+      -        if self.is_empty():
+      -            return other
+      -        if other.is_empty():
+      -            return self
+      -        return PyRangeSet(self.intervals + other.intervals)
+      +    def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the union of two RangeSets as a PyRangeSet."""
+      +        if self.is_empty():
+      +            # Ensure return type is PyRangeSet even if 'other' is a different implementation
+      +            return PyRangeSet(other.intervals)
+      +        if other.is_empty():
+      +            return self
+      +        return PyRangeSet(self.intervals + other.intervals)
+       
+      -    def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the intersection of two PyRangeSets."""
+      +    def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the intersection of two RangeSets as a PyRangeSet."""
+               if self.is_empty() or other.is_empty():
+                   return PyRangeSet.empty()
+               a = list(self.intervals)
+               b = list(other.intervals)
+               i = j = 0
+               res: List[Tuple[int, int]] = []
+               while i < len(a) and j < len(b):
+      @@ -119,9 +128,9 @@ class PyRangeSet:
+                       i += 1
+                   else:
+                       j += 1
+               return PyRangeSet(res)
+       
+      -    def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the set difference self \ other."""
+      +    def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the set difference self \\ other as a PyRangeSet."""
+               if self.is_empty():
+                   return PyRangeSet.empty()
+               if other.is_empty():
+                   return self
+               a = list(self.intervals)
+               b = list(other.intervals)
+      @@ -142,12 +151,16 @@ class PyRangeSet:
+                   if curr <= e1:
+                       res.append((curr, e1))
+               return PyRangeSet(res)
+       
+           def __eq__(self, other):
+      -        if not isinstance(other, PyRangeSet):
+      -            return NotImplemented
+      -        return self.intervals == other.intervals
+      +        if isinstance(other, PyRangeSet):
+      +            return self.intervals == other.intervals
+      +        if isinstance(other, RangeSet):
+      +            # Compare by normalized intervals for any RangeSet implementation
+      +            return self.intervals == other.intervals
+      +        return NotImplemented
+      ```
+
+      Notes
+      - The new RangeSet ABC introduces a clear contract while keeping the API minimal and generic.
+      - PyRangeSet now implements RangeSet[int], provides a read-only intervals property, and can interoperate with other RangeSet[int] implementations in union/intersection/difference while always returning a PyRangeSet.
+      - No other behavior or performance characteristics are changed.
     metadata:
   - user: |-
       Failed Hunk:
 
       ```diff
-      @@ -1,6 +1,6 @@
-       from typing import Protocol, Iterable, Optional, Tuple
+      @@ -142,12 +151,16 @@ class PyRangeSet:
+                   if curr <= e1:
+                       res.append((curr, e1))
+               return PyRangeSet(res)
        
-      -from .range_set.py_range_set import RangeSet
-      +from .range_set import RangeSet
-       
-       
-       class GraphProvider(Protocol):
+           def __eq__(self, other):
+      -        if not isinstance(other, PyRangeSet):
+      -            return NotImplemented
+      -        return self.intervals == other.intervals
+      +        if isinstance(other, PyRangeSet):
+      +            return self.intervals == other.intervals
+      +        if isinstance(other, RangeSet):
+      +            # Compare by normalized intervals for any RangeSet implementation
+      +            return self.intervals == other.intervals
+      +        return NotImplemented
       ```
 
       Expected Context (from patch):
 
       ```diff
-      from typing import Protocol, Iterable, Optional, Tuple
+                  if curr <= e1:
+                      res.append((curr, e1))
+              return PyRangeSet(res)
 
-      from .range_set.py_range_set import RangeSet
-
-
-      class GraphProvider(Protocol):
+          def __eq__(self, other):
+              if not isinstance(other, PyRangeSet):
+                  return NotImplemented
+              return self.intervals == other.intervals
       ```
 
-      Nearest Match in `python/aug25/common_interface.py` (found at line 1 with 33.33% similarity, shown with padding):
+      Nearest Match in `python/aug25/range_set/py_range_set.py` (found at line 115 with 62.50% similarity, shown with padding):
 
       ```python
-      import os
-      import sys
-      from typing import Protocol, Iterable, Optional, Tuple
+                      start = i
+                      in_range = True
+                  elif not bv[i] and in_range:
+                      intervals.append((start, i - 1))
+                      in_range = False
+              if in_range:
+                  intervals.append((start, len(bv) - 1))
+              return PyRangeSet(intervals)
 
-      if os.environ.get("USE_FFI_RANGESET", "0") == "1":
-          print("Using FFI-backed RangeSet.", file=sys.stderr)
-          try:
-              from .range_set.ffi_range_set import RangeSet
-          except ImportError:
-              print("Warning: FFI RangeSet not found, falling back to Python implementation.", file=sys.stderr)
-              from .range_set.py_range_set import RangeSet
+          def __eq__(self, other):
+              if not isinstance(other, PyRangeSet):
+                  return NotImplemented
+              return self.intervals == other.intervals
+
+          def __hash__(self):
+              return hash(self.intervals)
+
+          def __repr__(self):
       ```
 
-      The git diff hunk above failed to apply to the file `python/aug25/common_interface.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      The git diff hunk above failed to apply to the file `python/aug25/range_set/py_range_set.py`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
       Do not include any other text or explanation outside the code block.
     metadata:
   - assistant: |-
       ```diff
-      diff --git a/python/aug25/common_interface.py b/python/aug25/common_interface.py
-      --- a/python/aug25/common_interface.py
-      +++ b/python/aug25/common_interface.py
-      @@ -1,6 +1,6 @@
-       import os
-       import sys
-       from typing import Protocol, Iterable, Optional, Tuple
+      diff --git a/python/aug25/range_set/py_range_set.py b/python/aug25/range_set/py_range_set.py
+      index 2c4a9a5..79f4c56 100644
+      --- a/python/aug25/range_set/py_range_set.py
+      +++ b/python/aug25/range_set/py_range_set.py
+      @@ -1,17 +1,20 @@
+      +from __future__ import annotations
+       from typing import Iterable, Optional, Tuple, List
+      +from .range_set_abc import RangeSet
        
-      -if os.environ.get("USE_FFI_RANGESET", "0") == "1":
-      +from .range_set import RangeSet
+      -class PyRangeSet:
+      +class PyRangeSet(RangeSet[int]):
+           """
+      -    Represents a set of integers as a sorted, disjoint list of closed intervals.
+      +    Represents a set of integers as a sorted, disjoint list of closed intervals.
+      +    Implements the generic RangeSet[int] interface.
+           """
+      -    __slots__ = ('intervals',)
+      +    __slots__ = ('_intervals',)
+       
+           def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+               if intervals:
+      -            self.intervals = self._normalize(intervals)
+      +            self._intervals = self._normalize(intervals)
+               else:
+      -            self.intervals = tuple()
+      +            self._intervals = tuple()
+       
+      +    @property
+      +    def intervals(self) -> Tuple[Tuple[int, int], ...]:
+      +        return self._intervals
+      +
+           @staticmethod
+           def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+               """
+      @@ -91,21 +94,27 @@ class PyRangeSet:
+               """Return True if x is contained in the set."""
+               for s, e in self.intervals:
+                   if s <= x <= e:
+                       return True
+                   if x < s:
+                       return False
+               return False
+       
+      -    def union(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the union of two PyRangeSets."""
+      -        if self.is_empty():
+      -            return other
+      -        if other.is_empty():
+      -            return self
+      -        return PyRangeSet(self.intervals + other.intervals)
+      +    def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the union of two RangeSets as a PyRangeSet."""
+      +        if self.is_empty():
+      +            # Ensure return type is PyRangeSet even if 'other' is a different implementation
+      +            return PyRangeSet(other.intervals)
+      +        if other.is_empty():
+      +            return self
+      +        return PyRangeSet(self.intervals + other.intervals)
+       
+      -    def intersection(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the intersection of two PyRangeSets."""
+      +    def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the intersection of two RangeSets as a PyRangeSet."""
+               if self.is_empty() or other.is_empty():
+                   return PyRangeSet.empty()
+               a = list(self.intervals)
+               b = list(other.intervals)
+               i = j = 0
+               res: List[Tuple[int, int]] = []
+               while i < len(a) and j < len(b):
+      @@ -119,9 +128,9 @@ class PyRangeSet:
+                       i += 1
+                   else:
+                       j += 1
+               return PyRangeSet(res)
+       
+      -    def difference(self, other: 'PyRangeSet') -> 'PyRangeSet':
+      -        """Return the set difference self \ other."""
+      +    def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+      +        """Return the set difference self \\ other as a PyRangeSet."""
+               if self.is_empty():
+                   return PyRangeSet.empty()
+               if other.is_empty():
+                   return self
+               a = list(self.intervals)
+               b = list(other.intervals)
+      @@
+      -    def __eq__(self, other):
+      -        if not isinstance(other, PyRangeSet):
+      -            return NotImplemented
+      -        return self.intervals == other.intervals
+      +    def __eq__(self, other):
+      +        if isinstance(other, PyRangeSet):
+      +            return self.intervals == other.intervals
+      +        if isinstance(other, RangeSet):
+      +            # Compare by normalized intervals for any RangeSet implementation
+      +            return self.intervals == other.intervals
+      +        return NotImplemented
 
       ```
     metadata:
@@ -892,10 +1130,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/common_interface.py
-      Applying patch to 'python/aug25/common_interface.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/common_interface.py.
+      Identified target file: python/aug25/range_set/py_range_set.py
+      Applying patch to 'python/aug25/range_set/py_range_set.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/py_range_set.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add conditional import for FFI RangeSet"'
+  - user: 'Changes committed with message: "Refactor: Implement RangeSet ABC, add
+      intervals property, and enhance equality checks"'
     metadata:
 ...
