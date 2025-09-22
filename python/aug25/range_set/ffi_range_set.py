@@ -94,7 +94,10 @@ class FFIRangeSet(RangeSet[int]):
     @staticmethod
     def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
         """Creates a FFIRangeSet from a list of [start, end] lists."""
-        return FFIRangeSet(tuple(map(tuple, ranges)))
+        # return FFIRangeSet(tuple(map(tuple, ranges)))
+        self = FFIRangeSet()
+        self._bitset = ffi.Bitset.from_ranges(ranges)
+        return self
 
     @staticmethod
     def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
