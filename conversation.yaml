@@ -1253,6 +1253,8 @@ local_system:
           # Fast paths
           if l1 is l2:
               return l1
+          if l1 == l2:
+              return l1
 
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
@@ -1715,9 +1717,8 @@ local_system:
                   upper_branch = self.inner
               all_children = list(upper_branch._all_children())
               merged = UpperBranch(children={}, empty=None)
-              memo: MergeMemo[T, Acc] = MergeMemo()
               for c in all_children:
-                  merged = merge_upper(merged, c, memo)
+                  merged = merge_upper(merged, c)
               merged = try_promote(merged)
               return LeveledGSS(merged)
 
@@ -2019,9 +2020,7 @@ local_system:
               return LeveledGSS(res_inner)
 
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-              # Use a single memo for the whole merge operation to avoid recomputation
-              memo: MergeMemo[T, Acc] = MergeMemo()
-              return LeveledGSS(merge_upper(self.inner, other.inner, memo))
+              return LeveledGSS(merge_upper(self.inner, other.inner))
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
                   return set(self.inner.children.keys())
@@ -2400,41 +2399,6 @@ local_system:
 
       Node = TypeVar("Node")
 
-      # ------------------------------
-      # Merge memoization and helpers
-      # ------------------------------
-
-      @dataclass
-      class MergeMemo(Generic[T, Acc]):
-          # Cache for merging Upper nodes (Interface/UpperBranch)
-          upper: Dict[Tuple[int, int], "Upper[T, Acc]"] = field(default_factory=dict)
-          # Cache for merging Lower nodes
-          lower: Dict[Tuple[int, int], "Lower[T]"] = field(default_factory=dict)
-          # Cache for converting Interface -> UpperBranch
-          iface_to_upper: Dict[int, "UpperBranch[T, Acc]"] = field(default_factory=dict)
-
-      def _ordered_pair_ids(a: Any, b: Any) -> Tuple[int, int]:
-          ia, ib = id(a), id(b)
-          return (ia, ib) if ia <= ib else (ib, ia)
-
-      def _merge_acc_opt(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
-          """
-          Merge two optional accumulators but avoid calling .merge if the
-          values are identical (by identity or equality).
-          """
-          if a is None:
-              return b
-          if b is None:
-              return a
-          if a is b:
-              return a
-          try:
-              if a == b:
-                  return a
-          except Exception:
-              pass
-          return a.merge(b)  # type: ignore[union-attr]
-
       def _merge_children_by_depth(
           c1: Dict[T, Dict[int, Node]],
           c2: Dict[T, Dict[int, Node]],
@@ -2500,124 +2464,73 @@ local_system:
               return Interface(children=l_children, acc=the_acc, empty=node.empty)
           return node
 
-      def interface_to_upperbranch(it: Interface[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> UpperBranch[T, Acc]:
-          if memo is not None:
-              cached = memo.iface_to_upper.get(id(it))
-              if cached is not None:
-                  return cached
+      def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
           children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
           for v, kids in it.children.items():
               v_map: Dict[int, Upper[T, Acc]] = {}
               for lchild in kids.values():
-                  # Convert the entire Lower subtree to an Upper subtree with accumulator it.acc.
-                  up_child = lower_to_upper(lchild, it.acc)
-                  v_map[up_child._max_depth] = up_child
+                  ci = Interface(
+                      children=lchild.children,
+                      acc=it.acc,
+                      empty=(it.acc if lchild.empty else None),
+                  )
+                  v_map[ci._max_depth] = ci
               if v_map:
                   children[v] = v_map
           new_empty = it.empty
           if not it.children and new_empty is None:
               new_empty = it.acc
-          ub = UpperBranch(children=children, empty=new_empty)
-          if memo is not None:
-              memo.iface_to_upper[id(it)] = ub
-          return ub
+          return UpperBranch(children=children, empty=new_empty)
 
-      def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
+      def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
           if u1 is u2:
               return u1
-          key: Optional[Tuple[int, int]] = None
-          if memo is not None:
-              key = _ordered_pair_ids(u1, u2)
-              cached = memo.upper.get(key)
-              if cached is not None:
-                  return cached
           # If both are the same type, use the appropriate merge function
           if isinstance(u1, Interface) and isinstance(u2, Interface):
-              res = merge_interfaces(u1, u2, memo)
-          elif isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
-              res = merge_upperbranches(u1, u2, memo)
-          else:
-              # Mixed types: convert Interface(s) to UpperBranch and merge
-              ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1, memo)
-              ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2, memo)
-              res = merge_upperbranches(ub1, ub2, memo)  # type: ignore[arg-type]
-          if memo is not None and key is not None:
-              memo.upper[key] = res
-          return res
+              return merge_interfaces(u1, u2)
+          if isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
+              return merge_upperbranches(u1, u2)
+          # Mixed types: convert Interface(s) to UpperBranch and merge
+          ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1)
+          ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2)
+          return merge_upperbranches(ub1, ub2)  # type: ignore[arg-type]
 
-      def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
+      def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper[T, Acc]:
           if a is b:
               return a
-          if memo is not None:
-              key = _ordered_pair_ids(a, b)
-              cached = memo.upper.get(key)
-              if cached is not None:
-                  return cached
-              # Equality short-circuit
-              try:
-                  if a == b:
-                      memo.upper[key] = a
-                      return a
-              except Exception:
-                  pass
+          # Merge 'empty'
+          if a.empty is None:
+              new_empty = b.empty
+          elif b.empty is None:
+              new_empty = a.empty
+          else:
+              new_empty = a.empty.merge(b.empty)
 
-          # Merge 'empty' with equality/identity short-circuit
-          new_empty = _merge_acc_opt(a.empty, b.empty)
+          merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
+          return try_promote(UpperBranch(children=merged_children, empty=new_empty))
 
-          merged_children = _merge_children_by_depth(
-              a.children, b.children,
-              (lambda x, y: merge_upper(x, y, memo))
-          )
-          res: Upper[T, Acc] = try_promote(UpperBranch(children=merged_children, empty=new_empty))
-          if memo is not None:
-              memo.upper[_ordered_pair_ids(a, b)] = res
-          return res
-
-      def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
+      def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
           if a.acc == b.acc:
-              # Merge 'empty' with equality/identity short-circuit
-              new_empty = _merge_acc_opt(a.empty, b.empty)
-
-              # Fast path: identical children and empty
-              if (a.children is b.children) and (new_empty is a.empty):
-                  return a
-
-              merged_children = _merge_children_by_depth(
-                  a.children, b.children,
-                  (lambda l1, l2: merge_lower(l1, l2, memo))
-              )
+              if a.empty is None:
+                  new_empty = b.empty
+              elif b.empty is None:
+                  new_empty = a.empty
+              else:
+                  new_empty = a.empty.merge(b.empty)
+              merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
               return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-          # Different accumulators -> lift to upper branch (with caching)
-          return merge_upperbranches(interface_to_upperbranch(a, memo), interface_to_upperbranch(b, memo), memo)
+          return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
-      def merge_lower(l1: Lower[T], l2: Lower[T], memo: Optional[MergeMemo[T, Acc]] = None) -> Lower[T]:
+      def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
           # Fast paths
           if l1 is l2:
               return l1
-          if memo is not None:
-              key = _ordered_pair_ids(l1, l2)
-              cached = memo.lower.get(key)
-              if cached is not None:
-                  return cached
-              # Equality short-circuit
-              try:
-                  if l1 == l2:
-                      memo.lower[key] = l1
-                      return l1
-              except Exception:
-                  pass
 
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
 
-          merged_children = _merge_children_by_depth(
-              l1.children, l2.children,
-              (lambda x, y: merge_lower(x, y, memo))
-          )
-          res = Lower(children=merged_children, empty=new_empty)
-          if memo is not None:
-              memo.lower[_ordered_pair_ids(l1, l2)] = res
-          return res
+          merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
+          return Lower(children=merged_children, empty=new_empty)
 
 
       def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
@@ -2642,7 +2555,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -3926,6 +3839,8 @@ messages:
           # Fast paths
           if l1 is l2:
               return l1
+          if l1 == l2:
+              return l1
 
           # Merge 'empty' flags (logical OR)
           new_empty = l1.empty or l2.empty
@@ -3951,9 +3866,16 @@ messages:
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
-      When `merge` is run between two leveled GSSs, I'm getting:
-      - an unexpectedly high number of acc merges, despite the two GSSs not having that many accs in them (often they're have an interface at the very top level)
-      - an unexpectedly high number of lower nodes - actually, an exponential blowup.
+      We have some fast paths like this
+      ```python
+      def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
+          # Fast paths
+          if l1 is l2:
+              return l1
+          if l1 == l2:
+              return l1
+      ```
+      `is` checking is good, but equality checking checks the whole subtree, which is really expensive. Don't do that.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3972,311 +3894,54 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are precise, actionable changes to fix both issues you’re seeing:
-      - excessive Acc merges during merge
-      - exponential growth in Lower nodes
+      Of course. The deep equality check `l1 == l2` can be very slow as it recursively compares the entire subtree. Removing it is a good optimization, relying on the `is` check for the most common case of identical subtrees.
 
-      Summary of fixes:
-      1) Avoid unnecessary Acc.merge calls when the two accumulators are identical (by identity or equality).
-      2) Memoize merges of Upper and Lower nodes to reuse results across identical pairwise merges instead of reconstructing new nodes repeatedly.
-      3) Convert Interface → UpperBranch via lower_to_upper so you don’t create many transient Interface children that later explode when merged.
-      4) Thread the memo through the merge operations and use it in LeveledGSS.merge and LeveledGSS.pop.
+      Here are the step-by-step instructions to make the change:
 
-      Step-by-step instructions
-      File: python/gss_tester/implementations/leveled_impl.py
+      ### Step-by-step Instructions
 
-      1) Introduce a merge memo and helpers (right after the existing “Node = TypeVar('Node')” line):
-      - Add a MergeMemo dataclass that caches Upper and Lower merge results as well as conversions of Interface → UpperBranch.
-      - Add helper _ordered_pair_ids(a, b) to canonicalize memo keys.
-      - Add helper _merge_acc_opt(a_opt, b_opt) that avoids calling merge on identical accumulators.
+      1.  **Open the file**: `python/gss_tester/implementations/leveled_impl.py`
+      2.  **Locate the `merge_lower` function**: This function is near the end of the file.
+      3.  **Remove the equality check**: In the `merge_lower` function, delete the following two lines:
+          ```python
+          if l1 == l2:
+              return l1
+          ```
 
-      2) Update interface_to_upperbranch to:
-      - Accept an optional memo and cache conversions.
-      - Convert Lower children using lower_to_upper instead of wrapping them in new Interface nodes. This tightens the structure and reduces duplication before merges.
+      The function should now look like this:
+      ```python
+      def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
+          # Fast paths
+          if l1 is l2:
+              return l1
 
-      3) Add memoization to merge functions:
-      - Change merge_upper, merge_upperbranches, merge_interfaces, merge_lower to accept an optional memo.
-      - Early-return when nodes are the same object, or (for equality) when nodes compare equal (to avoid rebuilding identical nodes).
-      - Use the memo to reuse previously computed results for the same pair of nodes.
+          # Merge 'empty' flags (logical OR)
+          new_empty = l1.empty or l2.empty
 
-      4) Avoid unnecessary Acc merges:
-      - Use _merge_acc_opt in merge_upperbranches and merge_interfaces when combining optional empty accumulators.
+          merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
+          return Lower(children=merged_children, empty=new_empty)
+      ```
 
-      5) Thread memo where merges are executed:
-      - In LeveledGSS.merge, create a MergeMemo and pass it to merge_upper to ensure a single memo is used for the full merge.
-      - In LeveledGSS.pop, create a MergeMemo and pass it to merge_upper in the loop that folds children, for the same reason.
+      ### Git Diff
 
-      6) Keep existing invariants and validation behavior intact:
-      - No changes to how try_promote represents leaf-Interfaces (we avoided altering that to respect your validations).
-      - These changes only add caching, better conversion, and equality short-circuits.
-
-      After applying these changes, you should see:
-      - Far fewer Acc.merge calls (identical accumulators won’t merge).
-      - Lower nodes no longer blow up exponentially due to repeated recomputation across identical sub-merge pairs.
-      - Overall merges should be significantly faster.
-
-      Git diff patches
+      Here is the git diff for the change:
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 6e1a6bf..a8f3b29 100644
+      index 45b85a1..621532f 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -588,6 +588,36 @@ class LeveledGSSStats(Generic[T, Acc]):
-       
-       
-       Node = TypeVar("Node")
-      +
-      +# ------------------------------
-      +# Merge memoization and helpers
-      +# ------------------------------
-      +
-      +@dataclass
-      +class MergeMemo(Generic[T, Acc]):
-      +    # Cache for merging Upper nodes (Interface/UpperBranch)
-      +    upper: Dict[Tuple[int, int], "Upper[T, Acc]"] = field(default_factory=dict)
-      +    # Cache for merging Lower nodes
-      +    lower: Dict[Tuple[int, int], "Lower[T]"] = field(default_factory=dict)
-      +    # Cache for converting Interface -> UpperBranch
-      +    iface_to_upper: Dict[int, "UpperBranch[T, Acc]"] = field(default_factory=dict)
-      +
-      +def _ordered_pair_ids(a: Any, b: Any) -> Tuple[int, int]:
-      +    ia, ib = id(a), id(b)
-      +    return (ia, ib) if ia <= ib else (ib, ia)
-      +
-      +def _merge_acc_opt(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
-      +    """
-      +    Merge two optional accumulators but avoid calling .merge if the
-      +    values are identical (by identity or equality).
-      +    """
-      +    if a is None:
-      +        return b
-      +    if b is None:
-      +        return a
-      +    if a is b:
-      +        return a
-      +    try:
-      +        if a == b:
-      +            return a
-      +    except Exception:
-      +        pass
-      +    return a.merge(b)  # type: ignore[union-attr]
-       
-       def _merge_children_by_depth(
-           c1: Dict[T, Dict[int, Node]],
-      @@ -635,18 +665,37 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-               return Interface(children=l_children, acc=the_acc, empty=node.empty)
-           return node
-       
-      -def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
-      +def interface_to_upperbranch(it: Interface[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> UpperBranch[T, Acc]:
-      +    if memo is not None:
-      +        cached = memo.iface_to_upper.get(id(it))
-      +        if cached is not None:
-      +            return cached
-           children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-           for v, kids in it.children.items():
-               v_map: Dict[int, Upper[T, Acc]] = {}
-               for lchild in kids.values():
-      -            ci = Interface(
-      -                children=lchild.children,
-      -                acc=it.acc,
-      -                empty=(it.acc if lchild.empty else None),
-      -            )
-      -            v_map[ci._max_depth] = ci
-      +            # Convert the entire Lower subtree to an Upper subtree with accumulator it.acc.
-      +            up_child = lower_to_upper(lchild, it.acc)
-      +            v_map[up_child._max_depth] = up_child
-               if v_map:
-                   children[v] = v_map
-           new_empty = it.empty
-           if not it.children and new_empty is None:
-               new_empty = it.acc
-      -    return UpperBranch(children=children, empty=new_empty)
-      +    ub = UpperBranch(children=children, empty=new_empty)
-      +    if memo is not None:
-      +        memo.iface_to_upper[id(it)] = ub
-      +    return ub
-       
-      -def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc]) -> Upper[T, Acc]:
-      +def merge_upper(u1: Upper[T, Acc], u2: Upper[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
-           if u1 is u2:
-               return u1
-      -    # If both are the same type, use the appropriate merge function
-      -    if isinstance(u1, Interface) and isinstance(u2, Interface):
-      -        return merge_interfaces(u1, u2)
-      -    if isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
-      -        return merge_upperbranches(u1, u2)
-      -    # Mixed types: convert Interface(s) to UpperBranch and merge
-      -    ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1)
-      -    ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2)
-      -    return merge_upperbranches(ub1, ub2)  # type: ignore[arg-type]
-      +    key: Optional[Tuple[int, int]] = None
-      +    if memo is not None:
-      +        key = _ordered_pair_ids(u1, u2)
-      +        cached = memo.upper.get(key)
-      +        if cached is not None:
-      +            return cached
-      +    # If both are the same type, use the appropriate merge function
-      +    if isinstance(u1, Interface) and isinstance(u2, Interface):
-      +        res = merge_interfaces(u1, u2, memo)
-      +    elif isinstance(u1, UpperBranch) and isinstance(u2, UpperBranch):
-      +        res = merge_upperbranches(u1, u2, memo)
-      +    else:
-      +        # Mixed types: convert Interface(s) to UpperBranch and merge
-      +        ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1, memo)
-      +        ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2, memo)
-      +        res = merge_upperbranches(ub1, ub2, memo)  # type: ignore[arg-type]
-      +    if memo is not None and key is not None:
-      +        memo.upper[key] = res
-      +    return res
-       
-      -def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-      +def merge_upperbranches(a: UpperBranch[T, Acc], b: UpperBranch[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
-           if a is b:
-               return a
-      -    # Merge 'empty'
-      -    if a.empty is None:
-      -        new_empty = b.empty
-      -    elif b.empty is None:
-      -        new_empty = a.empty
-      -    else:
-      -        new_empty = a.empty.merge(b.empty)
-      +    if memo is not None:
-      +        key = _ordered_pair_ids(a, b)
-      +        cached = memo.upper.get(key)
-      +        if cached is not None:
-      +            return cached
-      +        # Equality short-circuit
-      +        try:
-      +            if a == b:
-      +                memo.upper[key] = a
-      +                return a
-      +        except Exception:
-      +            pass
-      +
-      +    # Merge 'empty' with equality/identity short-circuit
-      +    new_empty = _merge_acc_opt(a.empty, b.empty)
-       
-      -    merged_children = _merge_children_by_depth(a.children, b.children, merge_upper)
-      -    return try_promote(UpperBranch(children=merged_children, empty=new_empty))
-      +    merged_children = _merge_children_by_depth(
-      +        a.children, b.children,
-      +        (lambda x, y: merge_upper(x, y, memo))
-      +    )
-      +    res: Upper[T, Acc] = try_promote(UpperBranch(children=merged_children, empty=new_empty))
-      +    if memo is not None:
-      +        memo.upper[_ordered_pair_ids(a, b)] = res
-      +    return res
-       
-      -def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc]:
-      +def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc], memo: Optional[MergeMemo[T, Acc]] = None) -> Upper[T, Acc]:
-           if a.acc == b.acc:
-      -        if a.empty is None:
-      -            new_empty = b.empty
-      -        elif b.empty is None:
-      -            new_empty = a.empty
-      -        else:
-      -            new_empty = a.empty.merge(b.empty)
-      -        merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
-      -        return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-      -    return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
-      +        # Merge 'empty' with equality/identity short-circuit
-      +        new_empty = _merge_acc_opt(a.empty, b.empty)
-      +
-      +        # Fast path: identical children and empty
-      +        if (a.children is b.children) and (new_empty is a.empty):
-      +            return a
-      +
-      +        merged_children = _merge_children_by_depth(
-      +            a.children, b.children,
-      +            (lambda l1, l2: merge_lower(l1, l2, memo))
-      +        )
-      +        return Interface(children=merged_children, acc=a.acc, empty=new_empty)
-      +    # Different accumulators -> lift to upper branch (with caching)
-      +    return merge_upperbranches(interface_to_upperbranch(a, memo), interface_to_upperbranch(b, memo), memo)
-       
-      -def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
-      +def merge_lower(l1: Lower[T], l2: Lower[T], memo: Optional[MergeMemo[T, Acc]] = None) -> Lower[T]:
+      @@ -1218,8 +1218,6 @@
            # Fast paths
            if l1 is l2:
                return l1
-      +    if memo is not None:
-      +        key = _ordered_pair_ids(l1, l2)
-      +        cached = memo.lower.get(key)
-      +        if cached is not None:
-      +            return cached
-      +        # Equality short-circuit
-      +        try:
-      +            if l1 == l2:
-      +                memo.lower[key] = l1
-      +                return l1
-      +        except Exception:
-      +            pass
+      -    if l1 == l2:
+      -        return l1
        
            # Merge 'empty' flags (logical OR)
            new_empty = l1.empty or l2.empty
-       
-      -    merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower)
-      -    return Lower(children=merged_children, empty=new_empty)
-      +    merged_children = _merge_children_by_depth(
-      +        l1.children, l2.children,
-      +        (lambda x, y: merge_lower(x, y, memo))
-      +    )
-      +    res = Lower(children=merged_children, empty=new_empty)
-      +    if memo is not None:
-      +        memo.lower[_ordered_pair_ids(l1, l2)] = res
-      +    return res
-       
-       
-       def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
-      @@ -688,7 +747,17 @@ def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
-       
-           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-      -        return LeveledGSS(merge_upper(self.inner, other.inner))
-      +        # Use a single memo for the whole merge operation to avoid recomputation
-      +        memo: MergeMemo[T, Acc] = MergeMemo()
-      +        return LeveledGSS(merge_upper(self.inner, other.inner, memo))
-           def peek(self) -> Set[T]:
-               if isinstance(self.inner, Interface):
-                   return set(self.inner.children.keys())
-               else:
-                   return set(self.inner.children.keys())
-      @@ -621,12 +690,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-               else:
-                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
-           def pop(self) -> LeveledGSS[T, Acc]:
-               if isinstance(self.inner, Interface):
-      -            upper_branch = interface_to_upperbranch(self.inner)
-      +            upper_branch = interface_to_upperbranch(self.inner)
-               else:
-                   upper_branch = self.inner
-               all_children = list(upper_branch._all_children())
-               merged = UpperBranch(children={}, empty=None)
-      +        memo: MergeMemo[T, Acc] = MergeMemo()
-               for c in all_children:
-      -            merged = merge_upper(merged, c)
-      +            merged = merge_upper(merged, c, memo)
-               merged = try_promote(merged)
-               return LeveledGSS(merged)
+
       ```
-
-      What changed and why this fixes the issues
-
-      - Added MergeMemo and threaded it through merge_upper, merge_upperbranches, merge_interfaces, and merge_lower:
-        - This ensures identical pairs of nodes (by identity) are only merged once and the results are reused. This prevents the exponential creation of Lower nodes when the same lower subgraphs are merged under different parents repeatedly.
-        - Also short-circuits for equality (not just identity) further reduces unnecessary work when two nodes are structurally equal but not the same object.
-
-      - Avoided unnecessary Acc.merge calls:
-        - _merge_acc_opt short-circuits when the two accumulators are the same object or equal. This avoids inflated “merge” counts when the structure is already canonical or when try_promote produced interfaces with explicit empty equal to the acc.
-
-      - Changed interface_to_upperbranch:
-        - Convert Lower subtrees with lower_to_upper rather than wrapping them directly in a new Interface that references the Lower children. This reduces the creation of transient Interface nodes that otherwise cause heavy recomputation and lower-node explosion in subsequent merges.
-        - Added caching so converting the same Interface more than once uses a cached UpperBranch.
-
-      - Wired memo through LeveledGSS.merge and LeveledGSS.pop so multi-child merges share memoization across the full operation.
-
-      These changes should keep your representation canonical, dramatically reduce lower-node blowups, and cut down spurious accumulator merges.
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -4287,7 +3952,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Introduce memoization and optimize
-      accumulator merging in LeveledGSS"'
+  - user: 'Changes committed with message: "Optimize merge_lower by removing expensive
+      equality check"'
     metadata:
 ...
