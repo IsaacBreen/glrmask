@@ -1231,6 +1231,20 @@ def merge_interfaces(a: Interface[T, Acc], b: Interface[T, Acc]) -> Upper[T, Acc
             new_empty = a.empty.merge(b.empty)
         merged_children = _merge_children_by_depth(a.children, b.children, merge_lower)
         return Interface(children=merged_children, acc=a.acc, empty=new_empty)
+    if a.children is b.children:
+        if a.acc is None:
+            new_acc = b.acc
+        elif b.acc is None:
+            new_acc = a.acc
+        else:
+            new_acc = a.acc.merge(b.acc)
+        if a.empty is None:
+            new_empty = b.empty
+        elif b.empty is None:
+            new_empty = a.empty
+        else:
+            new_empty = a.empty.merge(b.empty)
+        return Interface(children=a.children, acc=new_acc, empty=new_empty)
     return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b))
 
 def merge_lower(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
