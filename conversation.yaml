@@ -400,7 +400,9 @@ local_system:
               This is an optimized version focusing on speed.
               """
               state_map: Dict[int, GSS] = self.state
-              all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
+              all_ones: RangeSet = self.all_internal_llm_tokens_bitset
+              if all_ones is None:
+                  all_ones = RangeSet.empty()
               final_mask: RangeSet = RangeSet.empty()
 
               values: Dict[int, GSS] = {}
@@ -11791,7 +11793,9 @@ local_system:
                   record_metric('FFIRangeSet.union.in_len_b', len(other))
               except Exception:
                   pass
-              res = self | other
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.union.out_len', len(res))
               except Exception:
@@ -11808,7 +11812,9 @@ local_system:
                   record_metric('FFIRangeSet.intersection.in_len_b', len(other))
               except Exception:
                   pass
-              res = self & other
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.intersection.out_len', len(res))
               except Exception:
@@ -11825,7 +11831,9 @@ local_system:
                   record_metric('FFIRangeSet.difference.in_len_b', len(other))
               except Exception:
                   pass
-              res = self._bitset.difference(other._bitset)
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.difference.out_len', len(res))
               except Exception:
@@ -12736,7 +12744,7 @@ local_system:
                   disallowed_llm_mask = RangeSet.empty()
                   disallowed_map: Tuple[Tuple[int, RangeSet], ...] = acc.terminals_union
 
-                  for tsid, disallowed_terminals in disallowed_map:
+                  for tsid, disallowed_terminals in disallowed_map.items():
                       if tsid > max_state:
                           continue
                       terminals_to_llm = pmc.get(tsid)
@@ -25090,7 +25098,9 @@ messages:
               This is an optimized version focusing on speed.
               """
               state_map: Dict[int, GSS] = self.state
-              all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
+              all_ones: RangeSet = self.all_internal_llm_tokens_bitset
+              if all_ones is None:
+                  all_ones = RangeSet.empty()
               final_mask: RangeSet = RangeSet.empty()
 
               values: Dict[int, GSS] = {}
@@ -36668,7 +36678,9 @@ messages:
                   record_metric('FFIRangeSet.union.in_len_b', len(other))
               except Exception:
                   pass
-              res = self | other
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.union.out_len', len(res))
               except Exception:
@@ -36685,7 +36697,9 @@ messages:
                   record_metric('FFIRangeSet.intersection.in_len_b', len(other))
               except Exception:
                   pass
-              res = self & other
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.intersection.out_len', len(res))
               except Exception:
@@ -36702,7 +36716,9 @@ messages:
                   record_metric('FFIRangeSet.difference.in_len_b', len(other))
               except Exception:
                   pass
-              res = self._bitset.difference(other._bitset)
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
               try:
                   record_metric('FFIRangeSet.difference.out_len', len(res))
               except Exception:
@@ -37258,7 +37274,7 @@ messages:
       filename: python/aug25/range_set/rangeset_stats.py
   - user: |-
       bash python/run_benchmarks.sh python/aug25/models/rust_model.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py python/aug25/models/gemini-10.py python/aug25/models/gpt-5-18.py
-      Benchmark results will be saved in: benchmark_results/2025-09-22_19-44-12
+      Benchmark results will be saved in: benchmark_results/2025-09-22_19-48-53
       ---
       Baseline Model: python/aug25/models/rust_model.py
       Other Models: python/aug25/models/precompute3_model_pure_python_get_mask_only.py python/aug25/models/gemini-10.py python/aug25/models/gpt-5-18.py
@@ -37268,72 +37284,74 @@ messages:
       Starting benchmark runs...
 
       >>> Running benchmark for: rust_model.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-22_19-44-12
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-22_19-48-53
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/rust_model.py
-      Model loaded in 3.8706 seconds.
+      Model loaded in 2.8487 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:08<00:00,  3.12it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:08<00:00,  3.06it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-22_19-44-12/rust_model_results.json
+      Benchmark results saved to: benchmark_results/2025-09-22_19-48-53/rust_model_results.json
       >>> Finished benchmark for: rust_model.py
 
       >>> Running benchmark for: precompute3_model_pure_python_get_mask_only.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_pure_python_get_mask_only.py --output benchmark_results/2025-09-22_19-44-12
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_pure_python_get_mask_only.py --output benchmark_results/2025-09-22_19-48-53
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      Model loaded in 16.2793 seconds.
+      Model loaded in 16.8384 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                        | 0/25 [00:00<?, ?it/s, get_mask]
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 310, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 234, in run_benchmark
-          mask_rs = model.get_mask()
-                    ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_get_mask_only.py", line 160, in get_mask
-          child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 738, in apply_and_prune
-          res_inner = transform(self.inner)
-                      ^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 690, in transform
-          new_acc_opt = mutate_acc(node.acc)
-                        ^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 677, in mutate_acc
-          r = mutator(a)
-              ^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_get_mask_only.py", line 149, in intersect_and_prune
-          new_mask = acc.llm_mask.intersection(llm_bv)
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      TypeError: argument 'other': 'FFIRangeSet' object cannot be converted to 'Bitset'
+      Benchmarking steps:   0%|                                                                                                                                                          | 0/25 [00:00<?, ?it/s, commit]commit (ms): 0.38
+      Benchmarking steps:   0%|                                                                                                                                                          | 0/25 [00:00<?, ?it/s, commit]commit (ms): 1.64
+      Benchmarking steps:   8%|███████████▋                                                                                                                                      | 2/25 [00:00<00:01, 13.07it/s, commit]commit (ms): 0.83
+      Benchmarking steps:   8%|███████████▋                                                                                                                                      | 2/25 [00:00<00:01, 13.07it/s, commit]commit (ms): 4.21
+      Benchmarking steps:  16%|███████████████████████▎                                                                                                                          | 4/25 [00:00<00:02,  8.67it/s, commit]commit (ms): 2.13
+      Benchmarking steps:  20%|█████████████████████████████▏                                                                                                                    | 5/25 [00:00<00:02,  7.87it/s, commit]commit (ms): 1.22
+      Benchmarking steps:  24%|███████████████████████████████████                                                                                                               | 6/25 [00:00<00:02,  7.59it/s, commit]commit (ms): 1.77
+      Benchmarking steps:  28%|████████████████████████████████████████▉                                                                                                         | 7/25 [00:01<00:02,  7.31it/s, commit]commit (ms): 1.31
+      Benchmarking steps:  32%|██████████████████████████████████████████████▋                                                                                                   | 8/25 [00:01<00:02,  7.36it/s, commit]commit (ms): 4.17
+      Benchmarking steps:  36%|████████████████████████████████████████████████████▌                                                                                             | 9/25 [00:01<00:02,  6.62it/s, commit]commit (ms): 2.81
+      Benchmarking steps:  40%|██████████████████████████████████████████████████████████                                                                                       | 10/25 [00:01<00:02,  5.96it/s, commit]commit (ms): 2.0
+      Benchmarking steps:  44%|███████████████████████████████████████████████████████████████▊                                                                                 | 11/25 [00:01<00:02,  5.72it/s, commit]commit (ms): 3.01
+      Benchmarking steps:  48%|█████████████████████████████████████████████████████████████████████▌                                                                           | 12/25 [00:01<00:02,  5.31it/s, commit]commit (ms): 1.98
+      Benchmarking steps:  52%|███████████████████████████████████████████████████████████████████████████▍                                                                     | 13/25 [00:02<00:02,  5.71it/s, commit]commit (ms): 6.69
+      Benchmarking steps:  56%|█████████████████████████████████████████████████████████████████████████████████▏                                                               | 14/25 [00:02<00:02,  5.34it/s, commit]commit (ms): 4.29
+      Benchmarking steps:  60%|███████████████████████████████████████████████████████████████████████████████████████                                                          | 15/25 [00:02<00:02,  4.57it/s, commit]commit (ms): 2.42
+      Benchmarking steps:  64%|████████████████████████████████████████████████████████████████████████████████████████████▊                                                    | 16/25 [00:02<00:01,  4.64it/s, commit]commit (ms): 4.74
+      Benchmarking steps:  68%|██████████████████████████████████████████████████████████████████████████████████████████████████▌                                              | 17/25 [00:03<00:01,  4.44it/s, commit]commit (ms): 3.1
+      Benchmarking steps:  72%|████████████████████████████████████████████████████████████████████████████████████████████████████████▍                                        | 18/25 [00:03<00:01,  4.75it/s, commit]commit (ms): 6.8
+      Benchmarking steps:  76%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████▏                                  | 19/25 [00:03<00:01,  4.46it/s, commit]commit (ms): 5.2
+      Benchmarking steps:  80%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████                             | 20/25 [00:03<00:01,  4.00it/s, commit]commit (ms): 3.68
+      Benchmarking steps:  84%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▊                       | 21/25 [00:04<00:00,  4.11it/s, commit]commit (ms): 4.39
+      Benchmarking steps:  88%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▌                 | 22/25 [00:04<00:00,  4.06it/s, commit]commit (ms): 3.9
+      Benchmarking steps:  92%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▍           | 23/25 [00:04<00:00,  4.56it/s, commit]commit (ms): 6.01
+      Benchmarking steps:  96%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▏     | 24/25 [00:04<00:00,  4.58it/s, commit]commit (ms): 4.51
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:04<00:00,  5.19it/s, commit]
+      --- Benchmark finished ---
 
-      >>> Benchmark for precompute3_model_pure_python_get_mask_only.py failed with exit code 1. Skipping.
+      Benchmark results saved to: benchmark_results/2025-09-22_19-48-53/precompute3_model_pure_python_get_mask_only_results.json
+      >>> Finished benchmark for: precompute3_model_pure_python_get_mask_only.py
 
       >>> Running benchmark for: gemini-10.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/gemini-10.py --output benchmark_results/2025-09-22_19-44-12
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/gemini-10.py --output benchmark_results/2025-09-22_19-48-53
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/gemini-10.py
-      Model loaded in 16.8295 seconds.
+      Model loaded in 15.8474 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                        | 0/25 [00:00<?, ?it/s, get_mask]
+      Benchmarking steps:   0%|                                                                                                                                                          | 0/25 [00:00<?, ?it/s, commit]commit (ms): 0.27
+      Benchmarking steps:   4%|█████▊                                                                                                                                          | 1/25 [00:00<00:02,  9.00it/s, get_mask]
       Traceback (most recent call last):
         File "<frozen runpy>", line 198, in _run_module_as_main
         File "<frozen runpy>", line 88, in _run_code
@@ -37344,51 +37362,98 @@ messages:
         File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 234, in run_benchmark
           mask_rs = model.get_mask()
                     ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-10.py", line 48, in get_mask
-          all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
-                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      OverflowError: cannot fit 'int' into an index-sized integer
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-10.py", line 88, in get_mask
+          gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 587, in apply
+          return LeveledGSS(transform(self.inner)) # type: ignore[arg-type]
+                            ^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 578, in transform
+          new_child = transform(child)
+                      ^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 565, in transform
+          new_acc = func(node.acc)
+                    ^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gemini-10.py", line 70, in initialize_acc
+          for tsid, disallowed_terminals in disallowed_map:
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+      TypeError: cannot unpack non-iterable int object
 
       >>> Benchmark for gemini-10.py failed with exit code 1. Skipping.
 
       >>> Running benchmark for: gpt-5-18.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/gpt-5-18.py --output benchmark_results/2025-09-22_19-44-12
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/gpt-5-18.py --output benchmark_results/2025-09-22_19-48-53
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/gpt-5-18.py
-      Model loaded in 16.5379 seconds.
+      Model loaded in 13.7411 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                        | 0/25 [00:00<?, ?it/s, get_mask]
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 310, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 234, in run_benchmark
-          mask_rs = model.get_mask()
-                    ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gpt-5-18.py", line 200, in get_mask
-          child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 738, in apply_and_prune
-          res_inner = transform(self.inner)
-                      ^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 690, in transform
-          new_acc_opt = mutate_acc(node.acc)
-                        ^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl.py", line 677, in mutate_acc
-          r = mutator(a)
-              ^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/gpt-5-18.py", line 145, in intersect_and_prune
-          new_mask = acc.llm_mask.intersection(llm_bv)
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      TypeError: argument 'other': 'FFIRangeSet' object cannot be converted to 'Bitset'
-      ^C^C
+      Benchmarking steps:   0%|                                                                                                                                                          | 0/25 [00:00<?, ?it/s, commit]commit (ms): 0.42
+      Benchmarking steps:   0%|                                                                                                                                                          | 0/25 [00:00<?, ?it/s, commit]commit (ms): 1.15
+      Benchmarking steps:   8%|███████████▋                                                                                                                                      | 2/25 [00:00<00:01, 16.99it/s, commit]commit (ms): 0.82
+      Benchmarking steps:   8%|███████████▋                                                                                                                                      | 2/25 [00:00<00:01, 16.99it/s, commit]commit (ms): 4.21
+      Benchmarking steps:  16%|███████████████████████▎                                                                                                                          | 4/25 [00:00<00:02, 10.38it/s, commit]commit (ms): 2.02
+      Benchmarking steps:  16%|███████████████████████▎                                                                                                                          | 4/25 [00:00<00:02, 10.38it/s, commit]commit (ms): 1.09
+      Benchmarking steps:  24%|███████████████████████████████████                                                                                                               | 6/25 [00:00<00:02,  9.05it/s, commit]commit (ms): 1.75
+      Benchmarking steps:  28%|████████████████████████████████████████▉                                                                                                         | 7/25 [00:00<00:02,  8.69it/s, commit]commit (ms): 1.33
+      Benchmarking steps:  32%|██████████████████████████████████████████████▋                                                                                                   | 8/25 [00:01<00:01,  8.51it/s, commit]commit (ms): 4.05
+      Benchmarking steps:  36%|████████████████████████████████████████████████████▌                                                                                             | 9/25 [00:01<00:02,  7.62it/s, commit]commit (ms): 2.72
+      Benchmarking steps:  40%|██████████████████████████████████████████████████████████                                                                                       | 10/25 [00:01<00:02,  6.76it/s, commit]commit (ms): 1.72
+      Benchmarking steps:  44%|███████████████████████████████████████████████████████████████▊                                                                                 | 11/25 [00:01<00:02,  6.49it/s, commit]commit (ms): 3.19
+      Benchmarking steps:  48%|█████████████████████████████████████████████████████████████████████▌                                                                           | 12/25 [00:01<00:02,  6.11it/s, commit]commit (ms): 1.95
+      Benchmarking steps:  52%|███████████████████████████████████████████████████████████████████████████▍                                                                     | 13/25 [00:01<00:01,  6.50it/s, commit]commit (ms): 4.42
+      Benchmarking steps:  56%|█████████████████████████████████████████████████████████████████████████████████▏                                                               | 14/25 [00:02<00:01,  6.18it/s, commit]commit (ms): 3.35
+      Benchmarking steps:  60%|███████████████████████████████████████████████████████████████████████████████████████                                                          | 15/25 [00:02<00:01,  5.27it/s, commit]commit (ms): 2.22
+      Benchmarking steps:  64%|████████████████████████████████████████████████████████████████████████████████████████████▊                                                    | 16/25 [00:02<00:01,  5.39it/s, commit]commit (ms): 3.35
+      Benchmarking steps:  68%|██████████████████████████████████████████████████████████████████████████████████████████████████▌                                              | 17/25 [00:02<00:01,  5.31it/s, commit]commit (ms): 2.32
+      Benchmarking steps:  72%|████████████████████████████████████████████████████████████████████████████████████████████████████████▍                                        | 18/25 [00:02<00:01,  5.83it/s, commit]commit (ms): 5.13
+      Benchmarking steps:  76%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████▏                                  | 19/25 [00:03<00:01,  5.67it/s, commit]commit (ms): 3.8
+      Benchmarking steps:  80%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████                             | 20/25 [00:03<00:00,  5.01it/s, commit]commit (ms): 2.81
+      Benchmarking steps:  84%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▊                       | 21/25 [00:03<00:00,  5.19it/s, commit]commit (ms): 3.9
+      Benchmarking steps:  88%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▌                 | 22/25 [00:03<00:00,  5.16it/s, commit]commit (ms): 2.92
+      Benchmarking steps:  92%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▍           | 23/25 [00:03<00:00,  5.69it/s, commit]commit (ms): 5.53
+      Benchmarking steps:  96%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████▏     | 24/25 [00:04<00:00,  5.60it/s, commit]commit (ms): 4.29
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:04<00:00,  6.18it/s, commit]
+      --- Benchmark finished ---
+
+      Benchmark results saved to: benchmark_results/2025-09-22_19-48-53/gpt-5-18_results.json
+      >>> Finished benchmark for: gpt-5-18.py
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-22_19-48-53/gpt-5-18_results.json benchmark_results/2025-09-22_19-48-53/precompute3_model_pure_python_get_mask_only_results.json benchmark_results/2025-09-22_19-48-53/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-22_19-48-53/analysis
+      Selected baseline: rust_model
+      --- Benchmark Summary ---
+                                                  equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                                    
+      gpt-5-18                                             ✅                    0     25   158.7131   50.7519   55.8629  167.9657  226.8109  252.2290  252.6759
+      precompute3_model_pure_python_get_mask_only          ✅                    0     25   188.9579   60.8624   60.3855  189.4346  269.2149  299.9117  303.6653
+      rust_model                                           ✅                    0     25   325.7047  908.5086   34.2363   81.3485  315.9634 3746.6067 4501.1807
+
+      Baseline: rust_model
+      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
+
+      Saving plots to benchmark_results/2025-09-22_19-48-53/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-22_19-48-53/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-22_19-48-53/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-22_19-48-53/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-22_19-48-53/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-22_19-48-53/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-22_19-48-53/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-22_19-48-53/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-22_19-48-53/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-22_19-48-53/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-22_19-48-53/analysis/total_timings_per_token_log.png
+
+      ---
+      Benchmark analysis complete.
+      Baseline: rust_model
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-22_19-48-53/analysis
+      Full JSON results are in: benchmark_results/2025-09-22_19-48-53
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -37407,131 +37472,60 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've analyzed the benchmark failures and identified two distinct issues. The `TypeError` affecting `precompute3_model_pure_python_get_mask_only.py` and `gpt-5-18.py` stems from incorrect FFI calls within the `FFIRangeSet` class. The `OverflowError` in `gemini-10.py` is caused by an implicit truthiness check on a very large `RangeSet`.
+      Based on the benchmark failure, it appears there's a `TypeError` in `python/aug25/models/gemini-10.py`. The traceback indicates that the code is attempting to unpack integer keys from a dictionary as if they were key-value tuples.
 
-      Here are the step-by-step instructions to fix these problems, followed by the corresponding git diffs.
+      Here are the step-by-step instructions to fix the bug, followed by the corresponding git diff.
 
-      ### Step-by-Step Instructions
+      ### Step-by-step Instructions
 
-      1.  **Fix `FFIRangeSet` Set Operations**
+      1.  **Open the file `python/aug25/models/gemini-10.py`**.
 
-          The `union`, `intersection`, and `difference` methods in `FFIRangeSet` are implemented recursively instead of calling the underlying Rust FFI methods. You need to correct them to perform the operations on the `_bitset` attribute and wrap the result in a new `FFIRangeSet` instance.
+      2.  **Locate the `get_mask` method**. Inside this method, there is a nested function named `initialize_acc`.
 
-          -   **File:** `python/aug25/range_set/ffi_range_set.py`
-          -   **In method `union`**: Replace `res = self | other` with:
-              ```python
-              new_bs = self._bitset.union(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              ```
-          -   **In method `intersection`**: Replace `res = self & other` with:
-              ```python
-              new_bs = self._bitset.intersection(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              ```
-          -   **In method `difference`**: Replace `res = self._bitset.difference(other._bitset)` with:
-              ```python
-              new_bs = self._bitset.difference(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              ```
+      3.  **Find the incorrect loop**. Inside `initialize_acc`, you will find this line:
+          ```python
+          for tsid, disallowed_terminals in disallowed_map:
+          ```
+          The variable `disallowed_map` is a dictionary (`acc.terminals_union`). Iterating directly over a dictionary yields its keys, which are integers in this case, causing the `TypeError` when the code tries to unpack them into `tsid` and `disallowed_terminals`.
 
-      2.  **Fix `OverflowError` in `gemini-10.py`**
+      4.  **Correct the loop**. To iterate over both keys and values, you must use the `.items()` method. Modify the line to be:
+          ```python
+          for tsid, disallowed_terminals in disallowed_map.items():
+          ```
 
-          The line `all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()` performs a truthiness check on `self.all_internal_llm_tokens_bitset`. This implicitly calls `__len__()`, which fails with an `OverflowError` because the set is too large to fit into a standard C integer type.
+      This change will resolve the `TypeError` and allow the benchmark to run correctly.
 
-          -   **File:** `python/aug25/models/gemini-10.py`
-          -   **In method `get_mask`**: Replace the line:
-              ```python
-              all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
-              ```
-              with an explicit `None` check to avoid the problematic `__len__` call:
-              ```python
-              all_ones: RangeSet = self.all_internal_llm_tokens_bitset
-              if all_ones is None:
-                  all_ones = RangeSet.empty()
-              ```
+      ### Git Diff
 
-      ### Git Diffs
-
-      Here are the git diffs to apply the changes:
+      Here is the git patch to apply the fix.
 
       ```diff
       diff --git a/python/aug25/models/gemini-10.py b/python/aug25/models/gemini-10.py
-      index 2111181..1111181 100644
+      index 2111111..2222222 100644
       --- a/python/aug25/models/gemini-10.py
       +++ b/python/aug25/models/gemini-10.py
-      @@ -45,7 +45,9 @@
-               This is an optimized version focusing on speed.
-               """
-               state_map: Dict[int, GSS] = self.state
-      -        all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
-      +        all_ones: RangeSet = self.all_internal_llm_tokens_bitset
-      +        if all_ones is None:
-      +            all_ones = RangeSet.empty()
-               final_mask: RangeSet = RangeSet.empty()
+      @@ -67,7 +67,7 @@
+                   disallowed_llm_mask = RangeSet.empty()
+                   disallowed_map: Tuple[Tuple[int, RangeSet], ...] = acc.terminals_union
        
-               values: Dict[int, GSS] = {}
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/range_set/ffi_range_set.py b/python/aug25/range_set/ffi_range_set.py
-      index 2111181..1111181 100644
-      --- a/python/aug25/range_set/ffi_range_set.py
-      +++ b/python/aug25/range_set/ffi_range_set.py
-      @@ -38,7 +38,9 @@
-                   record_metric('FFIRangeSet.union.in_len_b', len(other))
-               except Exception:
-                   pass
-      -        res = self | other
-      +        new_bs = self._bitset.union(other._bitset)
-      +        res = FFIRangeSet()
-      +        res._bitset = new_bs
-               try:
-                   record_metric('FFIRangeSet.union.out_len', len(res))
-               except Exception:
-      @@ -54,7 +56,9 @@
-                   record_metric('FFIRangeSet.intersection.in_len_b', len(other))
-               except Exception:
-                   pass
-      -        res = self & other
-      +        new_bs = self._bitset.intersection(other._bitset)
-      +        res = FFIRangeSet()
-      +        res._bitset = new_bs
-               try:
-                   record_metric('FFIRangeSet.intersection.out_len', len(res))
-               except Exception:
-      @@ -70,7 +74,9 @@
-                   record_metric('FFIRangeSet.difference.in_len_b', len(other))
-               except Exception:
-                   pass
-      -        res = self._bitset.difference(other._bitset)
-      +        new_bs = self._bitset.difference(other._bitset)
-      +        res = FFIRangeSet()
-      +        res._bitset = new_bs
-               try:
-                   record_metric('FFIRangeSet.difference.out_len', len(res))
-               except Exception:
+      -            for tsid, disallowed_terminals in disallowed_map:
+      +            for tsid, disallowed_terminals in disallowed_map.items():
+                       if tsid > max_state:
+                           continue
+                       terminals_to_llm = pmc.get(tsid)
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/gemini-10.py
       Applying patch to 'python/aug25/models/gemini-10.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/gemini-10.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/range_set/ffi_range_set.py
-      Applying patch to 'python/aug25/range_set/ffi_range_set.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/range_set/ffi_range_set.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Safely handle None in gemini-10 and
-      correct FFI set operations in FFIRangeSet"'
+  - user: 'Changes committed with message: "Fix: Correctly iterate over dictionary
+      items in gemini-10.py"'
     metadata:
 ...

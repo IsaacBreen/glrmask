@@ -67,7 +67,7 @@ class Model(GraphProvider):
             disallowed_llm_mask = RangeSet.empty()
             disallowed_map: Tuple[Tuple[int, RangeSet], ...] = acc.terminals_union
 
-            for tsid, disallowed_terminals in disallowed_map:
+            for tsid, disallowed_terminals in disallowed_map.items():
                 if tsid > max_state:
                     continue
                 terminals_to_llm = pmc.get(tsid)
