@@ -78,7 +78,7 @@ class Model(GraphProvider):
                             terminals_to_llm[terminal_id]
                         )
 
-            allowed_mask = (all_ones or RangeSet.empty()).difference(disallowed_llm_mask)
+            allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
             return PyAcc(
                 terminals_union=tuple(),  # consume
                 llm_mask=allowed_mask,

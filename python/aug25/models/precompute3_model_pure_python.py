@@ -379,7 +379,7 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         state_map = self.state
-        all_ones_mask: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
+        all_ones_mask: RangeSet = self.all_internal_llm_tokens_bitset if self.all_internal_llm_tokens_bitset is not None else RangeSet.empty()
         final_mask: RangeSet = RangeSet.empty()
 
         values: Dict[int, GSS] = {}
