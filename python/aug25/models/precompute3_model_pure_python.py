@@ -625,4 +625,5 @@ class Model(GraphProvider):
             stats.stop('get_mask.final_conversion')
 
             stats.stop('get_mask.total')
+            stats.report()
             return result
