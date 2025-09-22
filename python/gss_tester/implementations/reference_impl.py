@@ -2,9 +2,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from functools import reduce
-from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict
+from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict, TypeVar
 
-from ..interface import GSS, T, Acc
+from ..interface import GSS, T, Acc, NewAcc
 
 
 @dataclass(eq=False)
@@ -86,12 +86,12 @@ class ReferenceGSS(GSS[T, Acc]):
                     filtered.append((list(vals), acc))
         return ReferenceGSS(filtered)
 
-    def apply(self, func: Callable[[Acc], Acc]) -> 'ReferenceGSS[T, Acc]':
+    def apply(self, func: Callable[[Acc], NewAcc]) -> 'ReferenceGSS[T, NewAcc]':
         # Apply func to each accumulator independently
-        transformed: List[Tuple[List[T], Acc]] = []
+        transformed: List[Tuple[List[T], NewAcc]] = []
         for vals, acc in self._stacks:
             transformed.append((list(vals), func(acc)))
-        return ReferenceGSS(transformed)
+        return ReferenceGSS(transformed) # type: ignore[arg-type]
 
     def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
         # Keep only stacks where predicate(acc) is True

@@ -14,7 +14,7 @@ from typing import (
     TypeVar,
 )
 
-from ..interface import GSS, T, Acc
+from ..interface import GSS, T, Acc, NewAcc
 from .reference_impl import ReferenceGSS
 
 # ------------------------------
@@ -335,15 +335,15 @@ class SimpleGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_map[acc] = filtered_root
         return SimpleGSS(acc_trees=new_map)
 
-    def apply(self, func: Callable[[Acc], Acc]) -> "SimpleGSS[T, Acc]":
+    def apply(self, func: Callable[[Acc], NewAcc]) -> "SimpleGSS[T, NewAcc]":
         """
         Apply a function to each accumulator. If two accumulators map to the same new value,
         merge their tries.
         """
         if self.is_empty():
-            return self
+            return SimpleGSS(acc_trees={})
 
-        new_map: Dict[Acc, Lower[T]] = {}
+        new_map: Dict[NewAcc, Lower[T]] = {}
         for acc, root in self.acc_trees.items():
             new_acc = func(acc)
             if new_acc in new_map:
@@ -351,7 +351,7 @@ class SimpleGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 new_map[new_acc] = root
         # No cross-acc duplicates can appear here since stack sets were disjoint already.
-        return SimpleGSS(acc_trees=new_map)
+        return SimpleGSS(acc_trees=new_map) # type: ignore[arg-type]
 
     def prune(self, predicate: Callable[[Acc], bool]) -> "SimpleGSS[T, Acc]":
         """

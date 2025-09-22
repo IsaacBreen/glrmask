@@ -4,10 +4,10 @@ import os
 from dataclasses import dataclass, field
 from functools import reduce
 from itertools import chain
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
 from collections import Counter, defaultdict
 
-from ..interface import GSS, T, Acc
+from ..interface import GSS, T, Acc, NewAcc, Mergeable
 from .reference_impl import ReferenceGSS
 
 # ------------------------------
@@ -553,58 +553,38 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_inner = try_promote(UpperBranch(children={}, empty=new_empty))
                 return LeveledGSS(new_inner)
 
-    def apply(self, func: Callable[[Acc], Acc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
+    def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, NewAcc]:
         if memo is None:
             memo = {}
 
-        def transform(node: Upper[T, Acc]) -> Upper[T, Acc]:
+        def transform(node: Upper[T, Acc]) -> Upper[T, NewAcc]:
             if id(node) in memo:
                 return memo[id(node)]
 
             if isinstance(node, Interface):
                 new_acc = func(node.acc)
                 new_empty = func(node.empty) if node.empty is not None else None
-
-                if new_acc == node.acc and new_empty == node.empty:
-                    memo[id(node)] = node
-                    return node
-
                 res = Interface(children=node.children, acc=new_acc, empty=new_empty)
                 memo[id(node)] = res
                 return res
 
             # It's an UpperBranch
             new_empty = func(node.empty) if node.empty is not None else None
-
-            changed = new_empty != node.empty
-            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
             for v, kids in node.children.items():
-                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
-                any_child_changed_for_v = False
+                new_kids_for_v: Dict[int, Upper[T, NewAcc]] = {}
                 for d, child in kids.items():
                     new_child = transform(child)
-                    if new_child is not child:
-                        any_child_changed_for_v = True
-                    # Depth does not change in apply, so we can reuse `d`.
-                    new_kids_for_v[d] = new_child
-
-                if any_child_changed_for_v:
-                    changed = True
-                    new_children[v] = new_kids_for_v
-                else:
-                    new_children[v] = kids  # Reuse child dict
-
-            if not changed:
-                memo[id(node)] = node
-                return node
+                    new_kids_for_v[new_child._max_depth] = new_child
+                new_children[v] = new_kids_for_v
 
             res = UpperBranch(children=new_children, empty=new_empty)
             promoted = try_promote(res)
             memo[id(node)] = promoted
             return promoted
 
-        return LeveledGSS(transform(self.inner))
+        return LeveledGSS(transform(self.inner)) # type: ignore[arg-type]
 
     def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
         memo: Dict[int, Optional[Upper[T, Acc]]] = {}
@@ -680,17 +660,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledGSS(UpperBranch(children={}, empty=None))
         return LeveledGSS(res_inner)
 
-    def apply_and_prune(self, mutator: Callable[[Acc], Optional[Acc]]) -> LeveledGSS[T, Acc]:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]]) -> LeveledGSS[T, NewAcc]:
         """
         Fast single-pass implementation of apply_and_prune for LeveledGSS.
-        - mutator(acc) -> Optional[Acc]
+        - mutator(acc) -> Optional[NewAcc]
             * return None to prune stacks carrying `acc`
-            * return Acc (possibly unchanged) to keep/update stacks
+            * return NewAcc (possibly unchanged) to keep/update stacks
         This fuses the behavior of `apply` and `prune` and minimizes reconstruction.
         """
-        acc_cache: Dict[int, Optional[Acc]] = {}
+        acc_cache: Dict[int, Optional[NewAcc]] = {}
 
-        def mutate_acc(a: Acc) -> Optional[Acc]:
+        def mutate_acc(a: Acc) -> Optional[NewAcc]:
             k = id(a)
             if k in acc_cache:
                 return acc_cache[k]
@@ -698,9 +678,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             acc_cache[k] = r
             return r
 
-        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
+        memo: Dict[int, Optional[Upper[T, NewAcc]]] = {}
 
-        def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
+        def transform(node: Upper[T, Acc]) -> Optional[Upper[T, NewAcc]]:
             nid = id(node)
             if nid in memo:
                 return memo[nid]
@@ -720,8 +700,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
                 if not keep_acc and keep_empty:
                     # Acc is pruned, but the interface's explicit empty survives as a terminal stack.
-                    # Promote the leaf to maintain canonical form (Interface with no children).
-                    res = UpperBranch(children={}, empty=new_empty_opt)  # type: ignore[arg-type]
+                    # Promote the leaf to maintain canonical form.
+                    res = UpperBranch(children={}, empty=new_empty_opt)
                     promoted = try_promote(res)
                     memo[nid] = promoted
                     return promoted
@@ -729,51 +709,22 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 # keep_acc is True
                 new_acc = new_acc_opt  # type: ignore[assignment]
                 # Detect if anything changed; children are reused verbatim.
-                changed = (new_acc != node.acc) or (
-                    (node.empty is not None and new_empty_opt != node.empty)
-                )
-                if not changed:
-                    memo[nid] = node
-                    return node
-
                 res = Interface(children=node.children, acc=new_acc, empty=new_empty_opt)
                 memo[nid] = res
                 return res
 
             # UpperBranch
-            if node.empty is not None:
-                new_empty_opt = mutate_acc(node.empty)
-                empty_changed = new_empty_opt != node.empty
-            else:
-                new_empty_opt = None
-                empty_changed = False
-
-            changed = empty_changed
-            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            new_empty_opt = mutate_acc(node.empty) if node.empty is not None else None
+            new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
             for v, kids in node.children.items():
-                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
-                child_map_changed = False
+                new_kids_for_v: Dict[int, Upper[T, NewAcc]] = {}
                 for d, child in kids.items():
                     new_child = transform(child)
-                    if new_child is not child:
-                        child_map_changed = True
                     if new_child is not None:
                         new_kids_for_v[new_child._max_depth] = new_child
-
-                if len(new_kids_for_v) != len(kids):
-                    child_map_changed = True
-
-                if child_map_changed:
-                    changed = True
-                    if new_kids_for_v:
-                        new_children[v] = new_kids_for_v
-                else:
-                    new_children[v] = kids  # Reuse
-
-            if not changed:
-                memo[nid] = node
-                return node
+                if new_kids_for_v:
+                    new_children[v] = new_kids_for_v
 
             if not new_children and new_empty_opt is None:
                 memo[nid] = None
@@ -786,7 +737,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         res_inner = transform(self.inner)
         if res_inner is None:
-            return LeveledGSS(UpperBranch(children={}, empty=None))
+            return LeveledGSS(UpperBranch(children={}, empty=None)) # type: ignore[arg-type]
         return LeveledGSS(res_inner)
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
@@ -1032,6 +983,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
 
 Node = TypeVar("Node")
+AccPromote = TypeVar("AccPromote", bound="Mergeable")
 
 def _merge_optional_acc(a: Optional[Acc], b: Optional[Acc]) -> Optional[Acc]:
     if a is None:
@@ -1067,8 +1019,8 @@ def _merge_children_by_depth(
         merged_children[v] = v_out
     return merged_children
 
-def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
-    all_children = list(node._all_children())
+def try_promote(node: UpperBranch[T, AccPromote]) -> Upper[T, AccPromote]:
+    all_children: List[Upper[T, AccPromote]] = list(node._all_children())
     if not all_children:
         # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
         # it can be represented canonically as an Interface with no children.
@@ -1078,24 +1030,24 @@ def try_promote(node: UpperBranch[T, Acc]) -> Upper[T, Acc]:
     if not all(isinstance(c, Interface) for c in all_children):
         return node
 
-    accs: Set[Acc] = set()
+    accs: Set[AccPromote] = set()
     if node.empty is not None:
         accs.add(node.empty)
     for c in all_children:
-        ic: Interface[T, Acc] = c  # type: ignore[assignment]
+        ic: Interface[T, AccPromote] = c  # type: ignore[assignment]
         accs.add(ic.acc)
         if ic.empty is not None:
             accs.add(ic.empty)
 
     if len(accs) <= 1:
-        the_acc: Optional[Acc] = next(iter(accs)) if accs else None
+        the_acc: Optional[AccPromote] = next(iter(accs)) if accs else None
         if the_acc is None:
             return UpperBranch(children={}, empty=None)
         l_children: Dict[T, Dict[int, Lower[T]]] = {}
         for v, kids in node.children.items():
             v_map: Dict[int, Lower[T]] = {}
             for child in kids.values():
-                ci: Interface[T, Acc] = child  # type: ignore[assignment]
+                ci: Interface[T, AccPromote] = child  # type: ignore[assignment]
                 lower = Lower(children=ci.children, empty=(ci.empty is not None))
                 v_map[lower._max_depth] = lower
             if v_map:

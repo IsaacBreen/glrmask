@@ -25,6 +25,7 @@ class MergeableInt(int):
 
 T = TypeVar('T')  # Stack item type
 Acc = TypeVar('Acc', bound=Mergeable) # Accumulator type
+NewAcc = TypeVar('NewAcc', bound=Mergeable) # New accumulator type for apply/apply_and_prune
 GSSType = TypeVar("GSSType", bound="GSS[Any, Any]")
 
 class GSS(ABC, Generic[T, Acc]):
@@ -106,7 +107,7 @@ class GSS(ABC, Generic[T, Acc]):
         return dest
 
     @abstractmethod
-    def apply(self: GSSType, func: Callable[[Acc], Acc]) -> GSSType:
+    def apply(self, func: Callable[[Acc], NewAcc]) -> GSS[T, NewAcc]:
         """Applies a function to each accumulator, returning a new GSS state."""
         pass
 
@@ -118,7 +119,7 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
-    def apply_and_prune(self: GSSType, mutator: Callable[[Acc], Optional[Acc]]) -> GSSType:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]]) -> GSS[T, NewAcc]:
         """
         Combined transform that applies a mutate-and-prune function to each stack's accumulator.
         The `mutator` must return:
@@ -129,9 +130,9 @@ class GSS(ABC, Generic[T, Acc]):
         invoking `mutator` more than once per accumulator instance when possible.
         Concrete implementations can override for a faster single-pass transform.
         """
-        cache: Dict[int, Optional[Acc]] = {}
+        cache: Dict[int, Optional[NewAcc]] = {}
 
-        def decide(a: Acc) -> Optional[Acc]:
+        def decide(a: Acc) -> Optional[NewAcc]:
             k = id(a)
             if k in cache:
                 return cache[k]
@@ -140,9 +141,11 @@ class GSS(ABC, Generic[T, Acc]):
             return r
 
         pruned = self.prune(lambda a: decide(a) is not None)
-        def map_acc(a: Acc) -> Acc:
+        def map_acc(a: Acc) -> NewAcc:
             r = decide(a)
-            return r if r is not None else a
+            if r is None:
+                raise AssertionError("This should not be reached if prune worked correctly")
+            return r
         return pruned.apply(map_acc)
     @abstractmethod
     def merge(self: GSSType, other: GSSType) -> GSSType:
