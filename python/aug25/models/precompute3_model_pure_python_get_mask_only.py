@@ -33,13 +33,24 @@ def _profile_method(cls, method_name, counter_name):
 
         # Format it into a readable string
         call_chain = []
+        last_filename = None
         for frame in reversed(frames):
             # Don't include the profiler wrapper in the output
             if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
                 continue
-            call_chain.append(f"{frame.filename.split('/')[-1]}:{frame.lineno} ({frame.name})")
 
-        stack_key = " -> ".join(call_chain)
+            filename = frame.filename.split('/')[-1]
+            frame_str = f"{frame.lineno} ({frame.name})"
+
+            if filename == last_filename:
+                # Same file, just append line and func
+                call_chain[-1] += f" -> {frame_str}"
+            else:
+                # New file
+                call_chain.append(f"{filename}:{frame_str}")
+                last_filename = filename
+
+        stack_key = " | ".join(call_chain)
 
         stats_dict = _PROFILING_STATS[counter_name]
         stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
