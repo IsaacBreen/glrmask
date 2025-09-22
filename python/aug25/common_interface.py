@@ -1,119 +1,6 @@
-from typing import Protocol, Iterable, Optional, Tuple, List
+from typing import Protocol, Iterable, Optional, Tuple
 
-
-class RangeSet:
-    """
-    Represents a set of integers as a sorted, disjoint list of closed intervals.
-    """
-    __slots__ = ('intervals',)
-
-    def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
-        if intervals:
-            self.intervals = self._normalize(intervals)
-        else:
-            self.intervals = tuple()
-
-    @staticmethod
-    def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
-        """
-        Normalizes a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
-        """
-        items = sorted(intervals)
-        if not items:
-            return tuple()
-
-        merged: List[Tuple[int, int]] = []
-        cs, ce = items[0]
-        for ns, ne in items[1:]:
-            if ns <= ce + 1:
-                ce = max(ce, ne)
-            else:
-                merged.append((cs, ce))
-                cs, ce = ns, ne
-        merged.append((cs, ce))
-        return tuple(merged)
-
-    @staticmethod
-    def _merge_unsorted(intervals: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        """
-        Same as normalize but returns a list. Used by optimizer.
-        """
-        items = sorted(intervals)
-        if not items:
-            return []
-
-        merged: List[Tuple[int, int]] = []
-        cs, ce = items[0]
-        for ns, ne in items[1:]:
-            if ns <= ce + 1:
-                ce = max(ce, ne)
-            else:
-                merged.append((cs, ce))
-                cs, ce = ns, ne
-        merged.append((cs, ce))
-        return merged
-
-    @staticmethod
-    def from_ranges(ranges: List[List[int]]) -> 'RangeSet':
-        """Creates a RangeSet from a list of [start, end] lists."""
-        return RangeSet(tuple(map(tuple, ranges)))
-
-    def to_ranges(self) -> List[List[int]]:
-        """Converts the RangeSet to a list of [start, end] lists."""
-        return [list(interval) for interval in self.intervals]
-
-    @staticmethod
-    def from_indices(indices: Iterable[int]) -> 'RangeSet':
-        """Creates a RangeSet from an iterable of individual indices."""
-        indices_sorted = sorted(indices)
-        intervals = []
-        start = 0
-        for i in range(1, len(indices_sorted)):
-            if indices_sorted[i] != indices_sorted[i - 1] + 1:
-                intervals.append((start, indices_sorted[i - 1]))
-                start = indices_sorted[i]
-        intervals.append((start, indices_sorted[-1]))
-        return RangeSet(intervals)
-
-    @staticmethod
-    def empty() -> 'RangeSet':
-        """Creates an empty RangeSet."""
-        return RangeSet()
-
-    def to_indices(self) -> List[int]:
-        """Converts the RangeSet to a list of individual indices."""
-        result = []
-        for start, end in self.intervals:
-            result.extend(range(start, end + 1))
-        return result
-
-    @staticmethod
-    def from_numpy(bv) -> 'RangeSet':
-        """Creates a RangeSet from a numpy array of booleans."""
-        intervals = []
-        in_range = False
-        start = 0
-        for i in range(len(bv)):
-            if bv[i] and not in_range:
-                start = i
-                in_range = True
-            elif not bv[i] and in_range:
-                intervals.append((start, i - 1))
-                in_range = False
-        if in_range:
-            intervals.append((start, len(bv) - 1))
-        return RangeSet(intervals)
-
-    def __eq__(self, other):
-        if not isinstance(other, RangeSet):
-            return NotImplemented
-        return self.intervals == other.intervals
-
-    def __hash__(self):
-        return hash(self.intervals)
-
-    def __repr__(self):
-        return f"RangeSet({self.intervals!r})"
+from .range_set import RangeSet
 
 
 class GraphProvider(Protocol):
@@ -139,3 +26,6 @@ class GraphProvider(Protocol):
         - destination_node_index: The index of the node to transition to.
         """
         ...
+
+
+__all__ = ["GraphProvider", "RangeSet"]
