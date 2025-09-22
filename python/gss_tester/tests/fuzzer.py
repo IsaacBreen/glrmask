@@ -20,6 +20,8 @@ def run_fuzz_test(
     if value_pool is None:
         value_pool = list(range(20)) + ['a', 'b', 'c']
 
+    ALL_OPERATIONS = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+
     def _state_sig(stacks: List[Any]) -> str:
         # Canonical fingerprint of a GSS state, independent of object identity
         return json.dumps(stacks, sort_keys=True, ensure_ascii=False)
@@ -74,12 +76,11 @@ def run_fuzz_test(
                 continue
 
         # Choose an operation
-        can_merge = len(gss_states) >= 2
-        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-        if can_merge:
-            operations.append('merge')
-        
-        op_choice = rng.choice(operations)
+        op_choice = rng.choice(ALL_OPERATIONS)
+
+        # Skip impossible operations
+        if op_choice == 'merge' and len(gss_states) < 2:
+            continue
 
         # Select GSS state(s) to operate on
         source_index = rng.randrange(len(gss_states))
@@ -128,7 +129,7 @@ def run_fuzz_test(
                 new_gss = source_gss.prune(predicate)
                 args = {"threshold": threshold}
 
-            elif op_choice == 'merge' and can_merge:
+            elif op_choice == 'merge':
                 candidates = [i for i in range(len(gss_states)) if i != source_index]
                 other_index = rng.choice(candidates)
                 other_gss = gss_states[other_index]
