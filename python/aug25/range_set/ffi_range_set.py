@@ -33,19 +33,19 @@ class FFIRangeSet(RangeSet[int]):
     def union(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the union of two RangeSets."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet.from_ranges(other.intervals)
+            raise TypeError("other must be a FFIRangeSet")
         return self | other
 
     def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the intersection of two RangeSets."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet.from_ranges(other.intervals)
+            raise TypeError("other must be a FFIRangeSet")
         return self & other
 
     def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
         """Return the set difference self \\ other."""
         if not isinstance(other, FFIRangeSet):
-            other = FFIRangeSet.from_ranges(other.intervals)
+            raise TypeError("other must be a FFIRangeSet")
         return self - other
 
     def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
