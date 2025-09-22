@@ -85,7 +85,7 @@ class FFIRangeSet(RangeSet[int]):
             record_metric('FFIRangeSet.difference.in_len_b', len(other))
         except Exception:
             pass
-        res = self - other
+        res = self.difference(other)
         try:
             record_metric('FFIRangeSet.difference.out_len', len(res))
         except Exception:
