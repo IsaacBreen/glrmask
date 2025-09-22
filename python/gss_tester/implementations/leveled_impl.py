@@ -67,15 +67,6 @@ class Lower(Generic[T]):
 @dataclass(frozen=True)
 class LeveledGSSStats(Generic[T, Acc]):
     # Stack-level statistics
-    total_stacks: int
-    empty_stacks: int
-    non_empty_stacks: int
-    min_stack_length: Optional[int]
-    max_stack_length: Optional[int]
-    avg_stack_length: Optional[float]
-    median_stack_length: Optional[float]
-    length_histogram: Dict[int, int]
-    top_values_distribution: Dict[T, int]
     top_values: Set[T]
 
     # Structure-level statistics (unique nodes/edges in the DAG)
@@ -97,8 +88,6 @@ class LeveledGSSStats(Generic[T, Acc]):
     distinct_values: Set[T]
     unique_accumulators_count: int
     unique_accumulators: Set[Acc]
-    total_accumulator_instances: int
-    accumulator_sharing_ratio: float
 
     # "Empty" flags / terminal interfaces
     num_upper_with_empty: int
@@ -141,15 +130,7 @@ class LeveledGSSStats(Generic[T, Acc]):
     def __str__(self) -> str:
         lines: List[str] = []
         lines.append("LeveledGSSStats")
-        lines.append(f"- stacks: total={self.total_stacks}, empty={self.empty_stacks}, non_empty={self.non_empty_stacks}")
-        lines.append(f"- lengths: min={self.min_stack_length}, max={self.max_stack_length}, avg={self.avg_stack_length}, median={self.median_stack_length}")
-        lines.append(f"- length_histogram: {self._fmt_hist(self.length_histogram)}")
         lines.append(f"- top_values: {len(self.top_values)} distinct -> {self._fmt_subset(self.top_values)}")
-        lines.append(f"- top_values_distribution (counts by top-of-stack value): size={len(self.top_values_distribution)}")
-        # Try to display a small preview of top_values_distribution
-        if self.top_values_distribution:
-            sample_items = list(self.top_values_distribution.items())[:10]
-            lines.append("  " + ", ".join(f"{repr(k)}:{v}" for k, v in sample_items) + (" ..." if len(self.top_values_distribution) > 10 else ""))
 
         lines.append("- structure:")
         lines.append(f"  nodes: UpperBranch={self.num_upperbranch_nodes}, Interface={self.num_interface_nodes}, Lower={self.num_lower_nodes}, total={self.total_unique_nodes}")
@@ -159,9 +140,7 @@ class LeveledGSSStats(Generic[T, Acc]):
         lines.append("- values/accumulators:")
         lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
         lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
-        lines.append(f"  total_stacks={self.total_stacks} (logical paths)")
-        lines.append(f"  accumulator_sharing_ratio={self.accumulator_sharing_ratio:.4f} (unique_accs/total_stacks)")
+        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (references to accs)")
 
         lines.append("- empties/terminals:")
         lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
@@ -859,133 +838,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def stats(self) -> LeveledGSSStats[T, Acc]:
         """
-        Compute a comprehensive set of statistics for this LeveledGSS without flattening to stacks.
-        Where possible, dynamic programming is used to avoid enumerating all stacks.
+        Compute a comprehensive set of statistics for this LeveledGSS.
+        This operation is efficient and does not enumerate all stacks, focusing on structural properties.
         """
-        # --------------------
-        # Helpers: histograms of path lengths (suffix lengths from a node to any terminal stack)
-        # --------------------
-        lower_hist_cache: Dict[int, Dict[int, int]] = {}
-        upper_hist_cache: Dict[int, Dict[int, int]] = {}
-
-        def _merge_hist_inplace(dst: Dict[int, int], src: Dict[int, int], offset: int = 0) -> None:
-            if offset == 0:
-                for k, v in src.items():
-                    dst[k] = dst.get(k, 0) + v
-            else:
-                for k, v in src.items():
-                    kk = k + offset
-                    dst[kk] = dst.get(kk, 0) + v
-
-        def _hist_lower(node: Lower[T]) -> Dict[int, int]:
-            key = id(node)
-            cached = lower_hist_cache.get(key)
-            if cached is not None:
-                return cached
-            hist: Dict[int, int] = {}
-            if node.empty:
-                hist[0] = hist.get(0, 0) + 1
-            for kids in node.children.values():
-                for child in kids.values():
-                    ch = _hist_lower(child)
-                    _merge_hist_inplace(hist, ch, offset=1)
-            lower_hist_cache[key] = hist
-            return hist
-
-        def _hist_upper(node: Upper[T, Acc]) -> Dict[int, int]:
-            key = id(node)
-            cached = upper_hist_cache.get(key)
-            if cached is not None:
-                return cached
-            hist: Dict[int, int] = {}
-            if isinstance(node, UpperBranch):
-                if node.empty is not None:
-                    hist[0] = hist.get(0, 0) + 1
-                for kids in node.children.values():
-                    for child in kids.values():
-                        ch = _hist_upper(child)
-                        _merge_hist_inplace(hist, ch, offset=1)
-            else:
-                # Interface
-                if not node.children and node.empty is None:
-                    # Terminal via acc
-                    hist[0] = hist.get(0, 0) + 1
-                if node.empty is not None:
-                    # Terminal via explicit empty
-                    hist[0] = hist.get(0, 0) + 1
-                for kids in node.children.values():
-                    for child in kids.values():
-                        ch = _hist_lower(child)
-                        _merge_hist_inplace(hist, ch, offset=1)
-            upper_hist_cache[key] = hist
-            return hist
-
-        def _hist_total(h: Dict[int, int]) -> int:
-            return sum(h.values())
-
-        # Root histogram (suffix lengths from root)
-        root_hist = _hist_upper(self.inner)
-        total_stacks = _hist_total(root_hist)
-        empty_stacks = root_hist.get(0, 0)
-        non_empty_stacks = total_stacks - empty_stacks
-        if total_stacks > 0:
-            min_len = min(root_hist.keys())
-            max_len = max(root_hist.keys())
-            avg_len = sum(k * v for k, v in root_hist.items()) / total_stacks
-            # median from histogram
-            def median_from_hist(h: Dict[int, int], n: int) -> float:
-                keys = sorted(h.keys())
-                if n % 2 == 1:
-                    k_idx = (n + 1) // 2
-                    cum = 0
-                    for L in keys:
-                        cum += h[L]
-                        if cum >= k_idx:
-                            return float(L)
-                    return float(keys[-1])
-                else:
-                    k1 = n // 2
-                    k2 = k1 + 1
-                    cum = 0
-                    L1 = keys[0]
-                    L2 = keys[0]
-                    hit1 = False
-                    for L in keys:
-                        cum += h[L]
-                        if not hit1 and cum >= k1:
-                            L1 = L
-                            hit1 = True
-                        if cum >= k2:
-                            L2 = L
-                            break
-                    return (L1 + L2) / 2.0
-            median_len: Optional[float] = median_from_hist(root_hist, total_stacks)
-        else:
-            min_len = None
-            max_len = None
-            avg_len = None
-            median_len = None
-
-        # --------------------
-        # Top-of-stack distribution
-        # --------------------
-        top_values_distribution: Dict[T, int] = {}
-        if isinstance(self.inner, UpperBranch):
-            for v, kids in self.inner.children.items():
-                cnt = 0
-                for child in kids.values():
-                    cnt += _hist_total(_hist_upper(child))
-                if cnt:
-                    top_values_distribution[v] = cnt
-        else:
-            # Interface at root
-            for v, kids in self.inner.children.items():
-                cnt = 0
-                for child in kids.values():
-                    cnt += _hist_total(_hist_lower(child))
-                if cnt:
-                    top_values_distribution[v] = cnt
-        top_values: Set[T] = set(top_values_distribution.keys())
+        top_values: Set[T] = set(self.inner.children.keys())
 
         # --------------------
         # Structural scan (unique nodes/edges, depths, values, accumulators, multi-depth slots, sharing)
@@ -1132,12 +988,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         distinct_values_count = len(distinct_values)
         unique_accumulators_count = len(unique_accumulators)
 
-        # Accumulator counts
-        if total_stacks > 0:
-            accumulator_sharing_ratio = unique_accumulators_count / total_stacks
-        else:
-            accumulator_sharing_ratio = 1.0  # No stacks, so no redundancy.
-
         # Sharing metrics
         if incoming_edges:
             max_in_degree = max(incoming_edges.values())
@@ -1149,15 +999,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         structural_sharing_factor = total_edges / float(max(1, total_unique_nodes - 1))
 
         return LeveledGSSStats(
-            total_stacks=total_stacks,
-            empty_stacks=empty_stacks,
-            non_empty_stacks=non_empty_stacks,
-            min_stack_length=min_len,
-            max_stack_length=max_len,
-            avg_stack_length=avg_len,
-            median_stack_length=median_len,
-            length_histogram=dict(sorted(root_hist.items())),
-            top_values_distribution=top_values_distribution,
             top_values=top_values,
             num_upperbranch_nodes=num_upperbranch_nodes,
             num_interface_nodes=num_interface_nodes,
@@ -1173,8 +1014,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             distinct_values=distinct_values,
             unique_accumulators_count=unique_accumulators_count,
             unique_accumulators=unique_accumulators,
-            total_accumulator_instances=total_accumulator_instances,
-            accumulator_sharing_ratio=accumulator_sharing_ratio,
             num_upper_with_empty=num_upper_with_empty,
             num_interfaces_with_empty=num_interfaces_with_empty,
             num_lower_terminal_nodes=num_lower_terminal_nodes,
