@@ -1,6 +1,6 @@
 from typing import Protocol, Iterable, Optional, Tuple
 
-from .range_set import RangeSet
+from .range_set.range_set import RangeSet
 
 
 class GraphProvider(Protocol):
