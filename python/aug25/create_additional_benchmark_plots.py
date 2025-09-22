@@ -49,16 +49,22 @@ def parse_log_data(log_content):
         data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
         data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
         data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
+        data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
 
         # --- Extract Commit Times ---
         data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
 
-        # --- Final Check ---
+        # --- Final Check and Data Validation ---
         num_steps = len(data['get_mask_total_time'])
         if num_steps == 0:
             print("Error: No profiling steps found for the Python model.", file=sys.stderr)
             return None
         data['steps'] = list(range(1, num_steps + 1))
+
+        # Handle optional metrics that might not be in older logs
+        if len(data['acc_merge_calls']) == 0 and num_steps > 0:
+            print("Info: 'acc_merge calls' not found in log. Assuming zero for all steps.", file=sys.stderr)
+            data['acc_merge_calls'] = [0] * num_steps
 
         print(f"Successfully parsed {num_steps} steps.", file=sys.stderr)
         return data
@@ -104,11 +110,12 @@ def generate_plots(data):
     plt.savefig(os.path.join(plot_dir, "main_loop_apply_intersection.png"))
     plt.close()
 
-    # Plot 4: Main Loop Union and Merge Calls
+    # Plot 4: Main Loop Union and Merge Calls (UPDATED)
     plt.figure(figsize=(12, 8))
     plt.plot(steps, data['main_loop_union_calls'], 'o-', label='Main Loop Bitset.union Calls')
     plt.plot(steps, data['main_loop_merge_calls'], 'x-', label='Main Loop GSS.merge Calls')
     plt.plot(steps, data['bitset_union_calls'], 's--', alpha=0.7, label='Total bitset_union Calls')
+    plt.plot(steps, data['acc_merge_calls'], 'd-.', alpha=0.8, label='acc_merge Calls')
     plt.xlabel('Benchmark Step'); plt.ylabel('Number of Calls'); plt.title('Main Loop Union & Merge Calls (Log Scale)')
     plt.yscale('log'); plt.xticks(steps); plt.grid(True, which="both", ls="--"); plt.legend(); plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, "main_loop_union_merge.png"))
