@@ -310,9 +310,9 @@ class Model(GraphProvider):
                 # Sort by count, descending, and take top 10
                 sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
                 for i, (stack, count) in enumerate(sorted_callers):
-                    if i >= 10:
-                        print(f"  ... and {len(sorted_callers) - 10} more call sites.")
-                        break
+                    # if i >= 10:
+                    #     print(f"  ... and {len(sorted_callers) - 10} more call sites.")
+                    #     break
                     print(f"  - {count:<7} calls from: {stack}")
         print(f"--- get_mask END ---")
 
