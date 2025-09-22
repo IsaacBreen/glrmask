@@ -438,10 +438,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             all_children = list(self.inner._all_children())
             merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
             merged_empty = self.inner.acc if merged.empty else None
-            if merged.children:
-                return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
-            else:
-                return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+            return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
         else:
             all_children = list(self.inner._all_children())
             merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
@@ -453,10 +450,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 all_children = list(gss.inner._all_children())
                 merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
                 merged_empty = gss.inner.acc if merged.empty else None
-                if merged.empty or merged.children:
-                    gss = LeveledGSS(Interface(children=merged.children, acc=gss.inner.acc, empty=merged_empty))
-                else:
-                    gss = LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+                gss = LeveledGSS(Interface(children=merged.children, acc=gss.inner.acc, empty=merged_empty))
             else:
                 all_children = list(gss.inner._all_children())
                 merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
