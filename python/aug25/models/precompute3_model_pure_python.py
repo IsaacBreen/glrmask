@@ -48,14 +48,26 @@ class ParserTable:
     table: Dict[int, Row]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class PyAcc:
-    terminals_union: Tuple[Tuple[int, RangeSet], ...]
+    terminals_union: Dict[int, RangeSet]
     llm_mask: RangeSet
 
+    def __eq__(self, other):
+        if not isinstance(other, PyAcc):
+            return NotImplemented
+        return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+    def __hash__(self):
+        # frozenset of items for hashable dict
+        return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+
     def merge(self, other: "PyAcc") -> "PyAcc":
-        d1 = dict(self.terminals_union)
-        d2 = dict(other.terminals_union)
+        # The dataclass is frozen, so we can't modify in-place.
+        # But terminals_union is a dict, which is mutable.
+        # We must be careful to create copies.
+        d1 = self.terminals_union
+        d2 = other.terminals_union
         new_terminals_union = d1.copy()
         for k, v in d2.items():
             if k in new_terminals_union:
@@ -64,7 +76,7 @@ class PyAcc:
                 new_terminals_union[k] = v
 
         return PyAcc(
-            terminals_union=tuple(sorted(new_terminals_union.items())),
+            terminals_union=new_terminals_union,
             llm_mask=self.llm_mask.union(other.llm_mask),
         )
 
@@ -173,7 +185,7 @@ class Model(GraphProvider):
             all_terminals.add(model.ignore_terminal_id)
         model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-        initial_acc = PyAcc(terminals_union=tuple(), llm_mask=RangeSet.empty())
+        initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
@@ -196,7 +208,7 @@ class Model(GraphProvider):
     @profile
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
-            disallowed_terminals_map = dict(acc.terminals_union)
+            disallowed_terminals_map = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
                 disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                 if not matched_bv.intersection(disallowed_for_state).is_empty():
@@ -207,26 +219,24 @@ class Model(GraphProvider):
     @profile
     def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
-            old_map = dict(acc.terminals_union)
+            old_map = acc.terminals_union
             new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
             for old_sid, new_sid in state_map.items():
                 bv_source = old_map.get(old_sid, RangeSet.empty())
                 new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
-            new_map_tuple = tuple(sorted(new_bvs.items()))
-            return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
+            return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
         return gss.apply(apply_map)
 
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
-            current_map = dict(acc.terminals_union)
+            current_map = acc.terminals_union.copy()
             curr_bv = current_map.get(state_id, RangeSet.empty())
             to_add = RangeSet.from_indices([terminal_id])
             new_bv = curr_bv.union(to_add)
             current_map[state_id] = new_bv
-            new_map_tuple = tuple(sorted(current_map.items()))
-            return PyAcc(terminals_union=new_map_tuple, llm_mask=acc.llm_mask)
+            return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
 
     def get_root(self, state_id: int) -> int:
@@ -403,7 +413,7 @@ class Model(GraphProvider):
             def initialize_acc(acc: PyAcc) -> PyAcc:
                 # Compute allowed LLM tokens from disallowed terminals
                 disallowed_llm_mask = RangeSet.empty()
-                disallowed_map = dict(acc.terminals_union)
+                disallowed_map = acc.terminals_union
                 if disallowed_map:
                     for tsid, disallowed_terminals in disallowed_map.items():
                         if tsid > max_state or tsid not in pmc:
@@ -418,7 +428,7 @@ class Model(GraphProvider):
                 allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
 
                 return PyAcc(
-                    terminals_union=tuple(),  # consume
+                    terminals_union={},  # consume
                     llm_mask=allowed_mask,
                 )
 

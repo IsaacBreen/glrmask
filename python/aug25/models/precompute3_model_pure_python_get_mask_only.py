@@ -109,7 +109,7 @@ class Model(GraphProvider):
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
             disallowed_llm_mask = RangeSet.empty()
-            disallowed_map = dict(acc.terminals_union)
+            disallowed_map = acc.terminals_union
 
             for tsid, disallowed_terminals in disallowed_map.items():
                 if tsid > max_state or tsid not in pmc:
@@ -123,7 +123,7 @@ class Model(GraphProvider):
 
             allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
             return PyAcc(
-                terminals_union=tuple(),  # consume
+                terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
 
