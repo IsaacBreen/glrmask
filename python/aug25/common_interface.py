@@ -2,7 +2,7 @@ import os
 import sys
 from typing import Protocol, Iterable, Optional, Tuple
 
-if os.environ.get("USE_FFI_RANGESET", "0") == "1":
+from .range_set import RangeSet
     print("Using FFI-backed RangeSet.", file=sys.stderr)
     try:
         from .range_set.ffi_range_set import RangeSet
