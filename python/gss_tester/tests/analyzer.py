@@ -129,13 +129,13 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                     # Immediate operation at divergence index
                     t1 = res1.get("trace") if res1 else None
                     t2 = res2.get("trace") if res2 else None
-                    if t1 or t2:                        if t1 and t1.get("error"):
+                    if t1 or t2:
+                        if t1 and t1.get("error"):
                             print(f"  - NOTE: '{impl_name1}' encountered an exception at this step:")
                             print(f"    - Error: {t1.get('error')}")
                         if t2 and t2.get("error"):
                             print(f"  - NOTE: '{impl_name2}' encountered an exception at this step:")
                             print(f"    - Error: {t2.get('error')}")
-
                         print("  - Divergence operation details:")
                         if t1:
                             print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
