@@ -437,29 +437,31 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if isinstance(self.inner, Interface):
             all_children = list(self.inner._all_children())
             merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
-            return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=None))
+            merged_empty = self.inner.acc if merged.empty else None
+            if merged.children:
+                return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
+            else:
+                return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
         else:
             all_children = list(self.inner._all_children())
             merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
             return LeveledGSS(try_promote(merged))
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
-        all_upper_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-        all_lower_children: Dict[Acc, Dict[int, Lower[T]]] = {}  # acc -> id(node) -> node
+        gss = self
         for _ in range(n):
-            new_all_upper_children = {}
-            new_all_lower_children = {}
-            for u in all_upper_children.values():
-                if isinstance(u, Interface):
-                    for lower in u._all_children():
-                        new_all_lower_children.setdefault(u.acc, {})[id(lower)] = lower
+            if isinstance(gss.inner, Interface):
+                all_children = list(gss.inner._all_children())
+                merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+                merged_empty = gss.inner.acc if merged.empty else None
+                if merged.empty or merged.children:
+                    gss = LeveledGSS(Interface(children=merged.children, acc=gss.inner.acc, empty=merged_empty))
                 else:
-                    for upper in u._all_children():
-                        new_all_upper_children[id(upper)] = upper
-            for l in new_all_lower_children.values():
-                new_all_upper_children[id(l)] = l
-            all_upper_children = new_all_upper_children
-            all_lower_children = new_all_lower_children
-        merged_lower = 
+                    gss = LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+            else:
+                all_children = list(gss.inner._all_children())
+                merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+                gss = LeveledGSS(try_promote(merged))
+        return gss
 
 
 
