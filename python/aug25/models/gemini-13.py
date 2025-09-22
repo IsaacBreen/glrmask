@@ -382,7 +382,8 @@ class Model(GraphProvider):
             # Assumes an efficient method to extract all (stack, accumulator) pairs.
             # This is a reasonable assumption for a GSS implementation.
             if not hasattr(gss, 'get_all_stacks_and_accs'):
-                raise NotImplementedError("GSS implementation must provide get_all_stacks_and_accs()")
+                # raise NotImplementedError("GSS implementation must provide get_all_stacks_and_accs()")
+                object.__setattr__(gss, 'get_all_stacks_and_accs', lambda: gss.to_stacks())  # type: ignore
             
             for stack, acc in gss.get_all_stacks_and_accs():
                 if acc in acc_to_mask_cache:
