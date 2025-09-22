@@ -91,7 +91,7 @@ class Model(GraphProvider):
         self.arena: Dict[int, dict] = arena
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = None
         self.tokenizer: Optional[ffi.Regex] = None
         self.glr_parser: Optional[ffi.GLRParser] = None
         self.ignore_terminal_id: Optional[int] = None
@@ -100,6 +100,7 @@ class Model(GraphProvider):
         self.internal_to_original_map: Dict[int, int] = {}
         self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
         self.tokenizer_initial_state: Optional[int] = None
+        self.tokenizer_max_state: Optional[int] = None
         self.all_terminals_bitset: Optional[RangeSet] = None
 
         dumps = json.dumps
@@ -141,6 +142,7 @@ class Model(GraphProvider):
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         model.tokenizer = constraint.tokenizer()
+        model.tokenizer_max_state = model.tokenizer.max_state()
         model.glr_parser = constraint.glr_parser()
         model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
         model.tokenizer_initial_state = model.tokenizer.initial_state_id()
@@ -375,166 +377,148 @@ class Model(GraphProvider):
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
         return GSS.merge_many(shifted_gsses)
-
-    @profile
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        Changes:
-        - Initialize LLM mask per-accumulator (PyAcc.llm_mask) BEFORE traversal by computing
+        Changes for get_mask_only:
+        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
           the forbidden terminals -> forbidden LLM tokens and taking the complement.
         - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        state_map = self.state
-        all_ones_mask: RangeSet = self.all_internal_llm_tokens_bitset if self.all_internal_llm_tokens_bitset is not None else RangeSet.empty()
+        state_map: Dict[int, GSS] = self.state
+
+        all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
         final_mask: RangeSet = RangeSet.empty()
 
+        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
-        stopped: set[int] = set()
-        todo: Dict[int, set[int]] = {}
+        todo: Dict[int, Set[int]] = {}
         depth_heap: List[int] = []
 
-        heappush = heapq.heappush
-        heappop = heapq.heappop
-        roots_map = self.roots_map
-        max_depth = self.max_depth
-        arena = self.arena
+        hp, hpop = heapq.heappush, heapq.heappop
+        roots_map: Dict[int, int] = self.roots_map
+        max_depth: Dict[int, int] = self.max_depth
+        arena: Dict[int, dict] = self.arena
         is_end = self.is_end
-
         pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-        max_state = self.tokenizer.max_state()
+        max_state: int = self.tokenizer_max_state
 
-        # Seed: Initialize llm_mask in each GSS, consume terminals union, and enqueue roots.
+        # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+        def initialize_acc(acc: PyAcc) -> PyAcc:
+            # Compute allowed LLM tokens from disallowed terminals for this accumulator
+            disallowed_llm_mask = RangeSet.empty()
+            disallowed_map = acc.terminals_union
+
+            for tsid, disallowed_terminals in disallowed_map.items():
+                if tsid > max_state or tsid not in pmc:
+                    continue
+                terminals_to_llm = pmc[tsid]
+                for terminal_id in disallowed_terminals.to_indices():
+                    if terminal_id in terminals_to_llm:
+                        disallowed_llm_mask = disallowed_llm_mask.union(
+                            terminals_to_llm[terminal_id]
+                        )
+
+            allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
+            return PyAcc(
+                terminals_union={},  # consume
+                llm_mask=allowed_mask,
+            )
+
+        apply_memo: Dict[PyAcc, PyAcc] = {}
         for sid, gss in state_map.items():
-            # Set initial llm_mask on each accumulator and consume terminals_union
-            def initialize_acc(acc: PyAcc) -> PyAcc:
-                # Compute allowed LLM tokens from disallowed terminals
-                disallowed_llm_mask = RangeSet.empty()
-                disallowed_map = acc.terminals_union
-                if disallowed_map:
-                    for tsid, disallowed_terminals in disallowed_map.items():
-                        if tsid > max_state or tsid not in pmc:
-                            continue
-                        terminals_to_llm = pmc[tsid]
-                        for terminal_id in disallowed_terminals.to_indices():
-                            if terminal_id in terminals_to_llm:
-                                disallowed_llm_mask = disallowed_llm_mask.union(
-                                    terminals_to_llm[terminal_id]
-                                )
-
-                allowed_mask = all_ones_mask.difference(disallowed_llm_mask)
-
-                return PyAcc(
-                    terminals_union={},  # consume
-                    llm_mask=allowed_mask,
-                )
-
-            gss_initialized = gss.apply(initialize_acc)
-
-            root_idx = roots_map.get(int(sid))
-            if root_idx is None:
-                continue
-            root_idx = int(root_idx)
-
-            existing = values.get(root_idx)
-            if existing is not None:
-                merged_gss = existing.merge(gss_initialized)
-                values[root_idx] = merged_gss
+            r: int = roots_map[int(sid)]
+            gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+            if r in values:
+                values[r] = values[r].merge(gss_initialized)
             else:
-                values[root_idx] = gss_initialized
+                values[r] = gss_initialized
 
-            depth = max_depth[root_idx]
-            bucket = todo.get(depth)
+            d: int = max_depth[r]
+            bucket: Optional[Set[int]] = todo.get(d)
             if bucket is None:
-                todo[depth] = {root_idx}
-                heappush(depth_heap, depth)
+                todo[d] = {r}
+                hp(depth_heap, d)
             else:
-                bucket.add(root_idx)
+                bucket.add(r)
 
-        def enqueue(depth: int, node_idx: int) -> None:
-            bucket = todo.get(depth)
+        def enqueue(d: int, n: int) -> None:
+            bucket: Optional[Set[int]] = todo.get(d)
             if bucket is None:
-                todo[depth] = {node_idx}
-                heappush(depth_heap, depth)
+                todo[d] = {n}
+                hp(depth_heap, d)
             else:
-                bucket.add(node_idx)
+                bucket.add(n)
 
         # Main loop
-        while True:
-            node_indices: Optional[set[int]] = None
-            current_depth = -1
-            while depth_heap:
-                current_depth = heappop(depth_heap)
-                node_indices = todo.pop(current_depth, None)
-                if node_indices:
-                    break
-            if not node_indices:
-                break
-
-            for node_idx in node_indices:
-                if node_idx in stopped:
-                    continue
-
-                gss_node = values.pop(node_idx, None)
-                if gss_node is None:
-                    continue
-
-                # Compute current allowed LLM tokens at this node by reducing acc
-                reduced_acc = gss_node.reduce_acc()
-                if reduced_acc is None or reduced_acc.llm_mask.is_empty():
-                    # No possible tokens here -> stop this branch
-                    stopped.add(node_idx)
-                    continue
+        while depth_heap:
+            depth: int = hpop(depth_heap)
+            while todo[depth]:
+                node: int = todo[depth].pop()
+                gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
-                if is_end(node_idx):
-                    final_mask = final_mask.union(reduced_acc.llm_mask)
+                if is_end(node):
+                    reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                    if reduced_acc:
+                        final_mask = final_mask.union(reduced_acc.llm_mask)
 
-                # Transitions grouped by (pop, llm_bv)
-                node_data = arena.get(node_idx, {})
-                children = node_data.get("children") or []
-                for (pop, llm_bv), dests in children:
-                    popped = gss_node.popn(pop)
-                    llm_empty = llm_bv.is_empty()
+                # Traverse edges and propagate masks
+                edges = arena.get(node, {}).get("children") or []
+                for (pop, llm_bv), dests in edges:
+                    popped: GSS = gss_node.popn(pop)
+                    if popped.is_empty():
+                        continue
 
                     for dest_idx, state_bv in dests:
-                        matched: List[GSS] = []
-                        if not state_bv.is_empty():
-                            # for sid_val in popped.peek():
-                            #     if state_bv.contains(sid_val):
-                            #         matched.append(popped.isolate(sid_val))
-                            sid_vals = RangeSet.from_indices(popped.peek())
-                            matched = [popped.isolate_many(sid_vals.intersection(state_bv).to_indices())]
-                        if not matched:
+                        peeked = popped.peek()
+                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+
+                        if not values_to_keep:
                             continue
 
-                        child_gss_node = GSS.merge_many(matched)
+                        child_gss: GSS = popped.isolate_many(values_to_keep)
+                        if child_gss.is_empty():
+                            continue
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                        if not llm_empty:
-                            def intersect_edge(acc: PyAcc) -> PyAcc:
-                                return PyAcc(
+                        acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
+                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                            if acc in acc_memo:
+                                return acc_memo[acc]
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            if new_mask.is_empty():
+                                result = None
+                            else:
+                                result = PyAcc(
                                     terminals_union=acc.terminals_union,
-                                    llm_mask=acc.llm_mask.intersection(llm_bv)
+                                    llm_mask=new_mask
                                 )
-                            child_gss_node = child_gss_node.apply(intersect_edge)
+                            acc_memo[acc] = result
+                            return result
 
-                        d = int(dest_idx)
-                        existing_child = values.get(d)
-                        if existing_child is not None:
-                            merged_gss = existing_child.merge(child_gss_node)
-                            values[d] = merged_gss
+                        child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                        if child_gss.is_empty():
+                            continue
+
+                        d: int = int(dest_idx)
+                        if d in values:
+                            values[d] = values[d].merge(child_gss)
                         else:
-                            values[d] = child_gss_node
-
+                            values[d] = child_gss
                         enqueue(max_depth[d], d)
+
+            todo.pop(depth)
+
 
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
-        for internal_id in final_mask.to_indices():
-            if internal_id in self.internal_to_original_map:
-                original_indices.append(self.internal_to_original_map[internal_id])
+        for i in final_mask.to_indices():
+            if i in self.internal_to_original_map:
+                original_indices.append(self.internal_to_original_map[i])
+
         return RangeSet.from_indices(original_indices)
