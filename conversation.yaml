@@ -17,8 +17,11 @@ local_system:
       import argparse
       import json
       from pathlib import Path
-      from typing import List, Dict, Any, Tuple
+      from typing import List, Dict, Any, Tuple, Optional
       import itertools
+
+      MAX_STACKS_PREVIEW = 5
+      TRACE_CONTEXT_WINDOW = 10
 
       def analyze_results(result_files: List[Path], reference_file: Path = None):
           all_results: Dict[str, List[Dict[str, Any]]] = {}
@@ -33,7 +36,6 @@ local_system:
               except (json.JSONDecodeError, KeyError) as e:
                   print(f"Warning: Skipping invalid result file {file_path}: {e}")
 
-
           if not implementations:
               print("No valid result files found to analyze.")
               return
@@ -47,6 +49,28 @@ local_system:
               return tuple(
                   (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
               )
+
+          def pretty_stacks(stacks: Any, max_items: int = MAX_STACKS_PREVIEW) -> str:
+              try:
+                  if not isinstance(stacks, list):
+                      return json.dumps(stacks, ensure_ascii=False)
+                  shown = stacks[:max_items]
+                  s = json.dumps(shown, ensure_ascii=False)
+                  if len(stacks) > max_items:
+                      s += " ..."
+                  return s
+              except Exception:
+                  return repr(stacks)
+
+          def extract_trace_window(results: List[Dict[str, Any]], up_to_index: int, window: int = TRACE_CONTEXT_WINDOW) -> List[Tuple[int, Dict[str, Any]]]:
+              start = max(0, up_to_index - window + 1)
+              items: List[Tuple[int, Dict[str, Any]]] = []
+              for i in range(start, up_to_index + 1):
+                  r = results[i]
+                  t = r.get("trace")
+                  if isinstance(t, dict):
+                      items.append((i, t))
+              return items[-window:]
 
           partitions: Dict[Signature, List[str]] = {}
           for impl_name, results in all_results.items():
@@ -116,6 +140,72 @@ local_system:
                               print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
                           else:
                               print(f"    - {impl_name2}: No yield at this index.")
+
+                          # Rich trace context (if available)
+                          # Immediate operation at divergence index
+                          t1 = res1.get("trace") if res1 else None
+                          t2 = res2.get("trace") if res2 else None
+                          if t1 or t2:
+                              print("  - Divergence operation details:")
+                              if t1:
+                                  print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                                  args1 = t1.get("args", {})
+                                  print(f"      args={json.dumps(args1, ensure_ascii=False)}")
+                                  ss1 = t1.get("source_stacks")
+                                  rs1 = t1.get("result_stacks")
+                                  if ss1 is not None:
+                                      print(f"      source_stacks={pretty_stacks(ss1)}")
+                                  if rs1 is not None:
+                                      print(f"      result_stacks={pretty_stacks(rs1)}")
+                              else:
+                                  print(f"    - {impl_name1}: No trace info at divergence index.")
+                              if t2:
+                                  print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                                  args2 = t2.get("args", {})
+                                  print(f"      args={json.dumps(args2, ensure_ascii=False)}")
+                                  ss2 = t2.get("source_stacks")
+                                  rs2 = t2.get("result_stacks")
+                                  if ss2 is not None:
+                                      print(f"      source_stacks={pretty_stacks(ss2)}")
+                                  if rs2 is not None:
+                                      print(f"      result_stacks={pretty_stacks(rs2)}")
+                              else:
+                                  print(f"    - {impl_name2}: No trace info at divergence index.")
+
+                          # Rolling window of previous fuzz ops for each impl (up to TRACE_CONTEXT_WINDOW)
+                          ctx1 = extract_trace_window(all_results[impl_name1], i, TRACE_CONTEXT_WINDOW)
+                          ctx2 = extract_trace_window(all_results[impl_name2], i, TRACE_CONTEXT_WINDOW)
+                          if ctx1:
+                              seed1 = ctx1[-1][1].get("seed")
+                              print(f"  - Trace context for {impl_name1} (seed={seed1}, last {len(ctx1)} op(s)):")
+                              for idx, tr in ctx1:
+                                  op = tr.get("op")
+                                  step = tr.get("step")
+                                  args = tr.get("args", {})
+                                  ss = tr.get("source_stacks")
+                                  rs = tr.get("result_stacks")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  if ss is not None:
+                                      print(f"         src={pretty_stacks(ss)}")
+                                  if rs is not None:
+                                      print(f"         res={pretty_stacks(rs)}")
+                          else:
+                              print(f"  - No fuzz trace context available for {impl_name1}.")
+
+                          if ctx2:
+                              seed2 = ctx2[-1][1].get("seed")
+                              print(f"  - Trace context for {impl_name2} (seed={seed2}, last {len(ctx2)} op(s)):")
+                              for idx, tr in ctx2:
+                                  op = tr.get("op")
+                                  step = tr.get("step")
+                                  args = tr.get("args", {})
+                                  ss = tr.get("source_stacks")
+                                  rs = tr.get("result_stacks")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  if ss is not None:
+                                      print(f"         src={pretty_stacks(ss)}")
+                                  if rs is not None:
+                                      print(f"         res={pretty_stacks(rs)}")
                           break # Show only the first divergence for this pair
 
       def main():
@@ -145,7 +235,7 @@ local_system:
           main()
     python/gss_tester/tests/fuzzer.py: |
       import random
-      from typing import Generator, Any, Type, List, Callable
+      from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
 
       from ..interface import GSS, MergeableInt
 
@@ -156,23 +246,54 @@ local_system:
           num_steps: int,
           max_gss_states: int = 10,
           value_pool: List[Any] = None
-      ) -> Generator[GSS, None, None]:
+      ) -> Generator[Tuple[GSS, Dict[str, Any]], None, None]:
           """
           Runs a randomized sequence of GSS operations to find inconsistencies.
-          Yields the new GSS state after each operation.
+          Yields (new_gSS_state, trace) after each operation.
+          The trace includes operation name, arguments, source stacks, result stacks, and more.
           """
           if value_pool is None:
               value_pool = list(range(20)) + ['a', 'b', 'c']
 
           rng = random.Random(seed)
           gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
-          yield gss_states[0]
+          step_idx = 0
+          yield gss_states[0], {
+              "phase": "fuzz",
+              "op": "init",
+              "step": step_idx,
+              "seed": seed,
+              "args": {},
+              "source_index": None,
+              "other_index": None,
+              "pool_size_before": 0,
+              "pool_size_after": len(gss_states),
+              "source_stacks": None,
+              "other_stacks": None,
+              "result_stacks": gss_states[0].to_stacks(),
+              "added_to_pool": False,
+          }
 
           for _ in range(num_steps):
               if not gss_states:
                   # All states were pruned or became empty, start over.
                   gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
-                  yield gss_states[0]
+                  step_idx += 1
+                  yield gss_states[0], {
+                      "phase": "fuzz",
+                      "op": "restart_empty_pool",
+                      "step": step_idx,
+                      "seed": seed,
+                      "args": {},
+                      "source_index": None,
+                      "other_index": None,
+                      "pool_size_before": 0,
+                      "pool_size_after": len(gss_states),
+                      "source_stacks": None,
+                      "other_stacks": None,
+                      "result_stacks": gss_states[0].to_stacks(),
+                      "added_to_pool": False,
+                  }
                   if len(gss_states) >= max_gss_states:
                       continue
 
@@ -185,14 +306,20 @@ local_system:
               op_choice = rng.choice(operations)
 
               # Select GSS state(s) to operate on
-              source_gss = rng.choice(gss_states)
+              source_index = rng.randrange(len(gss_states))
+              source_gss = gss_states[source_index]
+              source_stacks = source_gss.to_stacks()
               
               new_gss: GSS
+              args: Dict[str, Any] = {}
+              other_stacks: Optional[List[Any]] = None
+              other_index: Optional[int] = None
 
               try:
                   if op_choice == 'push':
                       value = rng.choice(value_pool)
                       new_gss = source_gss.push(value)
+                      args = {"value": value}
 
                   elif op_choice == 'pop':
                       new_gss = source_gss.pop()
@@ -200,6 +327,7 @@ local_system:
                   elif op_choice == 'popn':
                       n = rng.randint(0, 4)
                       new_gss = source_gss.popn(n)
+                      args = {"n": n}
 
                   elif op_choice == 'isolate':
                       # 20% chance of isolating empty stack
@@ -208,31 +336,57 @@ local_system:
                       else:
                           value = rng.choice(value_pool)
                       new_gss = source_gss.isolate(value)
+                      args = {"value": value}
 
                   elif op_choice == 'apply':
                       amount = rng.randint(1, 10)
                       # Use a default argument in the lambda to capture the value of `amount`
                       func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
                       new_gss = source_gss.apply(func)
+                      args = {"amount": amount}
 
                   elif op_choice == 'prune':
                       threshold = rng.randint(0, 20)
                       # Use a default argument in the lambda to capture the value of `threshold`
                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
                       new_gss = source_gss.prune(predicate)
+                      args = {"threshold": threshold}
 
                   elif op_choice == 'merge' and can_merge:
-                      other_gss = rng.choice([g for g in gss_states if g is not source_gss])
+                      candidates = [i for i in range(len(gss_states)) if i != source_index]
+                      other_index = rng.choice(candidates)
+                      other_gss = gss_states[other_index]
                       new_gss = source_gss.merge(other_gss)
+                      other_stacks = other_gss.to_stacks()
+                      args = {"other_index": other_index}
                   
                   else: # Should not happen
                       continue
 
-                  yield new_gss
-
+                  pool_size_before = len(gss_states)
+                  step_idx += 1
+                  result_stacks = new_gss.to_stacks()
                   # Add the new state to our pool, but avoid adding empty or duplicate states
+                  added_to_pool = False
                   if new_gss is not source_gss and not new_gss.is_empty():
                       gss_states.append(new_gss)
+                      added_to_pool = True
+
+                  yield new_gss, {
+                      "phase": "fuzz",
+                      "op": op_choice,
+                      "step": step_idx,
+                      "seed": seed,
+                      "args": args,
+                      "source_index": source_index,
+                      "other_index": other_index,
+                      "pool_size_before": pool_size_before,
+                      "pool_size_after": len(gss_states),
+                      "source_stacks": source_stacks,
+                      "other_stacks": other_stacks,
+                      "result_stacks": result_stacks,
+                      "added_to_pool": added_to_pool,
+                  }
 
                   # Prune the list of GSS states to keep it manageable
                   if len(gss_states) > max_gss_states:
@@ -246,6 +400,7 @@ local_system:
       import argparse
       import importlib
       import json
+      from typing import Tuple
       from pathlib import Path
       import sys
       import os
@@ -283,11 +438,27 @@ local_system:
 
           print("Running test specification...")
           results = []
-          for state, line_no in run_test_spec(gss_class):
-              results.append({
-                  "line": line_no,
-                  "state": state
-              })
+          for yielded in run_test_spec(gss_class):
+              # Support (state, line) and (state, line, trace) tuples from the test spec.
+              if isinstance(yielded, tuple):
+                  if len(yielded) == 2:
+                      state, line_no = yielded
+                      item = {
+                          "line": line_no,
+                          "state": state
+                      }
+                  elif len(yielded) >= 3:
+                      state, line_no, trace = yielded[0], yielded[1], yielded[2]
+                      item = {
+                          "line": line_no,
+                          "state": state,
+                          "trace": trace
+                      }
+                  else:
+                      # Unexpected tuple arity; fallback to legacy behavior.
+                      state, line_no = yielded[0], yielded[1]
+                      item = {"line": line_no, "state": state}
+                  results.append(item)
 
           output_data = {
               "implementation": f"{args.implementation_module}.{args.implementation_class}",
@@ -303,7 +474,7 @@ local_system:
 
       if __name__ == "__main__":
           main()
-    python/gss_tester/tests/test_spec.py: |
+    python/gss_tester/tests/test_spec.py: |+
       import inspect
       from typing import Generator, Tuple, Any, Type
       from ..interface import GSS, MergeableInt
@@ -321,11 +492,15 @@ local_system:
           # For this test, the accumulator is an integer and stack items are integers.
           acc_factory = lambda: MergeableInt(0)
 
-          def _yield_state(gss_state: GSS):
+          def _yield_state(gss_state: GSS, trace: Any = None):
               """Helper to yield the state and the caller's line number."""
               caller_frame = inspect.currentframe().f_back
               line_no = caller_frame.f_lineno
-              yield (gss_state.to_stacks(), line_no)
+              if trace is None:
+                  yield (gss_state.to_stacks(), line_no)
+              else:
+                  # Forward optional fuzz trace alongside state+line
+                  yield (gss_state.to_stacks(), line_no, trace)
 
           # --- Test 1: Basic push/pop/construction ---
           gss1 = gss_class.from_stacks([([], acc_factory())])
@@ -553,8 +728,16 @@ local_system:
           # The seed ensures the test is deterministic.
           fuzz_seed = 42
           fuzz_steps = 100
-          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-              yield from _yield_state(gss_state)
+          for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+              # The fuzzer yields (gss_state, trace). For compatibility, accept a bare gss_state too.
+              if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
+                  gss_state, trace = item
+                  yield from _yield_state(gss_state, trace)
+              else:
+                  # Fallback (older fuzzer behavior)
+                  gss_state = item  # type: ignore[assignment]
+                  yield from _yield_state(gss_state)
+
     python/gss_tester/__init__.py: |
       # This file makes 'gss_tester' a Python package.
     python/gss_tester/interface.py: |
@@ -3708,6 +3891,10 @@ local_system:
               merged = try_promote(merged)
               return LeveledGSS(merged)
           def popn(self, n: int) -> LeveledGSS[T, Acc]:
+              # Fast path: popn(0) is a no-op. Preserve identity to match the default
+              # implementation's behavior (crucial for deterministic fuzzing).
+              if n <= 0:
+                  return self
               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
               for _ in range(n):
                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
@@ -4583,8 +4770,11 @@ messages:
       import argparse
       import json
       from pathlib import Path
-      from typing import List, Dict, Any, Tuple
+      from typing import List, Dict, Any, Tuple, Optional
       import itertools
+
+      MAX_STACKS_PREVIEW = 5
+      TRACE_CONTEXT_WINDOW = 10
 
       def analyze_results(result_files: List[Path], reference_file: Path = None):
           all_results: Dict[str, List[Dict[str, Any]]] = {}
@@ -4599,7 +4789,6 @@ messages:
               except (json.JSONDecodeError, KeyError) as e:
                   print(f"Warning: Skipping invalid result file {file_path}: {e}")
 
-
           if not implementations:
               print("No valid result files found to analyze.")
               return
@@ -4613,6 +4802,28 @@ messages:
               return tuple(
                   (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
               )
+
+          def pretty_stacks(stacks: Any, max_items: int = MAX_STACKS_PREVIEW) -> str:
+              try:
+                  if not isinstance(stacks, list):
+                      return json.dumps(stacks, ensure_ascii=False)
+                  shown = stacks[:max_items]
+                  s = json.dumps(shown, ensure_ascii=False)
+                  if len(stacks) > max_items:
+                      s += " ..."
+                  return s
+              except Exception:
+                  return repr(stacks)
+
+          def extract_trace_window(results: List[Dict[str, Any]], up_to_index: int, window: int = TRACE_CONTEXT_WINDOW) -> List[Tuple[int, Dict[str, Any]]]:
+              start = max(0, up_to_index - window + 1)
+              items: List[Tuple[int, Dict[str, Any]]] = []
+              for i in range(start, up_to_index + 1):
+                  r = results[i]
+                  t = r.get("trace")
+                  if isinstance(t, dict):
+                      items.append((i, t))
+              return items[-window:]
 
           partitions: Dict[Signature, List[str]] = {}
           for impl_name, results in all_results.items():
@@ -4682,6 +4893,72 @@ messages:
                               print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
                           else:
                               print(f"    - {impl_name2}: No yield at this index.")
+
+                          # Rich trace context (if available)
+                          # Immediate operation at divergence index
+                          t1 = res1.get("trace") if res1 else None
+                          t2 = res2.get("trace") if res2 else None
+                          if t1 or t2:
+                              print("  - Divergence operation details:")
+                              if t1:
+                                  print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                                  args1 = t1.get("args", {})
+                                  print(f"      args={json.dumps(args1, ensure_ascii=False)}")
+                                  ss1 = t1.get("source_stacks")
+                                  rs1 = t1.get("result_stacks")
+                                  if ss1 is not None:
+                                      print(f"      source_stacks={pretty_stacks(ss1)}")
+                                  if rs1 is not None:
+                                      print(f"      result_stacks={pretty_stacks(rs1)}")
+                              else:
+                                  print(f"    - {impl_name1}: No trace info at divergence index.")
+                              if t2:
+                                  print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                                  args2 = t2.get("args", {})
+                                  print(f"      args={json.dumps(args2, ensure_ascii=False)}")
+                                  ss2 = t2.get("source_stacks")
+                                  rs2 = t2.get("result_stacks")
+                                  if ss2 is not None:
+                                      print(f"      source_stacks={pretty_stacks(ss2)}")
+                                  if rs2 is not None:
+                                      print(f"      result_stacks={pretty_stacks(rs2)}")
+                              else:
+                                  print(f"    - {impl_name2}: No trace info at divergence index.")
+
+                          # Rolling window of previous fuzz ops for each impl (up to TRACE_CONTEXT_WINDOW)
+                          ctx1 = extract_trace_window(all_results[impl_name1], i, TRACE_CONTEXT_WINDOW)
+                          ctx2 = extract_trace_window(all_results[impl_name2], i, TRACE_CONTEXT_WINDOW)
+                          if ctx1:
+                              seed1 = ctx1[-1][1].get("seed")
+                              print(f"  - Trace context for {impl_name1} (seed={seed1}, last {len(ctx1)} op(s)):")
+                              for idx, tr in ctx1:
+                                  op = tr.get("op")
+                                  step = tr.get("step")
+                                  args = tr.get("args", {})
+                                  ss = tr.get("source_stacks")
+                                  rs = tr.get("result_stacks")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  if ss is not None:
+                                      print(f"         src={pretty_stacks(ss)}")
+                                  if rs is not None:
+                                      print(f"         res={pretty_stacks(rs)}")
+                          else:
+                              print(f"  - No fuzz trace context available for {impl_name1}.")
+
+                          if ctx2:
+                              seed2 = ctx2[-1][1].get("seed")
+                              print(f"  - Trace context for {impl_name2} (seed={seed2}, last {len(ctx2)} op(s)):")
+                              for idx, tr in ctx2:
+                                  op = tr.get("op")
+                                  step = tr.get("step")
+                                  args = tr.get("args", {})
+                                  ss = tr.get("source_stacks")
+                                  rs = tr.get("result_stacks")
+                                  print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
+                                  if ss is not None:
+                                      print(f"         src={pretty_stacks(ss)}")
+                                  if rs is not None:
+                                      print(f"         res={pretty_stacks(rs)}")
                           break # Show only the first divergence for this pair
 
       def main():
@@ -4716,7 +4993,7 @@ messages:
   - user: |-
       ```python 'python/gss_tester/tests/fuzzer.py'
       import random
-      from typing import Generator, Any, Type, List, Callable
+      from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
 
       from ..interface import GSS, MergeableInt
 
@@ -4727,23 +5004,54 @@ messages:
           num_steps: int,
           max_gss_states: int = 10,
           value_pool: List[Any] = None
-      ) -> Generator[GSS, None, None]:
+      ) -> Generator[Tuple[GSS, Dict[str, Any]], None, None]:
           """
           Runs a randomized sequence of GSS operations to find inconsistencies.
-          Yields the new GSS state after each operation.
+          Yields (new_gSS_state, trace) after each operation.
+          The trace includes operation name, arguments, source stacks, result stacks, and more.
           """
           if value_pool is None:
               value_pool = list(range(20)) + ['a', 'b', 'c']
 
           rng = random.Random(seed)
           gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
-          yield gss_states[0]
+          step_idx = 0
+          yield gss_states[0], {
+              "phase": "fuzz",
+              "op": "init",
+              "step": step_idx,
+              "seed": seed,
+              "args": {},
+              "source_index": None,
+              "other_index": None,
+              "pool_size_before": 0,
+              "pool_size_after": len(gss_states),
+              "source_stacks": None,
+              "other_stacks": None,
+              "result_stacks": gss_states[0].to_stacks(),
+              "added_to_pool": False,
+          }
 
           for _ in range(num_steps):
               if not gss_states:
                   # All states were pruned or became empty, start over.
                   gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
-                  yield gss_states[0]
+                  step_idx += 1
+                  yield gss_states[0], {
+                      "phase": "fuzz",
+                      "op": "restart_empty_pool",
+                      "step": step_idx,
+                      "seed": seed,
+                      "args": {},
+                      "source_index": None,
+                      "other_index": None,
+                      "pool_size_before": 0,
+                      "pool_size_after": len(gss_states),
+                      "source_stacks": None,
+                      "other_stacks": None,
+                      "result_stacks": gss_states[0].to_stacks(),
+                      "added_to_pool": False,
+                  }
                   if len(gss_states) >= max_gss_states:
                       continue
 
@@ -4756,14 +5064,20 @@ messages:
               op_choice = rng.choice(operations)
 
               # Select GSS state(s) to operate on
-              source_gss = rng.choice(gss_states)
+              source_index = rng.randrange(len(gss_states))
+              source_gss = gss_states[source_index]
+              source_stacks = source_gss.to_stacks()
               
               new_gss: GSS
+              args: Dict[str, Any] = {}
+              other_stacks: Optional[List[Any]] = None
+              other_index: Optional[int] = None
 
               try:
                   if op_choice == 'push':
                       value = rng.choice(value_pool)
                       new_gss = source_gss.push(value)
+                      args = {"value": value}
 
                   elif op_choice == 'pop':
                       new_gss = source_gss.pop()
@@ -4771,6 +5085,7 @@ messages:
                   elif op_choice == 'popn':
                       n = rng.randint(0, 4)
                       new_gss = source_gss.popn(n)
+                      args = {"n": n}
 
                   elif op_choice == 'isolate':
                       # 20% chance of isolating empty stack
@@ -4779,31 +5094,57 @@ messages:
                       else:
                           value = rng.choice(value_pool)
                       new_gss = source_gss.isolate(value)
+                      args = {"value": value}
 
                   elif op_choice == 'apply':
                       amount = rng.randint(1, 10)
                       # Use a default argument in the lambda to capture the value of `amount`
                       func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
                       new_gss = source_gss.apply(func)
+                      args = {"amount": amount}
 
                   elif op_choice == 'prune':
                       threshold = rng.randint(0, 20)
                       # Use a default argument in the lambda to capture the value of `threshold`
                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
                       new_gss = source_gss.prune(predicate)
+                      args = {"threshold": threshold}
 
                   elif op_choice == 'merge' and can_merge:
-                      other_gss = rng.choice([g for g in gss_states if g is not source_gss])
+                      candidates = [i for i in range(len(gss_states)) if i != source_index]
+                      other_index = rng.choice(candidates)
+                      other_gss = gss_states[other_index]
                       new_gss = source_gss.merge(other_gss)
+                      other_stacks = other_gss.to_stacks()
+                      args = {"other_index": other_index}
                   
                   else: # Should not happen
                       continue
 
-                  yield new_gss
-
+                  pool_size_before = len(gss_states)
+                  step_idx += 1
+                  result_stacks = new_gss.to_stacks()
                   # Add the new state to our pool, but avoid adding empty or duplicate states
+                  added_to_pool = False
                   if new_gss is not source_gss and not new_gss.is_empty():
                       gss_states.append(new_gss)
+                      added_to_pool = True
+
+                  yield new_gss, {
+                      "phase": "fuzz",
+                      "op": op_choice,
+                      "step": step_idx,
+                      "seed": seed,
+                      "args": args,
+                      "source_index": source_index,
+                      "other_index": other_index,
+                      "pool_size_before": pool_size_before,
+                      "pool_size_after": len(gss_states),
+                      "source_stacks": source_stacks,
+                      "other_stacks": other_stacks,
+                      "result_stacks": result_stacks,
+                      "added_to_pool": added_to_pool,
+                  }
 
                   # Prune the list of GSS states to keep it manageable
                   if len(gss_states) > max_gss_states:
@@ -4822,6 +5163,7 @@ messages:
       import argparse
       import importlib
       import json
+      from typing import Tuple
       from pathlib import Path
       import sys
       import os
@@ -4859,11 +5201,27 @@ messages:
 
           print("Running test specification...")
           results = []
-          for state, line_no in run_test_spec(gss_class):
-              results.append({
-                  "line": line_no,
-                  "state": state
-              })
+          for yielded in run_test_spec(gss_class):
+              # Support (state, line) and (state, line, trace) tuples from the test spec.
+              if isinstance(yielded, tuple):
+                  if len(yielded) == 2:
+                      state, line_no = yielded
+                      item = {
+                          "line": line_no,
+                          "state": state
+                      }
+                  elif len(yielded) >= 3:
+                      state, line_no, trace = yielded[0], yielded[1], yielded[2]
+                      item = {
+                          "line": line_no,
+                          "state": state,
+                          "trace": trace
+                      }
+                  else:
+                      # Unexpected tuple arity; fallback to legacy behavior.
+                      state, line_no = yielded[0], yielded[1]
+                      item = {"line": line_no, "state": state}
+                  results.append(item)
 
           output_data = {
               "implementation": f"{args.implementation_module}.{args.implementation_class}",
@@ -4902,11 +5260,15 @@ messages:
           # For this test, the accumulator is an integer and stack items are integers.
           acc_factory = lambda: MergeableInt(0)
 
-          def _yield_state(gss_state: GSS):
+          def _yield_state(gss_state: GSS, trace: Any = None):
               """Helper to yield the state and the caller's line number."""
               caller_frame = inspect.currentframe().f_back
               line_no = caller_frame.f_lineno
-              yield (gss_state.to_stacks(), line_no)
+              if trace is None:
+                  yield (gss_state.to_stacks(), line_no)
+              else:
+                  # Forward optional fuzz trace alongside state+line
+                  yield (gss_state.to_stacks(), line_no, trace)
 
           # --- Test 1: Basic push/pop/construction ---
           gss1 = gss_class.from_stacks([([], acc_factory())])
@@ -5134,8 +5496,16 @@ messages:
           # The seed ensures the test is deterministic.
           fuzz_seed = 42
           fuzz_steps = 100
-          for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-              yield from _yield_state(gss_state)
+          for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+              # The fuzzer yields (gss_state, trace). For compatibility, accept a bare gss_state too.
+              if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
+                  gss_state, trace = item
+                  yield from _yield_state(gss_state, trace)
+              else:
+                  # Fallback (older fuzzer behavior)
+                  gss_state = item  # type: ignore[assignment]
+                  yield from _yield_state(gss_state)
+
 
       ```
     metadata:
@@ -6785,7 +7155,7 @@ messages:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-22_11-52-28
+      Test results will be saved in: gss_test_results/2025-09-22_11-57-19
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -6793,25 +7163,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_11-52-28/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_11-57-19/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -6830,20 +7200,92 @@ messages:
 
       Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
         - First divergence at yield index 113:
-          - gss_tester.implementations.leveled_impl.LeveledGSS (L251): [[[12], 7]]
-          - gss_tester.implementations.reference_impl.ReferenceGSS (L251): []
+          - gss_tester.implementations.leveled_impl.LeveledGSS (L258): [[[12], 7]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS (L258): []
+        - Divergence operation details:
+          - gss_tester.implementations.leveled_impl.LeveledGSS: op=push step=63 seed=42
+            args={"value": 12}
+            source_stacks=[[[], 7]]
+            result_stacks=[[[12], 7]]
+          - gss_tester.implementations.reference_impl.ReferenceGSS: op=isolate step=63 seed=42
+            args={"value": 7}
+            source_stacks=[[[], 0]]
+            result_stacks=[]
+        - Trace context for gss_tester.implementations.leveled_impl.LeveledGSS (seed=42, last 10 op(s)):
+          [104] step=54 op=prune args={"threshold": 4}
+               src=[[[3, 6], 0]]
+               res=[]
+          [105] step=55 op=popn args={"n": 4}
+               src=[[[], 9]]
+               res=[]
+          [106] step=56 op=pop args={}
+               src=[[[], 7]]
+               res=[]
+          [107] step=57 op=pop args={}
+               src=[[[], 9]]
+               res=[]
+          [108] step=58 op=apply args={"amount": 5}
+               src=[[[1], 0], [[], 0]]
+               res=[[[1], 5], [[], 5]]
+          [109] step=59 op=pop args={}
+               src=[[[1], 0]]
+               res=[[[], 0]]
+          [110] step=60 op=isolate args={"value": null}
+               src=[[[], 0]]
+               res=[[[], 0]]
+          [111] step=61 op=apply args={"amount": 4}
+               src=[[[], 0]]
+               res=[[[], 4]]
+          [112] step=62 op=popn args={"n": 0}
+               src=[[[], 9]]
+               res=[[[], 9]]
+          [113] step=63 op=push args={"value": 12}
+               src=[[[], 7]]
+               res=[[[12], 7]]
+        - Trace context for gss_tester.implementations.reference_impl.ReferenceGSS (seed=42, last 10 op(s)):
+          [104] step=54 op=prune args={"threshold": 4}
+               src=[[[3, 6], 0]]
+               res=[]
+          [105] step=55 op=popn args={"n": 4}
+               src=[[[], 9]]
+               res=[]
+          [106] step=56 op=pop args={}
+               src=[[[], 7]]
+               res=[]
+          [107] step=57 op=pop args={}
+               src=[[[], 9]]
+               res=[]
+          [108] step=58 op=apply args={"amount": 5}
+               src=[[[1], 0], [[], 0]]
+               res=[[[1], 5], [[], 5]]
+          [109] step=59 op=pop args={}
+               src=[[[1], 0]]
+               res=[[[], 0]]
+          [110] step=60 op=isolate args={"value": null}
+               src=[[[], 0]]
+               res=[[[], 0]]
+          [111] step=61 op=apply args={"amount": 4}
+               src=[[[], 0]]
+               res=[[[], 4]]
+          [112] step=62 op=popn args={"n": 0}
+               src=[[[], 9]]
+               res=[[[], 9]]
+          [113] step=63 op=isolate args={"value": 7}
+               src=[[[], 0]]
+               res=[]
 
       ---
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-22_11-52-28
+      Full JSON results are in: gss_test_results/2025-09-22_11-57-19
     metadata:
-  - user: The output here isn't very helpful. It tells us there's a mismatch, but
-      since it's a fuzz test we can't really tell what happened. Improve it. Perhaps
-      show what the input GSS was. Or show what the sequence of commands was. Or what
-      the original stack was together with all commands. Like a trace. Or both. A
-      list of all operations, their inputs, and their outputs.
+  - user: "Fix this. NOTE: THE REFERENCE MODEL IS CORRECT. Also, the issue goes away
+      if I remove the popn override for LeveledGSS. But that's not the point. This
+      popn should be faster and behave exactly the same as the default impl. Investigate.
+      Fix it. DO NOT SIMPLY REMOVE popn FROM LeveledGSS! Do not cheat! We WANT out
+      efficient popn. It's much more efficient than the default impl, which calls
+      pop n times, because it avoids all the unnecessary and expensive merges."
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6862,511 +7304,64 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are step-by-step instructions to enhance the analyzer output with a detailed fuzz-trace, followed by ready-to-apply git patches.
+      Below is the root cause analysis, the precise fix, and the exact patch you can apply.
+
+      Root cause
+      - The optimized LeveledGSS.popn implementation returns a new LeveledGSS object even when n == 0.
+      - The default GSS.popn (from the base class) is a no-op for n == 0 and returns self (the exact same object).
+      - The fuzzer decides whether to add a state to its pool using an identity check: it only appends if new_gss is not source_gss and the result isn’t empty. Returning a new instance on popn(0) caused LeveledGSS to add a duplicate state to the pool while ReferenceGSS did not.
+      - This changed the pool size right before step 63 in the fuzz trace, making can_merge and source selection differ, which changed RNG consumption and led to divergent operation choices (Leveled: push vs Reference: isolate) at step 63.
+      - The semantics of the stacks themselves were still correct, but the identity mismatch on a no-op broke determinism.
+
+      What we’ll change
+      - Make LeveledGSS.popn return self when n <= 0. This preserves identity on no-ops and exactly matches the default implementation’s behavior while keeping the efficient path for n > 0.
 
       Step-by-step instructions
+      1) Edit file: python/gss_tester/implementations/leveled_impl.py
 
-      1) Add rich per-step trace data in the fuzzer
-      - File: python/gss_tester/tests/fuzzer.py
-      - Change the run_fuzz_test generator to yield (gss_state, trace_dict) instead of just gss_state.
-      - The trace should include:
-        - op: operation name ("init", "push", "pop", "popn", "isolate", "apply", "prune", "merge", "restart_empty_pool")
-        - step: numeric step index (0 for init, increments per operation)
-        - seed: fuzz seed used
-        - args: dictionary of operation arguments (e.g., value, n, amount, threshold)
-        - source_stacks: stacks of the GSS the operation was applied to
-        - other_stacks: stacks of the second GSS for merge operations (or None)
-        - result_stacks: stacks after the operation
-        - pool_size_before / pool_size_after: sizes of the pool of known states before/after the step
-        - source_index / other_index: indices of the selected GSS(es) in the pool (for context)
-        - added_to_pool: whether the result was added to the pool
+      2) In class LeveledGSS, locate the popn method.
 
-      2) Forward trace information from the test spec
-      - File: python/gss_tester/tests/test_spec.py
-      - Extend the internal helper to optionally emit a third element (trace) in the yielded tuple.
-      - In the fuzz section (Test 16), detect when the fuzzer yields a (gss_state, trace) pair, and forward that trace via the yield so downstream consumers receive it.
+      3) Add an early return guard at the top of the method to short-circuit no-ops:
+         - If n <= 0: return self
+         - Leave the rest of the implementation unchanged for n > 0.
 
-      3) Preserve trace in runner output JSON
-      - File: python/gss_tester/tests/runner.py
-      - Update the loop that consumes run_test_spec so it accepts both (state, line) and (state, line, trace). When a trace is present, include it per result item in the output JSON under the "trace" key.
+      4) Save the file and re-run your tests and the analyzer. The divergence at yield index 113 should disappear, and you’ll retain the efficient popn for n > 0.
 
-      4) Enhance analyzer to print fuzz trace context at the first divergence
-      - File: python/gss_tester/tests/analyzer.py
-      - When reporting the first divergence between two implementations:
-        - If either side has trace information, print the seed and a window (e.g., last 10) of prior fuzz operations leading to that divergence, including:
-          - step number
-          - operation and arguments
-          - a concise snapshot of source_stacks and result_stacks (truncated to keep output readable)
-        - Also print the operation at the divergence index itself, if it carries trace.
-      - Ensure all existing behavior remains intact when trace is not present (non-fuzz tests or older result files).
-
-      5) Notes on compatibility and behavior
-      - Existing JSON consumers (like the analyzer’s signature computation) won’t break because they still only rely on state and line, and ignore the optional "trace".
-      - For older result files without trace, the analyzer will behave as before but will add a “No trace info available” note (implicitly by just not printing a trace section).
-      - The added trace should make it immediately obvious which operations and inputs produced the divergent state in fuzz tests, with the seed included for reproducibility.
-
-      Git diffs
-
+      Patch
       ```diff
-      diff --git a/python/gss_tester/tests/fuzzer.py b/python/gss_tester/tests/fuzzer.py
-      index 2b116b4..a9c7d02 100644
-      --- a/python/gss_tester/tests/fuzzer.py
-      +++ b/python/gss_tester/tests/fuzzer.py
-      @@ -1,39 +1,66 @@
-       import random
-      -from typing import Generator, Any, Type, List, Callable
-      +from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
-       
-       from ..interface import GSS, MergeableInt
-       
-       
-       def run_fuzz_test(
-           gss_class: Type[GSS],
-           seed: int,
-           num_steps: int,
-           max_gss_states: int = 10,
-           value_pool: List[Any] = None
-      -) -> Generator[GSS, None, None]:
-      +) -> Generator[Tuple[GSS, Dict[str, Any]], None, None]:
-           """
-           Runs a randomized sequence of GSS operations to find inconsistencies.
-      -    Yields the new GSS state after each operation.
-      +    Yields (new_gSS_state, trace) after each operation.
-      +    The trace includes operation name, arguments, source stacks, result stacks, and more.
-           """
-           if value_pool is None:
-               value_pool = list(range(20)) + ['a', 'b', 'c']
-       
-           rng = random.Random(seed)
-           gss_states: List[GSS] = [gss_class.from_stacks([([], MergeableInt(0))])]
-      -    yield gss_states[0]
-      +    step_idx = 0
-      +    yield gss_states[0], {
-      +        "phase": "fuzz",
-      +        "op": "init",
-      +        "step": step_idx,
-      +        "seed": seed,
-      +        "args": {},
-      +        "source_index": None,
-      +        "other_index": None,
-      +        "pool_size_before": 0,
-      +        "pool_size_after": len(gss_states),
-      +        "source_stacks": None,
-      +        "other_stacks": None,
-      +        "result_stacks": gss_states[0].to_stacks(),
-      +        "added_to_pool": False,
-      +    }
-       
-           for _ in range(num_steps):
-               if not gss_states:
-                   # All states were pruned or became empty, start over.
-                   gss_states.append(gss_class.from_stacks([([], MergeableInt(0))]))
-      -            yield gss_states[0]
-      +            step_idx += 1
-      +            yield gss_states[0], {
-      +                "phase": "fuzz",
-      +                "op": "restart_empty_pool",
-      +                "step": step_idx,
-      +                "seed": seed,
-      +                "args": {},
-      +                "source_index": None,
-      +                "other_index": None,
-      +                "pool_size_before": 0,
-      +                "pool_size_after": len(gss_states),
-      +                "source_stacks": None,
-      +                "other_stacks": None,
-      +                "result_stacks": gss_states[0].to_stacks(),
-      +                "added_to_pool": False,
-      +            }
-                   if len(gss_states) >= max_gss_states:
-                       continue
-       
-               # Choose an operation
-               can_merge = len(gss_states) >= 2
-               operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               if can_merge:
-                   operations.append('merge')
-               
-               op_choice = rng.choice(operations)
-       
-               # Select GSS state(s) to operate on
-      -        source_gss = rng.choice(gss_states)
-      +        source_index = rng.randrange(len(gss_states))
-      +        source_gss = gss_states[source_index]
-      +        source_stacks = source_gss.to_stacks()
-               
-               new_gss: GSS
-      +        args: Dict[str, Any] = {}
-      +        other_stacks: Optional[List[Any]] = None
-      +        other_index: Optional[int] = None
-       
-               try:
-                   if op_choice == 'push':
-                       value = rng.choice(value_pool)
-                       new_gss = source_gss.push(value)
-      +                args = {"value": value}
-       
-                   elif op_choice == 'pop':
-                       new_gss = source_gss.pop()
-       
-                   elif op_choice == 'popn':
-                       n = rng.randint(0, 4)
-                       new_gss = source_gss.popn(n)
-      +                args = {"n": n}
-       
-                   elif op_choice == 'isolate':
-                       # 20% chance of isolating empty stack
-                       if rng.random() < 0.2:
-                           value = None
-                       else:
-                           value = rng.choice(value_pool)
-                       new_gss = source_gss.isolate(value)
-      +                args = {"value": value}
-       
-                   elif op_choice == 'apply':
-                       amount = rng.randint(1, 10)
-                       # Use a default argument in the lambda to capture the value of `amount`
-                       func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
-                       new_gss = source_gss.apply(func)
-      +                args = {"amount": amount}
-       
-                   elif op_choice == 'prune':
-                       threshold = rng.randint(0, 20)
-                       # Use a default argument in the lambda to capture the value of `threshold`
-                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
-                       new_gss = source_gss.prune(predicate)
-      +                args = {"threshold": threshold}
-       
-                   elif op_choice == 'merge' and can_merge:
-      -                other_gss = rng.choice([g for g in gss_states if g is not source_gss])
-      +                candidates = [i for i in range(len(gss_states)) if i != source_index]
-      +                other_index = rng.choice(candidates)
-      +                other_gss = gss_states[other_index]
-                       new_gss = source_gss.merge(other_gss)
-      +                other_stacks = other_gss.to_stacks()
-      +                args = {"other_index": other_index}
-                   
-                   else: # Should not happen
-                       continue
-       
-      -            yield new_gss
-      +            pool_size_before = len(gss_states)
-      +            step_idx += 1
-      +            result_stacks = new_gss.to_stacks()
-      +            # Add the new state to our pool, but avoid adding empty or duplicate states
-      +            added_to_pool = False
-      +            if new_gss is not source_gss and not new_gss.is_empty():
-      +                gss_states.append(new_gss)
-      +                added_to_pool = True
-       
-      -            # Add the new state to our pool, but avoid adding empty or duplicate states
-      -            if new_gss is not source_gss and not new_gss.is_empty():
-      -                gss_states.append(new_gss)
-      +            yield new_gss, {
-      +                "phase": "fuzz",
-      +                "op": op_choice,
-      +                "step": step_idx,
-      +                "seed": seed,
-      +                "args": args,
-      +                "source_index": source_index,
-      +                "other_index": other_index,
-      +                "pool_size_before": pool_size_before,
-      +                "pool_size_after": len(gss_states),
-      +                "source_stacks": source_stacks,
-      +                "other_stacks": other_stacks,
-      +                "result_stacks": result_stacks,
-      +                "added_to_pool": added_to_pool,
-      +            }
-       
-                   # Prune the list of GSS states to keep it manageable
-                   if len(gss_states) > max_gss_states:
-                       gss_states = rng.sample(gss_states, max_gss_states)
-       
-               except Exception:
-                   # Some operations might fail on some implementations if invariants are broken.
-                   # We'll just skip the step and continue fuzzing.
-                   continue
-      ```
-
-      ```diff
-      diff --git a/python/gss_tester/tests/test_spec.py b/python/gss_tester/tests/test_spec.py
-      index 1c65adb..7e9c074 100644
-      --- a/python/gss_tester/tests/test_spec.py
-      +++ b/python/gss_tester/tests/test_spec.py
-      @@ -1,10 +1,10 @@
-       import inspect
-      -from typing import Generator, Tuple, Any, Type
-      +from typing import Generator, Tuple, Any, Type
-       from ..interface import GSS, MergeableInt
-       from .fuzzer import run_fuzz_test
-       
-       def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-           """
-           A generator that defines a sequence of GSS operations and yields states at
-           various points for consistency checking.
-       
-           Yields:
-               Tuple[Any, int]: A tuple of (json_serializable_gss_state, line_number).
-           """
-           
-           # For this test, the accumulator is an integer and stack items are integers.
-           acc_factory = lambda: MergeableInt(0)
-       
-      -    def _yield_state(gss_state: GSS):
-      +    def _yield_state(gss_state: GSS, trace: Any = None):
-               """Helper to yield the state and the caller's line number."""
-               caller_frame = inspect.currentframe().f_back
-               line_no = caller_frame.f_lineno
-      -        yield (gss_state.to_stacks(), line_no)
-      +        if trace is None:
-      +            yield (gss_state.to_stacks(), line_no)
-      +        else:
-      +            # Forward optional fuzz trace alongside state+line
-      +            yield (gss_state.to_stacks(), line_no, trace)
-       
-           # --- Test 1: Basic push/pop/construction ---
-           gss1 = gss_class.from_stacks([([], acc_factory())])
-      @@ -212,7 +212,16 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None]:
-           # Run a short, seeded fuzz test to catch more complex interactions.
-           # The seed ensures the test is deterministic.
-           fuzz_seed = 42
-           fuzz_steps = 100
-      -    for gss_state in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-      -        yield from _yield_state(gss_state)
-      +    for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
-      +        # The fuzzer yields (gss_state, trace). For compatibility, accept a bare gss_state too.
-      +        if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
-      +            gss_state, trace = item
-      +            yield from _yield_state(gss_state, trace)
-      +        else:
-      +            # Fallback (older fuzzer behavior)
-      +            gss_state = item  # type: ignore[assignment]
-      +            yield from _yield_state(gss_state)
-       
-      ```
-
-      ```diff
-      diff --git a/python/gss_tester/tests/runner.py b/python/gss_tester/tests/runner.py
-      index 03b6236..2b155a8 100644
-      --- a/python/gss_tester/tests/runner.py
-      +++ b/python/gss_tester/tests/runner.py
-      @@ -1,6 +1,7 @@
-       import argparse
-       import importlib
-       import json
-      +from typing import Tuple
-       from pathlib import Path
-       import sys
-       import os
-      @@ -34,12 +35,26 @@ def main():
-       
-           print("Running test specification...")
-           results = []
-      -    for state, line_no in run_test_spec(gss_class):
-      -        results.append({
-      -            "line": line_no,
-      -            "state": state
-      -        })
-      +    for yielded in run_test_spec(gss_class):
-      +        # Support (state, line) and (state, line, trace) tuples from the test spec.
-      +        if isinstance(yielded, tuple):
-      +            if len(yielded) == 2:
-      +                state, line_no = yielded
-      +                item = {
-      +                    "line": line_no,
-      +                    "state": state
-      +                }
-      +            elif len(yielded) >= 3:
-      +                state, line_no, trace = yielded[0], yielded[1], yielded[2]
-      +                item = {
-      +                    "line": line_no,
-      +                    "state": state,
-      +                    "trace": trace
-      +                }
-      +            else:
-      +                # Unexpected tuple arity; fallback to legacy behavior.
-      +                state, line_no = yielded[0], yielded[1]
-      +                item = {"line": line_no, "state": state}
-      +            results.append(item)
-       
-           output_data = {
-               "implementation": f"{args.implementation_module}.{args.implementation_class}",
-               "results": results
-           }
-      @@ -53,4 +68,4 @@ def main():
-           print(f"Results saved to {args.output}")
-       
-       if __name__ == "__main__":
-      -    main()
-      +    main()
-      ```
-
-      ```diff
-      diff --git a/python/gss_tester/tests/analyzer.py b/python/gss_tester/tests/analyzer.py
-      index 72ad8a0..9343e9d 100644
-      --- a/python/gss_tester/tests/analyzer.py
-      +++ b/python/gss_tester/tests/analyzer.py
-      @@ -1,9 +1,12 @@
-       import argparse
-       import json
-       from pathlib import Path
-      -from typing import List, Dict, Any, Tuple
-      +from typing import List, Dict, Any, Tuple, Optional
-       import itertools
-       
-      +MAX_STACKS_PREVIEW = 5
-      +TRACE_CONTEXT_WINDOW = 10
-      +
-       def analyze_results(result_files: List[Path], reference_file: Path = None):
-           all_results: Dict[str, List[Dict[str, Any]]] = {}
-           implementations: List[str] = []
-      @@ -18,7 +21,6 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
-               except (json.JSONDecodeError, KeyError) as e:
-                   print(f"Warning: Skipping invalid result file {file_path}: {e}")
-       
-      -
-           if not implementations:
-               print("No valid result files found to analyze.")
-               return
-      @@ -30,6 +32,29 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
-           def get_signature(results: List[Dict[str, Any]]) -> Signature:
-               # Serialize state to a string to make it hashable and canonical.
-               return tuple(
-                   (r['line'], json.dumps(r['state'], sort_keys=True)) for r in results
-               )
-       
-      +    def pretty_stacks(stacks: Any, max_items: int = MAX_STACKS_PREVIEW) -> str:
-      +        try:
-      +            if not isinstance(stacks, list):
-      +                return json.dumps(stacks, ensure_ascii=False)
-      +            shown = stacks[:max_items]
-      +            s = json.dumps(shown, ensure_ascii=False)
-      +            if len(stacks) > max_items:
-      +                s += " ..."
-      +            return s
-      +        except Exception:
-      +            return repr(stacks)
-      +
-      +    def extract_trace_window(results: List[Dict[str, Any]], up_to_index: int, window: int = TRACE_CONTEXT_WINDOW) -> List[Tuple[int, Dict[str, Any]]]:
-      +        start = max(0, up_to_index - window + 1)
-      +        items: List[Tuple[int, Dict[str, Any]]] = []
-      +        for i in range(start, up_to_index + 1):
-      +            r = results[i]
-      +            t = r.get("trace")
-      +            if isinstance(t, dict):
-      +                items.append((i, t))
-      +        return items[-window:]
-      +
-           partitions: Dict[Signature, List[str]] = {}
-           for impl_name, results in all_results.items():
-               sig = get_signature(results)
-      @@ -86,6 +111,70 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
-                       if sig_item1 != sig_item2:
-                           print(f"  - First divergence at yield index {i}:")
-                           if res1:
-                               print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
-                           else:
-                               print(f"    - {impl_name1}: No yield at this index.")
-                           
-                           if res2:
-                               print(f"    - {impl_name2} (L{res2['line']}): {json.dumps(res2['state'])}")
-                           else:
-                               print(f"    - {impl_name2}: No yield at this index.")
-      +
-      +                    # Rich trace context (if available)
-      +                    # Immediate operation at divergence index
-      +                    t1 = res1.get("trace") if res1 else None
-      +                    t2 = res2.get("trace") if res2 else None
-      +                    if t1 or t2:
-      +                        print("  - Divergence operation details:")
-      +                        if t1:
-      +                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
-      +                            args1 = t1.get("args", {})
-      +                            print(f"      args={json.dumps(args1, ensure_ascii=False)}")
-      +                            ss1 = t1.get("source_stacks")
-      +                            rs1 = t1.get("result_stacks")
-      +                            if ss1 is not None:
-      +                                print(f"      source_stacks={pretty_stacks(ss1)}")
-      +                            if rs1 is not None:
-      +                                print(f"      result_stacks={pretty_stacks(rs1)}")
-      +                        else:
-      +                            print(f"    - {impl_name1}: No trace info at divergence index.")
-      +                        if t2:
-      +                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
-      +                            args2 = t2.get("args", {})
-      +                            print(f"      args={json.dumps(args2, ensure_ascii=False)}")
-      +                            ss2 = t2.get("source_stacks")
-      +                            rs2 = t2.get("result_stacks")
-      +                            if ss2 is not None:
-      +                                print(f"      source_stacks={pretty_stacks(ss2)}")
-      +                            if rs2 is not None:
-      +                                print(f"      result_stacks={pretty_stacks(rs2)}")
-      +                        else:
-      +                            print(f"    - {impl_name2}: No trace info at divergence index.")
-      +
-      +                    # Rolling window of previous fuzz ops for each impl (up to TRACE_CONTEXT_WINDOW)
-      +                    ctx1 = extract_trace_window(all_results[impl_name1], i, TRACE_CONTEXT_WINDOW)
-      +                    ctx2 = extract_trace_window(all_results[impl_name2], i, TRACE_CONTEXT_WINDOW)
-      +                    if ctx1:
-      +                        seed1 = ctx1[-1][1].get("seed")
-      +                        print(f"  - Trace context for {impl_name1} (seed={seed1}, last {len(ctx1)} op(s)):")
-      +                        for idx, tr in ctx1:
-      +                            op = tr.get("op")
-      +                            step = tr.get("step")
-      +                            args = tr.get("args", {})
-      +                            ss = tr.get("source_stacks")
-      +                            rs = tr.get("result_stacks")
-      +                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
-      +                            if ss is not None:
-      +                                print(f"         src={pretty_stacks(ss)}")
-      +                            if rs is not None:
-      +                                print(f"         res={pretty_stacks(rs)}")
-      +                    else:
-      +                        print(f"  - No fuzz trace context available for {impl_name1}.")
-      +
-      +                    if ctx2:
-      +                        seed2 = ctx2[-1][1].get("seed")
-      +                        print(f"  - Trace context for {impl_name2} (seed={seed2}, last {len(ctx2)} op(s)):")
-      +                        for idx, tr in ctx2:
-      +                            op = tr.get("op")
-      +                            step = tr.get("step")
-      +                            args = tr.get("args", {})
-      +                            ss = tr.get("source_stacks")
-      +                            rs = tr.get("result_stacks")
-      +                            print(f"    [{idx}] step={step} op={op} args={json.dumps(args, ensure_ascii=False)}")
-      +                            if ss is not None:
-      +                                print(f"         src={pretty_stacks(ss)}")
-      +                            if rs is not None:
-      +                                print(f"         res={pretty_stacks(rs)}")
-                           break # Show only the first divergence for this pair
-       
-       def main():
-           parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
-           parser.add_argument(
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index d2c1b2b..f4f9b37 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -308,6 +308,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
+               merged = try_promote(merged)
+               return LeveledGSS(merged)
+           def popn(self, n: int) -> LeveledGSS[T, Acc]:
+      +        # Fast path: popn(0) is a no-op. Preserve identity to match the default
+      +        # implementation's behavior (crucial for deterministic fuzzing).
+      +        if n <= 0:
+      +            return self
+               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+               for _ in range(n):
+                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+                       return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
+                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
+               all_children: List[Upper[T, Acc]] = list(all_children.values())
+               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+               merged = try_promote(merged)
+               return LeveledGSS(merged)
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/tests/fuzzer.py
-      Applying patch to 'python/gss_tester/tests/fuzzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/fuzzer.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/tests/test_spec.py
-      Applying patch to 'python/gss_tester/tests/test_spec.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/test_spec.py.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/gss_tester/tests/runner.py
-      Applying patch to 'python/gss_tester/tests/runner.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/runner.py.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: python/gss_tester/tests/analyzer.py
-      Applying patch to 'python/gss_tester/tests/analyzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/analyzer.py.
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix(LeveledGSS): Preserve identity for
+      popn(0) to ensure deterministic fuzzing"'
     metadata:
 ...
