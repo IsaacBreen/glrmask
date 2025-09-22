@@ -37,7 +37,7 @@ def print_rangeset_stats():
 
 # Monkey-patch RangeSet methods for profiling
 if not hasattr(RangeSet, '_instrumented'):
-    for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+    for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains', '__hash__', '__eq__']:
         if hasattr(RangeSet, method_name):
             setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
     RangeSet._instrumented = True

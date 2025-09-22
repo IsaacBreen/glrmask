@@ -60,7 +60,7 @@ class PyAcc:
 
     def __hash__(self):
         # frozenset of items for hashable dict
-        return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+        return hash((len(self.terminals_union), self.llm_mask))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         # The dataclass is frozen, so we can't modify in-place.
