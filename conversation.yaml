@@ -59,11 +59,11 @@ local_system:
               data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
               # --- Extract Detailed Bitset Operation Counts ---
-              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
-              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
-              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
-              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
-              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
+              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union total calls: (\d+)", profiling_text)]
+              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection total calls: (\d+)", profiling_text)]
+              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
+              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
+              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
 
               # --- Extract Commit Times ---
               data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
@@ -2055,6 +2055,7 @@ local_system:
       import os
       import matplotlib.pyplot as plt
       import numpy as np
+      from collections import defaultdict
       from sklearn.linear_model import LinearRegression
 
       def parse_log_data(log_content):
@@ -2083,7 +2084,7 @@ local_system:
               data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
 
               # --- Extract get_mask() Profiling Stats ---
-              profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+              profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=--- get_mask END ---)", python_model_log, re.DOTALL)
               profiling_text = "\n".join(profiling_blocks)
 
               data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
@@ -2101,6 +2102,34 @@ local_system:
               data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
               data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
               data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
+
+              # --- Extract Detailed Call Sites per Step ---
+              def canonicalize_stack(stack_str: str) -> str:
+                  """Reduces a detailed call stack to a canonical name."""
+                  if 'reduce_acc' in stack_str:
+                      return 'GSS.reduce_acc()'
+                  if 'leveled_impl.py' in stack_str and 'merge' in stack_str:
+                      return 'GSS.merge()'
+                  if 'get_mask' in stack_str and 'leveled_impl' not in stack_str:
+                      return 'get_mask() final union'
+                  return 'Other'
+
+              def parse_call_sites(op_name, text):
+                  sites = defaultdict(int)
+                  # Regex to find the block for a specific operation
+                  op_block_match = re.search(rf"{op_name} total calls: \d+\n((?:  - \d+.*?from:.*?\n)*)", text)
+                  if op_block_match:
+                      op_block = op_block_match.group(1)
+                      # Regex to find each call site line
+                      for match in re.finditer(r"^\s*-\s*(\d+)\s+calls from: (.*)", op_block, re.MULTILINE):
+                          count = int(match.group(1))
+                          stack = match.group(2).strip()
+                          canonical_name = canonicalize_stack(stack)
+                          sites[canonical_name] += count
+                  return dict(sites)
+
+              data['bitset_union_by_site'] = [parse_call_sites('bitset_union', block) for block in profiling_blocks]
+              data['acc_merge_by_site'] = [parse_call_sites('acc_merge', block) for block in profiling_blocks]
 
               # --- Extract Commit Times ---
               data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
@@ -2408,6 +2437,51 @@ local_system:
               create_merge_average_plot('interfaces', 'Average Interface Nodes in Merges per Step', 'Average Interface Nodes (Log Scale)')
               create_merge_average_plot('upper', 'Average UpperBranch Nodes in Merges per Step', 'Average UpperBranch Nodes (Log Scale)')
               create_merge_average_plot('lower', 'Average Lower Nodes in Merges per Step', 'Average Lower Nodes (Log Scale)')
+
+          # Plot 13: Call Site Analysis
+          def generate_call_site_plot(steps, site_data, title, filename):
+              if not site_data: return
+              all_sites = sorted(list(set(site for step_data in site_data for site in step_data.keys())))
+              if not all_sites: return
+
+              plot_data = {site: np.array([step_data.get(site, 0) for step_data in site_data]) for site in all_sites}
+
+              plt.figure(figsize=(12, 8))
+              for site, counts in plot_data.items():
+                  if np.any(counts > 0):
+                      # Add 0.1 to plot zeros on a log scale
+                      plt.plot(steps, counts + 0.1, 'o-', label=site)
+
+              plt.xlabel('Benchmark Step')
+              plt.ylabel('Number of Calls (0 plotted as 0.1)')
+              plt.title(title)
+              plt.yscale('log')
+              plt.xticks(steps)
+
+              ax = plt.gca()
+              ax.set_ylim(bottom=0.1)
+              yticks = ax.get_yticks()
+              yticklabels = [f'{y:.0g}' if y > 0.1 else '0' for y in yticks]
+              ax.set_yticklabels(yticklabels)
+
+              plt.grid(True, which="both", ls="--")
+              plt.legend(loc='upper left')
+              plt.tight_layout()
+              plt.savefig(filename)
+              plt.close()
+
+          if data.get('bitset_union_by_site'):
+              generate_call_site_plot(
+                  steps, data['bitset_union_by_site'],
+                  'bitset_union Calls by Canonical Site',
+                  os.path.join(plot_dir, "bitset_union_by_site.png")
+              )
+          if data.get('acc_merge_by_site'):
+              generate_call_site_plot(
+                  steps, data['acc_merge_by_site'],
+                  'acc_merge Calls by Canonical Site',
+                  os.path.join(plot_dir, "acc_merge_by_site.png")
+              )
 
           print("All plots generated successfully.", file=sys.stderr)
 
@@ -4177,11 +4251,11 @@ messages:
               data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
 
               # --- Extract Detailed Bitset Operation Counts ---
-              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
-              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
-              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
-              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
-              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
+              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union total calls: (\d+)", profiling_text)]
+              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection total calls: (\d+)", profiling_text)]
+              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
+              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
+              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
 
               # --- Extract Commit Times ---
               data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
@@ -6174,13 +6248,9 @@ messages:
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
-      MERGE_STATS: type=new step=45 unique_accs=1 total_acc_instances=1 interfaces=1 upper=0 lower=144
-      MERGE_STATS: type=merged step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
-      MERGE_STATS: type=existing step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
-      MERGE_STATS: type=new step=45 unique_accs=1 total_acc_instances=1 interfaces=1 upper=0 lower=144
-      MERGE_STATS: type=merged step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
-      MERGE_STATS: type=existing step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
-      MERGE_STATS: type=new step=45 unique_accs=1 total_acc_instances=1 interfaces=1 upper=0 lower=144
+      ```bash
+      DISABLE_TQDM=1 bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_get_mask_only.py 2>&1 | tee .temp && python python/aug25/create_additional_benchmark_plots.py < .temp
+      ...
       MERGE_STATS: type=merged step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
       MERGE_STATS: type=existing step=45 unique_accs=2 total_acc_instances=23 interfaces=23 upper=1 lower=170
       MERGE_STATS: type=new step=45 unique_accs=1 total_acc_instances=1 interfaces=1 upper=0 lower=144
@@ -6237,55 +6307,14 @@ messages:
       >>> Finished benchmark for: precompute3_model_pure_python_get_mask_only.py
 
       All benchmark runs completed.
-      ---
-      Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-22_14-44-50/precompute3_model_pure_python_get_mask_only_results.json --baseline precompute3_model_pure_python_get_mask_only --output-dir benchmark_results/2025-09-22_14-44-50/analysis
-      Selected baseline: precompute3_model_pure_python_get_mask_only
-      --- Benchmark Summary ---
-                                                  equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)   p99 (ms)   max (ms)
-      model                                                                                                                                                      
-      precompute3_model_pure_python_get_mask_only          ✅                    0     45  3704.9246 5321.5886  198.2607 1727.8553 8514.6236 23858.3497 27680.9033
+      ...
+      ```
 
-      Baseline: precompute3_model_pure_python_get_mask_only
-      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
+      There are really just a few 'canonical' groups of call traces, once we account for recursion. I want to reduce the calls down based on their recursion to these groups, and then plot the number of calls from each group over time.
 
-      Saving plots to benchmark_results/2025-09-22_14-44-50/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-22_14-44-50/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-22_14-44-50/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-22_14-44-50/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-22_14-44-50/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-22_14-44-50/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-22_14-44-50/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-22_14-44-50/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-22_14-44-50/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-22_14-44-50/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-22_14-44-50/analysis/total_timings_per_token_log.png
-
-      ---
-      Benchmark analysis complete.
-      Baseline: precompute3_model_pure_python_get_mask_only
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-22_14-44-50/analysis
-      Full JSON results are in: benchmark_results/2025-09-22_14-44-50
-      Info: 'acc_merge calls' not found in log. Assuming zero for all steps.
-      Successfully parsed 45 steps.
-      Saving custom plots to: benchmark_results/2025-09-22_14-44-50/custom_plots
-      Traceback (most recent call last):
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/create_additional_benchmark_plots.py", line 372, in <module>
-          generate_plots(parsed_data)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/create_additional_benchmark_plots.py", line 133, in generate_plots
-          plt.plot(steps, data['bitset_intersection_calls'], 's--', alpha=0.7, label='Total bitset_intersection Calls')
-        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/matplotlib/pyplot.py", line 3794, in plot
-          return gca().plot(
-                 ^^^^^^^^^^^
-        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/matplotlib/axes/_axes.py", line 1779, in plot
-          lines = [*self._get_lines(self, *args, data=data, **kwargs)]
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/matplotlib/axes/_base.py", line 296, in __call__
-          yield from self._plot_args(
-                     ^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/matplotlib/axes/_base.py", line 486, in _plot_args
-          raise ValueError(f"x and y must have same first dimension, but "
-      ValueError: x and y must have same first dimension, but have shapes (45,) and (0,)
+      ```bash
+      chatllm send --init --code-completion-model cp --attach python/aug25/create_additional_benchmark_plots.py python/aug25/models/precompute3_model_pure_python_get_mask_only.py python/gss_tester/implementations/leveled_impl.py --apply git-llm --model cp --paste
+      ```
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -6304,93 +6333,140 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The plotting script is failing because the regular expressions it uses to parse the log file don't match the format of the log output. The script is looking for lines like `bitset_intersection calls: ...` but the log contains `bitset_intersection total calls: ...`.
-
-      Here are the step-by-step instructions to fix this, followed by the git diff.
+      Of course. Here are the step-by-step instructions to modify your plotting script to analyze and visualize the call site data, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      The fix involves updating five regular expressions in the parsing function of `python/aug25/create_additional_benchmark_plots.py` to include the word "total".
+      1.  **File: `python/aug25/create_additional_benchmark_plots.py`**
 
-      1.  **Open the file** `python/aug25/create_additional_benchmark_plots.py`.
+          a.  **Import `defaultdict`**: At the top of the file, add `from collections import defaultdict` to support the new parsing logic.
 
-      2.  **Navigate to the `parse_log_data` function.** Inside this function, locate the section marked with the comment `--- Extract Detailed Bitset Operation Counts ---`.
+          b.  **Update Log Parsing**: In the `parse_log_data` function, you'll enhance the section that parses profiling stats.
+              -   Modify the `re.findall` call for `profiling_blocks` to use `(?=--- get_mask END ---)` as the delimiter. This correctly isolates the stats for each `get_mask()` call.
+              -   After the existing logic that extracts total call counts (like `acc_merge_calls`), insert a new section. This section will:
+                  1.  Define a helper function `canonicalize_stack` to classify raw stack traces into meaningful groups like `GSS.reduce_acc()` or `GSS.merge()`.
+                  2.  Define another helper function `parse_call_sites` that reads the detailed call site information for an operation (e.g., `bitset_union`) within a single profiling block.
+                  3.  Use these helpers to loop through each step's profiling block, parse the call sites for `bitset_union` and `acc_merge`, and store the aggregated results in new data structures: `data['bitset_union_by_site']` and `data['acc_merge_by_site']`.
 
-      3.  **Update the regular expressions** in this section. You need to add ` total` before ` calls` in each `re.findall` call.
+          c.  **Add New Plots**: In the `generate_plots` function, add the logic to create the new visualizations.
+              -   At the end of the function, define a new helper function `generate_call_site_plot`. This function will create a line plot for the call site data, with each canonical group represented by a separate line. It will use a logarithmic y-axis to handle the wide range of call counts and will correctly label points at zero.
+              -   After defining the helper, add calls to it to generate two new plots: one for `bitset_union` calls and one for `acc_merge` calls. These will be saved as `bitset_union_by_site.png` and `acc_merge_by_site.png`.
 
-          *   **Change this line:**
-              ```python
-              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
-              ```
-              **To this:**
-              ```python
-              data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union total calls: (\d+)", profiling_text)]
-              ```
-
-          *   **Change this line:**
-              ```python
-              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
-              ```
-              **To this:**
-              ```python
-              data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection total calls: (\d+)", profiling_text)]
-              ```
-
-          *   **Change this line:**
-              ```python
-              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
-              ```
-              **To this:**
-              ```python
-              data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
-              ```
-
-          *   **Change this line:**
-              ```python
-              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
-              ```
-              **To this:**
-              ```python
-              data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
-              ```
-
-          *   **Change this line:**
-              ```python
-              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
-              ```
-              **To this:**
-              ```python
-              data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
-              ```
-
-      4.  **Save the file.** After making these changes, the script will correctly parse the log data, and the plotting should proceed without the `ValueError`.
+      These changes will add two new plots that break down the sources of `bitset_union` and `acc_merge` calls, allowing you to see how the contribution of each canonical group changes over the course of the benchmark.
 
       ### Git Diffs
 
-      Here is the git diff to apply the changes automatically.
+      Here are the git diffs to apply these changes:
 
       ```diff
       diff --git a/python/aug25/create_additional_benchmark_plots.py b/python/aug25/create_additional_benchmark_plots.py
-      index 1111111..2222222 100644
+      index 211111e..1111111 100644
       --- a/python/aug25/create_additional_benchmark_plots.py
       +++ b/python/aug25/create_additional_benchmark_plots.py
-      @@ -63,11 +63,11 @@
-               data['main_loop_merge_calls'] = [int(m) for m in re.findall(r"Main loop GSS.merge calls: (\d+)", profiling_text)]
+      @@ -7,6 +7,7 @@
+       import os
+       import matplotlib.pyplot as plt
+       import numpy as np
+      +from collections import defaultdict
+       from sklearn.linear_model import LinearRegression
        
-               # --- Extract Detailed Bitset Operation Counts ---
-      -        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union calls: (\d+)", profiling_text)]
-      -        data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection calls: (\d+)", profiling_text)]
-      -        data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference calls: (\d+)", profiling_text)]
-      -        data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement calls: (\d+)", profiling_text)]
-      -        data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge calls: (\d+)", profiling_text)]
-      +        data['bitset_union_calls'] = [int(m) for m in re.findall(r"bitset_union total calls: (\d+)", profiling_text)]
-      +        data['bitset_intersection_calls'] = [int(m) for m in re.findall(r"bitset_intersection total calls: (\d+)", profiling_text)]
-      +        data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
-      +        data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
-      +        data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
+       def parse_log_data(log_content):
+      @@ -36,7 +37,7 @@
+               data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
        
+               # --- Extract get_mask() Profiling Stats ---
+      -        profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+      +        profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=--- get_mask END ---)", python_model_log, re.DOTALL)
+               profiling_text = "\n".join(profiling_blocks)
+       
+               data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
+      @@ -55,6 +56,34 @@
+               data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
+               data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
+       
+      +        # --- Extract Detailed Call Sites per Step ---
+      +        def canonicalize_stack(stack_str: str) -> str:
+      +            """Reduces a detailed call stack to a canonical name."""
+      +            if 'reduce_acc' in stack_str:
+      +                return 'GSS.reduce_acc()'
+      +            if 'leveled_impl.py' in stack_str and 'merge' in stack_str:
+      +                return 'GSS.merge()'
+      +            if 'get_mask' in stack_str and 'leveled_impl' not in stack_str:
+      +                return 'get_mask() final union'
+      +            return 'Other'
+      +
+      +        def parse_call_sites(op_name, text):
+      +            sites = defaultdict(int)
+      +            # Regex to find the block for a specific operation
+      +            op_block_match = re.search(rf"{op_name} total calls: \d+\n((?:  - \d+.*?from:.*?\n)*)", text)
+      +            if op_block_match:
+      +                op_block = op_block_match.group(1)
+      +                # Regex to find each call site line
+      +                for match in re.finditer(r"^\s*-\s*(\d+)\s+calls from: (.*)", op_block, re.MULTILINE):
+      +                    count = int(match.group(1))
+      +                    stack = match.group(2).strip()
+      +                    canonical_name = canonicalize_stack(stack)
+      +                    sites[canonical_name] += count
+      +            return dict(sites)
+      +
+      +        data['bitset_union_by_site'] = [parse_call_sites('bitset_union', block) for block in profiling_blocks]
+      +        data['acc_merge_by_site'] = [parse_call_sites('acc_merge', block) for block in profiling_blocks]
+      +
                # --- Extract Commit Times ---
                data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
+       
+      @@ -341,6 +370,51 @@
+               create_merge_average_plot('upper', 'Average UpperBranch Nodes in Merges per Step', 'Average UpperBranch Nodes (Log Scale)')
+               create_merge_average_plot('lower', 'Average Lower Nodes in Merges per Step', 'Average Lower Nodes (Log Scale)')
+       
+      +    # Plot 13: Call Site Analysis
+      +    def generate_call_site_plot(steps, site_data, title, filename):
+      +        if not site_data: return
+      +        all_sites = sorted(list(set(site for step_data in site_data for site in step_data.keys())))
+      +        if not all_sites: return
+      +
+      +        plot_data = {site: np.array([step_data.get(site, 0) for step_data in site_data]) for site in all_sites}
+      +
+      +        plt.figure(figsize=(12, 8))
+      +        for site, counts in plot_data.items():
+      +            if np.any(counts > 0):
+      +                # Add 0.1 to plot zeros on a log scale
+      +                plt.plot(steps, counts + 0.1, 'o-', label=site)
+      +
+      +        plt.xlabel('Benchmark Step')
+      +        plt.ylabel('Number of Calls (0 plotted as 0.1)')
+      +        plt.title(title)
+      +        plt.yscale('log')
+      +        plt.xticks(steps)
+      +
+      +        ax = plt.gca()
+      +        ax.set_ylim(bottom=0.1)
+      +        yticks = ax.get_yticks()
+      +        yticklabels = [f'{y:.0g}' if y > 0.1 else '0' for y in yticks]
+      +        ax.set_yticklabels(yticklabels)
+      +
+      +        plt.grid(True, which="both", ls="--")
+      +        plt.legend(loc='upper left')
+      +        plt.tight_layout()
+      +        plt.savefig(filename)
+      +        plt.close()
+      +
+      +    if data.get('bitset_union_by_site'):
+      +        generate_call_site_plot(
+      +            steps, data['bitset_union_by_site'],
+      +            'bitset_union Calls by Canonical Site',
+      +            os.path.join(plot_dir, "bitset_union_by_site.png")
+      +        )
+      +    if data.get('acc_merge_by_site'):
+      +        generate_call_site_plot(
+      +            steps, data['acc_merge_by_site'],
+      +            'acc_merge Calls by Canonical Site',
+      +            os.path.join(plot_dir, "acc_merge_by_site.png")
+      +        )
+      +
+           print("All plots generated successfully.", file=sys.stderr)
+       
+       if __name__ == "__main__":
 
       ```
     metadata:
@@ -6403,7 +6479,7 @@ messages:
       Applying patch to 'python/aug25/create_additional_benchmark_plots.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/create_additional_benchmark_plots.py.
     metadata:
-  - user: "Changes committed with message: \"Fix: Update regex in benchmark plot generation
-      to match 'total calls' in log output\""
+  - user: 'Changes committed with message: "Add plots for call site analysis of bitset_union
+      and acc_merge"'
     metadata:
 ...

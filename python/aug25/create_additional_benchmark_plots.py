@@ -9,6 +9,7 @@ import re
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import defaultdict
 from sklearn.linear_model import LinearRegression
 
 def parse_log_data(log_content):
@@ -37,7 +38,7 @@ def parse_log_data(log_content):
         data['structural_sharing_factor'] = [float(m) for m in re.findall(r"structural_sharing_factor=([\d.]+)", "\n".join(initial_stats_blocks))]
 
         # --- Extract get_mask() Profiling Stats ---
-        profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=commit \(ms\))", python_model_log, re.DOTALL)
+        profiling_blocks = re.findall(r"--- get_mask\(\) profiling stats for call #\d+ ---(.*?)(?=--- get_mask END ---)", python_model_log, re.DOTALL)
         profiling_text = "\n".join(profiling_blocks)
 
         data['get_mask_total_time'] = [float(m) for m in re.findall(r"Total time:\s+([\d.]+) ms", profiling_text)]
@@ -55,6 +56,34 @@ def parse_log_data(log_content):
         data['bitset_difference_calls'] = [int(m) for m in re.findall(r"bitset_difference total calls: (\d+)", profiling_text)]
         data['hybrid_complement_calls'] = [int(m) for m in re.findall(r"hybrid_complement total calls: (\d+)", profiling_text)]
         data['acc_merge_calls'] = [int(m) for m in re.findall(r"acc_merge total calls: (\d+)", profiling_text)]
+
+        # --- Extract Detailed Call Sites per Step ---
+        def canonicalize_stack(stack_str: str) -> str:
+            """Reduces a detailed call stack to a canonical name."""
+            if 'reduce_acc' in stack_str:
+                return 'GSS.reduce_acc()'
+            if 'leveled_impl.py' in stack_str and 'merge' in stack_str:
+                return 'GSS.merge()'
+            if 'get_mask' in stack_str and 'leveled_impl' not in stack_str:
+                return 'get_mask() final union'
+            return 'Other'
+
+        def parse_call_sites(op_name, text):
+            sites = defaultdict(int)
+            # Regex to find the block for a specific operation
+            op_block_match = re.search(rf"{op_name} total calls: \d+\n((?:  - \d+.*?from:.*?\n)*)", text)
+            if op_block_match:
+                op_block = op_block_match.group(1)
+                # Regex to find each call site line
+                for match in re.finditer(r"^\s*-\s*(\d+)\s+calls from: (.*)", op_block, re.MULTILINE):
+                    count = int(match.group(1))
+                    stack = match.group(2).strip()
+                    canonical_name = canonicalize_stack(stack)
+                    sites[canonical_name] += count
+            return dict(sites)
+
+        data['bitset_union_by_site'] = [parse_call_sites('bitset_union', block) for block in profiling_blocks]
+        data['acc_merge_by_site'] = [parse_call_sites('acc_merge', block) for block in profiling_blocks]
 
         # --- Extract Commit Times ---
         data['commit_time'] = [float(m) for m in re.findall(r"commit \(ms\): ([\d.]+)", python_model_log)]
@@ -362,6 +391,51 @@ def generate_plots(data):
         create_merge_average_plot('interfaces', 'Average Interface Nodes in Merges per Step', 'Average Interface Nodes (Log Scale)')
         create_merge_average_plot('upper', 'Average UpperBranch Nodes in Merges per Step', 'Average UpperBranch Nodes (Log Scale)')
         create_merge_average_plot('lower', 'Average Lower Nodes in Merges per Step', 'Average Lower Nodes (Log Scale)')
+
+    # Plot 13: Call Site Analysis
+    def generate_call_site_plot(steps, site_data, title, filename):
+        if not site_data: return
+        all_sites = sorted(list(set(site for step_data in site_data for site in step_data.keys())))
+        if not all_sites: return
+
+        plot_data = {site: np.array([step_data.get(site, 0) for step_data in site_data]) for site in all_sites}
+
+        plt.figure(figsize=(12, 8))
+        for site, counts in plot_data.items():
+            if np.any(counts > 0):
+                # Add 0.1 to plot zeros on a log scale
+                plt.plot(steps, counts + 0.1, 'o-', label=site)
+
+        plt.xlabel('Benchmark Step')
+        plt.ylabel('Number of Calls (0 plotted as 0.1)')
+        plt.title(title)
+        plt.yscale('log')
+        plt.xticks(steps)
+
+        ax = plt.gca()
+        ax.set_ylim(bottom=0.1)
+        yticks = ax.get_yticks()
+        yticklabels = [f'{y:.0g}' if y > 0.1 else '0' for y in yticks]
+        ax.set_yticklabels(yticklabels)
+
+        plt.grid(True, which="both", ls="--")
+        plt.legend(loc='upper left')
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+
+    if data.get('bitset_union_by_site'):
+        generate_call_site_plot(
+            steps, data['bitset_union_by_site'],
+            'bitset_union Calls by Canonical Site',
+            os.path.join(plot_dir, "bitset_union_by_site.png")
+        )
+    if data.get('acc_merge_by_site'):
+        generate_call_site_plot(
+            steps, data['acc_merge_by_site'],
+            'acc_merge Calls by Canonical Site',
+            os.path.join(plot_dir, "acc_merge_by_site.png")
+        )
 
     print("All plots generated successfully.", file=sys.stderr)
 
