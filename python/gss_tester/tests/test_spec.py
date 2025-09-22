@@ -247,21 +247,17 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     yield from _yield_state(gss_empty_pruned)
 
     # --- Test 16: Fuzz tests ---
-    # Run a series of seeded fuzz tests of increasing length. This ensures that
-    # when the analyzer finds a divergence, it will be from the shortest
-    # sequence of operations that triggers the bug.
+    # Run a short, seeded fuzz test to catch more complex interactions.
+    # The seed ensures the test is deterministic.
     fuzz_seed = 42
-    max_fuzz_len = 50  # Max length of sequence to test.
-    for length in range(1, max_fuzz_len + 1):
-        for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=length):
-            # The fuzzer yields (gss_state, trace).
-            if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
-                gss_state, trace = item
-                # Add the current test length to the trace for better reporting.
-                if isinstance(trace, dict):
-                    trace['fuzz_len'] = length
-                yield from _yield_state(gss_state, trace)
-            else:
-                # Fallback for unexpected fuzzer yield format.
-                gss_state = item  # type: ignore[assignment]
-                yield from _yield_state(gss_state)
+    fuzz_steps = 100
+    for item in run_fuzz_test(gss_class, seed=fuzz_seed, num_steps=fuzz_steps):
+        # The fuzzer yields (gss_state, trace). For compatibility, accept a bare gss_state too.
+        if isinstance(item, tuple) and len(item) == 2 and hasattr(item[0], "to_stacks"):
+            gss_state, trace = item
+            yield from _yield_state(gss_state, trace)
+        else:
+            # Fallback (older fuzzer behavior)
+            gss_state = item  # type: ignore[assignment]
+            yield from _yield_state(gss_state)
+

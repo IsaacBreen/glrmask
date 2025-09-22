@@ -132,9 +132,7 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                     if t1 or t2:
                         print("  - Divergence operation details:")
                         if t1:
-                            fuzz_len1 = t1.get('fuzz_len')
-                            len_str1 = f" fuzz_len={fuzz_len1}" if fuzz_len1 is not None else ""
-                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}{len_str1}")
+                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
                             args1 = t1.get("args", {})
                             print(f"      args={json.dumps(args1, ensure_ascii=False)}")
                             ss1 = t1.get("source_stacks")
@@ -146,9 +144,7 @@ def analyze_results(result_files: List[Path], reference_file: Path = None):
                         else:
                             print(f"    - {impl_name1}: No trace info at divergence index.")
                         if t2:
-                            fuzz_len2 = t2.get('fuzz_len')
-                            len_str2 = f" fuzz_len={fuzz_len2}" if fuzz_len2 is not None else ""
-                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}{len_str2}")
+                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
                             args2 = t2.get("args", {})
                             print(f"      args={json.dumps(args2, ensure_ascii=False)}")
                             ss2 = t2.get("source_stacks")
