@@ -436,10 +436,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def pop(self) -> LeveledGSS[T, Acc]:
         upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
         all_children = list(upper_branch._all_children())
-        if all_children:
-            merged = reduce(merge_upper, all_children[1:], all_children[0])
-        else:
-            merged = UpperBranch(children={}, empty=None)
+        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
         merged = try_promote(merged)
         return LeveledGSS(merged)
 
