@@ -252,7 +252,7 @@ class LeveledGSS(Generic[T, Acc]):
         """Recursive helper for validating max_depth on Upper nodes."""
         if isinstance(node, Interface):
             # An Interface node has Lower children. We need to validate their depths recursively.
-            def _validate_lower_recursively(n: "Interface[T, Acc]" | "Lower[T]"):
+            def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
                 for children_at_depth in n.children.values():
                     for depth, child in children_at_depth.items():
                         if depth != child._max_depth:
