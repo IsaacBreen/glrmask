@@ -45,7 +45,9 @@ class Model(GraphProvider):
         This is an optimized version focusing on speed.
         """
         state_map: Dict[int, GSS] = self.state
-        all_ones: RangeSet = self.all_internal_llm_tokens_bitset or RangeSet.empty()
+        all_ones: RangeSet = self.all_internal_llm_tokens_bitset
+        if all_ones is None:
+            all_ones = RangeSet.empty()
         final_mask: RangeSet = RangeSet.empty()
 
         values: Dict[int, GSS] = {}

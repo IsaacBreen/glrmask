@@ -51,7 +51,9 @@ class FFIRangeSet(RangeSet[int]):
             record_metric('FFIRangeSet.union.in_len_b', len(other))
         except Exception:
             pass
-        res = self | other
+        new_bs = self._bitset.union(other._bitset)
+        res = FFIRangeSet()
+        res._bitset = new_bs
         try:
             record_metric('FFIRangeSet.union.out_len', len(res))
         except Exception:
@@ -68,7 +70,9 @@ class FFIRangeSet(RangeSet[int]):
             record_metric('FFIRangeSet.intersection.in_len_b', len(other))
         except Exception:
             pass
-        res = self & other
+        new_bs = self._bitset.intersection(other._bitset)
+        res = FFIRangeSet()
+        res._bitset = new_bs
         try:
             record_metric('FFIRangeSet.intersection.out_len', len(res))
         except Exception:
@@ -85,7 +89,9 @@ class FFIRangeSet(RangeSet[int]):
             record_metric('FFIRangeSet.difference.in_len_b', len(other))
         except Exception:
             pass
-        res = self._bitset.difference(other._bitset)
+        new_bs = self._bitset.difference(other._bitset)
+        res = FFIRangeSet()
+        res._bitset = new_bs
         try:
             record_metric('FFIRangeSet.difference.out_len', len(res))
         except Exception:
