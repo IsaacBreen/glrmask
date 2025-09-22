@@ -1553,7 +1553,7 @@ local_system:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -2370,15 +2370,26 @@ local_system:
     python/gss_tester/tests/__init__.py: ''
     python/gss_tester/tests/analyzer.py: |
       import argparse
+      import importlib
       import json
       from pathlib import Path
-      from typing import List, Dict, Any, Tuple, Optional
+      import sys
+      from typing import List, Dict, Any, Tuple, Optional, Type, Callable
       import itertools
+
+      # --- Path setup for importing GSS interface and implementations ---
+      # This allows the script to be run from the project root.
+      project_root = Path(__file__).parent.parent.parent
+      if str(project_root) not in sys.path:
+          sys.path.insert(0, str(project_root))
+
+      from gss_tester.interface import GSS, MergeableInt
 
       MAX_STACKS_PREVIEW = 5
       TRACE_CONTEXT_WINDOW = 10
 
-      def analyze_results(result_files: List[Path], reference_file: Path = None):
+
+      def analyze_results(result_files: List[Path], reference_file: Path = None, minimize: bool = False):
           all_results: Dict[str, List[Dict[str, Any]]] = {}
           implementations: List[str] = []
 
@@ -2468,6 +2479,7 @@ local_system:
           if len(partitions) > 1:
               print("\n--- Divergence Report ---")
               # Compare every pair of partitions
+              divergence_found = False
               for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
                   impl_name1 = sorted(impls1)[0]
                   impl_name2 = sorted(impls2)[0]
@@ -2485,6 +2497,7 @@ local_system:
                       sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
 
                       if sig_item1 != sig_item2:
+                          divergence_found = True
                           print(f"  - First divergence at yield index {i}:")
                           if res1:
                               print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
@@ -2561,7 +2574,24 @@ local_system:
                                       print(f"         src={pretty_stacks(ss)}")
                                   if rs is not None:
                                       print(f"         res={pretty_stacks(rs)}")
+
+                          # --- Minimization ---
+                          if minimize:
+                              # Check if this divergence came from a fuzz test
+                              is_fuzz_failure = t1 and t1.get("phase") == "fuzz"
+                              if is_fuzz_failure:
+                                  # The reference implementation determines the "correct" trace
+                                  ref_impl = ref_impl_name if ref_impl_name in [impl_name1, impl_name2] else impl_name2
+                                  other_impl = impl_name1 if ref_impl == impl_name2 else impl_name1
+                                  
+                                  ref_results = all_results[ref_impl]
+                                  full_trace = [r['trace'] for r in ref_results if 'trace' in r and r['trace'].get("phase") == "fuzz"]
+                                  
+                                  minimize_divergence(ref_impl, other_impl, full_trace)
+
                           break # Show only the first divergence for this pair
+                  if divergence_found and minimize:
+                      break # Only minimize the first pair found
 
       def main():
           parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
@@ -2577,14 +2607,144 @@ local_system:
               default=None,
               help="Path to a reference result file for comparison."
           )
+          parser.add_argument(
+              "-m", "--minimize",
+              action="store_true",
+              help="Attempt to minimize any found fuzzing divergence to a minimal reproducible trace."
+          )
           args = parser.parse_args()
 
           valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
           if not valid_files:
               print("Error: No valid result files found.")
               return
+          
+          analyze_results(valid_files, args.reference, args.minimize)
 
-          analyze_results(valid_files, args.reference)
+
+      def _run_replay(gss_class: Type[GSS], trace_log: List[Dict[str, Any]], max_gss_states: int = 10) -> List[Dict[str, Any]]:
+          """
+          Executes a trace log against a GSS implementation and returns the results.
+          This is a non-yielding, replay-only version of the fuzzer.
+          """
+          gss_states: List[GSS] = []
+          results: List[Dict[str, Any]] = []
+
+          for i, trace_op in enumerate(trace_log):
+              op_choice = trace_op["op"]
+
+              if op_choice == 'init' or op_choice == 'restart_empty_pool':
+                  new_gss = gss_class.from_stacks([([], MergeableInt(0))])
+                  if op_choice == 'init':
+                      gss_states = [new_gss]
+                  else:
+                      gss_states.append(new_gss)
+                  results.append({"state": new_gss.to_stacks(), "trace": trace_op})
+                  continue
+
+              if not gss_states:
+                  break
+
+              source_index = trace_op["source_index"]
+              if source_index is None or source_index >= len(gss_states):
+                  break
+              source_gss = gss_states[source_index]
+
+              args = trace_op["args"]
+              new_gss: Optional[GSS] = None
+
+              try:
+                  if op_choice == 'push':
+                      new_gss = source_gss.push(args["value"])
+                  elif op_choice == 'pop':
+                      new_gss = source_gss.pop()
+                  elif op_choice == 'popn':
+                      new_gss = source_gss.popn(args["n"])
+                  elif op_choice == 'isolate':
+                      new_gss = source_gss.isolate(args["value"])
+                  elif op_choice == 'apply':
+                      amount = args["amount"]
+                      func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
+                      new_gss = source_gss.apply(func)
+                  elif op_choice == 'prune':
+                      threshold = args["threshold"]
+                      predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                      new_gss = source_gss.prune(predicate)
+                  elif op_choice == 'merge':
+                      can_merge = len(gss_states) >= 2
+                      if not can_merge:
+                          continue
+                      other_index = trace_op["other_index"]
+                      if other_index is None or other_index >= len(gss_states):
+                          break
+                      other_gss = gss_states[other_index]
+                      new_gss = source_gss.merge(other_gss)
+                  else:
+                      continue
+
+                  if new_gss is not None:
+                      if new_gss is not source_gss and not new_gss.is_empty():
+                          gss_states.append(new_gss)
+                      results.append({"state": new_gss.to_stacks(), "trace": trace_op})
+
+                  if len(gss_states) > max_gss_states:
+                      gss_states = gss_states[-max_gss_states:]
+              except Exception:
+                  break
+
+          return results
+
+
+      def _check_divergence(impl_name1: str, impl_name2: str, trace: List[Dict[str, Any]]) -> bool:
+          """Runs a trace on two implementations and returns True if they diverge."""
+          try:
+              mod_name1, cls_name1 = impl_name1.rsplit('.', 1)
+              gss_class1 = getattr(importlib.import_module(mod_name1), cls_name1)
+
+              mod_name2, cls_name2 = impl_name2.rsplit('.', 1)
+              gss_class2 = getattr(importlib.import_module(mod_name2), cls_name2)
+          except (ImportError, AttributeError) as e:
+              print(f"Error loading implementations for minimization: {e}", file=sys.stderr)
+              return False
+
+          results1 = _run_replay(gss_class1, trace)
+          results2 = _run_replay(gss_class2, trace)
+
+          sig1 = tuple(json.dumps(r['state'], sort_keys=True) for r in results1)
+          sig2 = tuple(json.dumps(r['state'], sort_keys=True) for r in results2)
+
+          return sig1 != sig2
+
+
+      def minimize_divergence(ref_impl: str, other_impl: str, full_trace: List[Dict[str, Any]]):
+          """
+          Attempts to find the smallest subset of a trace that still causes a divergence.
+          """
+          print("\n--- Minimizing Divergence ---")
+          print(f"Minimizing trace for '{ref_impl}' vs '{other_impl}' (starting with {len(full_trace)} ops)...")
+
+          minimized_trace = list(full_trace)
+          
+          # Simple forward deletion shrinker
+          i = 0
+          while i < len(minimized_trace):
+              shrunk_trace = minimized_trace[:i] + minimized_trace[i+1:]
+              if not shrunk_trace:
+                  i += 1
+                  continue
+              
+              if _check_divergence(ref_impl, other_impl, shrunk_trace):
+                  minimized_trace = shrunk_trace
+                  # Restart scan from the beginning
+                  i = 0
+              else:
+                  i += 1
+          
+          print(f"\n--- Minimized Failing Trace ({len(minimized_trace)} operations) ---")
+          for i, op in enumerate(minimized_trace):
+              op_name = op['op']
+              args = json.dumps(op['args'])
+              print(f"[{i+1}] op={op_name}, args={args}, source_idx={op['source_index']}, other_idx={op['other_index']}")
 
       if __name__ == "__main__":
           main()
@@ -2653,12 +2813,13 @@ local_system:
                       continue
 
               # Choose an operation
-              can_merge = len(gss_states) >= 2
-              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-              if can_merge:
-                  operations.append('merge')
-              
+              # Always choose from the full list of operations to keep the RNG stream
+              # consistent across implementations, even if their pool sizes differ.
+              operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
               op_choice = rng.choice(operations)
+
+              if op_choice == 'merge' and len(gss_states) < 2:
+                  continue # Skip step if merge is not possible.
 
               # Select GSS state(s) to operate on
               source_index = rng.randrange(len(gss_states))
@@ -2706,8 +2867,7 @@ local_system:
                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
                       new_gss = source_gss.prune(predicate)
                       args = {"threshold": threshold}
-
-                  elif op_choice == 'merge' and can_merge:
+                  elif op_choice == 'merge':
                       candidates = [i for i in range(len(gss_states)) if i != source_index]
                       other_index = rng.choice(candidates)
                       other_gss = gss_states[other_index]
@@ -2745,7 +2905,8 @@ local_system:
 
                   # Prune the list of GSS states to keep it manageable
                   if len(gss_states) > max_gss_states:
-                      gss_states = rng.sample(gss_states, max_gss_states)
+                      # Deterministic pruning: keep the most recently added states.
+                      gss_states = gss_states[-max_gss_states:]
 
               except Exception:
                   # Some operations might fail on some implementations if invariants are broken.
@@ -3882,26 +4043,25 @@ local_system:
 
           def push(self, value: T) -> LeveledGSS[T, Acc]:
               if self.is_empty():
-                  return type(self).empty()
+                  return self
               if isinstance(self.inner, Interface):
                   lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
                   new_children = {value: {lower_node._max_depth: lower_node}}
                   return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
               else:
                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
-
           def pop(self) -> LeveledGSS[T, Acc]:
               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
               all_children = list(upper_branch._all_children())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
               merged = try_promote(merged)
               return LeveledGSS(merged)
-
           def popn(self, n: int) -> LeveledGSS[T, Acc]:
               # Fast path: popn(0) is a no-op. Preserve identity to match the default
               # implementation's behavior (crucial for deterministic fuzzing).
               if n <= 0:
-                  return self
+                  # return self
+                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
               for _ in range(n):
                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
@@ -3909,7 +4069,7 @@ local_system:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -6348,7 +6508,7 @@ messages:
                   all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
               all_children: List[Upper[T, Acc]] = list(all_children.values())
               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
+              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
               return LeveledGSS(merged)
 
 
@@ -7167,7 +7327,7 @@ messages:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
       bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-22_12-01-10
+      Test results will be saved in: gss_test_results/2025-09-22_12-34-41
       ---
       Reference Implementation: gss_tester/implementations/reference_impl.py
       Other Implementations: gss_tester/implementations/leveled_impl.py
@@ -7175,25 +7335,25 @@ messages:
       Starting test runs...
 
       >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.reference_impl.ReferenceGSS.json
       Importing ReferenceGSS from gss_tester.implementations.reference_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      Results saved to gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.reference_impl.ReferenceGSS.json
       >>> Finished test spec for: gss_tester/implementations/reference_impl.py
 
       >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.leveled_impl.LeveledGSS.json
       Importing LeveledGSS from gss_tester.implementations.leveled_impl...
       Running test specification...
       Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json
+      Results saved to gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.leveled_impl.LeveledGSS.json
       >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
 
       All test runs completed.
       ---
       Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-01-10/gss_tester.implementations.reference_impl.ReferenceGSS.json
+      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-34-41/gss_tester.implementations.reference_impl.ReferenceGSS.json
       --- Consistency Analysis ---
       Found 2 equivalence class(es) among 2 implementations.
 
@@ -7290,30 +7450,10 @@ messages:
       Consistency analysis complete.
       Reference: gss_tester/implementations/reference_impl.py
       Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-22_12-01-10
+      Full JSON results are in: gss_test_results/2025-09-22_12-34-41
     metadata:
-  - user: |-
-      When I add this:
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  # return self
-                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-      ```
-      Suddenly I get this failure.
-      When I change it back to this
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  return self
-      ```
-      the test succeeds.
-      WTF?? What on earth would cause this?
-      (I know I can just use return self. But this indicates a big error somewhere in my program that could be causing other major problems that I don't know about yet.)
+  - user: I want to find the shortest possible sequence of ops that gets us an error.
+      Make the tests do this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7332,120 +7472,327 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. This is a fascinating and subtle bug that's a great example of why testing with a deterministic fuzzer is so powerful. The behavior you're seeing is not random; it's a direct consequence of how the fuzzer detects changes between operations.
+      Of course. To find the shortest possible sequence of operations that causes an error, we need to make the fuzz testing process deterministic and then add a "shrinking" or "minimization" step to the analysis.
 
-      Here is the step-by-step explanation and the fixes.
+      Here are the step-by-step instructions to modify your test suite, followed by the corresponding git diffs.
 
-      ### The "WTF" Explained: Object Identity vs. Equality
+      ### Step-by-Step Instructions
 
-      The root cause of the failure is the difference between object identity (`is`) and equality (`==`). Your fuzzer uses object identity to determine if an operation was a "no-op" (an operation that resulted in no change).
+      #### 1. Make the Fuzzer Deterministic
 
-      1.  **Fuzzer Synchronization:** The fuzzer (`fuzzer.py`) runs the same sequence of pseudo-random operations against both your `LeveledGSS` and the `ReferenceGSS`. This is controlled by a single starting `seed`. For the test results to be comparable, the sequence of operations must be identical.
+      First, we'll modify the fuzzer to ensure that for a given seed, every implementation executes the exact same sequence of operations. This makes the generated failure trace valid for all implementations and enables minimization.
 
-      2.  **State Pool:** The fuzzer maintains a pool of GSS states (`gss_states`). In each step, it picks a state from this pool to operate on. The size of this pool is critical. If the pool sizes diverge between the two test runs, the next call to `rng.randrange(len(gss_states))` will likely pick a different index, the random number generator's state will de-synchronize, and the two implementations will start executing completely different test sequences.
+      In `python/gss_tester/tests/fuzzer.py`:
 
-      3.  **The Identity Check:** The fuzzer decides whether to add the result of an operation (`new_gss`) to the state pool using this logic:
-          ```python
-          if new_gss is not source_gss and not new_gss.is_empty():
-              gss_states.append(new_gss)
-          ```
-          The key here is `new_gss is not source_gss`. It's checking if the operation returned a *new object* in memory, not just an object that is *equal* to the source.
+      1.  **Modify Operation Selection:** In the `run_fuzz_test` function, change the logic for choosing an operation. Instead of conditionally adding `'merge'` to the list of operations, always include it. Then, if `'merge'` is chosen when it's not possible (i.e., fewer than two GSS states are available), simply skip that step. This ensures the random number generator's state advances identically for all test subjects.
 
-      4.  **How `popn(0)` Breaks Everything:**
-          *   **ReferenceGSS:** The default `popn(n)` implementation in the `GSS` interface is used. When `n=0`, the loop doesn't run, and it correctly returns `self`. The identity check `new_gss is source_gss` is `True`, and the state is **not** added to the pool. The pool size remains unchanged.
-          *   **Your Failing LeveledGSS:** Your implementation of `popn(0)` does this: `return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self`. When the GSS happens to be rooted with an `Interface` node, you create a *brand new* `LeveledGSS` object. Although this new object is `==` to the original, it is not the *same* object. The identity check `new_gss is source_gss` is `False`. The fuzzer thinks a change occurred and **adds the new object to the pool**.
+      2.  **Modify GSS Pool Pruning:** In the same function, find the code that prunes the pool of GSS states when it gets too large. Replace the random sampling (`rng.sample`) with deterministic slicing (`gss_states[-max_gss_states:]`) to always keep the most recently created states.
 
-      At step 112 of the fuzz test, `popn(0)` is called. For `LeveledGSS`, this adds a duplicate state to the pool. The pool size for `LeveledGSS` is now different from the pool size for `ReferenceGSS`. At step 113, the fuzzer generates a different operation, and the test fails.
+      #### 2. Add Test Case Minimization to the Analyzer
 
-      The "big error" you were worried about is this inconsistent handling of object identity for no-op methods. An operation that does nothing should return `self` to signal its no-op nature to callers like the fuzzer.
+      Next, we'll enhance the analyzer to take a failing test trace and automatically reduce it to the smallest possible version that still causes the failure.
 
-      ### The Fixes
+      In `python/gss_tester/tests/analyzer.py`:
 
-      Here are two changes to make your implementation more robust and consistent with the reference.
+      1.  **Add Imports and Path Handling:** At the top of the file, add imports for `importlib` and `sys`. We also need to modify `sys.path` so the script can import the GSS interface and implementations from the parent directory.
 
-      #### Step 1: Fix `popn()` to Preserve Identity
+      2.  **Add Replay Logic:** Add a new function, `_run_replay`, to the analyzer. This function will be a modified version of the fuzzer's `run_fuzz_test` that, instead of generating random operations, executes a specific sequence of operations from a given trace log. This is essential for repeatedly testing a specific failure case.
 
-      First, we'll fix the immediate problem by ensuring `popn(0)` always returns `self`.
+      3.  **Add Divergence Checking Logic:** Create a helper function `_check_divergence` that takes two implementation names and a trace. It will use `_run_replay` to execute the trace on both implementations and return `True` if their final states differ.
 
-      *   **File:** `python/gss_tester/implementations/leveled_impl.py`
-      *   **Method:** `LeveledGSS.popn`
-      *   **Action:** Replace the conditional logic for `n <= 0` with a simple `return self`.
+      4.  **Add Minimization Logic:** Create the main `minimize_divergence` function. This function will implement a simple "forward deletion" shrinking algorithm. It will repeatedly try to remove operations from the failing trace and use `_check_divergence` to see if the smaller trace still triggers the bug.
 
-      ```python
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  return self
-      ```
+      5.  **Integrate into `main`:**
+          *   Add a `--minimize` command-line flag to the `ArgumentParser`.
+          *   In the `analyze_results` function, detect when a divergence occurs during a fuzz test. If the `--minimize` flag is active, call your new `minimize_divergence` function to find and report the minimal failing sequence.
 
-      #### Step 2: Fix `push()` on Empty GSS for Consistency
-
-      To address your concern about other potential issues, there is a similar inconsistency in the `push` method. When called on an empty GSS, it returns `self`, whereas the reference implementation returns a *new* empty GSS. This doesn't break the current test (because the fuzzer doesn't add empty states to the pool), but it's best to fix it for consistency.
-
-      *   **File:** `python/gss_tester/implementations/leveled_impl.py`
-      *   **Method:** `LeveledGSS.push`
-      *   **Action:** Change the `is_empty` check to return a new empty GSS instance using the class's `empty()` constructor.
-
-      ```python
-          def push(self, value: T) -> LeveledGSS[T, Acc]:
-              if self.is_empty():
-                  return type(self).empty()
-      ```
-
-      These two changes will resolve the test failure and make your implementation's behavior more correct and predictable.
+      These changes will equip your test suite with a powerful tool for debugging, turning long, random failures into short, easy-to-understand test cases.
 
       ### Git Diffs
 
-      Here are the changes in `git diff` format.
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -507,19 +507,19 @@
+      diff --git a/python/gss_tester/tests/analyzer.py b/python/gss_tester/tests/analyzer.py
+      --- a/python/gss_tester/tests/analyzer.py
+      +++ b/python/gss_tester/tests/analyzer.py
+      @@ -1,12 +1,24 @@
+       import argparse
+      +import importlib
+       import json
+       from pathlib import Path
+      -from typing import List, Dict, Any, Tuple, Optional
+      +import sys
+      +from typing import List, Dict, Any, Tuple, Optional, Type, Callable
+       import itertools
+      +
+      +# --- Path setup for importing GSS interface and implementations ---
+      +# This allows the script to be run from the project root.
+      +project_root = Path(__file__).parent.parent.parent
+      +if str(project_root) not in sys.path:
+      +    sys.path.insert(0, str(project_root))
+      +
+      +from gss_tester.interface import GSS, MergeableInt
        
-           def push(self, value: T) -> LeveledGSS[T, Acc]:
-               if self.is_empty():
-      -            return self
-      +            return type(self).empty()
-               if isinstance(self.inner, Interface):
-                   lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
-                   new_children = {value: {lower_node._max_depth: lower_node}}
-                   return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
-               else:
-                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
+       MAX_STACKS_PREVIEW = 5
+       TRACE_CONTEXT_WINDOW = 10
+       
+      -def analyze_results(result_files: List[Path], reference_file: Path = None):
       +
-           def pop(self) -> LeveledGSS[T, Acc]:
-               upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
-               all_children = list(upper_branch._all_children())
-               merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-               merged = try_promote(merged)
-               return LeveledGSS(merged)
+      +def analyze_results(result_files: List[Path], reference_file: Path = None, minimize: bool = False):
+           all_results: Dict[str, List[Dict[str, Any]]] = {}
+           implementations: List[str] = []
+       
+      @@ -93,6 +105,7 @@
+           if len(partitions) > 1:
+               print("\n--- Divergence Report ---")
+               # Compare every pair of partitions
+      +        divergence_found = False
+               for (sig1, impls1), (sig2, impls2) in itertools.combinations(partitions.items(), 2):
+                   impl_name1 = sorted(impls1)[0]
+                   impl_name2 = sorted(impls2)[0]
+      @@ -109,6 +122,7 @@
+                       sig_item2 = (res2['line'], json.dumps(res2['state'], sort_keys=True)) if res2 else None
+       
+                       if sig_item1 != sig_item2:
+      +                    divergence_found = True
+                           print(f"  - First divergence at yield index {i}:")
+                           if res1:
+                               print(f"    - {impl_name1} (L{res1['line']}): {json.dumps(res1['state'])}")
+      @@ -188,7 +202,23 @@
+                                       print(f"         src={pretty_stacks(ss)}")
+                                   if rs is not None:
+                                       print(f"         res={pretty_stacks(rs)}")
       +
-           def popn(self, n: int) -> LeveledGSS[T, Acc]:
-               # Fast path: popn(0) is a no-op. Preserve identity to match the default
-               # implementation's behavior (crucial for deterministic fuzzing).
-               if n <= 0:
-      -            # return self
-      -            return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-      +            return self
-               all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-               for _ in range(n):
-                   def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+      +                    # --- Minimization ---
+      +                    if minimize:
+      +                        # Check if this divergence came from a fuzz test
+      +                        is_fuzz_failure = t1 and t1.get("phase") == "fuzz"
+      +                        if is_fuzz_failure:
+      +                            # The reference implementation determines the "correct" trace
+      +                            ref_impl = ref_impl_name if ref_impl_name in [impl_name1, impl_name2] else impl_name2
+      +                            other_impl = impl_name1 if ref_impl == impl_name2 else impl_name1
+      +                            
+      +                            ref_results = all_results[ref_impl]
+      +                            full_trace = [r['trace'] for r in ref_results if 'trace' in r and r['trace'].get("phase") == "fuzz"]
+      +                            
+      +                            minimize_divergence(ref_impl, other_impl, full_trace)
+      +
+                           break # Show only the first divergence for this pair
+      +            if divergence_found and minimize:
+      +                break # Only minimize the first pair found
+       
+       def main():
+           parser = argparse.ArgumentParser(description="Analyze GSS implementation consistency from result files.")
+      @@ -204,14 +234,141 @@
+               default=None,
+               help="Path to a reference result file for comparison."
+           )
+      +    parser.add_argument(
+      +        "-m", "--minimize",
+      +        action="store_true",
+      +        help="Attempt to minimize any found fuzzing divergence to a minimal reproducible trace."
+      +    )
+           args = parser.parse_args()
+       
+           valid_files = [f for f in args.result_files if f.exists() and f.is_file()]
+           if not valid_files:
+               print("Error: No valid result files found.")
+               return
+      -
+      -    analyze_results(valid_files, args.reference)
+      +    
+      +    analyze_results(valid_files, args.reference, args.minimize)
+      +
+      +
+      +def _run_replay(gss_class: Type[GSS], trace_log: List[Dict[str, Any]], max_gss_states: int = 10) -> List[Dict[str, Any]]:
+      +    """
+      +    Executes a trace log against a GSS implementation and returns the results.
+      +    This is a non-yielding, replay-only version of the fuzzer.
+      +    """
+      +    gss_states: List[GSS] = []
+      +    results: List[Dict[str, Any]] = []
+      +
+      +    for i, trace_op in enumerate(trace_log):
+      +        op_choice = trace_op["op"]
+      +
+      +        if op_choice == 'init' or op_choice == 'restart_empty_pool':
+      +            new_gss = gss_class.from_stacks([([], MergeableInt(0))])
+      +            if op_choice == 'init':
+      +                gss_states = [new_gss]
+      +            else:
+      +                gss_states.append(new_gss)
+      +            results.append({"state": new_gss.to_stacks(), "trace": trace_op})
+      +            continue
+      +
+      +        if not gss_states:
+      +            break
+      +
+      +        source_index = trace_op["source_index"]
+      +        if source_index is None or source_index >= len(gss_states):
+      +            break
+      +        source_gss = gss_states[source_index]
+      +
+      +        args = trace_op["args"]
+      +        new_gss: Optional[GSS] = None
+      +
+      +        try:
+      +            if op_choice == 'push':
+      +                new_gss = source_gss.push(args["value"])
+      +            elif op_choice == 'pop':
+      +                new_gss = source_gss.pop()
+      +            elif op_choice == 'popn':
+      +                new_gss = source_gss.popn(args["n"])
+      +            elif op_choice == 'isolate':
+      +                new_gss = source_gss.isolate(args["value"])
+      +            elif op_choice == 'apply':
+      +                amount = args["amount"]
+      +                func: Callable[[MergeableInt], MergeableInt] = lambda acc, amt=amount: acc + amt
+      +                new_gss = source_gss.apply(func)
+      +            elif op_choice == 'prune':
+      +                threshold = args["threshold"]
+      +                predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+      +                new_gss = source_gss.prune(predicate)
+      +            elif op_choice == 'merge':
+      +                can_merge = len(gss_states) >= 2
+      +                if not can_merge:
+      +                    continue
+      +                other_index = trace_op["other_index"]
+      +                if other_index is None or other_index >= len(gss_states):
+      +                    break
+      +                other_gss = gss_states[other_index]
+      +                new_gss = source_gss.merge(other_gss)
+      +            else:
+      +                continue
+      +
+      +            if new_gss is not None:
+      +                if new_gss is not source_gss and not new_gss.is_empty():
+      +                    gss_states.append(new_gss)
+      +                results.append({"state": new_gss.to_stacks(), "trace": trace_op})
+      +
+      +            if len(gss_states) > max_gss_states:
+      +                gss_states = gss_states[-max_gss_states:]
+      +        except Exception:
+      +            break
+      +
+      +    return results
+      +
+      +
+      +def _check_divergence(impl_name1: str, impl_name2: str, trace: List[Dict[str, Any]]) -> bool:
+      +    """Runs a trace on two implementations and returns True if they diverge."""
+      +    try:
+      +        mod_name1, cls_name1 = impl_name1.rsplit('.', 1)
+      +        gss_class1 = getattr(importlib.import_module(mod_name1), cls_name1)
+      +
+      +        mod_name2, cls_name2 = impl_name2.rsplit('.', 1)
+      +        gss_class2 = getattr(importlib.import_module(mod_name2), cls_name2)
+      +    except (ImportError, AttributeError) as e:
+      +        print(f"Error loading implementations for minimization: {e}", file=sys.stderr)
+      +        return False
+      +
+      +    results1 = _run_replay(gss_class1, trace)
+      +    results2 = _run_replay(gss_class2, trace)
+      +
+      +    sig1 = tuple(json.dumps(r['state'], sort_keys=True) for r in results1)
+      +    sig2 = tuple(json.dumps(r['state'], sort_keys=True) for r in results2)
+      +
+      +    return sig1 != sig2
+      +
+      +
+      +def minimize_divergence(ref_impl: str, other_impl: str, full_trace: List[Dict[str, Any]]):
+      +    """
+      +    Attempts to find the smallest subset of a trace that still causes a divergence.
+      +    """
+      +    print("\n--- Minimizing Divergence ---")
+      +    print(f"Minimizing trace for '{ref_impl}' vs '{other_impl}' (starting with {len(full_trace)} ops)...")
+      +
+      +    minimized_trace = list(full_trace)
+      +    
+      +    # Simple forward deletion shrinker
+      +    i = 0
+      +    while i < len(minimized_trace):
+      +        shrunk_trace = minimized_trace[:i] + minimized_trace[i+1:]
+      +        if not shrunk_trace:
+      +            i += 1
+      +            continue
+      +        
+      +        if _check_divergence(ref_impl, other_impl, shrunk_trace):
+      +            minimized_trace = shrunk_trace
+      +            # Restart scan from the beginning
+      +            i = 0
+      +        else:
+      +            i += 1
+      +    
+      +    print(f"\n--- Minimized Failing Trace ({len(minimized_trace)} operations) ---")
+      +    for i, op in enumerate(minimized_trace):
+      +        op_name = op['op']
+      +        args = json.dumps(op['args'])
+      +        print(f"[{i+1}] op={op_name}, args={args}, source_idx={op['source_index']}, other_idx={op['other_index']}")
+       
+       if __name__ == "__main__":
+           main()
+
+      ``````diff
+      diff --git a/python/gss_tester/tests/fuzzer.py b/python/gss_tester/tests/fuzzer.py
+      --- a/python/gss_tester/tests/fuzzer.py
+      +++ b/python/gss_tester/tests/fuzzer.py
+      @@ -53,11 +53,13 @@
+                       continue
+       
+               # Choose an operation
+      -        can_merge = len(gss_states) >= 2
+      -        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+      -        if can_merge:
+      -            operations.append('merge')
+      -        
+      +        # Always choose from the full list of operations to keep the RNG stream
+      +        # consistent across implementations, even if their pool sizes differ.
+      +        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
+               op_choice = rng.choice(operations)
+      +
+      +        if op_choice == 'merge' and len(gss_states) < 2:
+      +            continue # Skip step if merge is not possible.
+       
+               # Select GSS state(s) to operate on
+               source_index = rng.randrange(len(gss_states))
+      @@ -102,7 +104,7 @@
+                       predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
+                       new_gss = source_gss.prune(predicate)
+                       args = {"threshold": threshold}
+      -
+      -            elif op_choice == 'merge' and can_merge:
+      +            elif op_choice == 'merge':
+                       candidates = [i for i in range(len(gss_states)) if i != source_index]
+                       other_index = rng.choice(candidates)
+                       other_gss = gss_states[other_index]
+      @@ -136,7 +138,8 @@
+       
+                   # Prune the list of GSS states to keep it manageable
+                   if len(gss_states) > max_gss_states:
+      -                gss_states = rng.sample(gss_states, max_gss_states)
+      +                # Deterministic pruning: keep the most recently added states.
+      +                gss_states = gss_states[-max_gss_states:]
+       
+               except Exception:
+                   # Some operations might fail on some implementations if invariants are broken.
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+      Identified target file: python/gss_tester/tests/analyzer.py
+      Applying patch to 'python/gss_tester/tests/analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/tests/analyzer.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/gss_tester/tests/fuzzer.py
+      Applying patch to 'python/gss_tester/tests/fuzzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/tests/fuzzer.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure popn(0) returns self and push
-      on empty GSS returns new empty GSS"'
+  - user: 'Changes committed with message: "feat: Add fuzz trace minimization and
+      deterministic fuzzer"'
     metadata:
 ...
