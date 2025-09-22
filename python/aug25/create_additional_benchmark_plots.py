@@ -311,6 +311,58 @@ def generate_plots(data):
         create_merge_total_plot('upper', 'Total UpperBranch Nodes in Merges per Step', 'Total UpperBranch Nodes (Log Scale)')
         create_merge_total_plot('lower', 'Total Lower Nodes in Merges per Step', 'Total Lower Nodes (Log Scale)')
 
+    # Plot 12: Average Merge Stats per Step
+    if data.get('merge_stats'):
+        from collections import defaultdict
+
+        step_totals = defaultdict(lambda: defaultdict(float))
+        merge_counts = defaultdict(int)
+        stat_keys = ['unique_accs', 'total_acc_instances', 'interfaces', 'upper', 'lower']
+
+        for item in data['merge_stats']:
+            step = item['step']
+            type_name = item['type']
+            if type_name == 'merged':
+                merge_counts[step] += 1
+            for key in stat_keys:
+                step_totals[step][f'{type_name}_{key}'] += item[key]
+
+        # Prepare data for plotting averages
+        plot_data_avg = defaultdict(list)
+        for step in steps:
+            count = merge_counts.get(step, 1) # Use 1 to avoid division by zero; total will be 0 anyway
+            for type_name in ['existing', 'new', 'merged']:
+                for key in stat_keys:
+                    full_key = f'{type_name}_{key}'
+                    total = step_totals[step].get(full_key, 0)
+                    plot_data_avg[full_key].append(total / count)
+
+        def create_merge_average_plot(stat_key, title, y_label, use_log_scale=True):
+            plt.figure(figsize=(12, 8))
+
+            plt.plot(steps, plot_data_avg[f'existing_{stat_key}'], 'o-', label='Avg. "Existing" GSS Stats')
+            plt.plot(steps, plot_data_avg[f'new_{stat_key}'], 'x-', label='Avg. "New" GSS Stats')
+            plt.plot(steps, plot_data_avg[f'merged_{stat_key}'], 's-', label='Avg. "Merged" GSS Stats')
+
+            plt.xlabel('Benchmark Step')
+            plt.ylabel(y_label)
+            plt.title(title)
+            plt.xticks(steps)
+            plt.grid(True, which="both", ls="--")
+            if use_log_scale:
+                plt.yscale('log')
+
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, f"merge_average_{stat_key}.png"))
+            plt.close()
+
+        create_merge_average_plot('unique_accs', 'Average Unique Accumulators in Merges per Step', 'Average Unique Accumulators (Log Scale)')
+        create_merge_average_plot('total_acc_instances', 'Average Accumulator Instances in Merges per Step', 'Average Acc Instances (Log Scale)')
+        create_merge_average_plot('interfaces', 'Average Interface Nodes in Merges per Step', 'Average Interface Nodes (Log Scale)')
+        create_merge_average_plot('upper', 'Average UpperBranch Nodes in Merges per Step', 'Average UpperBranch Nodes (Log Scale)')
+        create_merge_average_plot('lower', 'Average Lower Nodes in Merges per Step', 'Average Lower Nodes (Log Scale)')
+
     print("All plots generated successfully.", file=sys.stderr)
 
 if __name__ == "__main__":
