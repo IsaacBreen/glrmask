@@ -2,11 +2,45 @@ import heapq
 from typing import Dict, List, Set, Optional
 import time
 import collections
+from functools import wraps
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from .precompute3_model_pure_python import Model as InnerModel, PyAcc
 from ..common_interface import GraphProvider, RangeSet
 
+
+RANGESET_STATS = collections.defaultdict(float)
+RANGESET_CALLS = collections.defaultdict(int)
+
+def time_rangeset_method(func):
+    """Decorator to time methods of RangeSet."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        t0 = time.time()
+        result = func(*args, **kwargs)
+        RANGESET_STATS[func.__name__] += time.time() - t0
+        RANGESET_CALLS[func.__name__] += 1
+        return result
+    return wrapper
+
+def print_rangeset_stats():
+    """Prints the collected stats for RangeSet methods."""
+    print("\n--- RangeSet stats ---")
+    total_time = sum(RANGESET_STATS.values())
+    for k, v in sorted(RANGESET_STATS.items()):
+        calls = RANGESET_CALLS[k]
+        if total_time > 1e-6:
+            print(f"t_{k:<23}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+        else:
+            print(f"t_{k:<23}: {v:8.4f}s | calls: {calls}")
+    print("----------------------\n")
+
+# Monkey-patch RangeSet methods for profiling
+if not hasattr(RangeSet, '_instrumented'):
+    for method_name in ['union', 'intersection', 'difference', 'to_indices', 'from_indices', 'empty', 'is_empty', 'contains']:
+        if hasattr(RangeSet, method_name):
+            setattr(RangeSet, method_name, time_rangeset_method(getattr(RangeSet, method_name)))
+    RangeSet._instrumented = True
 
 class Model(GraphProvider):
     def __init__(self, inner_model: InnerModel):
@@ -230,4 +264,6 @@ class Model(GraphProvider):
             else:
                 print(f"{k:<25}: {int(v)}")
         print("----------------------\n")
+
+        print_rangeset_stats()
         return RangeSet.from_indices(original_indices)
