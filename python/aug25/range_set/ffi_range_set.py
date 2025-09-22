@@ -22,6 +22,28 @@ class FFIRangeSet(RangeSet[int]):
         """Returns the intervals as a list of lists for JSON serialization."""
         return [list(r) for r in self._bitset.to_ranges()]
 
+    def contains(self, x: int) -> bool:
+        """Return True if x is contained in the set."""
+        return self._bitset.contains(x)
+
+    def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+        """Return the union of two RangeSets."""
+        if not isinstance(other, FFIRangeSet):
+            other = FFIRangeSet(other.intervals)
+        return self | other
+
+    def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+        """Return the intersection of two RangeSets."""
+        if not isinstance(other, FFIRangeSet):
+            other = FFIRangeSet(other.intervals)
+        return self & other
+
+    def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+        """Return the set difference self \\ other."""
+        if not isinstance(other, FFIRangeSet):
+            other = FFIRangeSet(other.intervals)
+        return self - other
+
     def __or__(self, other: 'FFIRangeSet') -> 'FFIRangeSet':
         new_set = FFIRangeSet()
         new_set._bitset = self._bitset.union(other._bitset)
