@@ -22,6 +22,10 @@ class FFIRangeSet(RangeSet[int]):
         """Returns the intervals as a list of lists for JSON serialization."""
         return [list(r) for r in self._bitset.to_ranges()]
 
+    def to_indices(self) -> List[int]:
+        """Returns the elements of the set as a list."""
+        return self._bitset.to_indices()
+
     def contains(self, x: int) -> bool:
         """Return True if x is contained in the set."""
         return self._bitset.contains(x)
@@ -86,6 +90,24 @@ class FFIRangeSet(RangeSet[int]):
         # The ffi.Bitset constructor handles merging and sorting.
         temp_rs = FFIRangeSet(ranges)
         return temp_rs._bitset.to_ranges()
+
+    @staticmethod
+    def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+        """Creates a FFIRangeSet from a list of [start, end] lists."""
+        return FFIRangeSet(tuple(map(tuple, ranges)))
+
+    @staticmethod
+    def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+        """Creates a FFIRangeSet from an iterable of individual indices."""
+        new_set = FFIRangeSet()
+        # The FFI function expects a list.
+        new_set._bitset = ffi.Bitset.from_indices(list(indices))
+        return new_set
+
+    @staticmethod
+    def empty() -> 'FFIRangeSet':
+        """Creates an empty FFIRangeSet."""
+        return FFIRangeSet()
 
     @staticmethod
     def from_json(data: List[List[int]]) -> 'FFIRangeSet':

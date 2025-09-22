@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Generic, Tuple, TypeVar
+from typing import Generic, Iterable, List, Tuple, TypeVar
 
 T = TypeVar("T")
 
@@ -29,6 +29,11 @@ class RangeSet(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
+    def __len__(self) -> int:
+        """Return the total number of elements in the set."""
+        raise NotImplementedError
+
+    @abstractmethod
     def contains(self, x: T) -> bool:
         """Return True if x is contained in the set."""
         raise NotImplementedError
@@ -46,4 +51,43 @@ class RangeSet(ABC, Generic[T]):
     @abstractmethod
     def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
         """Return the set difference self \\ other."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def to_ranges(self) -> List[List[T]]:
+        """Returns the intervals as a list of lists for JSON serialization."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def to_indices(self) -> List[T]:
+        """Returns the elements of the set as a list."""
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+        """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def to_json(self) -> List[List[T]]:
+        """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
+        """Creates a RangeSet from a list of [start, end] lists."""
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
+        """Creates a RangeSet from an iterable of individual indices."""
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def empty(cls) -> "RangeSet[T]":
+        """Creates an empty RangeSet."""
         raise NotImplementedError
