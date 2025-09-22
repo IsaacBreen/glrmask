@@ -1,74 +1,11 @@
 import heapq
 import _sep1 as ffi
-import time
-import traceback
-from functools import wraps
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Optional
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from .precompute3_model_pure_python import Model as InnerModel, PyAcc
 from ..common_interface import GraphProvider, RangeSet
 
-try:
-    profile
-except NameError:
-    def profile(func): return func
-
-
-# --- Profiling infrastructure ---
-_PROFILING_STATS = {
-    'bitset_union': {},
-    'bitset_intersection': {},
-    'bitset_difference': {},
-    'hybrid_complement': {},
-    'acc_merge': {},
-}
-
-def _profile_method(cls, method_name, counter_name):
-    original_method = getattr(cls, method_name)
-    @wraps(original_method)
-    def wrapper(*args, **kwargs):
-        # Get stack, limit to a few frames, ignore the current one.
-        frames = traceback.extract_stack(limit=None)[:-1]
-
-        # Format it into a readable string
-        call_chain = []
-        last_filename = None
-        for frame in reversed(frames):
-            # Don't include the profiler wrapper in the output
-            if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
-                continue
-
-            filename = frame.filename.split('/')[-1]
-            frame_str = f"{frame.lineno} ({frame.name})"
-
-            if filename == last_filename:
-                # Same file, just append line and func
-                call_chain[-1] += f" -> {frame_str}"
-            else:
-                # New file
-                call_chain.append(f"{filename}:{frame_str}")
-                last_filename = filename
-
-        stack_key = " | ".join(call_chain)
-
-        stats_dict = _PROFILING_STATS[counter_name]
-        stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
-
-        return original_method(*args, **kwargs)
-    setattr(cls, method_name, wrapper)
-
-_hooks_installed = False
-def _install_profiling_hooks():
-    global _hooks_installed
-    if _hooks_installed:
-        return
-    _profile_method(ffi.Bitset, 'union', 'bitset_union')
-    _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
-    _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
-    _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
-    _profile_method(PyAcc, 'merge', 'acc_merge')
-    _hooks_installed = True
 
 class Model(GraphProvider):
     def __init__(self, inner_model: InnerModel):
@@ -81,9 +18,6 @@ class Model(GraphProvider):
         self.tokenizer_max_state: int = im.tokenizer.max_state()
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
         self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
-        # Profiling state
-        _install_profiling_hooks()
-        self.get_mask_calls = 0
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -99,7 +33,6 @@ class Model(GraphProvider):
     def is_end(self, node: int) -> bool:
         return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
 
-    @profile
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -111,21 +44,7 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        print("\n--- get_mask START ---")
-
         state_map: Dict[int, GSS] = self.state
-        t_start = time.perf_counter_ns()
-        self.get_mask_calls += 1
-
-        call_stats = {
-            'nodes_visited': 0,
-            'main_loop_iterations': 0,
-            'end_nodes_reached': 0,
-            'main_loop_apply_calls': 0,
-            'main_loop_merge_calls': 0,
-            'main_loop_union_calls': 0,
-            'main_loop_intersection_calls': 0,
-        }
 
         all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
         final_mask: ffi.Bitset = ffi.Bitset.zeros()
@@ -155,8 +74,8 @@ class Model(GraphProvider):
                     pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
                     if not pm:
                         continue
-                    for terminal_id_str, llm_tokens in pm.items():
-                        if bv.contains(int(terminal_id_str)):
+                    for terminal_id_key, llm_tokens in pm.items():
+                        if bv.contains(int(terminal_id_key)):
                             forbid = forbid.union(llm_tokens)
             allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
             return PyAcc(
@@ -164,59 +83,42 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask
             )
 
-        memo = {}
+        apply_memo: Dict[PyAcc, PyAcc] = {}
         for sid, gss in state_map.items():
-            r: Optional[int] = roots_map[int(sid)]
-
-            gss_initialized: GSS = gss.apply(initialize_acc, memo)
-
+            r: int = roots_map[int(sid)]
+            gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
             else:
                 values[r] = gss_initialized
 
             d: int = max_depth[r]
-            b: Optional[Set[int]] = todo.get(d)
-            if b is None:
+            bucket: Optional[Set[int]] = todo.get(d)
+            if bucket is None:
                 todo[d] = {r}
                 hp(depth_heap, d)
             else:
-                b.add(r)
-
-        print("\nInitial GSS stats:")
-        print(GSS.merge_many(list(self.state.values())).stats())
-        print("Stats after seeding:")
-        print(GSS.merge_many(list(values.values())).stats())
+                bucket.add(r)
 
         def enqueue(d: int, n: int) -> None:
-            b: Optional[Set[int]] = todo.get(d)
-            if b is None:
+            bucket: Optional[Set[int]] = todo.get(d)
+            if bucket is None:
                 todo[d] = {n}
                 hp(depth_heap, d)
             else:
-                b.add(n)
-
-        t_init_done = time.perf_counter_ns()
-
-        # Reset per-call stats
-        for k in _PROFILING_STATS:
-            _PROFILING_STATS[k] = {}
+                bucket.add(n)
 
         # Main loop
         while depth_heap:
-            call_stats['main_loop_iterations'] += 1
             depth: int = hpop(depth_heap)
             while todo[depth]:
-                call_stats['nodes_visited'] += 1
                 node: int = todo[depth].pop()
                 gss_node: GSS = values.pop(node)
 
                 # End-node handling: just union the allowed LLM tokens
                 if is_end(node):
-                    call_stats['end_nodes_reached'] += 1
                     reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                     if reduced_acc:
-                        call_stats['main_loop_union_calls'] += 1
                         final_mask = final_mask.union(reduced_acc.llm_mask)
 
                 # Traverse edges and propagate masks
@@ -239,12 +141,12 @@ class Model(GraphProvider):
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                         if not llm_bv.is_empty():
-                            memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                            acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
                             def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                if memo.get(acc) is not None:
-                                    return memo[acc]
+                                if acc in acc_memo:
+                                    return acc_memo[acc]
                                 new_mask = acc.llm_mask.intersection(llm_bv)
-                                call_stats['main_loop_intersection_calls'] += 1
                                 if new_mask.is_empty():
                                     result = None
                                 else:
@@ -252,79 +154,29 @@ class Model(GraphProvider):
                                         terminals_union=acc.terminals_union,
                                         llm_mask=new_mask
                                     )
-                                memo[acc] = result
+                                acc_memo[acc] = result
                                 return result
-                            call_stats['main_loop_apply_calls'] += 1
+
                             child_gss = child_gss.apply_and_prune(intersect_and_prune)
                             if child_gss.is_empty():
                                 continue
 
                         d: int = int(dest_idx)
                         if d in values:
-                            call_stats['main_loop_merge_calls'] += 1
-
-                            # --- GSS Merge Stats Logging ---
                             existing_gss = values[d]
                             new_gss = child_gss
                             merged_gss = existing_gss.merge(new_gss)
-
-                            stats_existing = existing_gss.stats()
-                            stats_new = new_gss.stats()
-                            stats_merged = merged_gss.stats()
-
-                            def print_merge_stats(label, stats):
-                                print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
-                                      f"unique_accs={stats.unique_accumulators_count} "
-                                      f"total_acc_instances={stats.total_accumulator_instances} "
-                                      f"interfaces={stats.num_interface_nodes} "
-                                      f"upper={stats.num_upperbranch_nodes} "
-                                      f"lower={stats.num_lower_nodes}")
-
-                            print_merge_stats("existing", stats_existing)
-                            print_merge_stats("new", stats_new)
-                            print_merge_stats("merged", stats_merged)
-
                             values[d] = merged_gss
                         else:
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
 
-
             todo.pop(depth)
-
-        t_main_loop_done = time.perf_counter_ns()
 
         # Convert internal mask back to original IDs
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_mask.insert(self.internal_to_original_map[i])
-
-        t_end = time.perf_counter_ns()
-
-        print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
-        print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
-        print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
-        print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
-        print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
-        print(f"Nodes visited: {call_stats['nodes_visited']}")
-        print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
-        print(f"End nodes reached: {call_stats['end_nodes_reached']}")
-        print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
-        print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
-        print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
-        print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
-        for k, v_dict in _PROFILING_STATS.items():
-            total_calls = sum(v_dict.values())
-            print(f"{k} total calls: {total_calls}")
-            if total_calls > 0:
-                # Sort by count, descending, and take top 10
-                sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
-                for i, (stack, count) in enumerate(sorted_callers):
-                    # if i >= 10:
-                    #     print(f"  ... and {len(sorted_callers) - 10} more call sites.")
-                    #     break
-                    print(f"  - {count:<7} calls from: {stack}")
-        print(f"--- get_mask END ---")
 
         return RangeSet.from_ranges(original_mask.to_ranges())
