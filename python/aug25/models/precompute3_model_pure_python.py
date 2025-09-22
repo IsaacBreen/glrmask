@@ -252,9 +252,8 @@ class Model(GraphProvider):
                     if state_bv.empty:
                         yield (int(pop), None, int(dest_idx))
                     else:
-                        for atomic in state_bv:
-                            for sid in range(atomic.lower, atomic.upper + 1):
-                                yield (int(pop), sid, int(dest_idx))
+                        for sid in P.iterate(state_bv, step=1):
+                            yield (int(pop), sid, int(dest_idx))
 
     @profile
     def commit(self, token_id: int):
@@ -417,10 +416,9 @@ class Model(GraphProvider):
                         if tsid > max_state or tsid not in pmc:
                             continue
                         terminals_to_llm = pmc[tsid]
-                        for atomic in disallowed_terminals:
-                            for terminal_id in range(atomic.lower, atomic.upper + 1):
-                                if terminal_id in terminals_to_llm:
-                                    disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                        for terminal_id in P.iterate(disallowed_terminals, step=1):
+                            if terminal_id in terminals_to_llm:
+                                disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
                 allowed_mask = all_ones_mask - disallowed_llm_mask
 
@@ -528,9 +526,8 @@ class Model(GraphProvider):
                         enqueue(max_depth[d], d)
 
         # Convert internal mask back to original IDs
-        original_mask = P.empty()
-        for atomic in final_mask:
-            for internal_id in range(atomic.lower, atomic.upper + 1):
-                if internal_id in self.internal_to_original_map:
-                    original_mask |= P.singleton(self.internal_to_original_map[internal_id])
+        original_mask: P.Interval = P.empty()
+        for internal_id in P.iterate(final_mask, step=1):
+            if internal_id in self.internal_to_original_map:
+                original_mask |= P.singleton(self.internal_to_original_map[internal_id])
         return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])

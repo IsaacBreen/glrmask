@@ -74,10 +74,9 @@ class Model(GraphProvider):
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
-                for atomic in disallowed_terminals:
-                    for terminal_id in range(atomic.lower, atomic.upper + 1):
-                        if terminal_id in terminals_to_llm:
-                            disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                for terminal_id in P.iterate(disallowed_terminals, step=1):
+                    if terminal_id in terminals_to_llm:
+                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
             allowed_mask = all_ones - disallowed_llm_mask
             return PyAcc(
@@ -126,7 +125,7 @@ class Model(GraphProvider):
                 # Traverse edges and propagate masks
                 for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
                     popped: GSS = gss_node.popn(pop)
-                    if popped.empty:
+                    if popped.is_empty():
                         continue
 
                     for dest_idx, state_bv in dests:
@@ -138,7 +137,7 @@ class Model(GraphProvider):
                             continue
 
                         child_gss: GSS = popped.isolate_many(values_to_keep)
-                        if child_gss.empty:
+                        if child_gss.is_empty():
                             continue
 
                         # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -160,7 +159,7 @@ class Model(GraphProvider):
                                 return result
 
                             child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                            if child_gss.empty:
+                            if child_gss.is_empty():
                                 continue
 
                         d: int = int(dest_idx)
@@ -173,13 +172,13 @@ class Model(GraphProvider):
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
 
-            todo.pop(depth)
+
+        todo.pop(depth)
 
         # Convert internal mask back to original IDs
         original_mask: P.Interval = P.empty()
-        for atomic in final_mask:
-            for i in range(atomic.lower, atomic.upper + 1):
-                if i in self.internal_to_original_map:
-                    original_mask |= P.singleton(self.internal_to_original_map[i])
+        for i in P.iterate(final_mask, step=1):
+            if i in self.internal_to_original_map:
+                original_mask |= P.singleton(self.internal_to_original_map[i])
 
-        return RangeSet.from_ranges([(i.lower, i.upper) for i in original_mask])
+        return RangeSet.from_ranges(original_mask.to_ranges())
