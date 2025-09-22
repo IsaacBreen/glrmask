@@ -9,6 +9,7 @@ local_system:
     - python/gss_tester/interface.py
     - python/gss_tester/implementations/reference_impl.py
     - python/gss_tester/implementations/leveled_impl.py
+    - python/aug25/models/precompute3_model_pure_python_get_mask_only.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -147,7 +148,12 @@ local_system:
                           if t1 or t2:
                               print("  - Divergence operation details:")
                               if t1:
-                                  print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                                  op_sel_info1 = ""
+                                  if t1.get("op_selection"):
+                                      sel = t1["op_selection"]
+                                      op_sel_info1 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                                  print(f"    - {impl_name1}: op={t1.get('op')}{op_sel_info1} step={t1.get('step')} seed={t1.get('seed')}")
                                   args1 = t1.get("args", {})
                                   print(f"      args={json.dumps(args1, ensure_ascii=False)}")
                                   ss1 = t1.get("source_stacks")
@@ -159,7 +165,12 @@ local_system:
                               else:
                                   print(f"    - {impl_name1}: No trace info at divergence index.")
                               if t2:
-                                  print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                                  op_sel_info2 = ""
+                                  if t2.get("op_selection"):
+                                      sel = t2["op_selection"]
+                                      op_sel_info2 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                                  print(f"    - {impl_name2}: op={t2.get('op')}{op_sel_info2} step={t2.get('step')} seed={t2.get('seed')}")
                                   args2 = t2.get("args", {})
                                   print(f"      args={json.dumps(args2, ensure_ascii=False)}")
                                   ss2 = t2.get("source_stacks")
@@ -185,9 +196,13 @@ local_system:
                               src_idx = tr.get("source_index")
                               src = pretty_stacks(tr.get("source_stacks"))
                               res = pretty_stacks(tr.get("result_stacks"))
+                              op_sel_info = ""
+                              if tr.get("op_selection"):
+                                  sel = tr["op_selection"]
+                                  op_sel_info = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
                               
                               return [
-                                  f"step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}",
+                                  f"step={step} op={op}{op_sel_info} args={args} src_idx={src_idx} avail_ops={avail}",
                                   f"  src: {src}",
                                   f"  res: {res}"
                               ]
@@ -212,9 +227,8 @@ local_system:
                           t1 = res1.get("trace") if res1 else None
                           t2 = res2.get("trace") if res2 else None
                           if t1 and t2 and t1.get('op') != t2.get('op'):
-                              print("\n  [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.")
-                              print("              Review the trace diff above to find the first step where 'res' (result_stacks) differs.")
-                              print("              This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').")
+                              print("\n  [Analysis]: The operations differ because they are chosen based on a hash of the source GSS, which has diverged.")
+                              print("              Review the 'Divergence operation details' and the trace diff above to see where 'src' (source_stacks) first differs.")
 
                           break # Show only the first divergence for this pair
 
@@ -246,6 +260,8 @@ local_system:
     python/gss_tester/tests/fuzzer.py: |
       import random
       from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
+      import json
+      import hashlib
 
       from ..interface import GSS, MergeableInt
 
@@ -307,18 +323,28 @@ local_system:
                   if len(gss_states) >= max_gss_states:
                       continue
 
-              # Choose an operation
+              # Select GSS state(s) to operate on
+              source_index = rng.randrange(len(gss_states))
+              source_gss = gss_states[source_index]
+              source_stacks = source_gss.to_stacks()
+              
+              # Choose an operation deterministically based on the source GSS state
               can_merge = len(gss_states) >= 2
               operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
               if can_merge:
                   operations.append('merge')
               
-              op_choice = rng.choice(operations)
-
-              # Select GSS state(s) to operate on
-              source_index = rng.randrange(len(gss_states))
-              source_gss = gss_states[source_index]
-              source_stacks = source_gss.to_stacks()
+              # To make the choice deterministic based on state, we can hash the state.
+              state_str = json.dumps(source_stacks, sort_keys=True)
+              state_hash = hashlib.sha256(state_str.encode('utf-8')).hexdigest()
+              # We use the hash to derive an index into the operations list.
+              # This makes the choice of operation entirely dependent on the source stack.
+              op_idx = int(state_hash, 16) % len(operations)
+              op_choice = operations[op_idx]
+              op_selection_info = {
+                  "source_stacks_hash": state_hash,
+                  "op_index": op_idx,
+              }
               
               new_gss: GSS
               args: Dict[str, Any] = {}
@@ -385,6 +411,7 @@ local_system:
                   yield new_gss, {
                       "phase": "fuzz",
                       "op": op_choice,
+                      "op_selection": op_selection_info,
                       "available_ops": operations,
                       "step": step_idx,
                       "seed": seed,
@@ -1546,27 +1573,87 @@ local_system:
               else:
                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
-              all_children = list(upper_branch._all_children())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
-              return LeveledGSS(merged)
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  # return self
-                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-              all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-              for _ in range(n):
-                  def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-                      return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
-                  all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
-              all_children: List[Upper[T, Acc]] = list(all_children.values())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
-              return LeveledGSS(merged)
+              if isinstance(self.inner, Interface):
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+                  merged_empty = self.inner.acc if merged.empty else None
+                  if merged_empty is None and not merged.children:
+                      return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+                  else:
+                      return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
+              else:
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+                  return LeveledGSS(try_promote(merged))
 
+          def popn(self, n: int) -> LeveledGSS[T, Acc]:
+              if n <= 0:
+                  return self
+              if self.is_empty():
+                  return self
+
+              # Memoization caches to avoid recomputing on shared subtrees
+              memo_upper: Dict[Tuple[int, int], Upper[T, Acc]] = {}
+              memo_lower: Dict[Tuple[int, int], Lower[T]] = {}
+
+              def _popn_lower(node: Lower[T], k: int) -> Lower[T]:
+                  """Recursively pop k levels from a Lower node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_lower:
+                      return memo_lower[key]
+
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = Lower(children={}, empty=False)
+                      memo_lower[key] = res
+                      return res
+
+                  # Recursively pop k-1 from all children and merge the results
+                  popped_children = [_popn_lower(child, k - 1) for child in all_children]
+                  res = reduce(merge_lower, popped_children[1:], popped_children[0])
+                  memo_lower[key] = res
+                  return res
+
+              def _popn_upper(node: Upper[T, Acc], k: int) -> Upper[T, Acc]:
+                  """Recursively pop k levels from an Upper node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_upper:
+                      return memo_upper[key]
+
+                  # Base case for recursion: no children to pop from
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = UpperBranch(children={}, empty=None)
+                      memo_upper[key] = res
+                      return res
+
+                  if isinstance(node, Interface):
+                      # For an Interface, we pop k-1 levels from its Lower children
+                      popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
+                      merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
+
+                      # The result is a new Interface with the same accumulator
+                      new_empty = node.acc if merged.empty else None
+                      if not merged.children and new_empty is None:
+                          res = UpperBranch(children={}, empty=None)
+                      else:
+                          res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
+                  else:  # UpperBranch
+                      # For an UpperBranch, we pop k-1 levels from its Upper children
+                      popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
+                      merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
+                      res = try_promote(merged)
+
+                  memo_upper[key] = res
+                  return res
+
+              return LeveledGSS(_popn_upper(self.inner, n))
 
           def is_empty(self) -> bool:
               # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
@@ -2377,6 +2464,301 @@ local_system:
                   children[v] = v_map
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      import _sep1 as ffi
+      import time
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
+
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
+
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
+
+
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': 0,
+          'bitset_intersection': 0,
+          'bitset_difference': 0,
+          'hybrid_complement': 0,
+          'acc_merge': 0,
+      }
+
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              _PROFILING_STATS[counter_name] += 1
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
+
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
+
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              print("\n--- get_mask START ---")
+
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
+
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
+
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
+
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
+
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
+
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
+
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
+
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
+
+              t_init_done = time.perf_counter_ns()
+
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+
+                                  # --- GSS Merge Stats Logging ---
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+
+                                  stats_existing = existing_gss.stats()
+                                  stats_new = new_gss.stats()
+                                  stats_merged = merged_gss.stats()
+
+                                  def print_merge_stats(label, stats):
+                                      print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                            f"unique_accs={stats.unique_accumulators_count} "
+                                            f"total_acc_instances={stats.total_accumulator_instances} "
+                                            f"interfaces={stats.num_interface_nodes} "
+                                            f"upper={stats.num_upperbranch_nodes} "
+                                            f"lower={stats.num_lower_nodes}")
+
+                                  print_merge_stats("existing", stats_existing)
+                                  print_merge_stats("new", stats_new)
+                                  print_merge_stats("merged", stats_merged)
+
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v in _PROFILING_STATS.items():
+                  print(f"{k} calls: {v}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
   prev_file_contents:
     python/gss_tester/tests/__init__.py: ''
     python/gss_tester/tests/analyzer.py: |
@@ -3938,27 +4320,87 @@ local_system:
               else:
                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
-              all_children = list(upper_branch._all_children())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
-              return LeveledGSS(merged)
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  # return self
-                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-              all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-              for _ in range(n):
-                  def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-                      return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
-                  all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
-              all_children: List[Upper[T, Acc]] = list(all_children.values())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
-              return LeveledGSS(merged)
+              if isinstance(self.inner, Interface):
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+                  merged_empty = self.inner.acc if merged.empty else None
+                  if merged_empty is None and not merged.children:
+                      return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+                  else:
+                      return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
+              else:
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+                  return LeveledGSS(try_promote(merged))
 
+          def popn(self, n: int) -> LeveledGSS[T, Acc]:
+              if n <= 0:
+                  return self
+              if self.is_empty():
+                  return self
+
+              # Memoization caches to avoid recomputing on shared subtrees
+              memo_upper: Dict[Tuple[int, int], Upper[T, Acc]] = {}
+              memo_lower: Dict[Tuple[int, int], Lower[T]] = {}
+
+              def _popn_lower(node: Lower[T], k: int) -> Lower[T]:
+                  """Recursively pop k levels from a Lower node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_lower:
+                      return memo_lower[key]
+
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = Lower(children={}, empty=False)
+                      memo_lower[key] = res
+                      return res
+
+                  # Recursively pop k-1 from all children and merge the results
+                  popped_children = [_popn_lower(child, k - 1) for child in all_children]
+                  res = reduce(merge_lower, popped_children[1:], popped_children[0])
+                  memo_lower[key] = res
+                  return res
+
+              def _popn_upper(node: Upper[T, Acc], k: int) -> Upper[T, Acc]:
+                  """Recursively pop k levels from an Upper node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_upper:
+                      return memo_upper[key]
+
+                  # Base case for recursion: no children to pop from
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = UpperBranch(children={}, empty=None)
+                      memo_upper[key] = res
+                      return res
+
+                  if isinstance(node, Interface):
+                      # For an Interface, we pop k-1 levels from its Lower children
+                      popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
+                      merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
+
+                      # The result is a new Interface with the same accumulator
+                      new_empty = node.acc if merged.empty else None
+                      if not merged.children and new_empty is None:
+                          res = UpperBranch(children={}, empty=None)
+                      else:
+                          res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
+                  else:  # UpperBranch
+                      # For an UpperBranch, we pop k-1 levels from its Upper children
+                      popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
+                      merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
+                      res = try_promote(merged)
+
+                  memo_upper[key] = res
+                  return res
+
+              return LeveledGSS(_popn_upper(self.inner, n))
 
           def is_empty(self) -> bool:
               # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
@@ -4769,6 +5211,326 @@ local_system:
                   children[v] = v_map
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
+    python/aug25/models/precompute3_model_pure_python_get_mask_only.py: |
+      import heapq
+      import _sep1 as ffi
+      import time
+      import traceback
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
+
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
+
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
+
+
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': {},
+          'bitset_intersection': {},
+          'bitset_difference': {},
+          'hybrid_complement': {},
+          'acc_merge': {},
+      }
+
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              # Get stack, limit to a few frames, ignore the current one.
+              frames = traceback.extract_stack(limit=5)[:-1]
+
+              # Format it into a readable string
+              call_chain = []
+              for frame in reversed(frames):
+                  # Don't include the profiler wrapper in the output
+                  if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
+                      continue
+                  call_chain.append(f"{frame.filename.split('/')[-1]}:{frame.lineno} ({frame.name})")
+
+              stack_key = " -> ".join(call_chain)
+
+              stats_dict = _PROFILING_STATS[counter_name]
+              stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
+
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
+
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
+
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              print("\n--- get_mask START ---")
+
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
+
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
+
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
+
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
+
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
+
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
+
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
+
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
+
+              t_init_done = time.perf_counter_ns()
+
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = {}
+
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+
+                                  # --- GSS Merge Stats Logging ---
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+
+                                  stats_existing = existing_gss.stats()
+                                  stats_new = new_gss.stats()
+                                  stats_merged = merged_gss.stats()
+
+                                  def print_merge_stats(label, stats):
+                                      print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                            f"unique_accs={stats.unique_accumulators_count} "
+                                            f"total_acc_instances={stats.total_accumulator_instances} "
+                                            f"interfaces={stats.num_interface_nodes} "
+                                            f"upper={stats.num_upperbranch_nodes} "
+                                            f"lower={stats.num_lower_nodes}")
+
+                                  print_merge_stats("existing", stats_existing)
+                                  print_merge_stats("new", stats_new)
+                                  print_merge_stats("merged", stats_merged)
+
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v_dict in _PROFILING_STATS.items():
+                  total_calls = sum(v_dict.values())
+                  print(f"{k} total calls: {total_calls}")
+                  if total_calls > 0:
+                      # Sort by count, descending, and take top 10
+                      sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
+                      for i, (stack, count) in enumerate(sorted_callers):
+                          if i >= 10:
+                              print(f"  ... and {len(sorted_callers) - 10} more call sites.")
+                              break
+                          print(f"  - {count:<7} calls from: {stack}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -4779,7 +5541,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -4954,7 +5716,12 @@ messages:
                           if t1 or t2:
                               print("  - Divergence operation details:")
                               if t1:
-                                  print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
+                                  op_sel_info1 = ""
+                                  if t1.get("op_selection"):
+                                      sel = t1["op_selection"]
+                                      op_sel_info1 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                                  print(f"    - {impl_name1}: op={t1.get('op')}{op_sel_info1} step={t1.get('step')} seed={t1.get('seed')}")
                                   args1 = t1.get("args", {})
                                   print(f"      args={json.dumps(args1, ensure_ascii=False)}")
                                   ss1 = t1.get("source_stacks")
@@ -4966,7 +5733,12 @@ messages:
                               else:
                                   print(f"    - {impl_name1}: No trace info at divergence index.")
                               if t2:
-                                  print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
+                                  op_sel_info2 = ""
+                                  if t2.get("op_selection"):
+                                      sel = t2["op_selection"]
+                                      op_sel_info2 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+
+                                  print(f"    - {impl_name2}: op={t2.get('op')}{op_sel_info2} step={t2.get('step')} seed={t2.get('seed')}")
                                   args2 = t2.get("args", {})
                                   print(f"      args={json.dumps(args2, ensure_ascii=False)}")
                                   ss2 = t2.get("source_stacks")
@@ -4992,9 +5764,13 @@ messages:
                               src_idx = tr.get("source_index")
                               src = pretty_stacks(tr.get("source_stacks"))
                               res = pretty_stacks(tr.get("result_stacks"))
+                              op_sel_info = ""
+                              if tr.get("op_selection"):
+                                  sel = tr["op_selection"]
+                                  op_sel_info = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
                               
                               return [
-                                  f"step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}",
+                                  f"step={step} op={op}{op_sel_info} args={args} src_idx={src_idx} avail_ops={avail}",
                                   f"  src: {src}",
                                   f"  res: {res}"
                               ]
@@ -5019,9 +5795,8 @@ messages:
                           t1 = res1.get("trace") if res1 else None
                           t2 = res2.get("trace") if res2 else None
                           if t1 and t2 and t1.get('op') != t2.get('op'):
-                              print("\n  [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.")
-                              print("              Review the trace diff above to find the first step where 'res' (result_stacks) differs.")
-                              print("              This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').")
+                              print("\n  [Analysis]: The operations differ because they are chosen based on a hash of the source GSS, which has diverged.")
+                              print("              Review the 'Divergence operation details' and the trace diff above to see where 'src' (source_stacks) first differs.")
 
                           break # Show only the first divergence for this pair
 
@@ -5058,6 +5833,8 @@ messages:
       ```python 'python/gss_tester/tests/fuzzer.py'
       import random
       from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
+      import json
+      import hashlib
 
       from ..interface import GSS, MergeableInt
 
@@ -5119,18 +5896,28 @@ messages:
                   if len(gss_states) >= max_gss_states:
                       continue
 
-              # Choose an operation
+              # Select GSS state(s) to operate on
+              source_index = rng.randrange(len(gss_states))
+              source_gss = gss_states[source_index]
+              source_stacks = source_gss.to_stacks()
+              
+              # Choose an operation deterministically based on the source GSS state
               can_merge = len(gss_states) >= 2
               operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
               if can_merge:
                   operations.append('merge')
               
-              op_choice = rng.choice(operations)
-
-              # Select GSS state(s) to operate on
-              source_index = rng.randrange(len(gss_states))
-              source_gss = gss_states[source_index]
-              source_stacks = source_gss.to_stacks()
+              # To make the choice deterministic based on state, we can hash the state.
+              state_str = json.dumps(source_stacks, sort_keys=True)
+              state_hash = hashlib.sha256(state_str.encode('utf-8')).hexdigest()
+              # We use the hash to derive an index into the operations list.
+              # This makes the choice of operation entirely dependent on the source stack.
+              op_idx = int(state_hash, 16) % len(operations)
+              op_choice = operations[op_idx]
+              op_selection_info = {
+                  "source_stacks_hash": state_hash,
+                  "op_index": op_idx,
+              }
               
               new_gss: GSS
               args: Dict[str, Any] = {}
@@ -5197,6 +5984,7 @@ messages:
                   yield new_gss, {
                       "phase": "fuzz",
                       "op": op_choice,
+                      "op_selection": op_selection_info,
                       "available_ops": operations,
                       "step": step_idx,
                       "seed": seed,
@@ -6388,27 +7176,87 @@ messages:
               else:
                   return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
           def pop(self) -> LeveledGSS[T, Acc]:
-              upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
-              all_children = list(upper_branch._all_children())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged)
-              return LeveledGSS(merged)
-          def popn(self, n: int) -> LeveledGSS[T, Acc]:
-              # Fast path: popn(0) is a no-op. Preserve identity to match the default
-              # implementation's behavior (crucial for deterministic fuzzing).
-              if n <= 0:
-                  # return self
-                  return LeveledGSS(self.inner) if isinstance(self.inner, Interface) else self
-              all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
-              for _ in range(n):
-                  def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
-                      return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
-                  all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
-              all_children: List[Upper[T, Acc]] = list(all_children.values())
-              merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
-              merged = try_promote(merged) if isinstance(merged, UpperBranch) else merged
-              return LeveledGSS(merged)
+              if isinstance(self.inner, Interface):
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+                  merged_empty = self.inner.acc if merged.empty else None
+                  if merged_empty is None and not merged.children:
+                      return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
+                  else:
+                      return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
+              else:
+                  all_children = list(self.inner._all_children())
+                  merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+                  return LeveledGSS(try_promote(merged))
 
+          def popn(self, n: int) -> LeveledGSS[T, Acc]:
+              if n <= 0:
+                  return self
+              if self.is_empty():
+                  return self
+
+              # Memoization caches to avoid recomputing on shared subtrees
+              memo_upper: Dict[Tuple[int, int], Upper[T, Acc]] = {}
+              memo_lower: Dict[Tuple[int, int], Lower[T]] = {}
+
+              def _popn_lower(node: Lower[T], k: int) -> Lower[T]:
+                  """Recursively pop k levels from a Lower node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_lower:
+                      return memo_lower[key]
+
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = Lower(children={}, empty=False)
+                      memo_lower[key] = res
+                      return res
+
+                  # Recursively pop k-1 from all children and merge the results
+                  popped_children = [_popn_lower(child, k - 1) for child in all_children]
+                  res = reduce(merge_lower, popped_children[1:], popped_children[0])
+                  memo_lower[key] = res
+                  return res
+
+              def _popn_upper(node: Upper[T, Acc], k: int) -> Upper[T, Acc]:
+                  """Recursively pop k levels from an Upper node."""
+                  if k == 0:
+                      return node
+
+                  key = (id(node), k)
+                  if key in memo_upper:
+                      return memo_upper[key]
+
+                  # Base case for recursion: no children to pop from
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = UpperBranch(children={}, empty=None)
+                      memo_upper[key] = res
+                      return res
+
+                  if isinstance(node, Interface):
+                      # For an Interface, we pop k-1 levels from its Lower children
+                      popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
+                      merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
+
+                      # The result is a new Interface with the same accumulator
+                      new_empty = node.acc if merged.empty else None
+                      if not merged.children and new_empty is None:
+                          res = UpperBranch(children={}, empty=None)
+                      else:
+                          res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
+                  else:  # UpperBranch
+                      # For an UpperBranch, we pop k-1 levels from its Upper children
+                      popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
+                      merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
+                      res = try_promote(merged)
+
+                  memo_upper[key] = res
+                  return res
+
+              return LeveledGSS(_popn_upper(self.inner, n))
 
           def is_empty(self) -> bool:
               # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
@@ -7224,275 +8072,308 @@ messages:
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
   - user: |-
-      bash gss_tester/run_tests.sh gss_tester/implementations/reference_impl.py gss_tester/implementations/leveled_impl.py
-      Test results will be saved in: gss_test_results/2025-09-22_12-57-25
-      ---
-      Reference Implementation: gss_tester/implementations/reference_impl.py
-      Other Implementations: gss_tester/implementations/leveled_impl.py
-      ---
-      Starting test runs...
+      ```python 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py'
+      import heapq
+      import _sep1 as ffi
+      import time
+      from functools import wraps
+      from typing import Dict, List, Set, Tuple, Optional
 
-      >>> Running test spec for: gss_tester/implementations/reference_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.reference_impl ReferenceGSS --output gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      Importing ReferenceGSS from gss_tester.implementations.reference_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      >>> Finished test spec for: gss_tester/implementations/reference_impl.py
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from .precompute3_model_pure_python import Model as InnerModel, PyAcc
+      from ..common_interface import GraphProvider, RangeSet
 
-      >>> Running test spec for: gss_tester/implementations/leveled_impl.py
-      python -m gss_tester.tests.runner gss_tester.implementations.leveled_impl LeveledGSS --output gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      Importing LeveledGSS from gss_tester.implementations.leveled_impl...
-      Running test specification...
-      Successfully ran 151 checks.
-      Results saved to gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.leveled_impl.LeveledGSS.json
-      >>> Finished test spec for: gss_tester/implementations/leveled_impl.py
-
-      All test runs completed.
-      ---
-      Analyzing results for consistency...
-      python -m gss_tester.tests.analyzer gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.leveled_impl.LeveledGSS.json gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.reference_impl.ReferenceGSS.json --reference gss_test_results/2025-09-22_12-57-25/gss_tester.implementations.reference_impl.ReferenceGSS.json
-      --- Consistency Analysis ---
-      Found 2 equivalence class(es) among 2 implementations.
-
-      Reference implementation: gss_tester.implementations.reference_impl.ReferenceGSS
-
-      Class 1 (1 implementation(s)) [Ref Match: ❌]
-      --------------------------------------------
-        - gss_tester.implementations.leveled_impl.LeveledGSS
-
-      Class 2 (1 implementation(s)) [Ref Match: ✅]
-      --------------------------------------------
-        - gss_tester.implementations.reference_impl.ReferenceGSS
+      try:
+          profile
+      except NameError:
+          def profile(func): return func
 
 
-      --- Divergence Report ---
+      # --- Profiling infrastructure ---
+      _PROFILING_STATS = {
+          'bitset_union': 0,
+          'bitset_intersection': 0,
+          'bitset_difference': 0,
+          'hybrid_complement': 0,
+          'acc_merge': 0,
+      }
 
-      Comparing 'gss_tester.implementations.leveled_impl.LeveledGSS' with 'gss_tester.implementations.reference_impl.ReferenceGSS':
-        - First divergence at yield index 113:
-          - gss_tester.implementations.leveled_impl.LeveledGSS (L258): [[[12], 7]]
-          - gss_tester.implementations.reference_impl.ReferenceGSS (L258): []
-        - Divergence operation details:
-          - gss_tester.implementations.leveled_impl.LeveledGSS: op=push step=63 seed=42
-            args={"value": 12}
-            source_stacks=[[[], 7]]
-            result_stacks=[[[12], 7]]
-          - gss_tester.implementations.reference_impl.ReferenceGSS: op=isolate step=63 seed=42
-            args={"value": 7}
-            source_stacks=[[[], 0]]
-            result_stacks=[]
+      def _profile_method(cls, method_name, counter_name):
+          original_method = getattr(cls, method_name)
+          @wraps(original_method)
+          def wrapper(*args, **kwargs):
+              _PROFILING_STATS[counter_name] += 1
+              return original_method(*args, **kwargs)
+          setattr(cls, method_name, wrapper)
 
-        --- Trace Diff (-gss_tester.implementations.leveled_impl.LeveledGSS, +gss_tester.implementations.reference_impl.ReferenceGSS) ---
-        [  0] step=0 op=init args={} src_idx=None avail_ops=None
-               src: null
-               res: [[[], 0]]
-        [  1] step=1 op=prune args={"threshold": 0} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               src: [[[], 0]]
-               res: []
-        [  2] step=2 op=prune args={"threshold": 7} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               src: [[[], 0]]
-               res: []
-        [  3] step=3 op=pop args={} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               src: [[[], 0]]
-               res: []
-        [  4] step=4 op=prune args={"threshold": 17} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               src: [[[], 0]]
-               res: []
-        [  5] step=5 op=push args={"value": 1} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               src: [[[], 0]]
-               res: [[[1], 0]]
-        [  6] step=6 op=push args={"value": 6} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[6], 0]]
-        [  7] step=7 op=pop args={} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[6], 0]]
-               res: [[[], 0]]
-        [  8] step=8 op=apply args={"amount": 9} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[], 9]]
-        [  9] step=9 op=pop args={} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: []
-        [ 10] step=10 op=isolate args={"value": 8} src_idx=1 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: []
-        [ 11] step=11 op=merge args={"other_index": 2} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[6], 0], [[], 0]]
-        [ 12] step=12 op=prune args={"threshold": 10} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 13] step=13 op=popn args={"n": 1} src_idx=1 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: [[[], 0]]
-        [ 14] step=14 op=merge args={"other_index": 0} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[6], 0]]
-               res: [[[6], 0], [[], 0]]
-        [ 15] step=15 op=push args={"value": 3} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[3], 0]]
-        [ 16] step=16 op=popn args={"n": 4} src_idx=5 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[6], 0], [[], 0]]
-               res: []
-        [ 17] step=17 op=popn args={"n": 3} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 18] step=18 op=apply args={"amount": 7} src_idx=1 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: [[[1], 7]]
-        [ 19] step=19 op=push args={"value": 9} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: [[[3, 9], 0]]
-        [ 20] step=20 op=merge args={"other_index": 1} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[1], 7], [[], 0]]
-        [ 21] step=21 op=prune args={"threshold": 19} src_idx=1 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: []
-        [ 22] step=22 op=prune args={"threshold": 17} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: []
-        [ 23] step=23 op=prune args={"threshold": 5} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 24] step=24 op=isolate args={"value": "a"} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[6], 0], [[], 0]]
-               res: []
-        [ 25] step=25 op=prune args={"threshold": 7} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: [[[], 9]]
-        [ 26] step=26 op=pop args={} src_idx=9 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 27] step=27 op=prune args={"threshold": 6} src_idx=5 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: [[[], 9]]
-        [ 28] step=28 op=prune args={"threshold": 13} src_idx=9 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 29] step=29 op=apply args={"amount": 6} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: [[[3], 6]]
-        [ 30] step=30 op=merge args={"other_index": 1} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[1], 0], [[], 0]]
-        [ 31] step=31 op=push args={"value": 13} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[13], 0]]
-        [ 32] step=32 op=merge args={"other_index": 3} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[13], 0]]
-               res: [[[13], 0], [[], 0]]
-        [ 33] step=33 op=merge args={"other_index": 3} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: [[[1], 7], [[], 0]]
-        [ 34] step=34 op=apply args={"amount": 5} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0], [[], 0]]
-               res: [[[1], 5], [[], 5]]
-        [ 35] step=35 op=isolate args={"value": 7} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 5], [[], 5]]
-               res: []
-        [ 36] step=36 op=pop args={} src_idx=1 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: []
-        [ 37] step=37 op=popn args={"n": 4} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: []
-        [ 38] step=38 op=apply args={"amount": 10} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: [[[3], 10]]
-        [ 39] step=39 op=popn args={"n": 1} src_idx=7 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 7], [[], 0]]
-               res: [[[], 7]]
-        [ 40] step=40 op=prune args={"threshold": 11} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0], [[], 0]]
-               res: []
-        [ 41] step=41 op=isolate args={"value": 1} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0], [[], 0]]
-               res: [[[1], 0]]
-        [ 42] step=42 op=apply args={"amount": 3} src_idx=7 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 10]]
-               res: [[[3], 13]]
-        [ 43] step=43 op=push args={"value": 5} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 10]]
-               res: [[[3, 5], 10]]
-        [ 44] step=44 op=isolate args={"value": 14} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3, 5], 10]]
-               res: []
-        [ 45] step=45 op=popn args={"n": 4} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: []
-        [ 46] step=46 op=prune args={"threshold": 4} src_idx=7 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[13], 0]]
-               res: []
-        [ 47] step=47 op=pop args={} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3, 5], 10]]
-               res: [[[3], 10]]
-        [ 48] step=48 op=apply args={"amount": 3} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: [[[3], 3]]
-        [ 49] step=49 op=apply args={"amount": 10} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: [[[1], 10]]
-        [ 50] step=50 op=prune args={"threshold": 7} src_idx=5 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 3]]
-               res: []
-        [ 51] step=51 op=popn args={"n": 1} src_idx=6 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 7], [[], 0]]
-               res: [[[], 7]]
-        [ 52] step=52 op=push args={"value": 6} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3], 0]]
-               res: [[[3, 6], 0]]
-        [ 53] step=53 op=merge args={"other_index": 4} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[], 7]]
-        [ 54] step=54 op=prune args={"threshold": 4} src_idx=8 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[3, 6], 0]]
-               res: []
-        [ 55] step=55 op=popn args={"n": 4} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: []
-        [ 56] step=56 op=pop args={} src_idx=5 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 7]]
-               res: []
-        [ 57] step=57 op=pop args={} src_idx=4 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: []
-        [ 58] step=58 op=apply args={"amount": 5} src_idx=7 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0], [[], 0]]
-               res: [[[1], 5], [[], 5]]
-        [ 59] step=59 op=pop args={} src_idx=7 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[1], 0]]
-               res: [[[], 0]]
-        [ 60] step=60 op=isolate args={"value": null} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[], 0]]
-        [ 61] step=61 op=apply args={"amount": 4} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 0]]
-               res: [[[], 4]]
-        [ 62] step=62 op=popn args={"n": 0} src_idx=2 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-               src: [[[], 9]]
-               res: [[[], 9]]
-      - [ 63] step=63 op=push args={"value": 12} src_idx=3 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-      -        src: [[[], 7]]
-      -        res: [[[12], 7]]
-      + [ 63] step=63 op=isolate args={"value": 7} src_idx=0 avail_ops=['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'merge']
-      +        src: [[[], 0]]
-      +        res: []
+      _hooks_installed = False
+      def _install_profiling_hooks():
+          global _hooks_installed
+          if _hooks_installed:
+              return
+          _profile_method(ffi.Bitset, 'union', 'bitset_union')
+          _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+          _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+          _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+          _profile_method(PyAcc, 'merge', 'acc_merge')
+          _hooks_installed = True
 
-        [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.
-                    Review the trace diff above to find the first step where 'res' (result_stacks) differs.
-                    This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').
+      class Model(GraphProvider):
+          def __init__(self, inner_model: InnerModel):
+              self.inner_model: InnerModel = inner_model
+              im: InnerModel = self.inner_model
+              self.arena: Dict[int, dict] = im.arena
+              self.roots_map: Dict[int, int] = im.roots_map
+              self.max_depth: Dict[int, int] = im.max_depth
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+              self.tokenizer_max_state: int = im.tokenizer.max_state()
+              self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+              self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+              # Profiling state
+              _install_profiling_hooks()
+              self.get_mask_calls = 0
 
-      ---
-      Consistency analysis complete.
-      Reference: gss_tester/implementations/reference_impl.py
-      Summary printed above.
-      Full JSON results are in: gss_test_results/2025-09-22_12-57-25
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              return Model(InnerModel.from_json_string(s))
+
+          def commit(self, token_id: int) -> None:
+              self.inner_model.commit(token_id)
+
+          @property
+          def state(self) -> Dict[int, GSS]:
+              return self.inner_model.state
+
+          def is_end(self, node: int) -> bool:
+              return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+
+          @profile
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              print("\n--- get_mask START ---")
+
+              state_map: Dict[int, GSS] = self.state
+              t_start = time.perf_counter_ns()
+              self.get_mask_calls += 1
+
+              call_stats = {
+                  'nodes_visited': 0,
+                  'main_loop_iterations': 0,
+                  'end_nodes_reached': 0,
+                  'main_loop_apply_calls': 0,
+                  'main_loop_merge_calls': 0,
+                  'main_loop_union_calls': 0,
+                  'main_loop_intersection_calls': 0,
+              }
+
+              all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+              final_mask: ffi.Bitset = ffi.Bitset.zeros()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[int, GSS] = {}
+              todo: Dict[int, Set[int]] = {}
+              depth_heap: List[int] = []
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, int] = self.roots_map
+              max_depth: Dict[int, int] = self.max_depth
+              arena: Dict[int, dict] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                  forbid: ffi.Bitset = ffi.Bitset.zeros()
+                  disallowed_l2 = acc.terminals_union.complement()
+                  for (start, end), bv in disallowed_l2.range_values():
+                      if bv.is_empty():
+                          continue
+                      for tsid in range(start, min(end, max_state) + 1):
+                          pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                          if not pm:
+                              continue
+                          for terminal_id_str, llm_tokens in pm.items():
+                              if bv.contains(int(terminal_id_str)):
+                                  forbid = forbid.union(llm_tokens)
+                  allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                  return PyAcc(
+                      terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                      llm_mask=allowed_mask
+                  )
+
+              memo = {}
+              for sid, gss in state_map.items():
+                  r: Optional[int] = roots_map[int(sid)]
+
+                  gss_initialized: GSS = gss.apply(initialize_acc, memo)
+
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {r}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(r)
+
+              print("\nInitial GSS stats:")
+              print(GSS.merge_many(list(self.state.values())).stats())
+              print("Stats after seeding:")
+              print(GSS.merge_many(list(values.values())).stats())
+
+              def enqueue(d: int, n: int) -> None:
+                  b: Optional[Set[int]] = todo.get(d)
+                  if b is None:
+                      todo[d] = {n}
+                      hp(depth_heap, d)
+                  else:
+                      b.add(n)
+
+              t_init_done = time.perf_counter_ns()
+
+              # Reset per-call stats
+              for k in _PROFILING_STATS:
+                  _PROFILING_STATS[k] = 0
+
+              # Main loop
+              while depth_heap:
+                  call_stats['main_loop_iterations'] += 1
+                  depth: int = hpop(depth_heap)
+                  while todo[depth]:
+                      call_stats['nodes_visited'] += 1
+                      node: int = todo[depth].pop()
+                      gss_node: GSS = values.pop(node)
+
+                      # End-node handling: just union the allowed LLM tokens
+                      if is_end(node):
+                          call_stats['end_nodes_reached'] += 1
+                          reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                          if reduced_acc:
+                              call_stats['main_loop_union_calls'] += 1
+                              final_mask = final_mask.union(reduced_acc.llm_mask)
+
+                      # Traverse edges and propagate masks
+                      for (pop, llm_bv), dests in (arena.get(node, {}).get("children") or []):
+                          popped: GSS = gss_node.popn(pop)
+                          if popped.is_empty():
+                              continue
+
+                          for dest_idx, state_bv in dests:
+                              if state_bv.is_empty():
+                                  continue
+
+                              values_to_keep = [s for s in popped.peek() if state_bv.contains(s)]
+                              if not values_to_keep:
+                                  continue
+
+                              child_gss: GSS = popped.isolate_many(values_to_keep)
+                              if child_gss.is_empty():
+                                  continue
+
+                              # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                              if not llm_bv.is_empty():
+                                  memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                                      if memo.get(acc) is not None:
+                                          return memo[acc]
+                                      new_mask = acc.llm_mask.intersection(llm_bv)
+                                      call_stats['main_loop_intersection_calls'] += 1
+                                      if new_mask.is_empty():
+                                          result = None
+                                      else:
+                                          result = PyAcc(
+                                              terminals_union=acc.terminals_union,
+                                              llm_mask=new_mask
+                                          )
+                                      memo[acc] = result
+                                      return result
+                                  call_stats['main_loop_apply_calls'] += 1
+                                  child_gss = child_gss.apply_and_prune(intersect_and_prune)
+                                  if child_gss.is_empty():
+                                      continue
+
+                              d: int = int(dest_idx)
+                              if d in values:
+                                  call_stats['main_loop_merge_calls'] += 1
+
+                                  # --- GSS Merge Stats Logging ---
+                                  existing_gss = values[d]
+                                  new_gss = child_gss
+                                  merged_gss = existing_gss.merge(new_gss)
+
+                                  stats_existing = existing_gss.stats()
+                                  stats_new = new_gss.stats()
+                                  stats_merged = merged_gss.stats()
+
+                                  def print_merge_stats(label, stats):
+                                      print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                            f"unique_accs={stats.unique_accumulators_count} "
+                                            f"total_acc_instances={stats.total_accumulator_instances} "
+                                            f"interfaces={stats.num_interface_nodes} "
+                                            f"upper={stats.num_upperbranch_nodes} "
+                                            f"lower={stats.num_lower_nodes}")
+
+                                  print_merge_stats("existing", stats_existing)
+                                  print_merge_stats("new", stats_new)
+                                  print_merge_stats("merged", stats_merged)
+
+                                  values[d] = merged_gss
+                              else:
+                                  values[d] = child_gss
+                              enqueue(max_depth[d], d)
+
+
+                  todo.pop(depth)
+
+              t_main_loop_done = time.perf_counter_ns()
+
+              # Convert internal mask back to original IDs
+              original_mask: ffi.Bitset = ffi.Bitset.zeros()
+              for i in final_mask.to_indices():
+                  if i in self.internal_to_original_map:
+                      original_mask.insert(self.internal_to_original_map[i])
+
+              t_end = time.perf_counter_ns()
+
+              print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+              print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+              print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+              print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+              print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+              print(f"Nodes visited: {call_stats['nodes_visited']}")
+              print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+              print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+              print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+              print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+              print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+              print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+              for k, v in _PROFILING_STATS.items():
+                  print(f"{k} calls: {v}")
+              print(f"--- get_mask END ---")
+
+              return RangeSet.from_ranges(original_mask.to_ranges())
+
+      ```
     metadata:
-  - user: The test output here is really confusing. We can see that all of a sudden
-      two different ops have been chosen, but we have no clue as to why. Change the
-      way ops are selected to make it much clearer what went into that decision, and
-      show what went into that decision in the trace.
+      filename: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+  - user: |-
+      Bitset.union is getting called a huge number of times. I need to know *where* it's being called. Like the call tree.
+      Can we patch Bitset.union and inspect the call stack or something? Then print it nicely each iteration? Print it in an understandable way.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7511,170 +8392,336 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The fuzzer's behavior is indeed confusing when implementations diverge. The core issue is that once the internal pool of GSS states differs between two test runs, the sequence of random operations can de-synchronize, leading to different operations being chosen.
+      Of course. Here are the step-by-step instructions to modify the profiling code to capture call stacks, followed by the corresponding git diff.
 
-      To make this clearer, I'll modify the fuzzer to make the choice of *operation* directly and deterministically dependent on the *state* of the GSS it's operating on. This way, when the GSS state diverges, the chosen operation will also diverge in a predictable way. I'll then update the analyzer to display this new information in the trace, making the cause of the divergence obvious.
+      ### Step-by-step Instructions
 
-      Here are the step-by-step instructions to apply these changes:
+      Here are the edits for `python/aug25/models/precompute3_model_pure_python_get_mask_only.py`:
 
-      ### Step 1: Modify Fuzzer Logic in `fuzzer.py`
+      1.  **Import `traceback` module:** At the top of the file, add `import traceback` to enable stack inspection.
 
-      You will edit `python/gss_tester/tests/fuzzer.py` to change how operations are selected. Instead of a purely random choice that can be affected by the size of the GSS pool, the selection will be based on a hash of the currently selected GSS state.
+          ```python
+          import heapq
+          import _sep1 as ffi
+          import time
+          import traceback
+          from functools import wraps
+          #...
+          ```
 
-      1.  **Add necessary imports:** At the top of the file, add imports for `json` and `hashlib`.
-      2.  **Restructure the fuzzer loop:**
-          *   First, select the `source_gss` randomly from the pool as before.
-          *   Then, determine the list of `available_ops` based on whether a `merge` is possible.
-          *   Create a hash from the canonical representation of the `source_gss`'s stacks.
-          *   Use this hash to deterministically calculate an index into the `available_ops` list. This makes the operation choice a direct consequence of the GSS state.
-      3.  **Enhance the trace output:** Add a new `op_selection` dictionary to the trace data that is yielded. This will contain the hash and index used, so the analysis script can display it.
+      2.  **Update `_PROFILING_STATS` initialization:** Modify the `_PROFILING_STATS` dictionary to use empty dictionaries (`{}`) as initial values instead of `0`. This will allow storing call stacks and their respective counts.
 
-      ### Step 2: Update Analyzer in `analyzer.py`
+          ```python
+          # --- Profiling infrastructure ---
+          _PROFILING_STATS = {
+              'bitset_union': {},
+              'bitset_intersection': {},
+              'bitset_difference': {},
+              'hybrid_complement': {},
+              'acc_merge': {},
+          }
+          ```
 
-      Next, you'll modify `python/gss_tester/tests/analyzer.py` to parse and display the new information being added to the trace.
+      3.  **Enhance `_profile_method` for stack tracing:** Replace the `_profile_method` function with the version below. This new implementation captures the call stack for each profiled method call, formats it into a readable string, and uses that string as a key to count invocations from unique call paths.
 
-      1.  **Update Divergence Report:** In the "Divergence operation details" section, modify the code to check for the new `op_selection` field in the trace and print the hash and index next to the operation name.
-      2.  **Update Trace Diff Formatting:** In the `format_trace_for_display` helper function, add the same logic to display the hash and index for every step in the detailed trace diff.
-      3.  **Clarify Analysis Explanation:** Update the final `[Analysis]` message to explain that operations diverged because the choice is based on the source GSS hash, and the source GSS itself had diverged at an earlier step.
+          ```python
+          def _profile_method(cls, method_name, counter_name):
+              original_method = getattr(cls, method_name)
+              @wraps(original_method)
+              def wrapper(*args, **kwargs):
+                  # Get stack, limit to a few frames, ignore the current one.
+                  frames = traceback.extract_stack(limit=5)[:-1]
+          
+                  # Format it into a readable string
+                  call_chain = []
+                  for frame in reversed(frames):
+                      # Don't include the profiler wrapper in the output
+                      if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
+                          continue
+                      call_chain.append(f"{frame.filename.split('/')[-1]}:{frame.lineno} ({frame.name})")
+          
+                  stack_key = " -> ".join(call_chain)
+          
+                  stats_dict = _PROFILING_STATS[counter_name]
+                  stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
+          
+                  return original_method(*args, **kwargs)
+              setattr(cls, method_name, wrapper)
+          ```
 
-      ---
+      4.  **Update statistics reset logic in `get_mask`:** In the `get_mask` method, locate the loop that resets the profiling statistics and change it to assign an empty dictionary (`{}`) to each key, matching the new data structure.
 
-      Here are the git diffs corresponding to these changes. You can apply them directly.
+          ```python
+          # In get_mask()
+          # ...
+          t_init_done = time.perf_counter_ns()
+
+          # Reset per-call stats
+          for k in _PROFILING_STATS:
+              _PROFILING_STATS[k] = {}
+
+          # Main loop
+          # ...
+          ```
+
+      5.  **Update statistics printing logic in `get_mask`:** At the end of the `get_mask` method, replace the final statistics printing loop. The new code will correctly iterate over the dictionary of call stacks, calculate total calls, and print a summary of the top 10 most frequent call sites for each profiled method.
+
+          ```python
+          # At the end of get_mask()
+          # ...
+          print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+          for k, v_dict in _PROFILING_STATS.items():
+              total_calls = sum(v_dict.values())
+              print(f"{k} total calls: {total_calls}")
+              if total_calls > 0:
+                  # Sort by count, descending, and take top 10
+                  sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
+                  for i, (stack, count) in enumerate(sorted_callers):
+                      if i >= 10:
+                          print(f"  ... and {len(sorted_callers) - 10} more call sites.")
+                          break
+                      print(f"  - {count:<7} calls from: {stack}")
+          print(f"--- get_mask END ---")
+
+          return RangeSet.from_ranges(original_mask.to_ranges())
+          ```
+
+      ### Git Diffs
+
+      Here is the git patch that applies the changes described above.
 
       ```diff
-      diff --git a/python/gss_tester/tests/analyzer.py b/python/gss_tester/tests/analyzer.py
-      --- a/python/gss_tester/tests/analyzer.py
-      +++ b/python/gss_tester/tests/analyzer.py
-      @@ -134,7 +134,13 @@
-                           if t1 or t2:
-                               print("  - Divergence operation details:")
-                               if t1:
-      -                            print(f"    - {impl_name1}: op={t1.get('op')} step={t1.get('step')} seed={t1.get('seed')}")
-      +                            op_sel_info1 = ""
-      +                            if t1.get("op_selection"):
-      +                                sel = t1["op_selection"]
-      +                                op_sel_info1 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+      diff --git a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      --- a/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      @@ -1,6 +1,7 @@
+       import heapq
+       import _sep1 as ffi
+       import time
+      +import traceback
+       from functools import wraps
+       from typing import Dict, List, Set, Tuple, Optional
+       
+      @@ -15,23 +16,36 @@
+       
+       # --- Profiling infrastructure ---
+       _PROFILING_STATS = {
+      -    'bitset_union': 0,
+      -    'bitset_intersection': 0,
+      -    'bitset_difference': 0,
+      -    'hybrid_complement': 0,
+      -    'acc_merge': 0,
+      +    'bitset_union': {},
+      +    'bitset_intersection': {},
+      +    'bitset_difference': {},
+      +    'hybrid_complement': {},
+      +    'acc_merge': {},
+       }
+       
+       def _profile_method(cls, method_name, counter_name):
+           original_method = getattr(cls, method_name)
+           @wraps(original_method)
+           def wrapper(*args, **kwargs):
+      -        _PROFILING_STATS[counter_name] += 1
+      +        # Get stack, limit to a few frames, ignore the current one.
+      +        frames = traceback.extract_stack(limit=5)[:-1]
       +
-      +                            print(f"    - {impl_name1}: op={t1.get('op')}{op_sel_info1} step={t1.get('step')} seed={t1.get('seed')}")
-                                   args1 = t1.get("args", {})
-                                   print(f"      args={json.dumps(args1, ensure_ascii=False)}")
-                                   ss1 = t1.get("source_stacks")
-      @@ -145,7 +151,12 @@
-                               else:
-                                   print(f"    - {impl_name1}: No trace info at divergence index.")
-                               if t2:
-      -                            print(f"    - {impl_name2}: op={t2.get('op')} step={t2.get('step')} seed={t2.get('seed')}")
-      +                            op_sel_info2 = ""
-      +                            if t2.get("op_selection"):
-      +                                sel = t2["op_selection"]
-      +                                op_sel_info2 = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
+      +        # Format it into a readable string
+      +        call_chain = []
+      +        for frame in reversed(frames):
+      +            # Don't include the profiler wrapper in the output
+      +            if 'precompute3_model_pure_python_get_mask_only.py' in frame.filename and 'wrapper' in frame.name:
+      +                continue
+      +            call_chain.append(f"{frame.filename.split('/')[-1]}:{frame.lineno} ({frame.name})")
       +
-      +                            print(f"    - {impl_name2}: op={t2.get('op')}{op_sel_info2} step={t2.get('step')} seed={t2.get('seed')}")
-                                   args2 = t2.get("args", {})
-                                   print(f"      args={json.dumps(args2, ensure_ascii=False)}")
-                                   ss2 = t2.get("source_stacks")
-      @@ -169,10 +180,15 @@
-                               src_idx = tr.get("source_index")
-                               src = pretty_stacks(tr.get("source_stacks"))
-                               res = pretty_stacks(tr.get("result_stacks"))
-      +                        op_sel_info = ""
-      +                        if tr.get("op_selection"):
-      +                            sel = tr["op_selection"]
-      +                            op_sel_info = f" (hash={sel.get('source_stacks_hash', '')[:8]}, idx={sel.get('op_index')})"
-                               
-                               return [
-      -                            f"step={step} op={op} args={args} src_idx={src_idx} avail_ops={avail}",
-      +                            f"step={step} op={op}{op_sel_info} args={args} src_idx={src_idx} avail_ops={avail}",
-                                   f"  src: {src}",
-                                   f"  res: {res}"
-                               ]
-      @@ -195,10 +211,8 @@
-                           t1 = res1.get("trace") if res1 else None
-                           t2 = res2.get("trace") if res2 else None
-                           if t1 and t2 and t1.get('op') != t2.get('op'):
-      -                        print("\n  [Analysis]: The operations differ because the fuzzer's internal state pool diverged at a prior step.")
-      -                        print("              Review the trace diff above to find the first step where 'res' (result_stacks) differs.")
-      -                        print("              This earlier difference caused the fuzzer to select different source GSSs for this step, leading to different available operations ('avail_ops').")
-      +                        print("\n  [Analysis]: The operations differ because they are chosen based on a hash of the source GSS, which has diverged.")
-      +                        print("              Review the 'Divergence operation details' and the trace diff above to see where 'src' (source_stacks) first differs.")
+      +        stack_key = " -> ".join(call_chain)
+      +
+      +        stats_dict = _PROFILING_STATS[counter_name]
+      +        stats_dict[stack_key] = stats_dict.get(stack_key, 0) + 1
+      +
+               return original_method(*args, **kwargs)
+           setattr(cls, method_name, wrapper)
        
-                           break # Show only the first divergence for this pair
+       _hooks_installed = False
+       def _install_profiling_hooks():
+           global _hooks_installed
+           if _hooks_installed:
+               return
+           _profile_method(ffi.Bitset, 'union', 'bitset_union')
+           _profile_method(ffi.Bitset, 'intersection', 'bitset_intersection')
+           _profile_method(ffi.Bitset, 'difference', 'bitset_difference')
+           _profile_method(ffi.HybridL2Bitset, 'complement', 'hybrid_complement')
+           _profile_method(PyAcc, 'merge', 'acc_merge')
+           _hooks_installed = True
        
-
-      ``````diff
-      diff --git a/python/gss_tester/tests/fuzzer.py b/python/gss_tester/tests/fuzzer.py
-      --- a/python/gss_tester/tests/fuzzer.py
-      +++ b/python/gss_tester/tests/fuzzer.py
-      @@ -1,5 +1,7 @@
-       import random
-       from typing import Generator, Any, Type, List, Callable, Tuple, Dict, Optional
-      +import json
-      +import hashlib
+       class Model(GraphProvider):
+           def __init__(self, inner_model: InnerModel):
+               self.inner_model: InnerModel = inner_model
+               im: InnerModel = self.inner_model
+               self.arena: Dict[int, dict] = im.arena
+               self.roots_map: Dict[int, int] = im.roots_map
+               self.max_depth: Dict[int, int] = im.max_depth
+               self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
+               self.tokenizer_max_state: int = im.tokenizer.max_state()
+               self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
+               self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+               # Profiling state
+               _install_profiling_hooks()
+               self.get_mask_calls = 0
        
-       from ..interface import GSS, MergeableInt
+           @staticmethod
+           def from_json_string(s: str) -> 'Model':
+               return Model(InnerModel.from_json_string(s))
        
-      @@ -62,17 +64,28 @@
-                   if len(gss_states) >= max_gss_states:
-                       continue
+           def commit(self, token_id: int) -> None:
+               self.inner_model.commit(token_id)
        
-      -        # Choose an operation
-      +        # Select GSS state(s) to operate on
-      +        source_index = rng.randrange(len(gss_states))
-      +        source_gss = gss_states[source_index]
-      +        source_stacks = source_gss.to_stacks()
-      +        
-      +        # Choose an operation deterministically based on the source GSS state
-               can_merge = len(gss_states) >= 2
-               operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
-               if can_merge:
-                   operations.append('merge')
-               
-      -        op_choice = rng.choice(operations)
-      -
-      -        # Select GSS state(s) to operate on
-      -        source_index = rng.randrange(len(gss_states))
-      -        source_gss = gss_states[source_index]
-      -        source_stacks = source_gss.to_stacks()
-      +        # To make the choice deterministic based on state, we can hash the state.
-      +        state_str = json.dumps(source_stacks, sort_keys=True)
-      +        state_hash = hashlib.sha256(state_str.encode('utf-8')).hexdigest()
-      +        # We use the hash to derive an index into the operations list.
-      +        # This makes the choice of operation entirely dependent on the source stack.
-      +        op_idx = int(state_hash, 16) % len(operations)
-      +        op_choice = operations[op_idx]
-      +        op_selection_info = {
-      +            "source_stacks_hash": state_hash,
-      +            "op_index": op_idx,
-      +        }
-               
-               new_gss: GSS
-               args: Dict[str, Any] = {}
-      @@ -148,6 +161,7 @@
-                   yield new_gss, {
-                       "phase": "fuzz",
-                       "op": op_choice,
-      +                "op_selection": op_selection_info,
-                       "available_ops": operations,
-                       "step": step_idx,
-                       "seed": seed,
+           @property
+           def state(self) -> Dict[int, GSS]:
+               return self.inner_model.state
+       
+           def is_end(self, node: int) -> bool:
+               return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
+       
+           @profile
+           def get_mask(self) -> RangeSet:
+               """
+               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+       
+               Changes for get_mask_only:
+               - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                 the forbidden terminals -> forbidden LLM tokens and taking the complement.
+               - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+               """
+               print("\n--- get_mask START ---")
+       
+               state_map: Dict[int, GSS] = self.state
+               t_start = time.perf_counter_ns()
+               self.get_mask_calls += 1
+       
+               call_stats = {
+                   'nodes_visited': 0,
+                   'main_loop_iterations': 0,
+                   'end_nodes_reached': 0,
+                   'main_loop_apply_calls': 0,
+                   'main_loop_merge_calls': 0,
+                   'main_loop_union_calls': 0,
+                   'main_loop_intersection_calls': 0,
+               }
+       
+               all_ones: Optional[ffi.Bitset] = self.all_internal_llm_tokens_bitset
+               final_mask: ffi.Bitset = ffi.Bitset.zeros()
+       
+               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+               values: Dict[int, GSS] = {}
+               todo: Dict[int, Set[int]] = {}
+               depth_heap: List[int] = []
+       
+               hp, hpop = heapq.heappush, heapq.heappop
+               roots_map: Dict[int, int] = self.roots_map
+               max_depth: Dict[int, int] = self.max_depth
+               arena: Dict[int, dict] = self.arena
+               is_end = self.is_end
+               pmc: Dict[int, Dict[int, ffi.Bitset]] = self.possible_matches_cache or {}
+               max_state: int = self.tokenizer_max_state
+       
+               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+                   # Compute forbidden LLM tokens from disallowed terminals for this GSS
+                   forbid: ffi.Bitset = ffi.Bitset.zeros()
+                   disallowed_l2 = acc.terminals_union.complement()
+                   for (start, end), bv in disallowed_l2.range_values():
+                       if bv.is_empty():
+                           continue
+                       for tsid in range(start, min(end, max_state) + 1):
+                           pm: Optional[Dict[int, ffi.Bitset]] = pmc.get(tsid)
+                           if not pm:
+                               continue
+                           for terminal_id_str, llm_tokens in pm.items():
+                               if bv.contains(int(terminal_id_str)):
+                                   forbid = forbid.union(llm_tokens)
+                   allowed_mask: ffi.Bitset = all_ones.difference(forbid)  # type: ignore[union-attr]
+                   return PyAcc(
+                       terminals_union=ffi.HybridL2Bitset.all(),  # consume
+                       llm_mask=allowed_mask
+                   )
+       
+               memo = {}
+               for sid, gss in state_map.items():
+                   r: Optional[int] = roots_map[int(sid)]
+       
+                   gss_initialized: GSS = gss.apply(initialize_acc, memo)
+       
+                   if r in values:
+                       values[r] = values[r].merge(gss_initialized)
+                   else:
+                       values[r] = gss_initialized
+       
+                   d: int = max_depth[r]
+                   b: Optional[Set[int]] = todo.get(d)
+                   if b is None:
+                       todo[d] = {r}
+                       hp(depth_heap, d)
+                   else:
+                       b.add(r)
+       
+               print("\nInitial GSS stats:")
+               print(GSS.merge_many(list(self.state.values())).stats())
+               print("Stats after seeding:")
+               print(GSS.merge_many(list(values.values())).stats())
+       
+               def enqueue(d: int, n: int) -> None:
+                   b: Optional[Set[int]] = todo.get(d)
+                   if b is None:
+                       todo[d] = {n}
+                       hp(depth_heap, d)
+                   else:
+                       b.add(n)
+       
+               t_init_done = time.perf_counter_ns()
+       
+               # Reset per-call stats
+               for k in _PROFILING_STATS:
+      -            _PROFILING_STATS[k] = 0
+      +            _PROFILING_STATS[k] = {}
+       
+               # Main loop
+               while depth_heap:
+      @@ -258,8 +285,17 @@
+               print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+               print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+               print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+      -        for k, v in _PROFILING_STATS.items():
+      -            print(f"{k} calls: {v}")
+      +        for k, v_dict in _PROFILING_STATS.items():
+      +            total_calls = sum(v_dict.values())
+      +            print(f"{k} total calls: {total_calls}")
+      +            if total_calls > 0:
+      +                # Sort by count, descending, and take top 10
+      +                sorted_callers = sorted(v_dict.items(), key=lambda item: item[1], reverse=True)
+      +                for i, (stack, count) in enumerate(sorted_callers):
+      +                    if i >= 10:
+      +                        print(f"  ... and {len(sorted_callers) - 10} more call sites.")
+      +                        break
+      +                    print(f"  - {count:<7} calls from: {stack}")
+               print(f"--- get_mask END ---")
+       
+               return RangeSet.from_ranges(original_mask.to_ranges())
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/tests/analyzer.py
-      Applying patch to 'python/gss_tester/tests/analyzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/analyzer.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/gss_tester/tests/fuzzer.py
-      Applying patch to 'python/gss_tester/tests/fuzzer.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/tests/fuzzer.py.
+      Identified target file: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_get_mask_only.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_get_mask_only.py.
     metadata:
-  - user: 'Changes committed with message: "fuzz: Make operation selection deterministic
-      and improve divergence reporting"'
+  - user: 'Changes committed with message: "profiling: Capture and display call stacks
+      for instrumented methods"'
     metadata:
 ...
