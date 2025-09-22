@@ -20,8 +20,11 @@ def parse_log_data(log_content):
         # Isolate the detailed log for the Python model
         python_model_log = re.search(r">>> Running benchmark for: precompute3_model_pure_python_get_mask_only\.py(.*?)>>> Finished benchmark for:", log_content, re.DOTALL).group(1)
 
-        # --- Extract GSS Stats (Initial and After Seeding are identical in the log) ---
-        initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=--- get_mask)", python_model_log, re.DOTALL)
+        # --- Extract GSS Stats ---
+        # THIS IS THE CORRECTED LINE: The regex now stops before "Stats after seeding:"
+        # to prevent capturing duplicate data from the second stats block.
+        initial_stats_blocks = re.findall(r"Initial GSS stats:\n(.*?)(?=Stats after seeding:)", python_model_log, re.DOTALL)
+
         data['total_stacks'] = [int(m) for m in re.findall(r"- stacks: total=(\d+)", "\n".join(initial_stats_blocks))]
         data['initial_upper_branch_nodes'] = [int(m) for m in re.findall(r"nodes: UpperBranch=(\d+)", "\n".join(initial_stats_blocks))]
         data['initial_interface_nodes'] = [int(m) for m in re.findall(r"Interface=(\d+)", "\n".join(initial_stats_blocks))]
