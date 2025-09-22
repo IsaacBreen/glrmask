@@ -69,6 +69,15 @@ class PyRangeSet(RangeSet[int]):
         return [list(interval) for interval in self.intervals]
 
     @staticmethod
+    def from_json(data: List[List[int]]) -> 'PyRangeSet':
+        """Creates a PyRangeSet from a list of [start, end] lists (JSON format)."""
+        return PyRangeSet(iter(map(tuple, data)))
+
+    def to_json(self) -> List[List[int]]:
+        """Converts the PyRangeSet to a list of [start, end] lists (JSON format)."""
+        return self.to_ranges()
+
+    @staticmethod
     def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
         """Creates a PyRangeSet from an iterable of individual indices."""
         indices_sorted = sorted(set(indices))
@@ -134,6 +143,10 @@ class PyRangeSet(RangeSet[int]):
     def is_empty(self) -> bool:
         """Return True if no indices are present."""
         return not self.intervals
+
+    def __len__(self) -> int:
+        """Return the total number of elements in the set."""
+        return sum(e - s + 1 for s, e in self._intervals)
 
     def contains(self, x: int) -> bool:
         """Return True if x is contained in the set."""
