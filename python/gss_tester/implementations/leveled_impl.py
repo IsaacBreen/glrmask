@@ -426,19 +426,21 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def push(self, value: T) -> LeveledGSS[T, Acc]:
         if self.is_empty():
-            return self
+            return type(self).empty()
         if isinstance(self.inner, Interface):
             lower_node = Lower(children=self.inner.children, empty=self.inner.empty is not None)
             new_children = {value: {lower_node._max_depth: lower_node}}
             return LeveledGSS(Interface(children=new_children, acc=self.inner.acc, empty=None))
         else:
             return LeveledGSS(UpperBranch(children={value: {self.inner._max_depth: self.inner}}, empty=None))
+
     def pop(self) -> LeveledGSS[T, Acc]:
         upper_branch = self.inner if isinstance(self.inner, UpperBranch) else interface_to_upperbranch(self.inner)
         all_children = list(upper_branch._all_children())
         merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
         merged = try_promote(merged)
         return LeveledGSS(merged)
+
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
         # Fast path: popn(0) is a no-op. Preserve identity to match the default
         # implementation's behavior (crucial for deterministic fuzzing).
