@@ -439,6 +439,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
         merged = try_promote(merged)
         return LeveledGSS(merged)
+    def popn(self, n: int) -> LeveledGSS[T, Acc]:
+        all_children: Dict[int, Upper[T, Acc]] = {id(self.inner): self.inner}
+        for _ in range(n):
+            def to_upperbranch(upper: Upper[T, Acc]) -> UpperBranch[T, Acc]:
+                return upper if isinstance(upper, UpperBranch) else interface_to_upperbranch(upper)
+            all_children = {id(child): child for parent in all_children.values() for child in to_upperbranch(parent)._all_children()}
+        all_children: List[Upper[T, Acc]] = list(all_children.values())
+        merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+        merged = try_promote(merged)
+        return LeveledGSS(merged)
+
 
     def is_empty(self) -> bool:
         # An empty GSS is represented by an UpperBranch with no children and no empty accumulator.
