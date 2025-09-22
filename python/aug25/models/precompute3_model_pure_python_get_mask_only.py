@@ -33,7 +33,6 @@ class Model(GraphProvider):
     def is_end(self, node: int) -> bool:
         return bool(((self.arena.get(node) or {}).get("value") or {}).get("clean_end", False))
 
-    @profile
     def get_mask(self) -> RangeSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
