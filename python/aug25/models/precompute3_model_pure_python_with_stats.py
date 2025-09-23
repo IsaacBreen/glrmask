@@ -555,6 +555,8 @@ class Model(GraphProvider):
                     edges = arena.get(node, {}).get("children") or []
                     stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
                     for (pop, llm_bv), dests in edges:
+                        llm_bv = llm_bv.difference(final_mask)
+
                         stats.inc('get_mask.traversal.edges_traversed')
                         stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                         stats.inc('get_mask.data.llm_bv_on_edge.len.sum', len(llm_bv))
@@ -594,6 +596,15 @@ class Model(GraphProvider):
 
                         stats.start('get_mask.main_loop.edge.apply_and_prune')
                         popped = popped.apply_and_prune(intersect_and_prune)
+                        stats.stop('get_mask.main_loop.edge.apply_and_prune')
+
+                        if popped.is_empty():
+                            stats.inc('get_mask.traversal.edge.popped_pruned_empty')
+                            continue
+
+                        if popped.reduce_acc().is_empty():
+                            stats.inc('get_mask.traversal.edge.popped_reduced_empty')
+                            continue
 
                         for dest_idx, state_bv in dests:
                             stats.inc('get_mask.traversal.dests_traversed')
@@ -613,7 +624,6 @@ class Model(GraphProvider):
                             if child_gss.is_empty():
                                 continue
 
-                            stats.stop('get_mask.main_loop.edge.apply_and_prune')
                             stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                             if child_gss.is_empty():
                                 stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
