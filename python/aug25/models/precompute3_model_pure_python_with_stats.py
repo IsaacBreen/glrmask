@@ -554,6 +554,10 @@ class Model(GraphProvider):
                     for (pop, llm_bv), dests in edges:
                         llm_bv = llm_bv.difference(final_mask)
 
+                        if llm_bv.is_empty():
+                            stats.inc('get_mask.traversal.edge.llm_bv_empty')
+                            continue
+
                         stats.inc('get_mask.traversal.edges_traversed')
                         stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                         stats.inc('get_mask.data.llm_bv_on_edge.len.sum', len(llm_bv))
