@@ -10,6 +10,28 @@ import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..stats import Stats
 
+# --- Monkey-patch RangeSet to collect stats on union/intersection ---
+# This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+# Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
+_original_rangeset_union = RangeSet.union
+_original_rangeset_intersection = RangeSet.intersection
+
+def _patched_union(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.union that increments a stats counter."""
+    Stats.get().inc('bitset.union.calls')
+    return _original_rangeset_union(self, other)
+
+def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.intersection that increments a stats counter."""
+    Stats.get().inc('bitset.intersection.calls')
+    return _original_rangeset_intersection(self, other)
+
+# Apply the patches
+RangeSet.union = _patched_union
+RangeSet.intersection = _patched_intersection
+# --- End of monkey-patch ---
+
+
 # Add a dummy profiler for when not running under kernprof
 try:
     # This will be injected by the kernprof script.
