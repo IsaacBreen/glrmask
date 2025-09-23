@@ -113,7 +113,7 @@ public:
         py::dict state_map;
 
         for (auto item_handle : state_) {
-            int tokenizer_sid = py::cast<int>(item_handle);
+            int tokenizer_sid = py::cast<int>(item_handle.first);
             // py::object gss = py::reinterpret_borrow<py::object>(item.second);
             py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
             py::object end_state_obj = result[0];
@@ -497,7 +497,7 @@ private:
                         int len = py::cast<int>(len_item[0]);
                         py::dict nts = py::cast<py::dict>(len_item[1]);
                         for (auto nt_item_handle : nts) {
-                            int nt = py::cast<int>(nt_item_handle);
+                            int nt = py::cast<int>(nt_item_handle.first);
                             aot.reduces.emplace_back(nt, len);
                         }
                     }

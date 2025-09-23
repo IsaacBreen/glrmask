@@ -1902,8 +1902,9 @@ local_system:
               py::dict terminals_map;
               py::dict state_map;
 
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
+              for (auto item_handle : state_) {
+                  int tokenizer_sid = py::cast<int>(item_handle);
+                  // py::object gss = py::reinterpret_borrow<py::object>(item.second);
                   py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
                   py::object end_state_obj = result[0];
                   py::object matches_obj = result[1];
@@ -1929,9 +1930,10 @@ local_system:
               py::function predicate = make_prune_predicate(terminals_map);
               py::function mapper = make_apply_map(state_map);
 
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : state_.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int tokenizer_sid = py::cast<int>(item[0]);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
 
                   py::object pruned_gss = gss.attr("prune")(predicate);
                   bool is_empty = pruned_gss.attr("is_empty")().cast<bool>();
@@ -1953,9 +1955,10 @@ local_system:
               };
 
               std::deque<Item> q;
-              for (auto item : temp_states) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : temp_states.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int tokenizer_sid = py::cast<int>(item[0]);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
                   q.push_back({0, tokenizer_sid, gss});
               }
 
@@ -2071,9 +2074,10 @@ local_system:
                   // Build disallowed mask as RangeSet
                   py::object disallowed_llm_mask = range_empty_()();
 
-                  for (auto item : terminals_union) {
-                      int tsid = py::cast<int>(item.first);
-                      py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
+                  for (auto item_handle : terminals_union.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int tsid = py::cast<int>(item[0]);
+                      py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item[1]);
                       if (tsid > tokenizer_max_state_) continue;
                       if (!pmc_.contains(py::int_(tsid))) continue;
 
@@ -2097,13 +2101,15 @@ local_system:
               });
 
               // Seed
-              for (auto item : state_map) {
-                  int sid = py::cast<int>(item.first);
+              for (auto item_handle : state_map.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int sid = py::cast<int>(item[0]);
                   int root = 0;
                   auto it = roots_map_.find(sid);
                   if (it == roots_map_.end()) continue;
                   root = it->second;
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
+
                   py::object gss_initialized = gss.attr("apply")(initialize_acc);
 
                   if (values.find(root) != values.end()) {
@@ -2244,15 +2250,17 @@ local_system:
           void parse_parser_table() {
               // parser_table_obj_ has: start_state_id and table (dict state_id -> Row dataclass)
               py::dict table = parser_table_obj_.attr("table");
-              for (auto item : table) {
-                  int state_id = py::cast<int>(item.first);
-                  py::object row_obj = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : table.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int state_id = py::cast<int>(item[0]);
+                  py::object row_obj = py::reinterpret_borrow<py::object>(item[1]);
                   Row row;
 
                   py::dict actions = row_obj.attr("actions");
-                  for (auto aitem : actions) {
-                      int term_id = py::cast<int>(aitem.first);
-                      py::object action = py::reinterpret_borrow<py::object>(aitem.second);
+                  for (auto aitem_handle : actions.attr("items")()) {
+                      py::tuple aitem = py::cast<py::tuple>(aitem_handle);
+                      int term_id = py::cast<int>(aitem[0]);
+                      py::object action = py::reinterpret_borrow<py::object>(aitem[1]);
 
                       ActionsOnTerminal aot;
                       // Shift: int
@@ -2274,11 +2282,12 @@ local_system:
                               aot.shift_state_id = py::cast<int>(shift_obj);
                           }
                           py::dict reduces = action.attr("reduces");
-                          for (auto len_item : reduces) {
-                              int len = py::cast<int>(len_item.first);
-                              py::dict nts = py::cast<py::dict>(len_item.second);
-                              for (auto nt_item : nts) {
-                                  int nt = py::cast<int>(nt_item.first);
+                          for (auto len_item_handle : reduces.attr("items")()) {
+                              py::tuple len_item = py::cast<py::tuple>(len_item_handle);
+                              int len = py::cast<int>(len_item[0]);
+                              py::dict nts = py::cast<py::dict>(len_item[1]);
+                              for (auto nt_item_handle : nts) {
+                                  int nt = py::cast<int>(nt_item_handle);
                                   aot.reduces.emplace_back(nt, len);
                               }
                           }
@@ -2287,9 +2296,10 @@ local_system:
                   }
 
                   py::dict gotos = row_obj.attr("gotos");
-                  for (auto gitem : gotos) {
-                      int nt = py::cast<int>(gitem.first);
-                      int to_state = py::cast<int>(gitem.second);
+                  for (auto gitem_handle : gotos.attr("items")()) {
+                      py::tuple gitem = py::cast<py::tuple>(gitem_handle);
+                      int nt = py::cast<int>(gitem[0]);
+                      int to_state = py::cast<int>(gitem[1]);
                       row.gotos[nt] = to_state;
                   }
 
@@ -2298,9 +2308,10 @@ local_system:
           }
 
           void parse_arena(py::dict arena_py) {
-              for (auto item : arena_py) {
-                  int uid = py::cast<int>(item.first);
-                  py::dict node = py::cast<py::dict>(item.second);
+              for (auto item_handle : arena_py.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int uid = py::cast<int>(item[0]);
+                  py::dict node = py::cast<py::dict>(item[1]);
                   NodeInfo info;
 
                   // Determine if end node
@@ -2378,9 +2389,10 @@ local_system:
                   py::object disallowed_map = acc.attr("terminals_union");
                   py::object rs_empty = range_empty_()();
 
-                  for (auto item : terminals_map) {
-                      int state_id = py::cast<int>(item.first);
-                      py::object matched_bv = py::reinterpret_borrow<py::object>(item.second);
+                  for (auto item_handle : terminals_map.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int state_id = py::cast<int>(item[0]);
+                      py::object matched_bv = py::reinterpret_borrow<py::object>(item[1]);
                       py::object disallowed_for_state;
                       if (py::cast<py::dict>(disallowed_map).contains(py::int_(state_id))) {
                           disallowed_for_state = disallowed_map[py::int_(state_id)];
@@ -2402,9 +2414,10 @@ local_system:
                   py::dict new_bvs;
                   py::object rs_empty = range_empty_()();
 
-                  for (auto item : state_map) {
-                      int old_sid = py::cast<int>(item.first);
-                      int new_sid = py::cast<int>(item.second);
+                  for (auto item_handle : state_map.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int old_sid = py::cast<int>(item[0]);
+                      int new_sid = py::cast<int>(item[1]);
                       py::object bv_source;
                       if (py::cast<py::dict>(old_map).contains(py::int_(old_sid))) {
                           bv_source = old_map[py::int_(old_sid)];
@@ -2435,8 +2448,7 @@ local_system:
                   py::object new_bv = curr_bv.attr("union")(to_add);
 
                   // Copy map
-                  py::dict new_map;
-                  for (auto item : current_map) new_map[item.first] = item.second;
+                  py::dict new_map = py::cast<py::dict>(current_map.attr("copy")());
                   new_map[py::int_(state_id)] = new_bv;
 
                   py::object new_acc = PyAccClass_(new_map, acc.attr("llm_mask"));
@@ -4516,7 +4528,7 @@ local_system:
               py::dict state_map;
 
               for (auto item_handle : state_) {
-                  int tokenizer_sid = py::cast<int>(item_handle);
+                  int tokenizer_sid = py::cast<int>(item_handle.first);
                   // py::object gss = py::reinterpret_borrow<py::object>(item.second);
                   py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
                   py::object end_state_obj = result[0];
@@ -4900,7 +4912,7 @@ local_system:
                               int len = py::cast<int>(len_item[0]);
                               py::dict nts = py::cast<py::dict>(len_item[1]);
                               for (auto nt_item_handle : nts) {
-                                  int nt = py::cast<int>(nt_item_handle);
+                                  int nt = py::cast<int>(nt_item_handle.first);
                                   aot.reduces.emplace_back(nt, len);
                               }
                           }
@@ -7204,8 +7216,9 @@ messages:
               py::dict terminals_map;
               py::dict state_map;
 
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
+              for (auto item_handle : state_) {
+                  int tokenizer_sid = py::cast<int>(item_handle);
+                  // py::object gss = py::reinterpret_borrow<py::object>(item.second);
                   py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
                   py::object end_state_obj = result[0];
                   py::object matches_obj = result[1];
@@ -7231,9 +7244,10 @@ messages:
               py::function predicate = make_prune_predicate(terminals_map);
               py::function mapper = make_apply_map(state_map);
 
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : state_.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int tokenizer_sid = py::cast<int>(item[0]);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
 
                   py::object pruned_gss = gss.attr("prune")(predicate);
                   bool is_empty = pruned_gss.attr("is_empty")().cast<bool>();
@@ -7255,9 +7269,10 @@ messages:
               };
 
               std::deque<Item> q;
-              for (auto item : temp_states) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : temp_states.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int tokenizer_sid = py::cast<int>(item[0]);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
                   q.push_back({0, tokenizer_sid, gss});
               }
 
@@ -7373,9 +7388,10 @@ messages:
                   // Build disallowed mask as RangeSet
                   py::object disallowed_llm_mask = range_empty_()();
 
-                  for (auto item : terminals_union) {
-                      int tsid = py::cast<int>(item.first);
-                      py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
+                  for (auto item_handle : terminals_union.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int tsid = py::cast<int>(item[0]);
+                      py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item[1]);
                       if (tsid > tokenizer_max_state_) continue;
                       if (!pmc_.contains(py::int_(tsid))) continue;
 
@@ -7399,13 +7415,15 @@ messages:
               });
 
               // Seed
-              for (auto item : state_map) {
-                  int sid = py::cast<int>(item.first);
+              for (auto item_handle : state_map.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int sid = py::cast<int>(item[0]);
                   int root = 0;
                   auto it = roots_map_.find(sid);
                   if (it == roots_map_.end()) continue;
                   root = it->second;
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
+                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
+
                   py::object gss_initialized = gss.attr("apply")(initialize_acc);
 
                   if (values.find(root) != values.end()) {
@@ -7546,15 +7564,17 @@ messages:
           void parse_parser_table() {
               // parser_table_obj_ has: start_state_id and table (dict state_id -> Row dataclass)
               py::dict table = parser_table_obj_.attr("table");
-              for (auto item : table) {
-                  int state_id = py::cast<int>(item.first);
-                  py::object row_obj = py::reinterpret_borrow<py::object>(item.second);
+              for (auto item_handle : table.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int state_id = py::cast<int>(item[0]);
+                  py::object row_obj = py::reinterpret_borrow<py::object>(item[1]);
                   Row row;
 
                   py::dict actions = row_obj.attr("actions");
-                  for (auto aitem : actions) {
-                      int term_id = py::cast<int>(aitem.first);
-                      py::object action = py::reinterpret_borrow<py::object>(aitem.second);
+                  for (auto aitem_handle : actions.attr("items")()) {
+                      py::tuple aitem = py::cast<py::tuple>(aitem_handle);
+                      int term_id = py::cast<int>(aitem[0]);
+                      py::object action = py::reinterpret_borrow<py::object>(aitem[1]);
 
                       ActionsOnTerminal aot;
                       // Shift: int
@@ -7576,11 +7596,12 @@ messages:
                               aot.shift_state_id = py::cast<int>(shift_obj);
                           }
                           py::dict reduces = action.attr("reduces");
-                          for (auto len_item : reduces) {
-                              int len = py::cast<int>(len_item.first);
-                              py::dict nts = py::cast<py::dict>(len_item.second);
-                              for (auto nt_item : nts) {
-                                  int nt = py::cast<int>(nt_item.first);
+                          for (auto len_item_handle : reduces.attr("items")()) {
+                              py::tuple len_item = py::cast<py::tuple>(len_item_handle);
+                              int len = py::cast<int>(len_item[0]);
+                              py::dict nts = py::cast<py::dict>(len_item[1]);
+                              for (auto nt_item_handle : nts) {
+                                  int nt = py::cast<int>(nt_item_handle);
                                   aot.reduces.emplace_back(nt, len);
                               }
                           }
@@ -7589,9 +7610,10 @@ messages:
                   }
 
                   py::dict gotos = row_obj.attr("gotos");
-                  for (auto gitem : gotos) {
-                      int nt = py::cast<int>(gitem.first);
-                      int to_state = py::cast<int>(gitem.second);
+                  for (auto gitem_handle : gotos.attr("items")()) {
+                      py::tuple gitem = py::cast<py::tuple>(gitem_handle);
+                      int nt = py::cast<int>(gitem[0]);
+                      int to_state = py::cast<int>(gitem[1]);
                       row.gotos[nt] = to_state;
                   }
 
@@ -7600,9 +7622,10 @@ messages:
           }
 
           void parse_arena(py::dict arena_py) {
-              for (auto item : arena_py) {
-                  int uid = py::cast<int>(item.first);
-                  py::dict node = py::cast<py::dict>(item.second);
+              for (auto item_handle : arena_py.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int uid = py::cast<int>(item[0]);
+                  py::dict node = py::cast<py::dict>(item[1]);
                   NodeInfo info;
 
                   // Determine if end node
@@ -7680,9 +7703,10 @@ messages:
                   py::object disallowed_map = acc.attr("terminals_union");
                   py::object rs_empty = range_empty_()();
 
-                  for (auto item : terminals_map) {
-                      int state_id = py::cast<int>(item.first);
-                      py::object matched_bv = py::reinterpret_borrow<py::object>(item.second);
+                  for (auto item_handle : terminals_map.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int state_id = py::cast<int>(item[0]);
+                      py::object matched_bv = py::reinterpret_borrow<py::object>(item[1]);
                       py::object disallowed_for_state;
                       if (py::cast<py::dict>(disallowed_map).contains(py::int_(state_id))) {
                           disallowed_for_state = disallowed_map[py::int_(state_id)];
@@ -7704,9 +7728,10 @@ messages:
                   py::dict new_bvs;
                   py::object rs_empty = range_empty_()();
 
-                  for (auto item : state_map) {
-                      int old_sid = py::cast<int>(item.first);
-                      int new_sid = py::cast<int>(item.second);
+                  for (auto item_handle : state_map.attr("items")()) {
+                      py::tuple item = py::cast<py::tuple>(item_handle);
+                      int old_sid = py::cast<int>(item[0]);
+                      int new_sid = py::cast<int>(item[1]);
                       py::object bv_source;
                       if (py::cast<py::dict>(old_map).contains(py::int_(old_sid))) {
                           bv_source = old_map[py::int_(old_sid)];
@@ -7737,8 +7762,7 @@ messages:
                   py::object new_bv = curr_bv.attr("union")(to_add);
 
                   // Copy map
-                  py::dict new_map;
-                  for (auto item : current_map) new_map[item.first] = item.second;
+                  py::dict new_map = py::cast<py::dict>(current_map.attr("copy")());
                   new_map[py::int_(state_id)] = new_bv;
 
                   py::object new_acc = PyAccClass_(new_map, acc.attr("llm_mask"));
@@ -7939,12 +7963,66 @@ messages:
       [notice] A new release of pip is available: 25.0.1 -> 25.2
       [notice] To update, run: pip install --upgrade pip
       Building C++ extensions ...
-      aug25/models/precompute3_engine.cpp:285:47: error: no member named 'first' in 'pybind11::handle'
-        285 |                 int tsid = py::cast<int>(item.first);
-            |                                          ~~~~ ^
-      aug25/models/precompute3_engine.cpp:286:90: error: no member named 'second' in 'pybind11::handle'
-        286 |                 py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
-            |                                                                                     ~~~~ ^
+      aug25/models/precompute3_engine.cpp:116:33: error: no matching function for call to 'cast'
+        116 |             int tokenizer_sid = py::cast<int>(item_handle);
+            |                                 ^~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1180:3: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'const handle' for 1st argument
+       1180 | T cast(const handle &handle) {
+            |   ^    ~~~~~~~~~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1223:8: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'int' for 1st argument
+       1223 | object cast(T &&value,
+            |        ^    ~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1281:1: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'object' for 1st argument
+       1281 | cast(object &&object) {
+            | ^    ~~~~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1189:3: note: candidate template ignored: requirement 'detail::is_base_of<pybind11::detail::pyobject_tag, int>::value' was not satisfied [with T = int]
+       1189 | T cast(const handle &handle) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1207:3: note: candidate template ignored: requirement 'detail::is_same<int, _object *>::value' was not satisfied [with T = int, Handle = value_type &]
+       1207 | T cast(Handle &&handle) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1217:3: note: candidate template ignored: requirement 'detail::is_same<int, _object *>::value' was not satisfied [with T = int, Object = value_type &]
+       1217 | T cast(Object &&obj) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1276:1: note: candidate template ignored: requirement 'detail::move_always<int, void>::value' was not satisfied [with T = int]
+       1276 | cast(object &&object) {
+            | ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1289:1: note: candidate template ignored: requirement 'detail::negation<std::integral_constant<bool, true>>::value' was not satisfied [with T = int]
+       1289 | cast(object &&object) {
+            | ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1295:55: note: candidate template ignored: requirement 'detail::is_base_of<pybind11::detail::pyobject_tag, int>::value' was not satisfied [with T = int]
+       1295 | detail::enable_if_t<detail::is_pyobject<T>::value, T> cast(object &&object) {
+            |                                                       ^
+      aug25/models/precompute3_engine.cpp:500:38: error: no matching function for call to 'cast'
+        500 |                             int nt = py::cast<int>(nt_item_handle);
+            |                                      ^~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1180:3: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'const handle' for 1st argument
+       1180 | T cast(const handle &handle) {
+            |   ^    ~~~~~~~~~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1223:8: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'int' for 1st argument
+       1223 | object cast(T &&value,
+            |        ^    ~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1281:1: note: candidate function template not viable: no known conversion from 'value_type' (aka 'pair<handle, handle>') to 'object' for 1st argument
+       1281 | cast(object &&object) {
+            | ^    ~~~~~~~~~~~~~~~
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1189:3: note: candidate template ignored: requirement 'detail::is_base_of<pybind11::detail::pyobject_tag, int>::value' was not satisfied [with T = int]
+       1189 | T cast(const handle &handle) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1207:3: note: candidate template ignored: requirement 'detail::is_same<int, _object *>::value' was not satisfied [with T = int, Handle = value_type &]
+       1207 | T cast(Handle &&handle) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1217:3: note: candidate template ignored: requirement 'detail::is_same<int, _object *>::value' was not satisfied [with T = int, Object = value_type &]
+       1217 | T cast(Object &&obj) {
+            |   ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1276:1: note: candidate template ignored: requirement 'detail::move_always<int, void>::value' was not satisfied [with T = int]
+       1276 | cast(object &&object) {
+            | ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1289:1: note: candidate template ignored: requirement 'detail::negation<std::integral_constant<bool, true>>::value' was not satisfied [with T = int]
+       1289 | cast(object &&object) {
+            | ^
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/cast.h:1295:55: note: candidate template ignored: requirement 'detail::is_base_of<pybind11::detail::pyobject_tag, int>::value' was not satisfied [with T = int]
+       1295 | detail::enable_if_t<detail::is_pyobject<T>::value, T> cast(object &&object) {
+            |                                                       ^
       2 errors generated.
     metadata:
   - user: |-
@@ -7964,385 +8042,63 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've identified the cause of the compilation error. The C++ code is incorrectly iterating over Python dictionaries from `pybind11` as if they were C++ maps (using `.first` and `.second`). This mistake is present in multiple places throughout the file.
-
-      The correct way to iterate over a `py::dict`'s items is to call its `.items()` method and then process the resulting key-value tuples. When only keys are needed, you can iterate over the dictionary directly, but the loop variable will be a handle to the key, not a pair.
-
-      Here are the step-by-step instructions to fix the compilation errors and other similar latent bugs in the file.
+      Of course. The C++ compilation is failing because you're trying to cast a Python dictionary item (a key-value pair) directly to an integer, when you should be casting just the key. Here are the steps to fix the issue.
 
       ### Step-by-step Instructions
 
-      You will need to edit the file `python/aug25/models/precompute3_engine.cpp`. I'll walk you through the necessary changes function by function.
+      You need to make two small changes to `python/aug25/models/precompute3_engine.cpp` to correctly extract the key from the dictionary item before casting it to an integer.
 
-      1.  **In `Engine::commit`:**
-          *   Around line 111, the first loop over `state_` only needs dictionary keys. Modify it to correctly extract the key:
+      1.  **In `python/aug25/models/precompute3_engine.cpp`:**
+          *   Locate the `commit` method. Inside the first `for` loop (around line 116), you are iterating through the `state_` dictionary. The loop variable `item_handle` is a pair. You need to access its first element, which is the key.
+          *   Change this line:
               ```cpp
-              // Change this:
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-              // To this:
-              for (auto item_handle : state_) {
-                  int tokenizer_sid = py::cast<int>(item_handle);
+              int tokenizer_sid = py::cast<int>(item_handle);
               ```
-          *   Around line 138, the second loop over `state_` needs key-value pairs. Modify it to iterate over `.items()`:
+          *   To this:
               ```cpp
-              // Change this:
-              for (auto item : state_) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
-              // To this:
-              for (auto item_handle : state_.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int tokenizer_sid = py::cast<int>(item[0]);
-                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
-              ```
-          *   Around line 155, the loop over `temp_states` also needs key-value pairs. Apply a similar fix:
-              ```cpp
-              // Change this:
-              for (auto item : temp_states) {
-                  int tokenizer_sid = py::cast<int>(item.first);
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
-              // To this:
-              for (auto item_handle : temp_states.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int tokenizer_sid = py::cast<int>(item[0]);
-                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
+              int tokenizer_sid = py::cast<int>(item_handle.first);
               ```
 
-      2.  **In `Engine::get_mask`:**
-          *   Around line 268, the loop over `state_map` needs key-value pairs. Fix it:
+      2.  **In the same file, `python/aug25/models/precompute3_engine.cpp`:**
+          *   Locate the `parse_parser_table` method. Inside the nested loop for parsing a `Split` action (around line 500), you are iterating through the `nts` dictionary. The loop variable `nt_item_handle` is also a pair.
+          *   Change this line:
               ```cpp
-              // Change this:
-              for (auto item : state_map) {
-                  int sid = py::cast<int>(item.first);
-                  // ...
-                  py::object gss = py::reinterpret_borrow<py::object>(item.second);
-              // To this:
-              for (auto item_handle : state_map.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int sid = py::cast<int>(item[0]);
-                  // ...
-                  py::object gss = py::reinterpret_borrow<py::object>(item[1]);
+              int nt = py::cast<int>(nt_item_handle);
               ```
-          *   Around line 284, fix the loop that caused the original compile error:
+          *   To this:
               ```cpp
-              // Change this:
-              for (auto item : terminals_union) {
-                  int tsid = py::cast<int>(item.first);
-                  py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
-              // To this:
-              for (auto item_handle : terminals_union.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int tsid = py::cast<int>(item[0]);
-                  py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item[1]);
+              int nt = py::cast<int>(nt_item_handle.first);
               ```
 
-      3.  **In `Engine::parse_parser_table`:**
-          *   This function has several incorrect loops. Fix them as follows:
-              *   Around line 465 (loop over `table`):
-                  ```cpp
-                  // Change from:
-                  for (auto item : table) {
-                      int state_id = py::cast<int>(item.first);
-                      py::object row_obj = py::reinterpret_borrow<py::object>(item.second);
-                  // To:
-                  for (auto item_handle : table.attr("items")()) {
-                      py::tuple item = py::cast<py::tuple>(item_handle);
-                      int state_id = py::cast<int>(item[0]);
-                      py::object row_obj = py::reinterpret_borrow<py::object>(item[1]);
-                  ```
-              *   Around line 470 (loop over `actions`):
-                  ```cpp
-                  // Change from:
-                  for (auto aitem : actions) {
-                      int term_id = py::cast<int>(aitem.first);
-                      py::object action = py::reinterpret_borrow<py::object>(aitem.second);
-                  // To:
-                  for (auto aitem_handle : actions.attr("items")()) {
-                      py::tuple aitem = py::cast<py::tuple>(aitem_handle);
-                      int term_id = py::cast<int>(aitem[0]);
-                      py::object action = py::reinterpret_borrow<py::object>(aitem[1]);
-                  ```
-              *   Around line 489 (loop over `reduces`):
-                  ```cpp
-                  // Change from:
-                  for (auto len_item : reduces) {
-                      int len = py::cast<int>(len_item.first);
-                      py::dict nts = py::cast<py::dict>(len_item.second);
-                  // To:
-                  for (auto len_item_handle : reduces.attr("items")()) {
-                      py::tuple len_item = py::cast<py::tuple>(len_item_handle);
-                      int len = py::cast<int>(len_item[0]);
-                      py::dict nts = py::cast<py::dict>(len_item[1]);
-                  ```
-              *   Around line 492 (loop over `nts`):
-                  ```cpp
-                  // Change from:
-                  for (auto nt_item : nts) {
-                      int nt = py::cast<int>(nt_item.first);
-                  // To:
-                  for (auto nt_item_handle : nts) {
-                      int nt = py::cast<int>(nt_item_handle);
-                  ```
-              *   Around line 501 (loop over `gotos`):
-                  ```cpp
-                  // Change from:
-                  for (auto gitem : gotos) {
-                      int nt = py::cast<int>(gitem.first);
-                      int to_state = py::cast<int>(gitem.second);
-                  // To:
-                  for (auto gitem_handle : gotos.attr("items")()) {
-                      py::tuple gitem = py::cast<py::tuple>(gitem_handle);
-                      int nt = py::cast<int>(gitem[0]);
-                      int to_state = py::cast<int>(gitem[1]);
-                  ```
-
-      4.  **In `Engine::parse_arena`:**
-          *   Around line 512, fix the loop over `arena_py`:
-              ```cpp
-              // Change from:
-              for (auto item : arena_py) {
-                  int uid = py::cast<int>(item.first);
-                  py::dict node = py::cast<py::dict>(item.second);
-              // To:
-              for (auto item_handle : arena_py.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int uid = py::cast<int>(item[0]);
-                  py::dict node = py::cast<py::dict>(item[1]);
-              ```
-
-      5.  **In `Engine::make_prune_predicate`:**
-          *   Around line 571, fix the loop over `terminals_map`:
-              ```cpp
-              // Change from:
-              for (auto item : terminals_map) {
-                  int state_id = py::cast<int>(item.first);
-                  py::object matched_bv = py::reinterpret_borrow<py::object>(item.second);
-              // To:
-              for (auto item_handle : terminals_map.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int state_id = py::cast<int>(item[0]);
-                  py::object matched_bv = py::reinterpret_borrow<py::object>(item[1]);
-              ```
-
-      6.  **In `Engine::make_apply_map`:**
-          *   Around line 588, fix the loop over `state_map`:
-              ```cpp
-              // Change from:
-              for (auto item : state_map) {
-                  int old_sid = py::cast<int>(item.first);
-                  int new_sid = py::cast<int>(item.second);
-              // To:
-              for (auto item_handle : state_map.attr("items")()) {
-                  py::tuple item = py::cast<py::tuple>(item_handle);
-                  int old_sid = py::cast<int>(item[0]);
-                  int new_sid = py::cast<int>(item[1]);
-              ```
-
-      7.  **In `Engine::disallow_in_state`:**
-          *   Around line 609, replace the incorrect dictionary copy loop with a call to the Python `copy()` method:
-              ```cpp
-              // Change this:
-              // Copy map
-              py::dict new_map;
-              for (auto item : current_map) new_map[item.first] = item.second;
-              // To this:
-              // Copy map
-              py::dict new_map = py::cast<py::dict>(current_map.attr("copy")());
-              ```
-
-      After applying these changes, the C++ extension should compile successfully.
+      These changes will resolve the compilation errors.
 
       ### Git Diffs
 
-      Here is the git diff for the required changes.
+      Here is the git diff to apply the fixes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 211118c..111118c 100644
+      index 9111111..2222222 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -108,8 +108,9 @@
-               py::dict terminals_map;
+      @@ -113,7 +113,7 @@
                py::dict state_map;
        
-      -        for (auto item : state_) {
-      -            int tokenizer_sid = py::cast<int>(item.first);
-      +        for (auto item_handle : state_) {
-      +            int tokenizer_sid = py::cast<int>(item_handle);
-      +            // py::object gss = py::reinterpret_borrow<py::object>(item.second);
+               for (auto item_handle : state_) {
+      -            int tokenizer_sid = py::cast<int>(item_handle);
+      +            int tokenizer_sid = py::cast<int>(item_handle.first);
+                   // py::object gss = py::reinterpret_borrow<py::object>(item.second);
                    py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
                    py::object end_state_obj = result[0];
-                   py::object matches_obj = result[1];
-      @@ -135,9 +136,10 @@
-               py::function predicate = make_prune_predicate(terminals_map);
-               py::function mapper = make_apply_map(state_map);
-       
-      -        for (auto item : state_) {
-      -            int tokenizer_sid = py::cast<int>(item.first);
-      -            py::object gss = py::reinterpret_borrow<py::object>(item.second);
-      +        for (auto item_handle : state_.attr("items")()) {
-      +            py::tuple item = py::cast<py::tuple>(item_handle);
-      +            int tokenizer_sid = py::cast<int>(item[0]);
-      +            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
-       
-                   py::object pruned_gss = gss.attr("prune")(predicate);
-                   bool is_empty = pruned_gss.attr("is_empty")().cast<bool>();
-      @@ -157,9 +159,10 @@
-               };
-       
-               std::deque<Item> q;
-      -        for (auto item : temp_states) {
-      -            int tokenizer_sid = py::cast<int>(item.first);
-      -            py::object gss = py::reinterpret_borrow<py::object>(item.second);
-      +        for (auto item_handle : temp_states.attr("items")()) {
-      +            py::tuple item = py::cast<py::tuple>(item_handle);
-      +            int tokenizer_sid = py::cast<int>(item[0]);
-      +            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
-                   q.push_back({0, tokenizer_sid, gss});
-               }
-       
-      @@ -264,13 +267,15 @@
-               });
-       
-               // Seed
-      -        for (auto item : state_map) {
-      -            int sid = py::cast<int>(item.first);
-      +        for (auto item_handle : state_map.attr("items")()) {
-      +            py::tuple item = py::cast<py::tuple>(item_handle);
-      +            int sid = py::cast<int>(item[0]);
-                   int root = 0;
-                   auto it = roots_map_.find(sid);
-                   if (it == roots_map_.end()) continue;
-                   root = it->second;
-      -            py::object gss = py::reinterpret_borrow<py::object>(item.second);
-      +            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
-      +
-                   py::object gss_initialized = gss.attr("apply")(initialize_acc);
-       
-                   if (values.find(root) != values.end()) {
-      @@ -289,9 +294,10 @@
-                   // Build disallowed mask as RangeSet
-                   py::object disallowed_llm_mask = range_empty_()();
-       
-      -            for (auto item : terminals_union) {
-      -                int tsid = py::cast<int>(item.first);
-      -                py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
-      +            for (auto item_handle : terminals_union.attr("items")()) {
-      +                py::tuple item = py::cast<py::tuple>(item_handle);
-      +                int tsid = py::cast<int>(item[0]);
-      +                py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item[1]);
-                       if (tsid > tokenizer_max_state_) continue;
-                       if (!pmc_.contains(py::int_(tsid))) continue;
-       
-      @@ -459,16 +465,18 @@
-           void parse_parser_table() {
-               // parser_table_obj_ has: start_state_id and table (dict state_id -> Row dataclass)
-               py::dict table = parser_table_obj_.attr("table");
-      -        for (auto item : table) {
-      -            int state_id = py::cast<int>(item.first);
-      -            py::object row_obj = py::reinterpret_borrow<py::object>(item.second);
-      +        for (auto item_handle : table.attr("items")()) {
-      +            py::tuple item = py::cast<py::tuple>(item_handle);
-      +            int state_id = py::cast<int>(item[0]);
-      +            py::object row_obj = py::reinterpret_borrow<py::object>(item[1]);
-                   Row row;
-       
-                   py::dict actions = row_obj.attr("actions");
-      -            for (auto aitem : actions) {
-      -                int term_id = py::cast<int>(aitem.first);
-      -                py::object action = py::reinterpret_borrow<py::object>(aitem.second);
-      +            for (auto aitem_handle : actions.attr("items")()) {
-      +                py::tuple aitem = py::cast<py::tuple>(aitem_handle);
-      +                int term_id = py::cast<int>(aitem[0]);
-      +                py::object action = py::reinterpret_borrow<py::object>(aitem[1]);
-       
-                       ActionsOnTerminal aot;
-                       // Shift: int
-      @@ -488,12 +496,14 @@
-                               aot.shift_state_id = py::cast<int>(shift_obj);
-                           }
-                           py::dict reduces = action.attr("reduces");
-      -                    for (auto len_item : reduces) {
-      -                        int len = py::cast<int>(len_item.first);
-      -                        py::dict nts = py::cast<py::dict>(len_item.second);
-      -                        for (auto nt_item : nts) {
-      -                            int nt = py::cast<int>(nt_item.first);
-      +                    for (auto len_item_handle : reduces.attr("items")()) {
-      +                        py::tuple len_item = py::cast<py::tuple>(len_item_handle);
-      +                        int len = py::cast<int>(len_item[0]);
-      +                        py::dict nts = py::cast<py::dict>(len_item[1]);
-      +                        for (auto nt_item_handle : nts) {
-      +                            int nt = py::cast<int>(nt_item_handle);
+      @@ -497,7 +497,7 @@
+                               int len = py::cast<int>(len_item[0]);
+                               py::dict nts = py::cast<py::dict>(len_item[1]);
+                               for (auto nt_item_handle : nts) {
+      -                            int nt = py::cast<int>(nt_item_handle);
+      +                            int nt = py::cast<int>(nt_item_handle.first);
                                    aot.reduces.emplace_back(nt, len);
                                }
                            }
-      @@ -502,9 +512,11 @@
-                   }
-       
-                   py::dict gotos = row_obj.attr("gotos");
-      -            for (auto gitem : gotos) {
-      -                int nt = py::cast<int>(gitem.first);
-      -                int to_state = py::cast<int>(gitem.second);
-      +            for (auto gitem_handle : gotos.attr("items")()) {
-      +                py::tuple gitem = py::cast<py::tuple>(gitem_handle);
-      +                int nt = py::cast<int>(gitem[0]);
-      +                int to_state = py::cast<int>(gitem[1]);
-                       row.gotos[nt] = to_state;
-                   }
-       
-      @@ -513,9 +525,10 @@
-           }
-       
-           void parse_arena(py::dict arena_py) {
-      -        for (auto item : arena_py) {
-      -            int uid = py::cast<int>(item.first);
-      -            py::dict node = py::cast<py::dict>(item.second);
-      +        for (auto item_handle : arena_py.attr("items")()) {
-      +            py::tuple item = py::cast<py::tuple>(item_handle);
-      +            int uid = py::cast<int>(item[0]);
-      +            py::dict node = py::cast<py::dict>(item[1]);
-                   NodeInfo info;
-       
-                   // Determine if end node
-      @@ -580,9 +593,10 @@
-                   py::object disallowed_map = acc.attr("terminals_union");
-                   py::object rs_empty = range_empty_()();
-       
-      -            for (auto item : terminals_map) {
-      -                int state_id = py::cast<int>(item.first);
-      -                py::object matched_bv = py::reinterpret_borrow<py::object>(item.second);
-      +            for (auto item_handle : terminals_map.attr("items")()) {
-      +                py::tuple item = py::cast<py::tuple>(item_handle);
-      +                int state_id = py::cast<int>(item[0]);
-      +                py::object matched_bv = py::reinterpret_borrow<py::object>(item[1]);
-                       py::object disallowed_for_state;
-                       if (py::cast<py::dict>(disallowed_map).contains(py::int_(state_id))) {
-                           disallowed_for_state = disallowed_map[py::int_(state_id)];
-      @@ -602,9 +616,10 @@
-                   py::dict new_bvs;
-                   py::object rs_empty = range_empty_()();
-       
-      -            for (auto item : state_map) {
-      -                int old_sid = py::cast<int>(item.first);
-      -                int new_sid = py::cast<int>(item.second);
-      +            for (auto item_handle : state_map.attr("items")()) {
-      +                py::tuple item = py::cast<py::tuple>(item_handle);
-      +                int old_sid = py::cast<int>(item[0]);
-      +                int new_sid = py::cast<int>(item[1]);
-                       py::object bv_source;
-                       if (py::cast<py::dict>(old_map).contains(py::int_(old_sid))) {
-                           bv_source = old_map[py::int_(old_sid)];
-      @@ -629,8 +644,7 @@
-                   py::object new_bv = curr_bv.attr("union")(to_add);
-       
-                   // Copy map
-      -            py::dict new_map;
-      -            for (auto item : current_map) new_map[item.first] = item.second;
-      +            py::dict new_map = py::cast<py::dict>(current_map.attr("copy")());
-                   new_map[py::int_(state_id)] = new_bv;
-       
-                   py::object new_acc = PyAccClass_(new_map, acc.attr("llm_mask"));
 
       ```
     metadata:
@@ -8355,7 +8111,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly iterate over pybind11 dictionaries
-      in C++ engine"'
+  - user: 'Changes committed with message: "Fix: Correctly cast dictionary keys to
+      int in C++ extension"'
     metadata:
 ...
