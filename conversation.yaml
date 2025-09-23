@@ -92,8 +92,10 @@ local_system:
           plots_dir = out_dir / "plots"
           plots_dir.mkdir(parents=True, exist_ok=True)
 
-          print("\n--- Scaling Analysis (sweeps) ---")
-          for doc in sweeps:
+          print("\n--- **Scaling Analysis (sweeps)** ---")
+          for i, doc in enumerate(sweeps):
+              if i > 0:
+                  print("-" * 60)
               impl = doc.get("implementation", "(unknown)")
               sweep = doc["sweep"]
               workload = sweep["workload"]
@@ -111,9 +113,10 @@ local_system:
                       phases_union.add(ph["name"])
               phases = sorted(phases_union)
 
-              print(f"\nImplementation: {impl}")
-              print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
+              print(f"\n**Implementation:** {impl}")
+              print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
               ideal_map = expectations.get(workload, {}).get(axis, {})
+              max_phase_len = max(len(p) for p in phases) if phases else 0
 
               # Build x,y series per phase
               x = []
@@ -138,21 +141,22 @@ local_system:
                   continue
 
               # Fit exponents per phase and print
-              print("  Measured exponents (log-log slope) per phase:")
+              print("\n  **Measured exponents (log-log slope) per phase:**")
               for p in phases:
                   b, a, r2 = _loglog_fit(x, phase_ys[p])
                   if b is None:
-                      print(f"    - {p}: insufficient data")
+                      print(f"    - {p:<{max_phase_len}}: insufficient data")
                       continue
                   ideal = ideal_map.get(p)
                   if ideal is None:
-                      print(f"    - {p}: slope={b:.3f}, r2={r2:.3f} (no ideal)")
+                      print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f} (no ideal)")
                   else:
                       delta = abs(b - ideal)
                       status = "OK" if delta <= 0.25 else "DRIFT"
-                      print(f"    - {p}: slope={b:.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
+                      print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
 
               # Plot log-log per phase
+              plotted_anything = False
               try:
                   import matplotlib.pyplot as plt
                   for p in phases:
@@ -160,6 +164,9 @@ local_system:
                       valid = [(xi, yi) for xi, yi in zip(x, y) if xi > 0 and yi > 0]
                       if len(valid) < 2:
                           continue
+                      if not plotted_anything:
+                          print("\n  **Plots:**")
+                          plotted_anything = True
                       xs, ys = zip(*valid)
                       b, a, r2 = _loglog_fit(list(xs), list(ys))
                       plt.figure(figsize=(6, 4))
@@ -185,7 +192,7 @@ local_system:
                       out_path = plots_dir / f"sweep_{workload}_{axis}_{p}.png"
                       plt.savefig(out_path)
                       plt.close()
-                      print(f"  Saved sweep plot: {out_path}")
+                      print(f"    - Saved: {out_path.name}")
               except Exception as e:
                   print(f"  Note: Sweep plotting skipped ({e}).")
 
@@ -203,10 +210,10 @@ local_system:
               for w in doc["workloads"]:
                   grouped[w["workload"]][impl_name].append(w)
 
-          print("--- Benchmark Summary ---")
+          print("--- **Benchmark Summary** ---")
           print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
           for workload, impl_map in grouped.items():
-              print(f"\nWorkload: {workload}")
+              print(f"\n**Workload:** {workload}")
               for impl, runs in impl_map.items():
                   ok = sum(1 for r in runs if r.get("outcome") == "ok")
                   aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
@@ -270,7 +277,7 @@ local_system:
                   out_path = plots_dir / f"{workload}_scaling.png"
                   plt.savefig(out_path)
                   plt.close()
-                  print(f"Saved plot: {out_path}")
+                  print(f"  - Saved plot: {out_path.name}")
 
                   # Per-phase stacked bars for the last run of each impl
                   plt.figure(figsize=(9, 5))
@@ -310,7 +317,7 @@ local_system:
                   out_path = plots_dir / f"{workload}_phase_breakdown.png"
                   plt.savefig(out_path)
                   plt.close()
-                  print(f"Saved plot: {out_path}")
+                  print(f"  - Saved plot: {out_path.name}")
 
           except Exception as e:
               print(f"Note: Plotting skipped or failed ({e}). You can install matplotlib and numpy for plots.")
@@ -4749,7 +4756,7 @@ local_system:
           plots_dir = out_dir / "plots"
           plots_dir.mkdir(parents=True, exist_ok=True)
 
-          print("\n--- **Scaling Analysis (sweeps)** ---")
+          print("\n--- Scaling Analysis (sweeps) ---")
           for i, doc in enumerate(sweeps):
               if i > 0:
                   print("-" * 60)
@@ -4768,12 +4775,12 @@ local_system:
               for r in runs:
                   for ph in r.get("phases", []):
                       phases_union.add(ph["name"])
-              phases = sorted(phases_union)
+              phases = sorted([p for p in phases_union if p not in ("build", "postcheck")])
 
-              print(f"\n**Implementation:** {impl}")
-              print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
+              print(f"\nImplementation: {impl}")
+              print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
               ideal_map = expectations.get(workload, {}).get(axis, {})
-              max_phase_len = max(len(p) for p in phases) if phases else 0
+              max_phase_len = max((len(p) for p in phases), default=0)
 
               # Build x,y series per phase
               x = []
@@ -4798,7 +4805,7 @@ local_system:
                   continue
 
               # Fit exponents per phase and print
-              print("\n  **Measured exponents (log-log slope) per phase:**")
+              print("\n  Measured exponents (log-log slope) per phase:")
               for p in phases:
                   b, a, r2 = _loglog_fit(x, phase_ys[p])
                   if b is None:
@@ -4822,7 +4829,7 @@ local_system:
                       if len(valid) < 2:
                           continue
                       if not plotted_anything:
-                          print("\n  **Plots:**")
+                          print("\n  Plots:")
                           plotted_anything = True
                       xs, ys = zip(*valid)
                       b, a, r2 = _loglog_fit(list(xs), list(ys))
@@ -4867,10 +4874,10 @@ local_system:
               for w in doc["workloads"]:
                   grouped[w["workload"]][impl_name].append(w)
 
-          print("--- **Benchmark Summary** ---")
+          print("--- Benchmark Summary ---")
           print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
           for workload, impl_map in grouped.items():
-              print(f"\n**Workload:** {workload}")
+              print(f"\nWorkload: {workload}")
               for impl, runs in impl_map.items():
                   ok = sum(1 for r in runs if r.get("outcome") == "ok")
                   aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
@@ -9467,8 +9474,10 @@ messages:
           plots_dir = out_dir / "plots"
           plots_dir.mkdir(parents=True, exist_ok=True)
 
-          print("\n--- Scaling Analysis (sweeps) ---")
-          for doc in sweeps:
+          print("\n--- **Scaling Analysis (sweeps)** ---")
+          for i, doc in enumerate(sweeps):
+              if i > 0:
+                  print("-" * 60)
               impl = doc.get("implementation", "(unknown)")
               sweep = doc["sweep"]
               workload = sweep["workload"]
@@ -9486,9 +9495,10 @@ messages:
                       phases_union.add(ph["name"])
               phases = sorted(phases_union)
 
-              print(f"\nImplementation: {impl}")
-              print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
+              print(f"\n**Implementation:** {impl}")
+              print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
               ideal_map = expectations.get(workload, {}).get(axis, {})
+              max_phase_len = max(len(p) for p in phases) if phases else 0
 
               # Build x,y series per phase
               x = []
@@ -9513,21 +9523,22 @@ messages:
                   continue
 
               # Fit exponents per phase and print
-              print("  Measured exponents (log-log slope) per phase:")
+              print("\n  **Measured exponents (log-log slope) per phase:**")
               for p in phases:
                   b, a, r2 = _loglog_fit(x, phase_ys[p])
                   if b is None:
-                      print(f"    - {p}: insufficient data")
+                      print(f"    - {p:<{max_phase_len}}: insufficient data")
                       continue
                   ideal = ideal_map.get(p)
                   if ideal is None:
-                      print(f"    - {p}: slope={b:.3f}, r2={r2:.3f} (no ideal)")
+                      print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f} (no ideal)")
                   else:
                       delta = abs(b - ideal)
                       status = "OK" if delta <= 0.25 else "DRIFT"
-                      print(f"    - {p}: slope={b:.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
+                      print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
 
               # Plot log-log per phase
+              plotted_anything = False
               try:
                   import matplotlib.pyplot as plt
                   for p in phases:
@@ -9535,6 +9546,9 @@ messages:
                       valid = [(xi, yi) for xi, yi in zip(x, y) if xi > 0 and yi > 0]
                       if len(valid) < 2:
                           continue
+                      if not plotted_anything:
+                          print("\n  **Plots:**")
+                          plotted_anything = True
                       xs, ys = zip(*valid)
                       b, a, r2 = _loglog_fit(list(xs), list(ys))
                       plt.figure(figsize=(6, 4))
@@ -9560,7 +9574,7 @@ messages:
                       out_path = plots_dir / f"sweep_{workload}_{axis}_{p}.png"
                       plt.savefig(out_path)
                       plt.close()
-                      print(f"  Saved sweep plot: {out_path}")
+                      print(f"    - Saved: {out_path.name}")
               except Exception as e:
                   print(f"  Note: Sweep plotting skipped ({e}).")
 
@@ -9578,10 +9592,10 @@ messages:
               for w in doc["workloads"]:
                   grouped[w["workload"]][impl_name].append(w)
 
-          print("--- Benchmark Summary ---")
+          print("--- **Benchmark Summary** ---")
           print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
           for workload, impl_map in grouped.items():
-              print(f"\nWorkload: {workload}")
+              print(f"\n**Workload:** {workload}")
               for impl, runs in impl_map.items():
                   ok = sum(1 for r in runs if r.get("outcome") == "ok")
                   aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
@@ -9645,7 +9659,7 @@ messages:
                   out_path = plots_dir / f"{workload}_scaling.png"
                   plt.savefig(out_path)
                   plt.close()
-                  print(f"Saved plot: {out_path}")
+                  print(f"  - Saved plot: {out_path.name}")
 
                   # Per-phase stacked bars for the last run of each impl
                   plt.figure(figsize=(9, 5))
@@ -9685,7 +9699,7 @@ messages:
                   out_path = plots_dir / f"{workload}_phase_breakdown.png"
                   plt.savefig(out_path)
                   plt.close()
-                  print(f"Saved plot: {out_path}")
+                  print(f"  - Saved plot: {out_path.name}")
 
           except Exception as e:
               print(f"Note: Plotting skipped or failed ({e}). You can install matplotlib and numpy for plots.")
@@ -14136,11 +14150,11 @@ messages:
     metadata:
       filename: python/gss_tester/run_tests.sh
   - user: |-
-      bash python/gss_tester/run_benches.sh medium python/gss_tester/implementations/leveled_impl_cpp.py
-      Benchmark results will be saved in: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41
+      bash python/gss_tester/run_benches.sh medium python/gss_tester/implementations/reference_impl.py python/gss_tester/implementations/leveled_impl.py python/gss_tester/implementations/leveled_impl_cpp.py
+      Benchmark results will be saved in: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01
       ---
       Preset: medium
-      Implementations: python/gss_tester/implementations/leveled_impl_cpp.py
+      Implementations: python/gss_tester/implementations/reference_impl.py python/gss_tester/implementations/leveled_impl.py python/gss_tester/implementations/leveled_impl_cpp.py
       ---
       Automating C++ module build...
         Cleaning previous C++ build artifacts...
@@ -14202,7 +14216,7 @@ messages:
       -- Performing Test HAS_FLTO - Success
       -- Performing Test HAS_FLTO_THIN
       -- Performing Test HAS_FLTO_THIN - Success
-      -- Configuring done (4.3s)
+      -- Configuring done (4.1s)
       -- Generating done (0.0s)
       -- Build files have been written to: /Users/isaacbreen/Projects2/grammars2024/python/aug25/models/build
         Building C++ modules...
@@ -14216,29 +14230,191 @@ messages:
       C++ module build complete.
       ---
 
+      >>> Running preset workloads for: python/gss_tester/implementations/reference_impl.py
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.446s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.106s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.177s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.437s
+      >>> Running workload 'apply_prune' with params {'depth': 6, 'branching': 4, 'apply_amount': 10, 'prune_threshold': 20} (max 20.0s)
+      <<< Finished workload 'apply_prune' outcome=ok in 0.059s
+      >>> Running workload 'fuzz' with params {'seed': 1337, 'steps': 500, 'max_gss_states': 15} (max 20.0s)
+      <<< Finished workload 'fuzz' outcome=ok in 0.027s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.preset.json
+      >>> Finished preset workloads for: python/gss_tester/implementations/reference_impl.py
+
+      >>> Checking for preset sweeps for preset 'medium'...
+
+      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.035s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.064s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.112s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.169s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json
+      >>> Finished sweep for: push_scaling
+
+      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.157s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.233s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.416s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.626s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      >>> Finished sweep for: pop_common_parent
+
+      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.035s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.062s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.112s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.169s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      >>> Finished sweep for: merge_after_prefix_mutations
+
+      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.reference_impl ReferenceGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.013s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.035s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.128s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.440s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json
+      >>> Finished sweep for: merge_surface_changes
+
+      >>> Running preset workloads for: python/gss_tester/implementations/leveled_impl.py
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl LeveledGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.preset.json
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.002s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.116s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.160s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.365s
+      >>> Running workload 'apply_prune' with params {'depth': 6, 'branching': 4, 'apply_amount': 10, 'prune_threshold': 20} (max 20.0s)
+      <<< Finished workload 'apply_prune' outcome=ok in 0.001s
+      >>> Running workload 'fuzz' with params {'seed': 1337, 'steps': 500, 'max_gss_states': 15} (max 20.0s)
+      <<< Finished workload 'fuzz' outcome=ok in 0.044s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.preset.json
+      >>> Finished preset workloads for: python/gss_tester/implementations/leveled_impl.py
+
+      >>> Checking for preset sweeps for preset 'medium'...
+
+      >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl LeveledGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.093s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 250, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.097s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.100s
+      >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
+      <<< Finished workload 'push_scaling' outcome=ok in 0.107s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.push_scaling.prefix_depth.json
+      >>> Finished sweep for: push_scaling
+
+      >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl LeveledGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.359s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.359s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.375s
+      >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.378s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      >>> Finished sweep for: pop_common_parent
+
+      >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl LeveledGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.097s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.101s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.105s
+      >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.110s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      >>> Finished sweep for: merge_after_prefix_mutations
+
+      >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl LeveledGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+      >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.002s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 5, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.002s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 6, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.002s
+      >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
+      <<< Finished workload 'merge_surface_changes' outcome=ok in 0.002s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_surface_changes.depth.json
+      >>> Finished sweep for: merge_surface_changes
+
       >>> Running preset workloads for: python/gss_tester/implementations/leveled_impl_cpp.py
-      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json
       /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
         "timestamp": datetime.utcnow().isoformat() + "Z",
       >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
       <<< Finished workload 'merge_surface_changes' outcome=ok in 0.001s
       >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.022s
+      <<< Finished workload 'push_scaling' outcome=ok in 0.023s
       >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.025s
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.026s
       >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.068s
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.067s
       >>> Running workload 'apply_prune' with params {'depth': 6, 'branching': 4, 'apply_amount': 10, 'prune_threshold': 20} (max 20.0s)
       <<< Finished workload 'apply_prune' outcome=ok in 0.001s
       >>> Running workload 'fuzz' with params {'seed': 1337, 'steps': 500, 'max_gss_states': 15} (max 20.0s)
       <<< Finished workload 'fuzz' outcome=ok in 0.039s
-      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json
       >>> Finished preset workloads for: python/gss_tester/implementations/leveled_impl_cpp.py
 
       >>> Checking for preset sweeps for preset 'medium'...
 
       >>> Running preset sweep for 'push_scaling' on axis 'prefix_depth'
-      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 100 250 500 800
       /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
         "timestamp": datetime.utcnow().isoformat() + "Z",
       >>> Running workload 'push_scaling' with params {'prefix_depth': 100, 'surface_width': 128} (max 20.0s)
@@ -14248,42 +14424,42 @@ messages:
       >>> Running workload 'push_scaling' with params {'prefix_depth': 500, 'surface_width': 128} (max 20.0s)
       <<< Finished workload 'push_scaling' outcome=ok in 0.022s
       >>> Running workload 'push_scaling' with params {'prefix_depth': 800, 'surface_width': 128} (max 20.0s)
-      <<< Finished workload 'push_scaling' outcome=ok in 0.025s
-      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json
+      <<< Finished workload 'push_scaling' outcome=ok in 0.024s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json
       >>> Finished sweep for: push_scaling
 
       >>> Running preset sweep for 'pop_common_parent' on axis 'parent_prefix_depth'
-      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json --sweep-workload pop_common_parent --sweep-axis parent_prefix_depth --sweep-values 100 250 500 800
       /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
         "timestamp": datetime.utcnow().isoformat() + "Z",
       >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 100} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.065s
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.063s
       >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 250} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.065s
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.064s
       >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 500} (max 20.0s)
       <<< Finished workload 'pop_common_parent' outcome=ok in 0.066s
       >>> Running workload 'pop_common_parent' with params {'siblings': 256, 'parent_prefix_depth': 800} (max 20.0s)
-      <<< Finished workload 'pop_common_parent' outcome=ok in 0.071s
-      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json
+      <<< Finished workload 'pop_common_parent' outcome=ok in 0.069s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json
       >>> Finished sweep for: pop_common_parent
 
       >>> Running preset sweep for 'merge_after_prefix_mutations' on axis 'prefix_depth'
-      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json --sweep-workload merge_after_prefix_mutations --sweep-axis prefix_depth --sweep-values 100 250 500 800
       /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
         "timestamp": datetime.utcnow().isoformat() + "Z",
       >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 100, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.021s
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.019s
       >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 250, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
       <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.021s
       >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 500, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
       <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.023s
       >>> Running workload 'merge_after_prefix_mutations' with params {'prefix_depth': 800, 'surface_width': 128, 'clones': 16, 'pop_n': 3, 'push_n': 4} (max 25.0s)
-      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.027s
-      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
+      <<< Finished workload 'merge_after_prefix_mutations' outcome=ok in 0.026s
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json
       >>> Finished sweep for: merge_after_prefix_mutations
 
       >>> Running preset sweep for 'merge_surface_changes' on axis 'depth'
-      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
+      python -m gss_tester.benchmarks.runner python.gss_tester.implementations.leveled_impl_cpp Leveled_impl_cppGSS --preset medium --output /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json --sweep-workload merge_surface_changes --sweep-axis depth --sweep-values 4 5 6 7
       /Users/isaacbreen/Projects2/grammars2024/python/gss_tester/benchmarks/runner.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
         "timestamp": datetime.utcnow().isoformat() + "Z",
       >>> Running workload 'merge_surface_changes' with params {'depth': 4, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
@@ -14294,98 +14470,249 @@ messages:
       <<< Finished workload 'merge_surface_changes' outcome=ok in 0.001s
       >>> Running workload 'merge_surface_changes' with params {'depth': 7, 'branching': 3, 'clones': 12, 'mutation': 'push'} (max 20.0s)
       <<< Finished workload 'merge_surface_changes' outcome=ok in 0.001s
-      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json
+      Benchmark results saved to /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json
       >>> Finished sweep for: merge_surface_changes
 
       All benchmark runs completed.
       ---
       Analyzing results...
-      python -m gss_tester.benchmarks.analyzer /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json --outdir /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis
-      --- Benchmark Summary ---
-      Loaded 5 result file(s) across 1 implementation(s).
+      python -m gss_tester.benchmarks.analyzer /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.preset.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_after_prefix_mutations.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.merge_surface_changes.depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.pop_common_parent.parent_prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS.sweep.push_scaling.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.preset.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_after_prefix_mutations.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.merge_surface_changes.depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.pop_common_parent.parent_prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.leveled_impl.LeveledGSS.sweep.push_scaling.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.preset.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_after_prefix_mutations.prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.merge_surface_changes.depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.pop_common_parent.parent_prefix_depth.json /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/python.gss_tester.implementations.reference_impl.ReferenceGSS.sweep.push_scaling.prefix_depth.json --outdir /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/analysis
+      --- **Benchmark Summary** ---
+      Loaded 15 result file(s) across 3 implementation(s).
 
-      Workload: merge_surface_changes
+      **Workload:** merge_surface_changes
         - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.001s..0.001s
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.002s..0.002s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.013s..0.446s
 
-      Workload: push_scaling
-        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.018s..0.025s
+      **Workload:** push_scaling
+        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.018s..0.024s
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.093s..0.116s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.035s..0.169s
 
-      Workload: merge_after_prefix_mutations
-        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.021s..0.027s
+      **Workload:** merge_after_prefix_mutations
+        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.019s..0.026s
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.097s..0.160s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.035s..0.177s
 
-      Workload: pop_common_parent
-        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.065s..0.071s
+      **Workload:** pop_common_parent
+        - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.063s..0.069s
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.359s..0.378s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 5 run(s), ok=5, aborted=0, error=0, time range: 0.157s..0.626s
 
-      Workload: apply_prune
+      **Workload:** apply_prune
         - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.001s..0.001s
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.001s..0.001s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.059s..0.059s
 
-      Workload: fuzz
+      **Workload:** fuzz
         - python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.039s..0.039s
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/merge_surface_changes_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/merge_surface_changes_phase_breakdown.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/push_scaling_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/push_scaling_phase_breakdown.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/merge_after_prefix_mutations_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/merge_after_prefix_mutations_phase_breakdown.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/pop_common_parent_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/pop_common_parent_phase_breakdown.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/apply_prune_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/apply_prune_phase_breakdown.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/fuzz_scaling.png
-      Saved plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/fuzz_phase_breakdown.png
+        - python.gss_tester.implementations.leveled_impl.LeveledGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.044s..0.044s
+        - python.gss_tester.implementations.reference_impl.ReferenceGSS: 1 run(s), ok=1, aborted=0, error=0, time range: 0.027s..0.027s
+        - Saved plot: merge_surface_changes_scaling.png
+        - Saved plot: merge_surface_changes_phase_breakdown.png
+        - Saved plot: push_scaling_scaling.png
+        - Saved plot: push_scaling_phase_breakdown.png
+        - Saved plot: merge_after_prefix_mutations_scaling.png
+        - Saved plot: merge_after_prefix_mutations_phase_breakdown.png
+        - Saved plot: pop_common_parent_scaling.png
+        - Saved plot: pop_common_parent_phase_breakdown.png
+        - Saved plot: apply_prune_scaling.png
+        - Saved plot: apply_prune_phase_breakdown.png
+        - Saved plot: fuzz_scaling.png
+        - Saved plot: fuzz_phase_breakdown.png
 
-      --- Scaling Analysis (sweeps) ---
+      --- **Scaling Analysis (sweeps)** ---
 
-      Implementation: python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
-      Sweep: workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.122, r2=0.863, ideal=1.00 -> DRIFT
-          - merge: slope=-0.006, r2=0.551, ideal=0.00 -> OK
-          - mutate_clones: slope=-0.089, r2=0.762, ideal=0.00 -> OK
-          - postcheck: slope=0.714, r2=0.993, ideal=0.00 -> DRIFT
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_build.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_merge.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+      **Implementation:** python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
+      **Sweep:** workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
 
-      Implementation: python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
-      Sweep: workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.463, r2=0.744, ideal=1.00 -> DRIFT
-          - clone_and_mutate: slope=-0.127, r2=0.772, ideal=0.00 -> OK
-          - merge: slope=-0.040, r2=0.747, ideal=0.00 -> OK
-          - postcheck: slope=-0.304, r2=0.700, ideal=0.00 -> DRIFT
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_surface_changes_depth_build.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_surface_changes_depth_clone_and_mutate.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_surface_changes_depth_merge.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_merge_surface_changes_depth_postcheck.png
+        **Measured exponents (log-log slope) per phase:**
+          - build        : slope=  0.139, r2=0.950, ideal=1.00 -> DRIFT
+          - merge        : slope=  0.027, r2=0.081, ideal=0.00 -> OK
+          - mutate_clones: slope=  0.027, r2=0.556, ideal=0.00 -> OK
+          - postcheck    : slope=  0.760, r2=0.997, ideal=0.00 -> DRIFT
 
-      Implementation: python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
-      Sweep: workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.037, r2=0.653, ideal=1.00 -> DRIFT
-          - pop: slope=-0.021, r2=0.046, ideal=0.00 -> OK
-          - postcheck: slope=0.001, r2=0.000, ideal=0.00 -> OK
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_build.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_pop.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+        **Plots:**
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_build.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+      ------------------------------------------------------------
 
-      Implementation: python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
-      Sweep: workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
-        Measured exponents (log-log slope) per phase:
-          - build: slope=0.148, r2=0.921, ideal=1.00 -> DRIFT
-          - postcheck: slope=-0.104, r2=0.457, ideal=0.00 -> OK
-          - push: slope=0.161, r2=0.899, ideal=0.00 -> OK
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_push_scaling_prefix_depth_build.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_push_scaling_prefix_depth_postcheck.png
-        Saved sweep plot: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots/sweep_push_scaling_prefix_depth_push.png
+      **Implementation:** python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
+      **Sweep:** workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build           : slope=  0.412, r2=0.603, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope= -0.079, r2=0.343, ideal=0.00 -> OK
+          - merge           : slope= -0.085, r2=0.116, ideal=0.00 -> OK
+          - postcheck       : slope= -0.455, r2=0.664, ideal=0.00 -> DRIFT
+
+        **Plots:**
+          - Saved: sweep_merge_surface_changes_depth_build.png
+          - Saved: sweep_merge_surface_changes_depth_clone_and_mutate.png
+          - Saved: sweep_merge_surface_changes_depth_merge.png
+          - Saved: sweep_merge_surface_changes_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
+      **Sweep:** workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.042, r2=0.936, ideal=1.00 -> DRIFT
+          - pop      : slope= -0.173, r2=0.840, ideal=0.00 -> OK
+          - postcheck: slope= -0.031, r2=0.043, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_build.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_pop.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl_cpp.Leveled_impl_cppGSS
+      **Sweep:** workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.139, r2=0.937, ideal=1.00 -> DRIFT
+          - postcheck: slope=  0.090, r2=0.572, ideal=0.00 -> OK
+          - push     : slope=  0.199, r2=0.514, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_push_scaling_prefix_depth_build.png
+          - Saved: sweep_push_scaling_prefix_depth_postcheck.png
+          - Saved: sweep_push_scaling_prefix_depth_push.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl.LeveledGSS
+      **Sweep:** workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build        : slope=  0.062, r2=0.964, ideal=1.00 -> DRIFT
+          - merge        : slope=  0.010, r2=0.099, ideal=0.00 -> OK
+          - mutate_clones: slope= -0.010, r2=0.046, ideal=0.00 -> OK
+          - postcheck    : slope= -0.020, r2=0.011, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_build.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl.LeveledGSS
+      **Sweep:** workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build           : slope=  0.458, r2=0.711, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope= -0.226, r2=0.636, ideal=0.00 -> OK
+          - merge           : slope= -0.170, r2=0.671, ideal=0.00 -> OK
+          - postcheck       : slope= -0.512, r2=0.968, ideal=0.00 -> DRIFT
+
+        **Plots:**
+          - Saved: sweep_merge_surface_changes_depth_build.png
+          - Saved: sweep_merge_surface_changes_depth_clone_and_mutate.png
+          - Saved: sweep_merge_surface_changes_depth_merge.png
+          - Saved: sweep_merge_surface_changes_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl.LeveledGSS
+      **Sweep:** workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.028, r2=0.847, ideal=1.00 -> DRIFT
+          - pop      : slope=  0.042, r2=0.596, ideal=0.00 -> OK
+          - postcheck: slope= -0.144, r2=0.934, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_build.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_pop.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.leveled_impl.LeveledGSS
+      **Sweep:** workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.064, r2=0.907, ideal=1.00 -> DRIFT
+          - postcheck: slope= -0.253, r2=0.763, ideal=0.00 -> DRIFT
+          - push     : slope= -0.084, r2=0.340, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_push_scaling_prefix_depth_build.png
+          - Saved: sweep_push_scaling_prefix_depth_postcheck.png
+          - Saved: sweep_push_scaling_prefix_depth_push.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.reference_impl.ReferenceGSS
+      **Sweep:** workload=merge_after_prefix_mutations, axis=prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build        : slope=  0.771, r2=0.993, ideal=1.00 -> OK
+          - merge        : slope=  0.694, r2=0.987, ideal=0.00 -> DRIFT
+          - mutate_clones: slope=  0.356, r2=0.891, ideal=0.00 -> DRIFT
+          - postcheck    : slope= -0.162, r2=0.454, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_build.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_merge.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_mutate_clones.png
+          - Saved: sweep_merge_after_prefix_mutations_prefix_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.reference_impl.ReferenceGSS
+      **Sweep:** workload=merge_surface_changes, axis=depth, values=[4, 5, 6, 7]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build           : slope=  5.106, r2=0.945, ideal=1.00 -> DRIFT
+          - clone_and_mutate: slope=  5.863, r2=0.976, ideal=0.00 -> DRIFT
+          - merge           : slope=  6.441, r2=0.985, ideal=0.00 -> DRIFT
+          - postcheck       : slope=  6.061, r2=0.973, ideal=0.00 -> DRIFT
+
+        **Plots:**
+          - Saved: sweep_merge_surface_changes_depth_build.png
+          - Saved: sweep_merge_surface_changes_depth_clone_and_mutate.png
+          - Saved: sweep_merge_surface_changes_depth_merge.png
+          - Saved: sweep_merge_surface_changes_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.reference_impl.ReferenceGSS
+      **Sweep:** workload=pop_common_parent, axis=parent_prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.665, r2=0.972, ideal=1.00 -> DRIFT
+          - pop      : slope=  0.811, r2=0.996, ideal=0.00 -> DRIFT
+          - postcheck: slope= -0.160, r2=0.972, ideal=0.00 -> OK
+
+        **Plots:**
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_build.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_pop.png
+          - Saved: sweep_pop_common_parent_parent_prefix_depth_postcheck.png
+      ------------------------------------------------------------
+
+      **Implementation:** python.gss_tester.implementations.reference_impl.ReferenceGSS
+      **Sweep:** workload=push_scaling, axis=prefix_depth, values=[100, 250, 500, 800]
+
+        **Measured exponents (log-log slope) per phase:**
+          - build    : slope=  0.755, r2=0.995, ideal=1.00 -> OK
+          - postcheck: slope= -0.163, r2=0.951, ideal=0.00 -> OK
+          - push     : slope=  0.305, r2=0.974, ideal=0.00 -> DRIFT
+
+        **Plots:**
+          - Saved: sweep_push_scaling_prefix_depth_build.png
+          - Saved: sweep_push_scaling_prefix_depth_postcheck.png
+          - Saved: sweep_push_scaling_prefix_depth_push.png
 
       ---
       Benchmark analysis complete.
-      Summary printed above. Plots saved to: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41/analysis/plots
-      Full JSON results are in: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-02-41
+      Summary printed above. Plots saved to: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01/analysis/plots
+      Full JSON results are in: /Users/isaacbreen/Projects2/grammars2024/python/gss_bench_results/2025-09-23_13-07-01
     metadata:
-  - user: The output here could be more readable.
+  - user: |-
+      The output here could be more readable.
+      Don't use markdown. Terminals don't render markdown.
+
+      I don't actually care about 'build' or 'postcheck' performance. It's the other stuff that matters.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -14404,143 +14731,109 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to improve the readability of the benchmark analysis output, followed by the corresponding git diff.
+      Of course. I'll adjust the benchmark analyzer to improve the output readability on a standard terminal and to focus the scaling analysis on the most relevant phases.
 
-      ### Instructions
+      Here are the step-by-step instructions for the changes:
 
-      I will adjust the output formatting in the benchmark analyzer to improve readability. This involves using markdown for headers, adding separators, aligning columns in the scaling analysis, and shortening file paths for saved plots.
+      ### Step-by-step Instructions
 
-      **File: `python/gss_tester/benchmarks/analyzer.py`**
+      1.  **Open `python/gss_tester/benchmarks/analyzer.py`**.
 
-      1.  **In the `analyze_sweeps` function:**
-          *   I'll change the main header to `--- **Scaling Analysis (sweeps)** ---`.
-          *   To separate the analysis for each result file, I'll add a loop counter and print a horizontal rule (`-` * 60) between entries.
-          *   The `Implementation` and `Sweep` sub-headers will be made bold.
-          *   I will calculate the maximum phase name length to align the columns in the "Measured exponents" table.
-          *   The "Measured exponents" header will be made bold.
-          *   The print statements for each phase's scaling analysis will be updated to use the calculated padding for alignment and a fixed width for slope values, making it a clean, table-like output.
-          *   Before printing the saved plot paths, I'll add a bold `**Plots:**` header.
-          *   The saved plot messages will be indented and shortened to show only the filename (e.g., `    - Saved: sweep_push_scaling_prefix_depth_build.png`).
+      2.  **Filter out 'build' and 'postcheck' phases**: In the `analyze_sweeps` function, find this line:
+          ```python
+          phases = sorted(phases_union)
+          ```
+          Replace it with the following line to exclude the 'build' and 'postcheck' phases from the scaling analysis and plots:
+          ```python
+          phases = sorted([p for p in phases_union if p not in ("build", "postcheck")])
+          ```
 
-      2.  **In the `summarize` function:**
-          *   The main header will be changed to `--- **Benchmark Summary** ---`.
-          *   Each `Workload:` sub-header will be made bold.
-          *   The messages for saved scaling and phase breakdown plots will be indented and shortened to show only the filename (e.g., `  - Saved plot: merge_surface_changes_scaling.png`).
+      3.  **Improve `max_phase_len` calculation**: Directly below the line you just changed, update the `max_phase_len` calculation for better readability:
+          *   **From**:
+              ```python
+              max_phase_len = max(len(p) for p in phases) if phases else 0
+              ```
+          *   **To**:
+              ```python
+              max_phase_len = max((len(p) for p in phases), default=0)
+              ```
 
-      These changes will make the console output much easier to parse visually.
+      4.  **Remove markdown from `analyze_sweeps` output**: In the same function, remove the bold markers (`**`) from the following `print` statements:
+          *   `print("\n--- **Scaling Analysis (sweeps)** ---")` should become `print("\n--- Scaling Analysis (sweeps) ---")`.
+          *   `print(f"\n**Implementation:** {impl}")` should become `print(f"\nImplementation: {impl}")`.
+          *   `print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")` should become `print(f"Sweep: workload={workload}, axis={axis}, values={vals}")`.
+          *   `print("\n  **Measured exponents (log-log slope) per phase:**")` should become `print("\n  Measured exponents (log-log slope) per phase:")`.
+          *   `print("\n  **Plots:**")` should become `print("\n  Plots:")`.
+
+      5.  **Remove markdown from `summarize` output**: In the `summarize` function, remove the bold markers from these `print` statements:
+          *   `print("--- **Benchmark Summary** ---")` should become `print("--- Benchmark Summary ---")`.
+          *   `print(f"\n**Workload:** {workload}")` should become `print(f"\nWorkload: {workload}")`.
 
       ### Git Diffs
 
-      Here is the git diff to apply these changes:
+      Here is the git diff to apply these changes directly.
 
       ```diff
       diff --git a/python/gss_tester/benchmarks/analyzer.py b/python/gss_tester/benchmarks/analyzer.py
-      index 611111c..1111111 100644
       --- a/python/gss_tester/benchmarks/analyzer.py
       +++ b/python/gss_tester/benchmarks/analyzer.py
-      @@ -50,9 +50,12 @@
+      @@ -70,7 +70,7 @@
            plots_dir = out_dir / "plots"
            plots_dir.mkdir(parents=True, exist_ok=True)
        
-      -    print("\n--- Scaling Analysis (sweeps) ---")
-      -    for doc in sweeps:
-      +    print("\n--- **Scaling Analysis (sweeps)** ---")
-      +    for i, doc in enumerate(sweeps):
-      +        if i > 0:
-      +            print("-" * 60)
-               impl = doc.get("implementation", "(unknown)")
-               sweep = doc["sweep"]
-               workload = sweep["workload"]
-      @@ -69,9 +72,10 @@
+      -    print("\n--- **Scaling Analysis (sweeps)** ---")
+      +    print("\n--- Scaling Analysis (sweeps) ---")
+           for i, doc in enumerate(sweeps):
+               if i > 0:
+                   print("-" * 60)
+      @@ -87,12 +87,12 @@
+               for r in runs:
+                   for ph in r.get("phases", []):
                        phases_union.add(ph["name"])
-               phases = sorted(phases_union)
+      -        phases = sorted(phases_union)
+      +        phases = sorted([p for p in phases_union if p not in ("build", "postcheck")])
        
-      -        print(f"\nImplementation: {impl}")
-      -        print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
-      +        print(f"\n**Implementation:** {impl}")
-      +        print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
+      -        print(f"\n**Implementation:** {impl}")
+      -        print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
+      +        print(f"\nImplementation: {impl}")
+      +        print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
                ideal_map = expectations.get(workload, {}).get(axis, {})
-      +        max_phase_len = max(len(p) for p in phases) if phases else 0
+      -        max_phase_len = max(len(p) for p in phases) if phases else 0
+      +        max_phase_len = max((len(p) for p in phases), default=0)
        
                # Build x,y series per phase
                x = []
-      @@ -93,22 +97,23 @@
+      @@ -114,7 +114,7 @@
                    continue
        
                # Fit exponents per phase and print
-      -        print("  Measured exponents (log-log slope) per phase:")
-      +        print("\n  **Measured exponents (log-log slope) per phase:**")
+      -        print("\n  **Measured exponents (log-log slope) per phase:**")
+      +        print("\n  Measured exponents (log-log slope) per phase:")
                for p in phases:
                    b, a, r2 = _loglog_fit(x, phase_ys[p])
                    if b is None:
-      -                print(f"    - {p}: insufficient data")
-      +                print(f"    - {p:<{max_phase_len}}: insufficient data")
-                       continue
-                   ideal = ideal_map.get(p)
-                   if ideal is None:
-      -                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f} (no ideal)")
-      +                print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f} (no ideal)")
-                   else:
-                       delta = abs(b - ideal)
-                       status = "OK" if delta <= 0.25 else "DRIFT"
-      -                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
-      +                print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
-       
-               # Plot log-log per phase
-      +        plotted_anything = False
-               try:
-                   import matplotlib.pyplot as plt
-                   for p in phases:
-                       y = phase_ys[p]
-                       valid = [(xi, yi) for xi, yi in zip(x, y) if xi > 0 and yi > 0]
+      @@ -136,7 +136,7 @@
                        if len(valid) < 2:
                            continue
-      +                if not plotted_anything:
-      +                    print("\n  **Plots:**")
-      +                    plotted_anything = True
+                       if not plotted_anything:
+      -                    print("\n  **Plots:**")
+      +                    print("\n  Plots:")
+                           plotted_anything = True
                        xs, ys = zip(*valid)
                        b, a, r2 = _loglog_fit(list(xs), list(ys))
-                       plt.figure(figsize=(6, 4))
-      @@ -131,7 +136,7 @@
-                       out_path = plots_dir / f"sweep_{workload}_{axis}_{p}.png"
-                       plt.savefig(out_path)
-                       plt.close()
-      -                print(f"  Saved sweep plot: {out_path}")
-      +                print(f"    - Saved: {out_path.name}")
-               except Exception as e:
-                   print(f"  Note: Sweep plotting skipped ({e}).")
-       
-      @@ -148,11 +153,11 @@
+      @@ -174,10 +174,10 @@
                for w in doc["workloads"]:
                    grouped[w["workload"]][impl_name].append(w)
        
-      -    print("--- Benchmark Summary ---")
-      +    print("--- **Benchmark Summary** ---")
+      -    print("--- **Benchmark Summary** ---")
+      +    print("--- Benchmark Summary ---")
            print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
            for workload, impl_map in grouped.items():
-      -        print(f"\nWorkload: {workload}")
-      +        print(f"\n**Workload:** {workload}")
+      -        print(f"\n**Workload:** {workload}")
+      +        print(f"\nWorkload: {workload}")
                for impl, runs in impl_map.items():
                    ok = sum(1 for r in runs if r.get("outcome") == "ok")
                    aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
-      @@ -207,7 +212,7 @@
-                   out_path = plots_dir / f"{workload}_scaling.png"
-                   plt.savefig(out_path)
-                   plt.close()
-      -            print(f"Saved plot: {out_path}")
-      +            print(f"  - Saved plot: {out_path.name}")
-       
-                   # Per-phase stacked bars for the last run of each impl
-                   plt.figure(figsize=(9, 5))
-      @@ -242,7 +247,7 @@
-                   out_path = plots_dir / f"{workload}_phase_breakdown.png"
-                   plt.savefig(out_path)
-                   plt.close()
-      -            print(f"Saved plot: {out_path}")
-      +            print(f"  - Saved plot: {out_path.name}")
-       
-           except Exception as e:
-               print(f"Note: Plotting skipped or failed ({e}). You can install matplotlib and numpy for plots.")
 
       ```
     metadata:
@@ -14553,7 +14846,7 @@ messages:
       Applying patch to 'python/gss_tester/benchmarks/analyzer.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/benchmarks/analyzer.py.
     metadata:
-  - user: 'Changes committed with message: "analyzer: Improve benchmark output readability
-      with markdown and alignment"'
+  - user: 'Changes committed with message: "Refactor: Improve benchmark analyzer output
+      and filtering"'
     metadata:
 ...

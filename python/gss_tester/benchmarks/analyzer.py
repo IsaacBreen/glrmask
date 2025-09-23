@@ -63,7 +63,7 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n--- **Scaling Analysis (sweeps)** ---")
+    print("\n--- Scaling Analysis (sweeps) ---")
     for i, doc in enumerate(sweeps):
         if i > 0:
             print("-" * 60)
@@ -82,12 +82,12 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
         for r in runs:
             for ph in r.get("phases", []):
                 phases_union.add(ph["name"])
-        phases = sorted(phases_union)
+        phases = sorted([p for p in phases_union if p not in ("build", "postcheck")])
 
-        print(f"\n**Implementation:** {impl}")
-        print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
+        print(f"\nImplementation: {impl}")
+        print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
         ideal_map = expectations.get(workload, {}).get(axis, {})
-        max_phase_len = max(len(p) for p in phases) if phases else 0
+        max_phase_len = max((len(p) for p in phases), default=0)
 
         # Build x,y series per phase
         x = []
@@ -112,7 +112,7 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
             continue
 
         # Fit exponents per phase and print
-        print("\n  **Measured exponents (log-log slope) per phase:**")
+        print("\n  Measured exponents (log-log slope) per phase:")
         for p in phases:
             b, a, r2 = _loglog_fit(x, phase_ys[p])
             if b is None:
@@ -136,7 +136,7 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
                 if len(valid) < 2:
                     continue
                 if not plotted_anything:
-                    print("\n  **Plots:**")
+                    print("\n  Plots:")
                     plotted_anything = True
                 xs, ys = zip(*valid)
                 b, a, r2 = _loglog_fit(list(xs), list(ys))
@@ -181,10 +181,10 @@ def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = T
         for w in doc["workloads"]:
             grouped[w["workload"]][impl_name].append(w)
 
-    print("--- **Benchmark Summary** ---")
+    print("--- Benchmark Summary ---")
     print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
     for workload, impl_map in grouped.items():
-        print(f"\n**Workload:** {workload}")
+        print(f"\nWorkload: {workload}")
         for impl, runs in impl_map.items():
             ok = sum(1 for r in runs if r.get("outcome") == "ok")
             aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
