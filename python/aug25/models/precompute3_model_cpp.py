@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Dict, List, Tuple, Optional, Any
 
 import _sep1 as ffi
@@ -13,7 +12,7 @@ from . import precompute3_engine as eng
 class Model(GraphProvider):
     """
     Thin Python wrapper around the C++ Engine. The core model logic (GSS, commit, get_mask)
-    is implemented entirely in C++. Python is only used for:
+    is implemented in C++ with a faithful LeveledGSS translation. Python is only used for:
       - Loading/normalizing the JSON model and constraint via _sep1
       - Providing GraphProvider helpers for the benchmark/visualizer
     """
@@ -85,20 +84,10 @@ class Model(GraphProvider):
         return model
 
     def commit(self, token_id: int):
-        """
-        Delegates the entire commit operation to the C++ engine.
-        """
-        t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
-        # Engine updates its internal state; return value unused (None).
         self._engine.commit(token_bytes)
-        t1 = time.perf_counter()
-        print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     def get_mask(self) -> RangeSet:
-        """
-        Delegates the entire mask computation to the C++ engine.
-        """
         return self._engine.get_mask()
 
     # GraphProvider impl for benchmark_runner compatibility

@@ -14,8 +14,12 @@
 #include <deque>
 #include <algorithm>
 #include <functional>
+#include <memory>
+
+#include "leveled_gss.hpp"
 
 namespace py = pybind11;
+using leveled_gss::LeveledGSS;
 
 class Engine {
 public:
@@ -66,14 +70,12 @@ public:
         parse_arena(arena_py);
 
         // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-        GSS initial_gss;
-        Stack st;
-        st.states.push_back(start_state_id_);
-        st.acc = std::make_shared<Acc>();
-        st.acc->llm_mask = range_empty_(); // empty initial; get_mask will initialize
-        // terminals_union is empty map by default
-        initial_gss.stacks.push_back(std::move(st));
-        state_[tokenizer_initial_state_] = std::move(initial_gss);
+        auto initial_acc = std::make_shared<Acc>();
+        initial_acc->llm_mask = range_empty_();
+        // terminals_union empty by default
+        Leveled init = Leveled::from_stacks({ { std::vector<int>{}, initial_acc } });
+        init = init.push(start_state_id_);
+        state_[tokenizer_initial_state_] = std::move(init);
     }
 
     void commit(py::bytes token_bytes) {
@@ -106,15 +108,15 @@ public:
         }
 
         // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
-        std::unordered_map<int, GSS> temp_states;
+        std::unordered_map<int, Leveled> temp_states;
         for (auto &kv : state_) {
             int tokenizer_sid = kv.first;
-            const GSS &gss = kv.second;
+            const Leveled &gss = kv.second;
 
-            GSS pruned = prune_by_terminals_map(gss, terminals_map);
-            if (!pruned.stacks.empty()) {
-                GSS mapped = apply_state_map_to_gss(pruned, state_map);
-                if (!mapped.stacks.empty()) {
+            Leveled pruned = prune_by_terminals_map(gss, terminals_map);
+            if (!pruned.is_empty()) {
+                Leveled mapped = apply_state_map_to_gss(pruned, state_map);
+                if (!mapped.is_empty()) {
                     temp_states[tokenizer_sid] = std::move(mapped);
                 }
             }
@@ -124,7 +126,7 @@ public:
         struct Item {
             int offset;
             int tokenizer_sid;
-            GSS gss;
+            Leveled gss;
         };
 
         std::deque<Item> q;
@@ -133,7 +135,7 @@ public:
         }
 
         // new states being built
-        std::unordered_map<int, std::vector<GSS>> new_states_vec;
+        std::unordered_map<int, std::vector<Leveled>> new_states_vec;
 
         while (!q.empty()) {
             Item cur = std::move(q.front());
@@ -144,9 +146,8 @@ public:
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
 
-            int end_state = -1;
             bool has_end_state = !end_state_obj.is_none();
-            if (has_end_state) end_state = py::cast<int>(end_state_obj);
+            int end_state = has_end_state ? py::cast<int>(end_state_obj) : -1;
 
             // collect matches
             std::vector<std::pair<int,int>> matches; // (terminal_id, width)
@@ -161,7 +162,7 @@ public:
                 int terminal_id = mt.first;
                 int width = mt.second;
 
-                GSS processed = cur.gss;
+                Leveled processed = cur.gss;
                 if (!(ignore_terminal_id_.has_value() && terminal_id == *ignore_terminal_id_)) {
                     processed = process_token(processed, terminal_id);
                 }
@@ -180,7 +181,7 @@ public:
                     }
                 }
 
-                if (!processed.stacks.empty()) {
+                if (!processed.is_empty()) {
                     int new_offset = cur.offset + width;
                     int next_tokenizer_sid = tokenizer_initial_state_;
                     if (static_cast<size_t>(new_offset) == token.size()) {
@@ -197,13 +198,13 @@ public:
         }
 
         // 4) Merge and filter empties
-        std::unordered_map<int, GSS> merged_states;
+        std::unordered_map<int, Leveled> merged_states;
         for (auto &kv : new_states_vec) {
             int sid = kv.first;
-            const std::vector<GSS> &lst = kv.second;
+            const std::vector<Leveled> &lst = kv.second;
             if (lst.empty()) continue;
-            GSS merged = merge_many(lst);
-            if (!merged.stacks.empty()) {
+            Leveled merged = merge_many(lst);
+            if (!merged.is_empty()) {
                 merged_states[sid] = std::move(merged);
             }
         }
@@ -214,7 +215,7 @@ public:
 
     py::object get_mask() {
         // values: node_id -> GSS
-        std::unordered_map<int, GSS> values;
+        std::unordered_map<int, Leveled> values;
         // todo buckets: depth -> set of nodes
         std::unordered_map<int, std::set<int>> todo;
         // min-heap for depths
@@ -234,13 +235,13 @@ public:
             auto it = roots_map_.find(sid);
             if (it == roots_map_.end()) continue;
             root = it->second;
-            const GSS &gss = kv.second;
+            const Leveled &gss = kv.second;
 
-            GSS gss_initialized = initialize_gss_accs(gss);
+            Leveled gss_initialized = initialize_gss_accs(gss);
 
             auto itv = values.find(root);
             if (itv != values.end()) {
-                values[root] = merge(values[root], gss_initialized);
+                values[root] = values[root].merge(gss_initialized);
             } else {
                 values[root] = std::move(gss_initialized);
             }
@@ -259,44 +260,43 @@ public:
                 bucket.erase(bucket.begin());
                 auto itv = values.find(node);
                 if (itv == values.end()) continue;
-                GSS gss_node = std::move(itv->second);
+                Leveled gss_node = std::move(itv->second);
                 values.erase(itv);
 
                 // End-node handling
                 const NodeInfo &info = arena_.at(node);
                 if (info.is_end) {
-                    py::object reduced = union_llm_masks(gss_node);
-                    final_mask = final_mask.attr("union")(reduced);
+                    auto reduced = gss_node.reduce_acc();
+                    if (reduced) {
+                        final_mask = final_mask.attr("union")(reduced->llm_mask);
+                    }
                 }
 
                 // Traverse edges
                 for (const Edge &e : info.edges) {
-                    GSS popped = popn(gss_node, e.pop);
-                    if (popped.stacks.empty()) continue;
+                    Leveled popped = gss_node.popn(e.pop);
+                    if (popped.is_empty()) continue;
 
                     for (const DestEdge &de : e.dests) {
                         // Determine which top states to keep
                         std::unordered_set<int> keep;
-                        for (auto &st : popped.stacks) {
-                            if (st.states.empty()) continue;
-                            int top = st.states.back();
-                            if (state_matches_bitset(de.state_bv, top)) {
-                                keep.insert(top);
-                            }
+                        std::unordered_set<int> top = popped.peek();
+                        for (int top_sid : top) {
+                            if (state_matches_bitset(de.state_bv, top_sid)) keep.insert(top_sid);
                         }
                         if (keep.empty()) continue;
 
-                        GSS child = isolate_many(popped, keep);
-                        if (child.stacks.empty()) continue;
+                        Leveled child = isolate_many(popped, keep);
+                        if (child.is_empty()) continue;
 
                         // intersect_and_prune with edge's llm_bv (as RangeSet)
-                        GSS child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
-                        if (child2.stacks.empty()) continue;
+                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                        if (child2.is_empty()) continue;
 
                         int dnode = de.dest_idx;
                         auto it_child = values.find(dnode);
                         if (it_child != values.end()) {
-                            values[dnode] = merge(it_child->second, child2);
+                            values[dnode] = values[dnode].merge(child2);
                         } else {
                             values[dnode] = std::move(child2);
                         }
@@ -354,21 +354,35 @@ private:
         int max_depth{0};
     };
 
-    struct Acc {
+    struct Acc : public std::enable_shared_from_this<Acc> {
         // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
         std::unordered_map<int, py::object> terminals_union;
         // current allowed LLM mask (RangeSet)
         py::object llm_mask;
+
+        std::shared_ptr<Acc> merge(const std::shared_ptr<Acc>& other) const {
+            auto n = std::make_shared<Acc>();
+            // Merge terminals_union by RangeSet union per key
+            n->terminals_union = terminals_union;
+            for (auto &kv : other->terminals_union) {
+                int key = kv.first;
+                const py::object &v = kv.second;
+                auto it = n->terminals_union.find(key);
+                if (it == n->terminals_union.end()) {
+                    n->terminals_union.emplace(key, v);
+                } else {
+                    it->second = it->second.attr("union")(v);
+                }
+            }
+            // Union llm masks
+            if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
+            else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
+            else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
+            return n;
+        }
     };
 
-    struct Stack {
-        std::vector<int> states;
-        std::shared_ptr<Acc> acc;
-    };
-
-    struct GSS {
-        std::vector<Stack> stacks;
-    };
+    using Leveled = LeveledGSS<int, Acc>;
 
     // -----------------------------
     // Members
@@ -398,8 +412,8 @@ private:
 
     py::dict internal_to_original_map_;
 
-    // Current GLR state: tokenizer_state_id -> GSS
-    std::unordered_map<int, GSS> state_;
+    // Current GLR state: tokenizer_state_id -> LeveledGSS
+    std::unordered_map<int, Leveled> state_;
 
     // RangeSet helpers
     py::object RangeSetClass_;
@@ -561,147 +575,31 @@ private:
     }
 
     // -----------------------------
-    // GSS primitives (naive vector-of-stacks)
+    // Leveled GSS transforms needed by algorithm
     // -----------------------------
-    static bool states_equal(const std::vector<int>& a, const std::vector<int>& b) {
-        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
-    }
-
-    static std::string stack_key(const Stack& s) {
-        std::string out;
-        out.reserve(32 + s.states.size() * 6);
-        out.append(std::to_string(reinterpret_cast<std::uintptr_t>(s.acc.get())));
-        out.push_back('|');
-        for (size_t i = 0; i < s.states.size(); ++i) {
-            if (i) out.push_back(',');
-            out.append(std::to_string(s.states[i]));
-        }
-        return out;
-    }
-
-    static void dedup_stacks(std::vector<Stack>& stacks) {
-        std::unordered_map<std::string, size_t> seen;
-        std::vector<Stack> out;
-        out.reserve(stacks.size());
-        for (auto &s : stacks) {
-            std::string k = stack_key(s);
-            if (seen.find(k) == seen.end()) {
-                seen.emplace(std::move(k), out.size());
-                out.push_back(std::move(s));
-            }
-        }
-        stacks.swap(out);
-    }
-
-    static GSS merge(const GSS& a, const GSS& b) {
-        GSS r;
-        r.stacks.reserve(a.stacks.size() + b.stacks.size());
-        r.stacks.insert(r.stacks.end(), a.stacks.begin(), a.stacks.end());
-        r.stacks.insert(r.stacks.end(), b.stacks.begin(), b.stacks.end());
-        dedup_stacks(r.stacks);
-        return r;
-    }
-
-    static GSS merge_many(const std::vector<GSS>& lst) {
-        if (lst.empty()) return GSS{};
-        GSS r;
-        size_t total = 0;
-        for (auto &g : lst) total += g.stacks.size();
-        r.stacks.reserve(total);
-        for (auto &g : lst) {
-            r.stacks.insert(r.stacks.end(), g.stacks.begin(), g.stacks.end());
-        }
-        dedup_stacks(r.stacks);
-        return r;
-    }
-
-    static std::unordered_set<int> peek(const GSS& g) {
-        std::unordered_set<int> s;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty()) {
-                s.insert(st.states.back());
-            }
-        }
-        return s;
-    }
-
-    static GSS isolate(const GSS& g, int value) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty() && st.states.back() == value) {
-                r.stacks.push_back(st);
-            }
-        }
-        return r;
-    }
-
-    static GSS isolate_many(const GSS& g, const std::unordered_set<int>& values) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty() && values.find(st.states.back()) != values.end()) {
-                r.stacks.push_back(st);
-            }
-        }
-        return r;
-    }
-
-    static GSS push(const GSS& g, int value) {
-        GSS r;
-        r.stacks.reserve(g.stacks.size());
-        for (auto &st : g.stacks) {
-            Stack ns = st;
-            ns.states.push_back(value);
-            r.stacks.push_back(std::move(ns));
-        }
-        return r;
-    }
-
-    static GSS popn(const GSS& g, int n) {
-        if (n <= 0) return g;
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (static_cast<int>(st.states.size()) >= n) {
-                Stack ns;
-                ns.acc = st.acc;
-                ns.states.assign(st.states.begin(), st.states.end() - n);
-                r.stacks.push_back(std::move(ns));
-            }
-        }
-        return r;
-    }
-
-    // -----------------------------
-    // Acc/GSS transforms needed by algorithm
-    // -----------------------------
-    GSS prune_by_terminals_map(const GSS& g, const std::unordered_map<int, py::object>& terminals_map) {
-        GSS r;
-        py::object rs_empty = range_empty_();
-        for (auto &st : g.stacks) {
-            bool keep = true;
+    Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, py::object>& terminals_map) {
+        auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
+            py::object rs_empty = range_empty_();
             for (auto &kv : terminals_map) {
                 int sid = kv.first;
                 const py::object &matched = kv.second;
-                auto it = st.acc->terminals_union.find(sid);
-                py::object disallowed = (it != st.acc->terminals_union.end()) ? it->second : rs_empty;
+                auto it = acc->terminals_union.find(sid);
+                py::object disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
                 py::object inter = matched.attr("intersection")(disallowed);
                 bool ok = inter.attr("is_empty")().cast<bool>();
-                if (!ok) {
-                    keep = false; break;
-                }
+                if (!ok) return false;
             }
-            if (keep) r.stacks.push_back(st);
-        }
-        return r;
+            return true;
+        };
+        return g.prune(pred);
     }
 
-    GSS apply_state_map_to_gss(const GSS& g, const std::unordered_map<int, int>& state_map) {
-        GSS r;
-        py::object rs_empty = range_empty_();
-        for (auto &st : g.stacks) {
-            std::shared_ptr<Acc> na = std::make_shared<Acc>();
-            na->llm_mask = st.acc->llm_mask;
-            // merge mapped bitsets
-            for (auto &kv : st.acc->terminals_union) {
+    Leveled apply_state_map_to_gss(const Leveled& g, const std::unordered_map<int, int>& state_map) {
+        auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+            auto na = std::make_shared<Acc>();
+            na->llm_mask = acc->llm_mask;
+            py::object rs_empty = range_empty_();
+            for (auto &kv : acc->terminals_union) {
                 int old_sid = kv.first;
                 auto it = state_map.find(old_sid);
                 if (it == state_map.end()) continue;
@@ -710,30 +608,25 @@ private:
                 py::object curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
                 na->terminals_union[new_sid] = curr.attr("union")(src);
             }
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
-        }
-        return r;
+            return na;
+        };
+        return g.apply(mapper);
     }
 
-    GSS disallow_in_state(const GSS& g, int state_id, int terminal_id) {
-        GSS r;
-        std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-        py::object to_add = range_from_indices_(idx);
-        py::object rs_empty = range_empty_();
-
-        for (auto &st : g.stacks) {
-            std::shared_ptr<Acc> na = std::make_shared<Acc>(*st.acc);
+    Leveled disallow_in_state(const Leveled& g, int state_id, int terminal_id) {
+        auto transformer = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+            auto na = std::make_shared<Acc>();
+            na->llm_mask = acc->llm_mask;
+            na->terminals_union = acc->terminals_union;
+            std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
+            py::object to_add = range_from_indices_(idx);
+            py::object rs_empty = range_empty_();
             py::object curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
             py::object new_bv = curr.attr("union")(to_add);
             na->terminals_union[state_id] = new_bv;
-
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
-        }
-        return r;
+            return na;
+        };
+        return g.apply(transformer);
     }
 
     bool state_matches_bitset(const py::object& bitset, int sid) const {
@@ -741,28 +634,32 @@ private:
         bool empty = bitset.attr("is_empty")().cast<bool>();
         if (empty) return true;
         return bitset.attr("contains")(py::int_(sid)).cast<bool>();
-        }
+    }
 
-    GSS process_token(const GSS& g, int terminal_id) {
-        // heads_by_state: state_id -> vector<GSS>
-        std::unordered_map<int, std::vector<GSS>> heads_by_state;
-        std::unordered_set<int> tops = peek(g);
+    Leveled process_token(const Leveled& g, int terminal_id) {
+        // heads_by_state: state_id -> vector<Leveled>
+        std::unordered_map<int, std::vector<Leveled>> heads_by_state;
+        std::unordered_set<int> tops = g.peek();
         for (int state_id : tops) {
-            GSS isol = isolate(g, state_id);
+            Leveled isol = g.isolate(state_id);
             heads_by_state[state_id].push_back(std::move(isol));
         }
 
-        std::vector<GSS> shifted_gsses;
+        std::vector<Leveled> shifted_gsses;
+
+        auto merge_many_gss = [&](const std::vector<Leveled>& lst) -> Leveled {
+            return Leveled::merge_many(lst);
+        };
 
         while (!heads_by_state.empty()) {
             // pop one element
             auto it = heads_by_state.begin();
             int state_id = it->first;
-            std::vector<GSS> gsss = std::move(it->second);
+            std::vector<Leveled> gsss = std::move(it->second);
             heads_by_state.erase(it);
 
             // merge_many
-            GSS state_gss = merge_many(gsss);
+            Leveled state_gss = merge_many_gss(gsss);
 
             // lookup row
             auto row_it = parser_.find(state_id);
@@ -773,14 +670,14 @@ private:
             if (act_it == row.actions.end()) continue;
             ActionsOnTerminal &action = act_it->second;
 
-            auto handle_shift = [&](int shift_to_state_id, const GSS& gss_to_shift) {
-                GSS shifted = push(gss_to_shift, shift_to_state_id);
+            auto handle_shift = [&](int shift_to_state_id, const Leveled& gss_to_shift) {
+                Leveled shifted = gss_to_shift.push(shift_to_state_id);
                 shifted_gsses.push_back(std::move(shifted));
             };
 
-            auto handle_reduce = [&](int nt_id, int len, const GSS& gss_to_reduce) {
-                GSS popped_gss = popn(gss_to_reduce, len);
-                std::unordered_set<int> from_states = peek(popped_gss);
+            auto handle_reduce = [&](int nt_id, int len, const Leveled& gss_to_reduce) {
+                Leveled popped_gss = gss_to_reduce.popn(len);
+                std::unordered_set<int> from_states = popped_gss.peek();
                 for (int from_sid : from_states) {
                     auto goto_it = parser_.find(from_sid);
                     if (goto_it == parser_.end()) continue;
@@ -788,7 +685,7 @@ private:
                     auto gt = from_row.gotos.find(nt_id);
                     if (gt == from_row.gotos.end()) continue;
                     int goto_state_id = gt->second;
-                    GSS goto_gss = push(isolate(popped_gss, from_sid), goto_state_id);
+                    Leveled goto_gss = popped_gss.isolate(from_sid).push(goto_state_id);
                     heads_by_state[goto_state_id].push_back(std::move(goto_gss));
                 }
             };
@@ -801,17 +698,16 @@ private:
             }
         }
 
-        GSS merged = merge_many(shifted_gsses);
+        Leveled merged = Leveled::merge_many(shifted_gsses);
         return merged;
     }
 
-    GSS initialize_gss_accs(const GSS& g) {
-        GSS r;
-        for (auto &st : g.stacks) {
+    Leveled initialize_gss_accs(const Leveled& g) {
+        auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             // Build disallowed mask as RangeSet
             py::object disallowed_llm_mask = range_empty_();
 
-            for (auto &kv : st.acc->terminals_union) {
+            for (auto &kv : a->terminals_union) {
                 int tsid = kv.first;
                 if (tsid > tokenizer_max_state_) continue;
                 if (!pmc_.contains(py::int_(tsid))) continue;
@@ -830,44 +726,39 @@ private:
 
             py::object allowed_mask = universe_rangeset_.attr("difference")(disallowed_llm_mask);
 
-            std::shared_ptr<Acc> na = std::make_shared<Acc>();
+            auto na = std::make_shared<Acc>();
             na->llm_mask = allowed_mask;
             // terminals_union -> empty
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
-        }
-        return r;
+            return na;
+        };
+        return g.apply(mutator);
     }
 
-    GSS intersect_llm_mask(const GSS& g, const py::object& limiter) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            py::object new_mask = st.acc->llm_mask.attr("intersection")(limiter);
+    Leveled intersect_llm_mask(const Leveled& g, const py::object& limiter) {
+        auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+            py::object new_mask = a->llm_mask.attr("intersection")(limiter);
             bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
-            if (is_empty_mask) continue;
-
-            std::shared_ptr<Acc> na = std::make_shared<Acc>(*st.acc);
+            if (is_empty_mask) return std::shared_ptr<Acc>(nullptr);
+            auto na = std::make_shared<Acc>(*a);
             na->llm_mask = new_mask;
-
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
-        }
-        return r;
+            return na;
+        };
+        return g.apply_and_prune(mutator);
     }
 
-    py::object union_llm_masks(const GSS& g) {
-        py::object acc = range_empty_();
-        for (auto &st : g.stacks) {
-            acc = acc.attr("union")(st.acc->llm_mask);
-        }
-        return acc;
+    // Merge many Leveled
+    static Leveled merge_many(const std::vector<Leveled>& lst) {
+        return Leveled::merge_many(lst);
+    }
+
+    // Convenience isolate_many wrapper for unordered_set<int>
+    static Leveled isolate_many(const Leveled& g, const std::unordered_set<int>& values) {
+        return g.isolate_many(values);
     }
 };
 
 PYBIND11_MODULE(precompute3_engine, m) {
-    m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), fully self-contained GSS implementation";
+    m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict,py::object>(),
