@@ -112,8 +112,9 @@ public:
         py::dict terminals_map;
         py::dict state_map;
 
-        for (auto item : state_) {
-            int tokenizer_sid = py::cast<int>(item.first);
+        for (auto item_handle : state_) {
+            int tokenizer_sid = py::cast<int>(item_handle);
+            // py::object gss = py::reinterpret_borrow<py::object>(item.second);
             py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
@@ -139,9 +140,10 @@ public:
         py::function predicate = make_prune_predicate(terminals_map);
         py::function mapper = make_apply_map(state_map);
 
-        for (auto item : state_) {
-            int tokenizer_sid = py::cast<int>(item.first);
-            py::object gss = py::reinterpret_borrow<py::object>(item.second);
+        for (auto item_handle : state_.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int tokenizer_sid = py::cast<int>(item[0]);
+            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
 
             py::object pruned_gss = gss.attr("prune")(predicate);
             bool is_empty = pruned_gss.attr("is_empty")().cast<bool>();
@@ -163,9 +165,10 @@ public:
         };
 
         std::deque<Item> q;
-        for (auto item : temp_states) {
-            int tokenizer_sid = py::cast<int>(item.first);
-            py::object gss = py::reinterpret_borrow<py::object>(item.second);
+        for (auto item_handle : temp_states.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int tokenizer_sid = py::cast<int>(item[0]);
+            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
             q.push_back({0, tokenizer_sid, gss});
         }
 
@@ -281,9 +284,10 @@ public:
             // Build disallowed mask as RangeSet
             py::object disallowed_llm_mask = range_empty_()();
 
-            for (auto item : terminals_union) {
-                int tsid = py::cast<int>(item.first);
-                py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item.second);
+            for (auto item_handle : terminals_union.attr("items")()) {
+                py::tuple item = py::cast<py::tuple>(item_handle);
+                int tsid = py::cast<int>(item[0]);
+                py::object disallowed_terms_rs = py::reinterpret_borrow<py::object>(item[1]);
                 if (tsid > tokenizer_max_state_) continue;
                 if (!pmc_.contains(py::int_(tsid))) continue;
 
@@ -307,13 +311,15 @@ public:
         });
 
         // Seed
-        for (auto item : state_map) {
-            int sid = py::cast<int>(item.first);
+        for (auto item_handle : state_map.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int sid = py::cast<int>(item[0]);
             int root = 0;
             auto it = roots_map_.find(sid);
             if (it == roots_map_.end()) continue;
             root = it->second;
-            py::object gss = py::reinterpret_borrow<py::object>(item.second);
+            py::object gss = py::reinterpret_borrow<py::object>(item[1]);
+
             py::object gss_initialized = gss.attr("apply")(initialize_acc);
 
             if (values.find(root) != values.end()) {
@@ -454,15 +460,17 @@ private:
     void parse_parser_table() {
         // parser_table_obj_ has: start_state_id and table (dict state_id -> Row dataclass)
         py::dict table = parser_table_obj_.attr("table");
-        for (auto item : table) {
-            int state_id = py::cast<int>(item.first);
-            py::object row_obj = py::reinterpret_borrow<py::object>(item.second);
+        for (auto item_handle : table.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int state_id = py::cast<int>(item[0]);
+            py::object row_obj = py::reinterpret_borrow<py::object>(item[1]);
             Row row;
 
             py::dict actions = row_obj.attr("actions");
-            for (auto aitem : actions) {
-                int term_id = py::cast<int>(aitem.first);
-                py::object action = py::reinterpret_borrow<py::object>(aitem.second);
+            for (auto aitem_handle : actions.attr("items")()) {
+                py::tuple aitem = py::cast<py::tuple>(aitem_handle);
+                int term_id = py::cast<int>(aitem[0]);
+                py::object action = py::reinterpret_borrow<py::object>(aitem[1]);
 
                 ActionsOnTerminal aot;
                 // Shift: int
@@ -484,11 +492,12 @@ private:
                         aot.shift_state_id = py::cast<int>(shift_obj);
                     }
                     py::dict reduces = action.attr("reduces");
-                    for (auto len_item : reduces) {
-                        int len = py::cast<int>(len_item.first);
-                        py::dict nts = py::cast<py::dict>(len_item.second);
-                        for (auto nt_item : nts) {
-                            int nt = py::cast<int>(nt_item.first);
+                    for (auto len_item_handle : reduces.attr("items")()) {
+                        py::tuple len_item = py::cast<py::tuple>(len_item_handle);
+                        int len = py::cast<int>(len_item[0]);
+                        py::dict nts = py::cast<py::dict>(len_item[1]);
+                        for (auto nt_item_handle : nts) {
+                            int nt = py::cast<int>(nt_item_handle);
                             aot.reduces.emplace_back(nt, len);
                         }
                     }
@@ -497,9 +506,10 @@ private:
             }
 
             py::dict gotos = row_obj.attr("gotos");
-            for (auto gitem : gotos) {
-                int nt = py::cast<int>(gitem.first);
-                int to_state = py::cast<int>(gitem.second);
+            for (auto gitem_handle : gotos.attr("items")()) {
+                py::tuple gitem = py::cast<py::tuple>(gitem_handle);
+                int nt = py::cast<int>(gitem[0]);
+                int to_state = py::cast<int>(gitem[1]);
                 row.gotos[nt] = to_state;
             }
 
@@ -508,9 +518,10 @@ private:
     }
 
     void parse_arena(py::dict arena_py) {
-        for (auto item : arena_py) {
-            int uid = py::cast<int>(item.first);
-            py::dict node = py::cast<py::dict>(item.second);
+        for (auto item_handle : arena_py.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int uid = py::cast<int>(item[0]);
+            py::dict node = py::cast<py::dict>(item[1]);
             NodeInfo info;
 
             // Determine if end node
@@ -588,9 +599,10 @@ private:
             py::object disallowed_map = acc.attr("terminals_union");
             py::object rs_empty = range_empty_()();
 
-            for (auto item : terminals_map) {
-                int state_id = py::cast<int>(item.first);
-                py::object matched_bv = py::reinterpret_borrow<py::object>(item.second);
+            for (auto item_handle : terminals_map.attr("items")()) {
+                py::tuple item = py::cast<py::tuple>(item_handle);
+                int state_id = py::cast<int>(item[0]);
+                py::object matched_bv = py::reinterpret_borrow<py::object>(item[1]);
                 py::object disallowed_for_state;
                 if (py::cast<py::dict>(disallowed_map).contains(py::int_(state_id))) {
                     disallowed_for_state = disallowed_map[py::int_(state_id)];
@@ -612,9 +624,10 @@ private:
             py::dict new_bvs;
             py::object rs_empty = range_empty_()();
 
-            for (auto item : state_map) {
-                int old_sid = py::cast<int>(item.first);
-                int new_sid = py::cast<int>(item.second);
+            for (auto item_handle : state_map.attr("items")()) {
+                py::tuple item = py::cast<py::tuple>(item_handle);
+                int old_sid = py::cast<int>(item[0]);
+                int new_sid = py::cast<int>(item[1]);
                 py::object bv_source;
                 if (py::cast<py::dict>(old_map).contains(py::int_(old_sid))) {
                     bv_source = old_map[py::int_(old_sid)];
@@ -645,8 +658,7 @@ private:
             py::object new_bv = curr_bv.attr("union")(to_add);
 
             // Copy map
-            py::dict new_map;
-            for (auto item : current_map) new_map[item.first] = item.second;
+            py::dict new_map = py::cast<py::dict>(current_map.attr("copy")());
             new_map[py::int_(state_id)] = new_bv;
 
             py::object new_acc = PyAccClass_(new_map, acc.attr("llm_mask"));
