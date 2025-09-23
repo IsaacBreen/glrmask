@@ -43,13 +43,13 @@ class Leveled_impl_cppGSS(GSS[T, Acc]):
     def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
         return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
 
-    def apply(self, func: Callable[[Acc], NewAcc]) -> GSS[T, NewAcc]:
+    def apply(self, func: Callable[[Acc], NewAcc], memo=None) -> GSS[T, NewAcc]:
         return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
 
-    def prune(self, predicate: Callable[[Acc], bool]) -> Leveled_impl_cppGSS[T, Acc]:
+    def prune(self, predicate: Callable[[Acc], bool], memo=None) -> Leveled_impl_cppGSS[T, Acc]:
         return Leveled_impl_cppGSS(self._cpp_gss.prune(predicate))
 
-    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]]) -> GSS[T, NewAcc]:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo=None) -> GSS[T, NewAcc]:
         return Leveled_impl_cppGSS(self._cpp_gss.apply_and_prune(mutator))
 
     def merge(self, other: Leveled_impl_cppGSS[T, Acc]) -> Leveled_impl_cppGSS[T, Acc]:
