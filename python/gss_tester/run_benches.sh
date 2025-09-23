@@ -7,6 +7,9 @@ set -euo pipefail
 # Orchestrates running GSS benchmark workloads across one or more implementations,
 # saving JSON results, and producing comparative analyses and plots.
 #
+# This script can be run from the `python` directory or the project root.
+# It also automates the C++ build process for pybind11 modules.
+#
 # Usage (Preset Mode):
 #   ./gss_tester/run_benches.sh <preset> <impl1> [impl2 ...] [-- [runner_args]]
 #
@@ -32,8 +35,9 @@ set -euo pipefail
 #   ./gss_tester/run_benches.sh tiny gss_tester.implementations.reference_impl.ReferenceGSS -- --sweep-workload push_scaling --sweep-axis prefix_depth --sweep-values 10 50 100 200
 # ==============================================================================
 
+# --- Setup PYTHONPATH to find gss_tester ---
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-PYTHON_SRC_ROOT="${SCRIPT_DIR}/.."
+PYTHON_SRC_ROOT=$(dirname "$SCRIPT_DIR")
 export PYTHONPATH="${PYTHON_SRC_ROOT}:${PYTHONPATH:-}"
 
 if [ "$#" -lt 2 ]; then
@@ -78,7 +82,7 @@ for arg in "${EXTRA_ARGS[@]}"; do
   fi
 done
 
-RESULTS_DIR="gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+RESULTS_DIR="$PYTHON_SRC_ROOT/gss_bench_results/$(date +"%Y-%m-%d_%H-%M-%S")"
 mkdir -p "$RESULTS_DIR"
 echo "Benchmark results will be saved in: $RESULTS_DIR"
 echo "---"
@@ -89,9 +93,28 @@ if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
 fi
 echo "---"
 
+# --- Automated C++ Build Process ---
+echo "Automating C++ module build..."
+C_PLUS_PLUS_MODULES_DIR="$PYTHON_SRC_ROOT/aug25/models"
+C_PLUS_PLUS_BUILD_DIR="$C_PLUS_PLUS_MODULES_DIR/build"
+C_PLUS_PLUS_OUTPUT_DIR="$PYTHON_SRC_ROOT" # Compiled .so files go directly into python/
+
+echo "  Cleaning previous C++ build artifacts..."
+rm -rf "$C_PLUS_PLUS_BUILD_DIR"
+echo "  Configuring C++ build with CMake..."
+cmake -S "$C_PLUS_PLUS_MODULES_DIR" -B "$C_PLUS_PLUS_BUILD_DIR"
+echo "  Building C++ modules..."
+cmake --build "$C_PLUS_PLUS_BUILD_DIR"
+echo "  Copying compiled C++ modules to Python path..."
+find "$C_PLUS_PLUS_BUILD_DIR" -name "leveled_gss_cpp.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+find "$C_PLUS_PLUS_BUILD_DIR" -name "precompute3_engine.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+echo "C++ module build complete."
+echo "---"
+
 for full_impl_path in "${IMPLS[@]}"; do
   if [[ "$full_impl_path" == *.py ]]; then
-    module_name=$(echo "$full_impl_path" | sed -e 's#^.*python/##' -e 's#\(\.py\)*$##' -e 's#/#.#g')
+    local_path="${full_impl_path#$PYTHON_SRC_ROOT/}" # Remove PYTHON_SRC_ROOT prefix if it exists
+    module_name=$(echo "$local_path" | sed -e 's#\(\.py\)*$##' -e 's#/#.#g')
     base_name=$(basename "$full_impl_path" | sed 's#\(\.py\)*$##')
     class_name_base=$(echo "$base_name" | sed 's/_impl$//')
     class_name="$(tr '[:lower:]' '[:upper:]' <<< "${class_name_base:0:1}")${class_name_base:1}GSS"
