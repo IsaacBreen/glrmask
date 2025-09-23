@@ -78,6 +78,16 @@ struct Acc : public std::enable_shared_from_this<Acc> {
         }
         return n;
     }
+
+    size_t hash() const {
+        size_t h = llm_mask.hash();
+        // This hash combines the mask's hash with hashes from the terminals_union map.
+        // The combination logic is chosen to distribute well.
+        for (const auto& [key, val] : terminals_union) {
+            h ^= (std::hash<int>{}(key) << 1) ^ val.hash();
+        }
+        return h;
+    }
 };
 
 
@@ -93,6 +103,23 @@ struct pair_hash {
     }
 };
 
+// Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
+namespace std {
+    template <>
+    struct hash<std::shared_ptr<Acc>> {
+        size_t operator()(const std::shared_ptr<Acc>& a) const {
+            return a ? a->hash() : 0;
+        }
+    };
+    template <>
+    struct equal_to<std::shared_ptr<Acc>> {
+        bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
+            if (!lhs && !rhs) return true;
+            if (!lhs || !rhs) return false;
+            return *lhs == *rhs;
+        }
+    };
+}
 
 class Engine {
 public:
@@ -498,11 +525,8 @@ public:
 
             // Zombie traversal avoidance
             stats.start("get_mask.zombie_check");
-            RangeSet node_llm_bv_union = RangeSet::empty();
-            for (const Edge& e : info.edges) {
-                node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-            }
-            RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
+            // Use the precomputed union of edge masks for this node.
+            RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
             if (potential_new_tokens.is_empty()) {
                 stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
                 stats.stop("get_mask.zombie_check");
@@ -537,10 +561,12 @@ public:
                 if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
 
                 // Apply LLM limiter once per edge (not per destination) to avoid repeated
-                // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-                // from the Python implementation.
-                std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
-                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
+                // expensive apply_and_prune work. The value-based acc_memo is critical
+                // for performance, replicating the Python version's key optimization.
+                std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                                   std::hash<std::shared_ptr<Acc>>,
+                                   std::equal_to<std::shared_ptr<Acc>>> acc_memo;
+                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
                 if (popped_limited.is_empty()) {
                     stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                     continue;
@@ -655,6 +681,7 @@ private:
 
     struct NodeInfo {
         std::vector<Edge> edges;
+        RangeSet llm_bv_union;
         bool is_end{false};
         int max_depth{0};
     };
@@ -864,6 +891,8 @@ private:
                 children_obj = py::list();
             }
 
+            RangeSet node_llm_bv_union = RangeSet::empty();
+
             for (auto ch : children_obj) {
                 py::tuple entry = py::cast<py::tuple>(ch);
                 py::tuple edge_key = py::cast<py::tuple>(entry[0]);
@@ -880,6 +909,7 @@ private:
                     llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
                 }
                 RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
+                node_llm_bv_union = node_llm_bv_union.union_with(llm_bv_rs);
 
                 std::vector<DestEdge> dests;
                 py::object dest_map = entry[1];
@@ -907,7 +937,7 @@ private:
                 Edge e{pop, llm_bv_rs, std::move(dests)};
                 info.edges.push_back(std::move(e));
             }
-
+            info.llm_bv_union = std::move(node_llm_bv_union);
             arena_[uid] = std::move(info);
         }
     }
@@ -1107,25 +1137,43 @@ private:
     Leveled intersect_llm_mask(
         const Leveled& g,
         const RangeSet& limiter,
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                           std::hash<std::shared_ptr<Acc>>,
+                           std::equal_to<std::shared_ptr<Acc>>>& value_memo
+    ) {
         auto& stats = Stats::get();
         stats.start("get_mask.main_loop.edge.apply_and_prune");
+
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             stats.inc("get_mask.intersect_and_prune.calls");
+
+            // Value-based memoization: check if we've already computed the result for an
+            // accumulator with this value.
+            auto it = value_memo.find(a);
+            if (it != value_memo.end()) {
+                stats.inc("get_mask.intersect_and_prune.memo_hits");
+                return it->second;
+            }
+
             stats.start("get_mask.intersect_and_prune.intersection");
             RangeSet new_mask = a->llm_mask.intersection_with(limiter);
             stats.stop("get_mask.intersect_and_prune.intersection");
             stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
-            bool is_empty_mask = new_mask.is_empty();
-            if (is_empty_mask) {
+
+            std::shared_ptr<Acc> result = nullptr;
+            if (!new_mask.is_empty()) {
+                auto na = std::make_shared<Acc>();
+                na->llm_mask = new_mask;
+                result = na;
+            } else {
                 stats.inc("get_mask.intersect_and_prune.pruned_accs");
-                return std::shared_ptr<Acc>(nullptr);
             }
-            auto na = std::make_shared<Acc>();
-            na->llm_mask = new_mask;
-            return na;
+            value_memo.emplace(a, result);
+            return result;
         };
-        return g.apply_and_prune(mutator, acc_memo);
+        auto result = g.apply_and_prune(mutator);
+        stats.stop("get_mask.main_loop.edge.apply_and_prune");
+        return result;
     }
 
 };

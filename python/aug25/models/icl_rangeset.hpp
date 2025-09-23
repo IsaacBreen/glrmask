@@ -4,6 +4,7 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <boost/functional/hash.hpp>
 #include <boost/icl/interval_set.hpp>
 #include "stats.hpp"
 
@@ -107,6 +108,16 @@ public:
         return set == other.set;
     }
 
+    size_t hash() const {
+        size_t seed = 0;
+        // The hash needs to be order-independent of the intervals, but boost::icl::interval_set
+        // stores them in a sorted, non-overlapping way, so simple iteration is fine.
+        for (const auto& interval : set) {
+            boost::hash_combine(seed, interval.lower());
+            boost::hash_combine(seed, interval.upper());
+        }
+        return seed;
+    }
 private:
     boost::icl::interval_set<unsigned long long> set;
 };
