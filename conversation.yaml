@@ -3179,7 +3179,11 @@ local_system:
                       }
                   }
                   if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                  return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
+                  UpperPtr<T, Acc> result_node = merged;
+                  if (!result_node->is_interface()) {
+                      result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+                  }
+                  return LeveledGSS(result_node);
               }
           }
 
@@ -3273,7 +3277,11 @@ local_system:
                           for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
                           UpperPtr<T, Acc> merged = popped[0];
                           for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          if (merged->is_interface()) {
+                              res = merged;
+                          } else {
+                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          }
                       }
                       memo_upper[key] = res;
                       return res;
@@ -6921,30 +6929,19 @@ local_system:
                       auto itm = memo_upper.find(key);
                       if (itm != memo_upper.end()) return itm->second;
 
-                      // Collect children
-                      std::vector<UpperPtr<T, Acc>> all_children;
-                      if (!node->is_interface()) {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                      }
-                      if (all_children.empty()) {
-                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          memo_upper[key] = res;
-                          return res;
-                      }
-
                       UpperPtr<T, Acc> res;
                       if (node->is_interface()) {
                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
                           // pop from lowers
-                          std::vector<LowerPtr<T>> lowers;
-                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                          if (lowers.empty()) {
+                          std::vector<LowerPtr<T>> all_lower_children;
+                          for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+
+                          if (all_lower_children.empty()) {
                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
                               std::vector<LowerPtr<T>> popped;
-                              popped.reserve(lowers.size());
-                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                              popped.reserve(all_lower_children.size());
+                              for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
                               LowerPtr<T> merged = popped[0];
                               for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
@@ -6956,15 +6953,22 @@ local_system:
                           }
                       } else {
                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          std::vector<UpperPtr<T, Acc>> popped;
-                          popped.reserve(all_children.size());
-                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                          UpperPtr<T, Acc> merged = popped[0];
-                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          if (merged->is_interface()) {
-                              res = merged;
+                          std::vector<UpperPtr<T, Acc>> all_upper_children;
+                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+
+                          if (all_upper_children.empty()) {
+                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
-                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              std::vector<UpperPtr<T, Acc>> popped;
+                              popped.reserve(all_upper_children.size());
+                              for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+                              UpperPtr<T, Acc> merged = popped[0];
+                              for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                              if (merged->is_interface()) {
+                                  res = merged;
+                              } else {
+                                  res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              }
                           }
                       }
                       memo_upper[key] = res;
@@ -10629,7 +10633,11 @@ messages:
                       }
                   }
                   if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                  return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
+                  UpperPtr<T, Acc> result_node = merged;
+                  if (!result_node->is_interface()) {
+                      result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+                  }
+                  return LeveledGSS(result_node);
               }
           }
 
@@ -10723,7 +10731,11 @@ messages:
                           for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
                           UpperPtr<T, Acc> merged = popped[0];
                           for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          if (merged->is_interface()) {
+                              res = merged;
+                          } else {
+                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          }
                       }
                       memo_upper[key] = res;
                       return res;
@@ -11156,7 +11168,7 @@ messages:
   - user: |-
       bash run_rust_and_cpp_models.sh
       Installing pybind11 (local user)...
-
+      ^[i
       [notice] A new release of pip is available: 25.0.1 -> 25.2
       [notice] To update, run: pip install --upgrade pip
       Building C++ extensions ...
@@ -11165,7 +11177,7 @@ messages:
        - python/aug25/models/precompute3_engine.cpython-312-darwin.so
 
       Running benchmarks...
-      Benchmark results will be saved in: benchmark_results/2025-09-23_11-29-35
+      Benchmark results will be saved in: benchmark_results/2025-09-23_11-33-19
       ---
       Baseline Model: python/aug25/models/rust_model.py
       Other Models: python/aug25/models/precompute3_model_cpp.py
@@ -11175,169 +11187,133 @@ messages:
       Starting benchmark runs...
 
       >>> Running benchmark for: rust_model.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-23_11-29-35
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-23_11-33-19
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/rust_model.py
-      Model loaded in 2.1048 seconds.
+      Model loaded in 3.2230 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:07<00:00,  3.20it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:07<00:00,  3.16it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-23_11-29-35/rust_model_results.json
+      Benchmark results saved to: benchmark_results/2025-09-23_11-33-19/rust_model_results.json
       >>> Finished benchmark for: rust_model.py
 
       >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_11-29-35
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_11-33-19
       >>> Running with AddressSanitizer...
-      python(63354,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      python(66000,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 38.3439 seconds.
+      Model loaded in 37.5412 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps:  12%|█████████████████▎                                                                                                                              | 3/25 [00:01<00:07,  2.79it/s, get_mask]=================================================================
-      ==63354==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200002a880 at pc 0x0001711d10ec bp 0x00016b353d10 sp 0x00016b353d08
-      READ of size 8 at 0x60200002a880 thread T0
-          #0 0x0001711d10e8 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:264
-          #1 0x000171262af4 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const leveled_gss.hpp:758
-          #2 0x00017126133c in decltype(std::declval<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&>()(std::declval<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&>(), std::declval<int>())) std::__1::__invoke[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:179
-          #3 0x00017126128c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_void_return_wrapper<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, false>::__call[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:243
-          #4 0x000171261250 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_r[abi:ne200100]<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:273
-          #5 0x000171261214 in std::__1::__function::__alloc_func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:167
-          #6 0x0001712608bc in std::__1::__function::__func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:319
-          #7 0x0001712788c0 in std::__1::__function::__value_func<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) const function.h:436
-          #8 0x00017124a084 in std::__1::function<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const function.h:995
-          #9 0x0001712497c8 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const leveled_gss.hpp:764
-          #10 0x00017114d700 in Engine::get_mask() precompute3_engine.cpp:322
-          #11 0x000171289668 in pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)::operator()(Engine*) const pybind11.h:136
-          #12 0x00017128957c in pybind11::object pybind11::detail::argument_loader<Engine*>::call_impl<pybind11::object, pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&, 0ul, pybind11::detail::void_type>(Engine&&, std::__1::integer_sequence<unsigned long, 0ul>, pybind11::detail::void_type&&) && cast.h:1631
-          #13 0x000171289144 in std::__1::enable_if<!std::is_void<pybind11::object>::value, pybind11::object>::type pybind11::detail::argument_loader<Engine*>::call<pybind11::object, pybind11::detail::void_type, pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&>(pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&) && cast.h:1599
-          #14 0x000171288d34 in void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*), pybind11::object, Engine*, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object&&, Engine (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const pybind11.h:279
-          #15 0x0001712887fc in void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*), pybind11::object, Engine*, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object&&, Engine (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::__invoke(pybind11::detail::function_call&) pybind11.h:249
-          #16 0x00017110751c in pybind11::cpp_function::dispatcher(_object*, _object*, _object*) pybind11.h:971
-          #17 0x000104b681f0 in cfunction_call+0x84 (python3.12:arm64+0x1000c41f0)
-          #18 0x000104b0bed4 in _PyObject_MakeTpCall+0x138 (python3.12:arm64+0x100067ed4)
-          #19 0x000104c27ca0 in _PyEval_EvalFrameDefault+0xd570 (python3.12:arm64+0x100183ca0)
-          #20 0x000104c19810 in PyEval_EvalCode+0x128 (python3.12:arm64+0x100175810)
-          #21 0x000104c16370 in builtin_exec+0x580 (python3.12:arm64+0x100172370)
-          #22 0x000104b68eb8 in cfunction_vectorcall_FASTCALL_KEYWORDS+0x8c (python3.12:arm64+0x1000c4eb8)
-          #23 0x000104b0ca50 in PyObject_Vectorcall+0x54 (python3.12:arm64+0x100068a50)
-          #24 0x000104c27ca0 in _PyEval_EvalFrameDefault+0xd570 (python3.12:arm64+0x100183ca0)
-          #25 0x000104cbea2c in pymain_run_module+0x120 (python3.12:arm64+0x10021aa2c)
-          #26 0x000104cbe3c0 in Py_RunMain+0x7dc (python3.12:arm64+0x10021a3c0)
-          #27 0x000104cbf2f0 in pymain_main+0x290 (python3.12:arm64+0x10021b2f0)
-          #28 0x000104aa64b8 in main+0x34 (python3.12:arm64+0x1000024b8)
-          #29 0x0001842b9d50 in start+0x1c0c (dyld:arm64e+0x3d50)
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:01<00:00, 15.82it/s, commit]
+      --- Benchmark finished ---
 
-      0x60200002a880 is located 0 bytes after 16-byte region [0x60200002a870,0x60200002a880)
-      allocated by thread T0 here:
-          #0 0x0001059a7404 in _Znwm+0x74 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x4b404)
-          #1 0x0001711e0e50 in void* std::__1::__libcpp_operator_new[abi:ne200100]<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>(unsigned long) allocate.h:55
-          #2 0x0001711e0dd8 in std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>** std::__1::__libcpp_allocate[abi:ne200100]<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>(std::__1::__element_count, unsigned long) allocate.h:91
-          #3 0x0001711e0d4c in std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>::allocate[abi:ne200100](unsigned long) allocator.h:105
-          #4 0x0001711e0c14 in std::__1::allocator_traits<std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>>::allocate[abi:ne200100](std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>&, unsigned long) allocator_traits.h:270
-          #5 0x0001711e05d8 in void std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__do_rehash<true>(unsigned long) __hash_table:1730
-          #6 0x0001711e0288 in void std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__rehash<true>(unsigned long) __hash_table:1715
-          #7 0x0001711df408 in std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__rehash_unique[abi:ne200100](unsigned long) __hash_table:883
-          #8 0x0001711df34c in std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::unordered_map(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>> const&) unordered_map:1660
-          #9 0x0001711df2c4 in std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::unordered_map(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>> const&) unordered_map:1659
-          #10 0x0001711df0d8 in void std::__1::allocator<leveled_gss::Lower<int>>::construct[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool>(leveled_gss::Lower<int>*, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) allocator.h:153
-          #11 0x0001711dec98 in void std::__1::allocator_traits<std::__1::allocator<leveled_gss::Lower<int>>>::construct[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::allocator<leveled_gss::Lower<int>>&, leveled_gss::Lower<int>*, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) allocator_traits.h:309
-          #12 0x0001711deab0 in std::__1::__shared_ptr_emplace<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>>::__shared_ptr_emplace[abi:ne200100]<std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, std::__1::allocator<leveled_gss::Lower<int>>, 0>(std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:161
-          #13 0x0001711de22c in std::__1::__shared_ptr_emplace<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>>::__shared_ptr_emplace[abi:ne200100]<std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, std::__1::allocator<leveled_gss::Lower<int>>, 0>(std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:158
-          #14 0x0001711ddfb0 in std::__1::shared_ptr<leveled_gss::Lower<int>> std::__1::allocate_shared[abi:ne200100]<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::allocator<leveled_gss::Lower<int>> const&, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:733
-          #15 0x0001711db414 in std::__1::shared_ptr<leveled_gss::Lower<int>> std::__1::make_shared[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:741
-          #16 0x0001711d18b0 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:298
-          #17 0x000171268b7c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_upperbranches<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:320
-          #18 0x000171268710 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_interfaces<int, Acc>(std::__1::shared_ptr<leveled_gss::Interface<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::Interface<int, Acc>> const&) leveled_gss.hpp:337
-          #19 0x00017126409c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_upper<int, Acc>(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&) leveled_gss.hpp:345
-          #20 0x000171262a6c in leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const leveled_gss.hpp:757
-          #21 0x00017126133c in decltype(std::declval<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&>()(std::declval<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&>(), std::declval<int>())) std::__1::__invoke[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:179
-          #22 0x00017126128c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_void_return_wrapper<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, false>::__call[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:243
-          #23 0x000171261250 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_r[abi:ne200100]<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:273
-          #24 0x000171261214 in std::__1::__function::__alloc_func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:167
-          #25 0x0001712608bc in std::__1::__function::__func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:319
-          #26 0x0001712788c0 in std::__1::__function::__value_func<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) const function.h:436
-          #27 0x00017124a084 in std::__1::function<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const function.h:995
-          #28 0x0001712497c8 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const leveled_gss.hpp:764
-          #29 0x00017114d700 in Engine::get_mask() precompute3_engine.cpp:322
-
-      SUMMARY: AddressSanitizer: heap-buffer-overflow leveled_gss.hpp:264 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&)
-      Shadow bytes around the buggy address:
-        0x60200002a600: fa fa fa fa fa fa fd fa fa fa fa fa fa fa fa fa
-        0x60200002a680: fa fa fa fa fa fa fd fa fa fa fa fa fa fa fa fa
-        0x60200002a700: fa fa fa fa fa fa fd fd fa fa fd fa fa fa fa fa
-        0x60200002a780: fa fa fd fa fa fa fa fa fa fa fd fa fa fa fd fa
-        0x60200002a800: fa fa fd fa fa fa fd fa fa fa 00 00 fa fa 00 00
-      =>0x60200002a880:[fa]fa fd fa fa fa fd fd fa fa fd fd fa fa fd fa
-        0x60200002a900: fa fa fd fd fa fa fd fa fa fa fd fd fa fa fd fa
-        0x60200002a980: fa fa 00 00 fa fa fd fd fa fa fd fd fa fa fd fd
-        0x60200002aa00: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd
-        0x60200002aa80: fa fa fd fd fa fa 00 00 fa fa fd fd fa fa fd fd
-        0x60200002ab00: fa fa 00 00 fa fa fd fa fa fa 00 00 fa fa 00 00
-      Shadow byte legend (one shadow byte represents 8 application bytes):
-        Addressable:           00
-        Partially addressable: 01 02 03 04 05 06 07 
-        Heap left redzone:       fa
-        Freed heap region:       fd
-        Stack left redzone:      f1
-        Stack mid redzone:       f2
-        Stack right redzone:     f3
-        Stack after return:      f5
-        Stack use after scope:   f8
-        Global redzone:          f9
-        Global init order:       f6
-        Poisoned by user:        f7
-        Container overflow:      fc
-        Array cookie:            ac
-        Intra object redzone:    bb
-        ASan internal:           fe
-        Left alloca redzone:     ca
-        Right alloca redzone:    cb
-      ==63354==ABORTING
-      python/run_benchmarks.sh: line 84: 63354 Abort trap: 6           DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"
-
-      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-        warnings.warn('resource_tracker: There appear to be %d '
-      >>> Benchmark for precompute3_model_cpp.py failed with exit code 134. Skipping.
+      Benchmark results saved to: benchmark_results/2025-09-23_11-33-19/precompute3_model_cpp_results.json
+      >>> Finished benchmark for: precompute3_model_cpp.py
 
       All benchmark runs completed.
       ---
       Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_11-29-35/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-23_11-29-35/analysis
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_11-33-19/precompute3_model_cpp_results.json benchmark_results/2025-09-23_11-33-19/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-23_11-33-19/analysis
       Selected baseline: rust_model
+      Mask mismatch at token index 4 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 5 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 6 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 7 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 8 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 9 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 10 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 11 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 12 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 13 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 14 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 15 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 16 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 17 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 18 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 19 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 20 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 21 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 22 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 23 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
+      Mask mismatch at token index 24 for model precompute3_model_cpp
+      Baseline: ((0, 12088), (12090, 21628))
+      Current:  ()
       --- Benchmark Summary ---
-                 equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                   
-      rust_model          ✅                    0     25   311.6554  890.1490   30.0756   77.2797  290.7305 3662.6174 4424.8380
+                            equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                              
+      precompute3_model_cpp          ❌                   21     25    62.5244  147.5820    0.5408    0.5809  336.4514  473.2762  504.6811
+      rust_model                     ✅                    0     25   315.5221  885.6535   30.4013   77.5128  303.6189 3649.6422 4396.4469
 
       Baseline: rust_model
       ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
 
-      Saving plots to benchmark_results/2025-09-23_11-29-35/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/total_timings_per_token_log.png
+      Saving plots to benchmark_results/2025-09-23_11-33-19/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/total_timings_per_token_log.png
 
       ---
       Benchmark analysis complete.
       Baseline: rust_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_11-29-35/analysis
-      Full JSON results are in: benchmark_results/2025-09-23_11-29-35
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_11-33-19/analysis
+      Full JSON results are in: benchmark_results/2025-09-23_11-33-19
     metadata:
   - user: This is meant to be a super-fast C++ implementation of precompute3_model_pure_python_standalone.py.
       Careful attention was paid in the Python version to ensure that everything scaled
@@ -11364,86 +11340,413 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I can help you fix the C++ implementation. The benchmark failure is due to a memory safety issue, which AddressSanitizer correctly identified as a heap-buffer-overflow.
+      Hello! I see you're running into an issue where your C++ accelerated model is producing incorrect masks. The benchmark results clearly show a divergence from the baseline, with the C++ version outputting empty masks after a few tokens. This kind of rapid state loss often points to a problem in the core state management logic, which in this case is the `LeveledGSS` implementation.
 
-      The root cause is an unsafe `static_pointer_cast` in the C++ LeveledGSS implementation within `leveled_gss.hpp`. The `merge_upper` function can return a pointer to an `Interface` object, but the `pop` and `popn` methods incorrectly assume it's always an `UpperBranch` and cast it without checking. This leads to treating an `Interface` object's memory as if it were an `UpperBranch`, causing memory corruption when its members are accessed.
+      After a careful review of the C++ code against the Python reference implementation, I've located a critical bug in the `popn` method within `python/aug25/models/leveled_gss.hpp`. The logic for handling `Interface` nodes was flawed, causing it to prematurely return an empty GSS, effectively wiping out all active parser states.
 
-      Here are the step-by-step instructions to fix this issue.
+      Here are the steps to fix the issue:
 
       ### Step-by-step Instructions
 
-      I will apply corrections to two locations in `python/aug25/models/leveled_gss.hpp` to ensure type safety.
+      1.  **Open `python/aug25/models/leveled_gss.hpp`:**
+          Navigate to the file containing the C++ `LeveledGSS` implementation.
 
-      1.  **Fix the `pop()` method:**
-          In `python/aug25/models/leveled_gss.hpp`, locate the `LeveledGSS::pop()` method. Inside the `else` block that handles `UpperBranch` nodes, replace the final `return` statement.
+      2.  **Locate the `popn` method:**
+          Find the `LeveledGSS::popn` method. Inside it, there is a lambda function named `_popn_upper`.
 
-          *   **File:** `python/aug25/models/leveled_gss.hpp`
-          *   **Around line 700:**
-          *   **Delete** the following line:
-              ```cpp
-              return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
-              ```
-          *   **Insert** these lines in its place:
-              ```cpp
-              UpperPtr<T, Acc> result_node = merged;
-              if (!result_node->is_interface()) {
-                  result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
-              }
-              return LeveledGSS(result_node);
-              ```
+      3.  **Refactor the `_popn_upper` lambda:**
+          The current implementation incorrectly collects children only for `UpperBranch` nodes, causing `Interface` nodes to be handled incorrectly. You need to restructure it to handle `Interface` and `UpperBranch` nodes in separate blocks, each collecting its own children before processing.
 
-      2.  **Fix the `popn()` method:**
-          In the same file, `python/aug25/models/leveled_gss.hpp`, find the `LeveledGSS::popn()` method and the `_popn_upper` lambda within it. In the `else` block for `UpperBranch` nodes, replace the line that assigns to `res`.
+          Replace the body of the `_popn_upper` lambda (from line 622 to 678) with the corrected logic that properly handles both node types. The corrected code will first check the node type, then collect children, and only then proceed with the pop logic.
 
-          *   **File:** `python/aug25/models/leveled_gss.hpp`
-          *   **Around line 784:**
-          *   **Delete** this line:
-              ```cpp
-              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-              ```
-          *   **Insert** these lines instead:
-              ```cpp
-              if (merged->is_interface()) {
-                  res = merged;
-              } else {
-                  res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-              }
-              ```
-
-      These changes introduce runtime type checks to prevent the invalid cast, resolving the memory corruption and allowing the benchmark to run correctly.
+      Here is the git diff with the necessary changes.
 
       ### Git Diffs
 
-      Here are the changes in `git diff` format for you to apply.
-
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 4552431..293375b 100644
+      index 327072e..e888022 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -697,7 +697,11 @@
+      @@ -621,57 +621,56 @@
+                       auto itm = memo_upper.find(key);
+                       if (itm != memo_upper.end()) return itm->second;
+       
+      -                // Collect children
+      -                std::vector<UpperPtr<T, Acc>> all_children;
+      -                if (!node->is_interface()) {
+      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
+      -                }
+      -                if (all_children.empty()) {
+      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+      -                    memo_upper[key] = res;
+      -                    return res;
+      -                }
+      -
+                       UpperPtr<T, Acc> res;
+                       if (node->is_interface()) {
+                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                           // pop from lowers
+      -                    std::vector<LowerPtr<T>> lowers;
+      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
+      -                    if (lowers.empty()) {
+      +                    std::vector<LowerPtr<T>> all_lower_children;
+      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+      +
+      +                    if (all_lower_children.empty()) {
+                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+                               std::vector<LowerPtr<T>> popped;
+      -                        popped.reserve(lowers.size());
+      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+      +                        popped.reserve(all_lower_children.size());
+      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
+                               LowerPtr<T> merged = popped[0];
+      -                        for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
+      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
+                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
+                               if (merged->_children.empty() && !new_empty) {
+                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                               } else {
+                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
+                               }
+                           }
+                       } else {
+                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    std::vector<UpperPtr<T, Acc>> popped;
+      -                    popped.reserve(all_children.size());
+      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+      -                    UpperPtr<T, Acc> merged = popped[0];
+      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      -                    if (merged->is_interface()) {
+      -                        res = merged;
+      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
+      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+      +
+      +                    if (all_upper_children.empty()) {
+      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        std::vector<UpperPtr<T, Acc>> popped;
+      +                        popped.reserve(all_upper_children.size());
+      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+      +                        UpperPtr<T, Acc> merged = popped[0];
+      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      +                        if (merged->is_interface()) {
+      +                            res = merged;
+      +                        } else {
+      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        }
+                           }
                        }
-                   }
-                   if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-      -            return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
-      +            UpperPtr<T, Acc> result_node = merged;
-      +            if (!result_node->is_interface()) {
-      +                result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
-      +            }
-      +            return LeveledGSS(result_node);
-               }
+                       memo_upper[key] = res;
+                       return res;
+                   };
+       
+               return LeveledGSS(_popn_upper(inner, n));
            }
        
-      @@ -781,7 +785,11 @@
-                           for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                           UpperPtr<T, Acc> merged = popped[0];
-                           for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      -                    res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                    if (merged->is_interface()) {
-      +                        res = merged;
-      +                    } else {
-      +                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                    }
+
+      ```
+
+      After applying this patch, rebuild the C++ extensions and run the benchmarks again. The mask mismatches should be resolved, and the C++ model should now behave identically to the Python reference implementation.
+    metadata:
+  - user: |-
+      Failed Hunk:
+
+      ```diff
+      @@ -621,57 +621,56 @@
+                       auto itm = memo_upper.find(key);
+                       if (itm != memo_upper.end()) return itm->second;
+       
+      -                // Collect children
+      -                std::vector<UpperPtr<T, Acc>> all_children;
+      -                if (!node->is_interface()) {
+      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
+      -                }
+      -                if (all_children.empty()) {
+      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+      -                    memo_upper[key] = res;
+      -                    return res;
+      -                }
+      -
+                       UpperPtr<T, Acc> res;
+                       if (node->is_interface()) {
+                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                           // pop from lowers
+      -                    std::vector<LowerPtr<T>> lowers;
+      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
+      -                    if (lowers.empty()) {
+      +                    std::vector<LowerPtr<T>> all_lower_children;
+      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+      +
+      +                    if (all_lower_children.empty()) {
+                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+                               std::vector<LowerPtr<T>> popped;
+      -                        popped.reserve(lowers.size());
+      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+      +                        popped.reserve(all_lower_children.size());
+      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
+                               LowerPtr<T> merged = popped[0];
+      -                        for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
+      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
+                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
+                               if (merged->_children.empty() && !new_empty) {
+                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                               } else {
+                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
+                               }
+                           }
+                       } else {
+                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    std::vector<UpperPtr<T, Acc>> popped;
+      -                    popped.reserve(all_children.size());
+      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+      -                    UpperPtr<T, Acc> merged = popped[0];
+      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      -                    if (merged->is_interface()) {
+      -                        res = merged;
+      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
+      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+      +
+      +                    if (all_upper_children.empty()) {
+      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        std::vector<UpperPtr<T, Acc>> popped;
+      +                        popped.reserve(all_upper_children.size());
+      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+      +                        UpperPtr<T, Acc> merged = popped[0];
+      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      +                        if (merged->is_interface()) {
+      +                            res = merged;
+      +                        } else {
+      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        }
+                           }
+                       }
+                       memo_upper[key] = res;
+                       return res;
+                   };
+       
+               return LeveledGSS(_popn_upper(inner, n));
+           }
+       
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+                      auto itm = memo_upper.find(key);
+                      if (itm != memo_upper.end()) return itm->second;
+
+                      // Collect children
+                      std::vector<UpperPtr<T, Acc>> all_children;
+                      if (!node->is_interface()) {
+                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
+                      }
+                      if (all_children.empty()) {
+                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                          memo_upper[key] = res;
+                          return res;
+                      }
+
+                      UpperPtr<T, Acc> res;
+                      if (node->is_interface()) {
+                          auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                          // pop from lowers
+                          std::vector<LowerPtr<T>> lowers;
+                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
+                          if (lowers.empty()) {
+                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                          } else {
+                              std::vector<LowerPtr<T>> popped;
+                              popped.reserve(lowers.size());
+                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                              LowerPtr<T> merged = popped[0];
+                              for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
+                              auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
+                              if (merged->_children.empty() && !new_empty) {
+                                  res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                              } else {
+                                  res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
+                              }
+                          }
+                      } else {
+                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+                          std::vector<UpperPtr<T, Acc>> popped;
+                          popped.reserve(all_children.size());
+                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+                          UpperPtr<T, Acc> merged = popped[0];
+                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                          if (merged->is_interface()) {
+                              res = merged;
+                          } else {
+                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          }
+                      }
+                      memo_upper[key] = res;
+                      return res;
+                  };
+
+              return LeveledGSS(_popn_upper(inner, n));
+          }
+      ```
+
+      Nearest Match in `python/aug25/models/leveled_gss.hpp` (found at line 719 with 98.21% similarity, shown with padding):
+
+      ```objective-c
+
+              std::function<UpperPtr<T, Acc>(const UpperPtr<T, Acc>&, int)> _popn_upper =
+                  [&](const UpperPtr<T, Acc>& node, int k) -> UpperPtr<T, Acc> {
+                      if (k == 0) return node;
+                      Key key{reinterpret_cast<std::uintptr_t>(node.get()), k};
+                      auto itm = memo_upper.find(key);
+                      if (itm != memo_upper.end()) return itm->second;
+
+                      // Collect children
+                      std::vector<UpperPtr<T, Acc>> all_children;
+                      if (!node->is_interface()) {
+                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
+                      }
+                      if (all_children.empty()) {
+                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                          memo_upper[key] = res;
+                          return res;
+                      }
+
+                      UpperPtr<T, Acc> res;
+                      if (node->is_interface()) {
+                          auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                          // pop from lowers
+                          std::vector<LowerPtr<T>> lowers;
+                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
+                          if (lowers.empty()) {
+                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                          } else {
+                              std::vector<LowerPtr<T>> popped;
+                              popped.reserve(lowers.size());
+                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                              LowerPtr<T> merged = popped[0];
+                              for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
+                              auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
+                              if (merged->_children.empty() && !new_empty) {
+                                  res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                              } else {
+                                  res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
+                              }
+                          }
+                      } else {
+                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+                          std::vector<UpperPtr<T, Acc>> popped;
+                          popped.reserve(all_children.size());
+                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+                          UpperPtr<T, Acc> merged = popped[0];
+                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                          if (merged->is_interface()) {
+                              res = merged;
+                          } else {
+                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          }
+                      }
+                      memo_upper[key] = res;
+                      return res;
+                  };
+
+              return LeveledGSS(_popn_upper(inner, n));
+          }
+
+          bool is_empty() const {
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  return ub->_children.empty() && !ub->empty;
+              }
+      ```
+
+      The git diff hunk above failed to apply to the file `python/aug25/models/leveled_gss.hpp`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
+      index 327072e..e888022 100644
+      --- a/python/aug25/models/leveled_gss.hpp
+      +++ b/python/aug25/models/leveled_gss.hpp
+      @@ -719,51 +719,47 @@
+                       auto itm = memo_upper.find(key);
+                       if (itm != memo_upper.end()) return itm->second;
+       
+      -                // Collect children
+      -                std::vector<UpperPtr<T, Acc>> all_children;
+      -                if (!node->is_interface()) {
+      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
+      -                }
+      -                if (all_children.empty()) {
+      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+      -                    memo_upper[key] = res;
+      -                    return res;
+      -                }
+      -
+                       UpperPtr<T, Acc> res;
+                       if (node->is_interface()) {
+                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                           // pop from lowers
+      -                    std::vector<LowerPtr<T>> lowers;
+      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
+      -                    if (lowers.empty()) {
+      +                    std::vector<LowerPtr<T>> all_lower_children;
+      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+      +
+      +                    if (all_lower_children.empty()) {
+                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+                               std::vector<LowerPtr<T>> popped;
+      -                        popped.reserve(lowers.size());
+      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+      +                        popped.reserve(all_lower_children.size());
+      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
+                               LowerPtr<T> merged = popped[0];
+                               for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
+                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
+                               if (merged->_children.empty() && !new_empty) {
+                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                               } else {
+                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
+                               }
+                           }
+                       } else {
+                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    std::vector<UpperPtr<T, Acc>> popped;
+      -                    popped.reserve(all_children.size());
+      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+      -                    UpperPtr<T, Acc> merged = popped[0];
+      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      -                    if (merged->is_interface()) {
+      -                        res = merged;
+      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
+      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+      +
+      +                    if (all_upper_children.empty()) {
+      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+                           } else {
+      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        std::vector<UpperPtr<T, Acc>> popped;
+      +                        popped.reserve(all_upper_children.size());
+      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+      +                        UpperPtr<T, Acc> merged = popped[0];
+      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      +                        if (merged->is_interface()) {
+      +                            res = merged;
+      +                        } else {
+      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                        }
+                           }
                        }
                        memo_upper[key] = res;
                        return res;
@@ -11459,7 +11762,7 @@ messages:
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Add type checks in LeveledGSS pop/popn
-      to prevent heap-buffer-overflow"'
+  - user: 'Changes committed with message: "Fix: Correct LeveledGSS popn logic for
+      Interface nodes"'
     metadata:
 ...

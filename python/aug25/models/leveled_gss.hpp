@@ -719,30 +719,19 @@ public:
                 auto itm = memo_upper.find(key);
                 if (itm != memo_upper.end()) return itm->second;
 
-                // Collect children
-                std::vector<UpperPtr<T, Acc>> all_children;
-                if (!node->is_interface()) {
-                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                }
-                if (all_children.empty()) {
-                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                    memo_upper[key] = res;
-                    return res;
-                }
-
                 UpperPtr<T, Acc> res;
                 if (node->is_interface()) {
                     auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
                     // pop from lowers
-                    std::vector<LowerPtr<T>> lowers;
-                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                    if (lowers.empty()) {
+                    std::vector<LowerPtr<T>> all_lower_children;
+                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+
+                    if (all_lower_children.empty()) {
                         res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                     } else {
                         std::vector<LowerPtr<T>> popped;
-                        popped.reserve(lowers.size());
-                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                        popped.reserve(all_lower_children.size());
+                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
                         LowerPtr<T> merged = popped[0];
                         for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
                         auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
@@ -754,15 +743,22 @@ public:
                     }
                 } else {
                     auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                    std::vector<UpperPtr<T, Acc>> popped;
-                    popped.reserve(all_children.size());
-                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                    UpperPtr<T, Acc> merged = popped[0];
-                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                    if (merged->is_interface()) {
-                        res = merged;
+                    std::vector<UpperPtr<T, Acc>> all_upper_children;
+                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+
+                    if (all_upper_children.empty()) {
+                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                     } else {
-                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                        std::vector<UpperPtr<T, Acc>> popped;
+                        popped.reserve(all_upper_children.size());
+                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+                        UpperPtr<T, Acc> merged = popped[0];
+                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                        if (merged->is_interface()) {
+                            res = merged;
+                        } else {
+                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                        }
                     }
                 }
                 memo_upper[key] = res;
