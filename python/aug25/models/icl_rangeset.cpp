@@ -12,6 +12,8 @@ PYBIND11_MODULE(icl_rangeset, m) {
         .def_static("empty", &RangeSet::empty, "Create an empty RangeSet")
         .def_static("from_indices", &RangeSet::from_indices, py::arg("indices"),
                     "Create a RangeSet from a list of indices")
+        .def_static("from_singleton", &RangeSet::from_singleton, py::arg("index"),
+                    "Create a RangeSet from a single index")
         .def_static("from_ranges", &RangeSet::from_ranges, py::arg("ranges"),
                     "Create a RangeSet from a list of inclusive ranges [[start, end], ...]")
         .def("union", &RangeSet::union_with, py::arg("other"),

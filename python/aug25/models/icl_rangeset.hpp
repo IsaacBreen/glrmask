@@ -22,6 +22,12 @@ public:
         return rs;
     }
 
+    static RangeSet from_singleton(unsigned long long index) {
+        RangeSet rs;
+        rs.set.add(index);
+        return rs;
+    }
+
     static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
         RangeSet rs;
         for (const auto& p : ranges) {

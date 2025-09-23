@@ -246,6 +246,7 @@ static LowerPtr<T> merge_lower(const LowerPtr<T>& l1, const LowerPtr<T>& l2);
 template <typename T, typename Acc>
 static UpperBranchPtr<T, Acc> interface_to_upperbranch(const InterfacePtr<T, Acc>& it) {
     auto children = std::make_shared<UpperChildren<T, Acc>>();
+    children->reserve(it->_children->size());
     for (auto &kv : *it->_children) {
         const T& v = kv.first;
         const auto& kids = kv.second;
@@ -275,6 +276,7 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> try_promote(const UpperBranchPtr<T, Acc>& node) {
     // Collect all children
     std::vector<UpperPtr<T, Acc>> all_children;
+    all_children.reserve(node->_children->size() * 2); // estimate
     for (auto &kv : *node->_children) {
         for (auto &dkv : kv.second) {
             all_children.push_back(dkv.second);
@@ -317,6 +319,7 @@ static UpperPtr<T, Acc> try_promote(const UpperBranchPtr<T, Acc>& node) {
 
         // Build Lower children by converting each Interface child
         auto l_children = std::make_shared<LowerChildren<T>>();
+        l_children->reserve(node->_children->size());
         for (auto &kv : *node->_children) {
             const T& v = kv.first;
             const auto& kids = kv.second;
@@ -420,6 +423,7 @@ static LowerPtr<T> merge_lower(const LowerPtr<T>& l1, const LowerPtr<T>& l2) {
 template <typename T, typename Acc>
 static UpperPtr<T, Acc> lower_to_upper(const LowerPtr<T>& l, const std::shared_ptr<Acc>& acc) {
     auto children = std::make_shared<UpperChildren<T, Acc>>();
+    children->reserve(l->_children->size());
     for (auto &kv : *l->_children) {
         const T& v = kv.first;
         const auto& kids = kv.second;

@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include "leveled_gss.hpp"
+#include <pybind11/gil.h>
 
 #include <functional>
 #include <memory>
@@ -92,13 +93,17 @@ public:
            py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
            py::object all_internal_llm_tokens_bitset,
            py::dict internal_to_original_map)
-        : tokenizer_(std::move(tokenizer)),
+        : tokenizer_(std::move(tokenizer)), // Keep a ref for error messages etc.
           tokenizer_initial_state_(tokenizer_initial_state),
           tokenizer_max_state_(tokenizer_max_state),
           parser_data_(std::move(parser_data)),
           roots_map_py_(std::move(roots_map_py)),
           pmc_(std::move(possible_matches)),
-          all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
+          all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
+          // Pre-bind Python methods to avoid repeated attr lookups
+          tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
+          tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
+          {
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
@@ -180,15 +185,30 @@ public:
     }
 
     void commit(py::bytes token_bytes) {
+        // Caches for this commit() call.
+        // Key: (offset, tokenizer_sid)
+        struct pair_hash {
+            template <class T1, class T2>
+            std::size_t operator () (const std::pair<T1,T2> &p) const {
+                auto h1 = std::hash<T1>{}(p.first);
+                auto h2 = std::hash<T2>{}(p.second);
+                // A common way to combine hashes.
+                return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+            }
+        };
+        using ExecResult = py::tuple;
+        std::unordered_map<std::pair<int, int>, ExecResult, pair_hash> exec_cache;
+        accessible_cache_.clear();
+
         // Build terminals_map and state_map
         std::string token = token_bytes; // implicit cast via pybind11
         std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
         std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
         // 1) Probe tokenizer from each active state
-        for (auto &kv : state_) {
+        for (const auto &kv : state_) {
             int tokenizer_sid = kv.first;
-            py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
+            py::tuple result = tokenizer_execute_from_state_(py::bytes(token), tokenizer_sid);
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
 
@@ -209,18 +229,22 @@ public:
 
         // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
         std::unordered_map<int, Leveled> temp_states;
-        for (auto &kv : state_) {
-            int tokenizer_sid = kv.first;
-            const Leveled &gss = kv.second;
+        temp_states.reserve(state_.size());
+        {
+            py::gil_scoped_release release; // Release GIL for C++ heavy part
+            for (const auto &kv : state_) {
+                int tokenizer_sid = kv.first;
+                const Leveled &gss = kv.second;
 
-            Leveled pruned = prune_by_terminals_map(gss, terminals_map);
-            if (!pruned.is_empty()) {
-                Leveled mapped = apply_state_map_to_gss(pruned, state_map);
-                if (!mapped.is_empty()) {
-                    temp_states[tokenizer_sid] = std::move(mapped);
+                Leveled pruned = prune_by_terminals_map(gss, terminals_map);
+                if (!pruned.is_empty()) {
+                    Leveled mapped = apply_state_map_to_gss(pruned, state_map);
+                    if (!mapped.is_empty()) {
+                        temp_states[tokenizer_sid] = std::move(mapped);
+                    }
                 }
             }
-        }
+        } // GIL re-acquired here
 
         // 3) Main BFS over token bytes
         struct Item {
@@ -268,7 +292,17 @@ public:
             visited_q_items.insert(key);
 
             std::string suffix = token.substr(static_cast<size_t>(cur.offset));
-            py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(suffix), cur.tokenizer_sid);
+            ExecResult cached_res;
+            auto cache_key = std::make_pair(cur.offset, cur.tokenizer_sid);
+            auto it = exec_cache.find(cache_key);
+            if (it != exec_cache.end()) {
+                cached_res = it->second;
+            } else {
+                cached_res = tokenizer_execute_from_state_(py::bytes(suffix), cur.tokenizer_sid);
+                exec_cache[cache_key] = cached_res;
+            }
+            py::tuple result = cached_res;
+
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
 
@@ -295,14 +329,8 @@ public:
 
                 if (has_end_state) {
                     // Immediate re-match disallow
-                    py::object accessible = tokenizer_.attr("tokens_accessible_from_state")(end_state);
-                    bool immediate = false;
-                    for (auto v : accessible) {
-                        if (py::cast<int>(v) == terminal_id) {
-                            immediate = true; break;
-                        }
-                    }
-                    if (immediate) {
+                    const auto& accessible_set = get_accessible_tokens(end_state);
+                    if (accessible_set.count(terminal_id)) {
                         processed = disallow_in_state(processed, end_state, terminal_id);
                     }
                 }
@@ -340,6 +368,8 @@ public:
     }
 
     py::object get_mask() {
+        py::gil_scoped_release release; // Release GIL for the whole C++ part
+
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
         // todo buckets: depth -> set of nodes
@@ -357,6 +387,9 @@ public:
         // This memoization cache is critical for performance. It's shared across all GSSs
         // being initialized, mirroring the Python implementation's optimization.
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+
+        values.reserve(state_.size());
+        todo.reserve(state_.size());
 
         // Seed with initialized accs (compute allowed llm mask from terminals_union)
         for (auto &kv : state_) {
@@ -453,6 +486,8 @@ public:
                 original_indices.push_back(original_id);
             }
         }
+
+        py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
         return py::cast(RangeSet::from_indices(original_indices));
     }
 
@@ -494,6 +529,8 @@ private:
     // Members
     // -----------------------------
     // Tokenizer
+    // We keep the main object for potential future needs (e.g., error reporting)
+    // but pre-bind hot-path methods for performance.
     py::object tokenizer_;
     int tokenizer_initial_state_{0};
     int tokenizer_max_state_{0};
@@ -524,6 +561,12 @@ private:
     // Current GLR state: tokenizer_state_id -> LeveledGSS
     std::unordered_map<int, Leveled> state_;
 
+    // Pre-bound tokenizer methods
+    py::object tokenizer_execute_from_state_;
+    py::object tokenizer_tokens_accessible_from_state_;
+    // Cache for tokens_accessible_from_state (cleared per commit)
+    std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
+
     // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
     static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
         // Binary search by upper_bound on end values
@@ -538,6 +581,29 @@ private:
         }
         return false;
     }
+
+    // Helper for accessible tokens cache.
+    // NOTE: This function must be called with the GIL released, as it will
+    // temporarily re-acquire it to call into Python.
+    const std::unordered_set<int>& get_accessible_tokens(int state_id) {
+        auto it = accessible_cache_.find(state_id);
+        if (it != accessible_cache_.end()) {
+            return it->second;
+        }
+
+        py::gil_scoped_acquire acquire; // Need GIL for Python call
+        py::object accessible_py = tokenizer_tokens_accessible_from_state_(state_id);
+        std::unordered_set<int> accessible_set;
+        accessible_set.reserve(py::len(accessible_py));
+        for (auto v : accessible_py) {
+            accessible_set.insert(py::cast<int>(v));
+        }
+        py::gil_scoped_release release; // Release again
+
+        auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
+        return inserted_it->second;
+    }
+
     // -----------------------------
     // Parsing helpers
     // -----------------------------
@@ -760,8 +826,7 @@ private:
             auto na = std::make_shared<Acc>();
             na->llm_mask = acc->llm_mask;
             na->terminals_union = acc->terminals_union;
-            std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-            RangeSet to_add = RangeSet::from_indices(idx);
+            RangeSet to_add = RangeSet::from_singleton(static_cast<unsigned long long>(terminal_id));
             RangeSet rs_empty = RangeSet::empty();
             const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
             na->terminals_union[state_id] = curr.union_with(to_add);
