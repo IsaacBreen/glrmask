@@ -839,8 +839,25 @@ public:
     }
 
     // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
-    LeveledGSS apply(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func) const {
+    LeveledGSS apply(
+        const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+    ) const {
         std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
+
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+            acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
+
+        auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+            if (!a) return std::shared_ptr<Acc>(nullptr);
+            auto k = reinterpret_cast<std::uintptr_t>(a.get());
+            auto it = acc_memo.find(k);
+            if (it != acc_memo.end()) return it->second;
+            auto r = func(a);
+            acc_memo.emplace(k, r);
+            return r;
+        };
 
         std::function<UpperPtr<T, Acc>(const UpperPtr<T, Acc>&)> transform =
             [&](const UpperPtr<T, Acc>& node) -> UpperPtr<T, Acc> {
@@ -850,14 +867,14 @@ public:
 
                 if (node->is_interface()) {
                     auto itf = std::static_pointer_cast<Interface<T, Acc>>(node);
-                    auto new_acc = func(itf->acc);
-                    auto new_empty = itf->empty ? func(itf->empty) : std::shared_ptr<Acc>(nullptr);
+                    auto new_acc = apply_func(itf->acc);
+                    auto new_empty = itf->empty ? apply_func(itf->empty) : std::shared_ptr<Acc>(nullptr);
                     auto res = std::make_shared<Interface<T, Acc>>(itf->_children, new_acc, new_empty);
                     memo[nid] = res;
                     return res;
                 } else {
                     auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                    auto new_empty = ub->empty ? func(ub->empty) : std::shared_ptr<Acc>(nullptr);
+                    auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
                     UpperChildren<T, Acc> new_children;
                     for (auto &kv : ub->_children) {
                         const T& v = kv.first;
@@ -961,17 +978,23 @@ public:
         return LeveledGSS(res_inner);
     }
 
-    LeveledGSS apply_and_prune(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator_with_none) const {
-        // mutator_with_none returns nullptr to prune stacks carrying acc; otherwise updated acc
+    LeveledGSS apply_and_prune(
+        const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+    ) const {
+        // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
         std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_cache;
+
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+            acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
 
         auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             if (!a) return std::shared_ptr<Acc>(nullptr);
             auto k = reinterpret_cast<std::uintptr_t>(a.get());
             auto it = acc_cache.find(k);
             if (it != acc_cache.end()) return it->second;
-            auto r = mutator_with_none(a);
+            auto r = mutator(a);
             acc_cache.emplace(k, r);
             return r;
         };

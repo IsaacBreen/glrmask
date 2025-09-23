@@ -3411,6 +3411,12 @@ local_system:
                           bool keep_empty = (itf->empty && predicate(itf->empty));
                           auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
 
+                          // Fast path: if nothing changed, return original node to preserve sharing.
+                          if (keep_acc && new_empty.get() == itf->empty.get()) {
+                              memo[nid] = node;
+                              return node;
+                          }
+
                           if (!keep_acc && !keep_empty) {
                               memo[nid] = nullptr;
                               return nullptr;
@@ -5692,6 +5698,10 @@ local_system:
                   if (first) depth_heap.push(d);
               };
 
+              // This memoization cache is critical for performance. It's shared across all GSSs
+              // being initialized, mirroring the Python implementation's optimization.
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+
               // Seed with initialized accs (compute allowed llm mask from terminals_union)
               for (auto &kv : state_) {
                   int sid = kv.first;
@@ -5700,8 +5710,7 @@ local_system:
                   if (it == roots_map_.end()) continue;
                   root = it->second;
                   const Leveled &gss = kv.second;
-
-                  Leveled gss_initialized = initialize_gss_accs(gss);
+                  Leveled gss_initialized = initialize_gss_accs(gss, &init_acc_memo);
 
                   auto itv = values.find(root);
                   if (itv != values.end()) {
@@ -5714,6 +5723,7 @@ local_system:
               }
 
               py::object final_mask = range_empty_();
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
 
               while (!depth_heap.empty()) {
                   int depth = depth_heap.top(); depth_heap.pop();
@@ -5754,7 +5764,7 @@ local_system:
                               if (child.is_empty()) continue;
 
                               // intersect_and_prune with edge's llm_bv (as RangeSet)
-                              Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                              Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset, &intersect_acc_memo);
                               if (child2.is_empty()) continue;
 
                               int dnode = de.dest_idx;
@@ -6138,7 +6148,10 @@ local_system:
               return merged;
           }
 
-          Leveled initialize_gss_accs(const Leveled& g) {
+          Leveled initialize_gss_accs(
+              const Leveled& g,
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+          ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   // Build disallowed mask as RangeSet
                   py::object disallowed_llm_mask = range_empty_();
@@ -6167,10 +6180,14 @@ local_system:
                   // terminals_union -> empty
                   return na;
               };
-              return g.apply(mutator);
+              return g.apply(mutator, acc_memo);
           }
 
-          Leveled intersect_llm_mask(const Leveled& g, const py::object& limiter) {
+          Leveled intersect_llm_mask(
+              const Leveled& g,
+              const py::object& limiter,
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+          ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   py::object new_mask = a->llm_mask.attr("intersection")(limiter);
                   bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
@@ -6179,7 +6196,7 @@ local_system:
                   na->llm_mask = new_mask;
                   return na;
               };
-              return g.apply_and_prune(mutator);
+              return g.apply_and_prune(mutator, acc_memo);
           }
 
       };
@@ -7045,8 +7062,25 @@ local_system:
           }
 
           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
-          LeveledGSS apply(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func) const {
+          LeveledGSS apply(
+              const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+          ) const {
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
+
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+                  acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
+
+              auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+                  if (!a) return std::shared_ptr<Acc>(nullptr);
+                  auto k = reinterpret_cast<std::uintptr_t>(a.get());
+                  auto it = acc_memo.find(k);
+                  if (it != acc_memo.end()) return it->second;
+                  auto r = func(a);
+                  acc_memo.emplace(k, r);
+                  return r;
+              };
 
               std::function<UpperPtr<T, Acc>(const UpperPtr<T, Acc>&)> transform =
                   [&](const UpperPtr<T, Acc>& node) -> UpperPtr<T, Acc> {
@@ -7056,14 +7090,14 @@ local_system:
 
                       if (node->is_interface()) {
                           auto itf = std::static_pointer_cast<Interface<T, Acc>>(node);
-                          auto new_acc = func(itf->acc);
-                          auto new_empty = itf->empty ? func(itf->empty) : std::shared_ptr<Acc>(nullptr);
+                          auto new_acc = apply_func(itf->acc);
+                          auto new_empty = itf->empty ? apply_func(itf->empty) : std::shared_ptr<Acc>(nullptr);
                           auto res = std::make_shared<Interface<T, Acc>>(itf->_children, new_acc, new_empty);
                           memo[nid] = res;
                           return res;
                       } else {
                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          auto new_empty = ub->empty ? func(ub->empty) : std::shared_ptr<Acc>(nullptr);
+                          auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
                           UpperChildren<T, Acc> new_children;
                           for (auto &kv : ub->_children) {
                               const T& v = kv.first;
@@ -7167,17 +7201,23 @@ local_system:
               return LeveledGSS(res_inner);
           }
 
-          LeveledGSS apply_and_prune(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator_with_none) const {
-              // mutator_with_none returns nullptr to prune stacks carrying acc; otherwise updated acc
+          LeveledGSS apply_and_prune(
+              const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+          ) const {
+              // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_cache;
+
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
+              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+                  acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
 
               auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   if (!a) return std::shared_ptr<Acc>(nullptr);
                   auto k = reinterpret_cast<std::uintptr_t>(a.get());
                   auto it = acc_cache.find(k);
                   if (it != acc_cache.end()) return it->second;
-                  auto r = mutator_with_none(a);
+                  auto r = mutator(a);
                   acc_cache.emplace(k, r);
                   return r;
               };
@@ -10867,6 +10907,12 @@ messages:
                           bool keep_empty = (itf->empty && predicate(itf->empty));
                           auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
 
+                          // Fast path: if nothing changed, return original node to preserve sharing.
+                          if (keep_acc && new_empty.get() == itf->empty.get()) {
+                              memo[nid] = node;
+                              return node;
+                          }
+
                           if (!keep_acc && !keep_empty) {
                               memo[nid] = nullptr;
                               return nullptr;
@@ -11187,77 +11233,226 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on my analysis of the C++ and Python implementations, the primary cause of the poor scaling in the C++ version is a missing optimization in the `LeveledGSS::prune` method. The Python version includes a critical check to avoid reconstructing `Interface` nodes if no changes are made, thereby preserving the structural sharing of the GSS. The C++ version lacks this check, leading to unnecessary allocations and copies, which degrades performance, especially as the GSS grows in complexity.
+      Hello! As an AI assistant, I'd be happy to help you analyze the performance differences between your Python and C++ implementations and get that C++ version running at top speed.
 
-      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
+      Based on my analysis of the code, the poor scaling in the C++ version is primarily due to a subtle but critical deviation from the Python implementation: the lack of accumulator-level memoization in the `LeveledGSS` transformation methods (`apply` and `apply_and_prune`).
 
-      ### Step-by-Step Instructions
+      The Python version's performance relies heavily on sharing computation. When a function is applied to the GSS, it uses a memoization dictionary keyed by accumulator objects (`apply_memo` in `get_mask`). If the same accumulator appears in many different parts of the GSS, the function is only executed on it once.
 
-      1.  **Open the C++ LeveledGSS Header File**
+      Your C++ version correctly memoizes the traversal of GSS *nodes*, but it was missing this crucial caching layer for the *accumulators*. This means that during `get_mask`, the same expensive accumulator transformations (like `initialize_acc` or `intersect_llm_mask`) were being re-computed thousands of times for identical accumulator objects, leading to poor scaling.
 
-          Open the file `python/aug25/models/leveled_gss.hpp`.
+      Here are the step-by-step instructions to fix this by adding the accumulator memoization cache to the C++ implementation.
 
-      2.  **Locate the `prune` Method**
+      ### Step-by-step Instructions
 
-          Navigate to the `prune` method inside the `LeveledGSS` class template. Inside this method, you will find a `transform` lambda function.
+      #### 1. Update `leveled_gss.hpp` to Support Accumulator Caching
 
-      3.  **Modify the `Interface` Pruning Logic**
+      We will modify the `apply` and `apply_and_prune` methods in `LeveledGSS` to accept an optional pointer to an "accumulator cache". This allows the cache to be shared across multiple calls, which is the key to the optimization.
 
-          Within the `transform` lambda, find the `if (node->is_interface())` block. Inside this block, after the line that calculates `new_empty`, you will add a "fast path" check. This check compares the modified state with the original state and returns the original node if nothing has changed, preventing unnecessary reconstruction.
+      In `python/aug25/models/leveled_gss.hpp`:
 
-          **Insert the following code snippet:**
+      1.  Find the `apply` method signature and change it to accept a cache pointer. Then, implement the caching logic.
+      2.  Find the `apply_and_prune` method. It already has a local cache; we'll modify it to accept an optional external cache and use that if provided.
 
-          ```cpp
-                          // Fast path: if nothing changed, return original node to preserve sharing.
-                          if (keep_acc && new_empty.get() == itf->empty.get()) {
-                              memo[nid] = node;
-                              return node;
-                          }
-          ```
+      #### 2. Update `precompute3_engine.cpp` to Use the Accumulator Cache
 
-          This code should be placed immediately after this line:
-          `auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);`
+      Now, we'll update the `Engine` to create and pass these caches during the `get_mask` operation.
 
-          And before this line:
-          `if (!keep_acc && !keep_empty) {`
+      In `python/aug25/models/precompute3_engine.cpp`:
 
-      This single change will significantly improve the performance and scaling of the C++ implementation by preserving the shared structure of the GSS, just like the Python version does.
+      1.  Modify the helper functions `initialize_gss_accs` and `intersect_llm_mask` to accept and pass along the cache pointer to the GSS methods.
+      2.  In the `get_mask` method:
+          *   Create a single `init_acc_memo` map *before* the loop that seeds the traversal. Pass a pointer to it in the call to `initialize_gss_accs`. This ensures the cache is shared for all initial GSS states.
+          *   Create a single `intersect_acc_memo` map before the main traversal loop. Pass a pointer to it in the call to `intersect_llm_mask` inside the loop.
 
-      ### Git Diff
+      These changes will ensure that computations on accumulators are memoized correctly, restoring the performance and scaling characteristics of the original Python implementation.
 
-      Here is the git patch to apply the fix.
+      ---
+
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 4554f67..f721528 100644
+      index 455e81d..59c3d49 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -628,6 +628,12 @@
-                           bool keep_empty = (itf->empty && predicate(itf->empty));
-                           auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
+      @@ -608,8 +608,22 @@
+           }
        
-      +                    // Fast path: if nothing changed, return original node to preserve sharing.
-      +                    if (keep_acc && new_empty.get() == itf->empty.get()) {
-      +                        memo[nid] = node;
-      +                        return node;
-      +                    }
+           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
+      -    LeveledGSS apply(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func) const {
+      +    LeveledGSS apply(
+      +        const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+      +    ) const {
+               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
       +
-                           if (!keep_acc && !keep_empty) {
-                               memo[nid] = nullptr;
-                               return nullptr;
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+      +            acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
+      +
+      +        auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+      +            if (!a) return std::shared_ptr<Acc>(nullptr);
+      +            auto k = reinterpret_cast<std::uintptr_t>(a.get());
+      +            auto it = acc_memo.find(k);
+      +            if (it != acc_memo.end()) return it->second;
+      +            auto r = func(a);
+      +            acc_memo.emplace(k, r);
+      +            return r;
+      +        };
+       
+               std::function<UpperPtr<T, Acc>(const UpperPtr<T, Acc>&)> transform =
+                   [&](const UpperPtr<T, Acc>& node) -> UpperPtr<T, Acc> {
+      @@ -619,14 +633,14 @@
+       
+                       if (node->is_interface()) {
+                           auto itf = std::static_pointer_cast<Interface<T, Acc>>(node);
+      -                    auto new_acc = func(itf->acc);
+      -                    auto new_empty = itf->empty ? func(itf->empty) : std::shared_ptr<Acc>(nullptr);
+      +                    auto new_acc = apply_func(itf->acc);
+      +                    auto new_empty = itf->empty ? apply_func(itf->empty) : std::shared_ptr<Acc>(nullptr);
+                           auto res = std::make_shared<Interface<T, Acc>>(itf->_children, new_acc, new_empty);
+                           memo[nid] = res;
+                           return res;
+                       } else {
+                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+      -                    auto new_empty = ub->empty ? func(ub->empty) : std::shared_ptr<Acc>(nullptr);
+      +                    auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
+                           UpperChildren<T, Acc> new_children;
+                           for (auto &kv : ub->_children) {
+                               const T& v = kv.first;
+      @@ -743,19 +757,21 @@
+               return LeveledGSS(res_inner);
+           }
+       
+      -    LeveledGSS apply_and_prune(const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator_with_none) const {
+      -        // mutator_with_none returns nullptr to prune stacks carrying acc; otherwise updated acc
+      +    LeveledGSS apply_and_prune(
+      +        const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+      +    ) const {
+      +        // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
+               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
+      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_cache;
+      +
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+      +            acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
+       
+               auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+                   if (!a) return std::shared_ptr<Acc>(nullptr);
+                   auto k = reinterpret_cast<std::uintptr_t>(a.get());
+                   auto it = acc_cache.find(k);
+                   if (it != acc_cache.end()) return it->second;
+      -            auto r = mutator_with_none(a);
+      +            auto r = mutator(a);
+                   acc_cache.emplace(k, r);
+                   return r;
+               };
+
+      ``````diff
+      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
+      index 223508a..f628531 100644
+      --- a/python/aug25/models/precompute3_engine.cpp
+      +++ b/python/aug25/models/precompute3_engine.cpp
+      @@ -204,6 +204,10 @@
+                   if (first) depth_heap.push(d);
+               };
+       
+      +        // This memoization cache is critical for performance. It's shared across all GSSs
+      +        // being initialized, mirroring the Python implementation's optimization.
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+      +
+               // Seed with initialized accs (compute allowed llm mask from terminals_union)
+               for (auto &kv : state_) {
+                   int sid = kv.first;
+      @@ -212,8 +216,7 @@
+                   if (it == roots_map_.end()) continue;
+                   root = it->second;
+                   const Leveled &gss = kv.second;
+      -
+      -            Leveled gss_initialized = initialize_gss_accs(gss);
+      +            Leveled gss_initialized = initialize_gss_accs(gss, &init_acc_memo);
+       
+                   auto itv = values.find(root);
+                   if (itv != values.end()) {
+      @@ -226,6 +229,7 @@
+               }
+       
+               py::object final_mask = range_empty_();
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
+       
+               while (!depth_heap.empty()) {
+                   int depth = depth_heap.top(); depth_heap.pop();
+      @@ -253,7 +257,7 @@
+                               if (child.is_empty()) continue;
+       
+                               // intersect_and_prune with edge's llm_bv (as RangeSet)
+      -                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+      +                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset, &intersect_acc_memo);
+                               if (child2.is_empty()) continue;
+       
+                               int dnode = de.dest_idx;
+      @@ -582,7 +586,10 @@
+               return merged;
+           }
+       
+      -    Leveled initialize_gss_accs(const Leveled& g) {
+      +    Leveled initialize_gss_accs(
+      +        const Leveled& g,
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+      +    ) {
+               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+                   // Build disallowed mask as RangeSet
+                   py::object disallowed_llm_mask = range_empty_();
+      @@ -610,10 +617,14 @@
+                   // terminals_union -> empty
+                   return na;
+               };
+      -        return g.apply(mutator);
+      -    }
+      -
+      -    Leveled intersect_llm_mask(const Leveled& g, const py::object& limiter) {
+      +        return g.apply(mutator, acc_memo);
+      +    }
+      +
+      +    Leveled intersect_llm_mask(
+      +        const Leveled& g,
+      +        const py::object& limiter,
+      +        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+      +    ) {
+               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+                   py::object new_mask = a->llm_mask.attr("intersection")(limiter);
+                   bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
+      @@ -622,7 +633,7 @@
+                   na->llm_mask = new_mask;
+                   return na;
+               };
+      -        return g.apply_and_prune(mutator);
+      +        return g.apply_and_prune(mutator, acc_memo);
+           }
+       
+       };
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/leveled_gss.hpp
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/precompute3_engine.cpp
+      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "perf: Improve LeveledGSS pruning by avoiding
-      unnecessary node reconstruction"'
+  - user: 'Changes committed with message: "perf: Add accumulator memoization to C++
+      LeveledGSS to improve scaling"'
     metadata:
 ...

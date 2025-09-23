@@ -273,6 +273,10 @@ public:
             if (first) depth_heap.push(d);
         };
 
+        // This memoization cache is critical for performance. It's shared across all GSSs
+        // being initialized, mirroring the Python implementation's optimization.
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+
         // Seed with initialized accs (compute allowed llm mask from terminals_union)
         for (auto &kv : state_) {
             int sid = kv.first;
@@ -281,8 +285,7 @@ public:
             if (it == roots_map_.end()) continue;
             root = it->second;
             const Leveled &gss = kv.second;
-
-            Leveled gss_initialized = initialize_gss_accs(gss);
+            Leveled gss_initialized = initialize_gss_accs(gss, &init_acc_memo);
 
             auto itv = values.find(root);
             if (itv != values.end()) {
@@ -295,6 +298,7 @@ public:
         }
 
         py::object final_mask = range_empty_();
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
 
         while (!depth_heap.empty()) {
             int depth = depth_heap.top(); depth_heap.pop();
@@ -335,7 +339,7 @@ public:
                         if (child.is_empty()) continue;
 
                         // intersect_and_prune with edge's llm_bv (as RangeSet)
-                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset, &intersect_acc_memo);
                         if (child2.is_empty()) continue;
 
                         int dnode = de.dest_idx;
@@ -719,7 +723,10 @@ private:
         return merged;
     }
 
-    Leveled initialize_gss_accs(const Leveled& g) {
+    Leveled initialize_gss_accs(
+        const Leveled& g,
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+    ) {
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             // Build disallowed mask as RangeSet
             py::object disallowed_llm_mask = range_empty_();
@@ -748,10 +755,14 @@ private:
             // terminals_union -> empty
             return na;
         };
-        return g.apply(mutator);
+        return g.apply(mutator, acc_memo);
     }
 
-    Leveled intersect_llm_mask(const Leveled& g, const py::object& limiter) {
+    Leveled intersect_llm_mask(
+        const Leveled& g,
+        const py::object& limiter,
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+    ) {
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             py::object new_mask = a->llm_mask.attr("intersection")(limiter);
             bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
@@ -760,7 +771,7 @@ private:
             na->llm_mask = new_mask;
             return na;
         };
-        return g.apply_and_prune(mutator);
+        return g.apply_and_prune(mutator, acc_memo);
     }
 
 };
