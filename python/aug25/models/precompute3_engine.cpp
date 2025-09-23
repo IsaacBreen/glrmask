@@ -904,8 +904,7 @@ private:
                 py::object llm_bv_json = edge_key[1];
 
                 // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                py::list llm_ranges_py = py::cast<py::list>(llm_bv_json);
                 std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                 llm_ranges_cpp.reserve(py::len(llm_ranges_py));
                 for (auto r : llm_ranges_py) {
@@ -922,11 +921,9 @@ private:
                     int dest_idx = py::cast<int>(dd[0]);
                     py::object state_bv_json = dd[1];
 
-                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-                    bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
+                    py::list py_ranges = py::cast<py::list>(state_bv_json);
                     std::vector<std::pair<int,int>> ranges;
-                    if (!is_empty_bv) {
-                        py::object py_ranges = state_bv.attr("to_ranges")();
+                    if (py::len(py_ranges) > 0) {
                         ranges.reserve(py::len(py_ranges));
                         for (auto it : py_ranges) {
                             py::tuple t = py::cast<py::tuple>(it);
@@ -935,6 +932,7 @@ private:
                             ranges.emplace_back(l, r);
                         }
                     }
+
                     dests.push_back(DestEdge{dest_idx, std::move(ranges)});
                 }
 
@@ -1145,6 +1143,8 @@ private:
         auto& stats = Stats::get();
         stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -1161,7 +1161,8 @@ private:
             na->llm_mask = new_mask;
             return na;
         };
-        auto result = g.apply_and_prune(mutator);
+        auto result = g.apply_and_prune(mutator, &acc_memo);
+        stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
         stats.stop("get_mask.main_loop.edge.apply_and_prune");
         return result;
     }
