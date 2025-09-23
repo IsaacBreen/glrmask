@@ -9,9 +9,9 @@ PYBIND11_MODULE(icl_rangeset, m) {
 
     py::class_<RangeSet>(m, "RangeSet")
         .def(py::init<>())
+        .def_static("empty", &RangeSet::empty, "Create an empty RangeSet")
         .def_static("from_singleton", &RangeSet::from_singleton, py::arg("index"),
                     "Create a RangeSet containing exactly one index")
-        .def_static("empty", &RangeSet::empty, "Create an empty RangeSet")
         .def_static("from_indices", &RangeSet::from_indices, py::arg("indices"),
                     "Create a RangeSet from a list of indices")
         .def_static("from_ranges", &RangeSet::from_ranges, py::arg("ranges"),

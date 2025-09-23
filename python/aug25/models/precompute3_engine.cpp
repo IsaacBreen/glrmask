@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include <queue>
+#include <cstdint>
 #include <set>
 #include <optional>
 #include <string>
@@ -93,6 +94,9 @@ public:
            py::object all_internal_llm_tokens_bitset,
            py::dict internal_to_original_map)
         : tokenizer_(std::move(tokenizer)),
+          // Pre-bind Python methods to avoid repeated attr lookups
+          tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
+          tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state")),
           tokenizer_initial_state_(tokenizer_initial_state),
           tokenizer_max_state_(tokenizer_max_state),
           parser_data_(std::move(parser_data)),
@@ -103,6 +107,10 @@ public:
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
         }
+        // Initialize per-state accessibility cache (lazy fill)
+        tokens_accessible_cache_.resize(static_cast<size_t>(std::max(0, tokenizer_max_state_) + 1));
+        tokens_accessible_cache_built_.resize(static_cast<size_t>(std::max(0, tokenizer_max_state_) + 1));
+        std::fill(tokens_accessible_cache_built_.begin(), tokens_accessible_cache_built_.end(), static_cast<uint8_t>(0));
 
         // Universe RangeSet for get_mask init
         {
@@ -179,45 +187,74 @@ public:
         state_[tokenizer_initial_state_] = std::move(init);
     }
 
+    // Commit keeps GIL for Python calls but releases it during pure C++ crunch
     void commit(py::bytes token_bytes) {
         // Build terminals_map and state_map
         std::string token = token_bytes; // implicit cast via pybind11
+        struct ExecResult {
+            bool has_end{false};
+            int end_state{-1};
+            std::vector<std::pair<int,int>> matches; // (terminal_id, width)
+        };
         std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
         std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
         // 1) Probe tokenizer from each active state
-        for (auto &kv : state_) {
-            int tokenizer_sid = kv.first;
-            py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(token), tokenizer_sid);
+        // Cache execute_from_state on (offset, sid) to avoid repeated Python calls
+        std::unordered_map<uint64_t, ExecResult> exec_cache;
+        exec_cache.reserve(state_.size() * 4 + 8);
+        auto get_exec = [&](int offset, int tokenizer_sid) -> const ExecResult& {
+            uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(offset)) << 32)
+                         | static_cast<uint32_t>(tokenizer_sid);
+            auto it = exec_cache.find(key);
+            if (it != exec_cache.end()) return it->second;
+            ExecResult er;
+            std::string suffix = token.substr(static_cast<size_t>(offset));
+            py::tuple result = tokenizer_execute_from_state_(py::bytes(suffix), tokenizer_sid);
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
-
-            if (!end_state_obj.is_none()) {
-                int end_state = py::cast<int>(end_state_obj);
-                state_map[tokenizer_sid] = end_state;
-            }
-
-            std::vector<unsigned long long> matched_terminals;
-            matched_terminals.reserve(32);
+            er.has_end = !end_state_obj.is_none();
+            er.end_state = er.has_end ? py::cast<int>(end_state_obj) : -1;
+            er.matches.reserve(py::len(matches_obj));
             for (auto tm : matches_obj) {
                 py::tuple tmt = py::cast<py::tuple>(tm);
                 int terminal_id = py::cast<int>(tmt[0]);
-                matched_terminals.push_back(static_cast<unsigned long long>(terminal_id));
+                int width = py::cast<int>(tmt[1]);
+                er.matches.emplace_back(terminal_id, width);
+            }
+            auto [iter, inserted] = exec_cache.emplace(key, std::move(er));
+            return iter->second;
+        };
+
+        for (auto &kv : state_) {
+            int tokenizer_sid = kv.first;
+            const ExecResult& er0 = get_exec(0, tokenizer_sid);
+            if (er0.has_end) {
+                state_map[tokenizer_sid] = er0.end_state;
+            }
+            std::vector<unsigned long long> matched_terminals;
+            matched_terminals.reserve(er0.matches.size());
+            for (const auto& mt : er0.matches) {
+                matched_terminals.push_back(static_cast<unsigned long long>(mt.first));
             }
             terminals_map[tokenizer_sid] = RangeSet::from_indices(matched_terminals);
         }
 
         // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
         std::unordered_map<int, Leveled> temp_states;
-        for (auto &kv : state_) {
-            int tokenizer_sid = kv.first;
-            const Leveled &gss = kv.second;
+        {
+            // Release GIL for pure C++ heavy transforms
+            py::gil_scoped_release nogil;
+            for (auto &kv : state_) {
+                int tokenizer_sid = kv.first;
+                const Leveled &gss = kv.second;
 
-            Leveled pruned = prune_by_terminals_map(gss, terminals_map);
-            if (!pruned.is_empty()) {
-                Leveled mapped = apply_state_map_to_gss(pruned, state_map);
-                if (!mapped.is_empty()) {
-                    temp_states[tokenizer_sid] = std::move(mapped);
+                Leveled pruned = prune_by_terminals_map(gss, terminals_map);
+                if (!pruned.is_empty()) {
+                    Leveled mapped = apply_state_map_to_gss(pruned, state_map);
+                    if (!mapped.is_empty()) {
+                        temp_states[tokenizer_sid] = std::move(mapped);
+                    }
                 }
             }
         }
@@ -239,6 +276,7 @@ public:
             int tokenizer_sid;
             std::uintptr_t gss_ptr;
 
+            // Key equality for BFS dedup
             bool operator==(const QItemKey& other) const {
                 return offset == other.offset &&
                        tokenizer_sid == other.tokenizer_sid &&
@@ -267,27 +305,17 @@ public:
             if (visited_q_items.count(key)) continue;
             visited_q_items.insert(key);
 
-            std::string suffix = token.substr(static_cast<size_t>(cur.offset));
-            py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(suffix), cur.tokenizer_sid);
-            py::object end_state_obj = result[0];
-            py::object matches_obj = result[1];
-
-            bool has_end_state = !end_state_obj.is_none();
-            int end_state = has_end_state ? py::cast<int>(end_state_obj) : -1;
-
-            // collect matches
-            std::vector<std::pair<int,int>> matches; // (terminal_id, width)
-            for (auto tm : matches_obj) {
-                py::tuple tmt = py::cast<py::tuple>(tm);
-                int terminal_id = py::cast<int>(tmt[0]);
-                int width = py::cast<int>(tmt[1]);
-                matches.emplace_back(terminal_id, width);
-            }
+            const ExecResult& er_cur = get_exec(cur.offset, cur.tokenizer_sid);
+            bool has_end_state = er_cur.has_end;
+            int end_state = er_cur.end_state;
+            const auto& matches = er_cur.matches;
 
             for (auto &mt : matches) {
                 int terminal_id = mt.first;
                 int width = mt.second;
-                
+
+                // Release GIL while traversing/mutating the pure C++ GSS
+                py::gil_scoped_release nogil;
                 Leveled processed = cur.gss;
                 if (!(ignore_terminal_id_.has_value() && terminal_id == *ignore_terminal_id_)) {
                     processed = process_token(processed, terminal_id);
@@ -295,13 +323,7 @@ public:
 
                 if (has_end_state) {
                     // Immediate re-match disallow
-                    py::object accessible = tokenizer_.attr("tokens_accessible_from_state")(end_state);
-                    bool immediate = false;
-                    for (auto v : accessible) {
-                        if (py::cast<int>(v) == terminal_id) {
-                            immediate = true; break;
-                        }
-                    }
+                    bool immediate = is_terminal_accessible_from_state(end_state, terminal_id);
                     if (immediate) {
                         processed = disallow_in_state(processed, end_state, terminal_id);
                     }
@@ -340,6 +362,7 @@ public:
     }
 
     py::object get_mask() {
+        py::gil_scoped_release nogil;
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
         // todo buckets: depth -> set of nodes
@@ -354,6 +377,7 @@ public:
             if (first) depth_heap.push(d);
         };
 
+        values.reserve(state_.size() + 4);
         // This memoization cache is critical for performance. It's shared across all GSSs
         // being initialized, mirroring the Python implementation's optimization.
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
@@ -444,6 +468,7 @@ public:
         }
 
         // Convert internal mask indices to original
+        // GIL is still released; we'll reacquire after this scope before returning
         std::vector<unsigned long long> original_indices;
         // Optimization: iterate over the map instead of expanding the rangeset,
         // as the map size is bounded by vocab size.
@@ -453,6 +478,7 @@ public:
                 original_indices.push_back(original_id);
             }
         }
+        // GIL automatically reacquires here when nogil goes out of scope
         return py::cast(RangeSet::from_indices(original_indices));
     }
 
@@ -495,6 +521,8 @@ private:
     // -----------------------------
     // Tokenizer
     py::object tokenizer_;
+    py::object tokenizer_execute_from_state_;
+    py::object tokenizer_tokens_accessible_from_state_;
     int tokenizer_initial_state_{0};
     int tokenizer_max_state_{0};
     std::optional<int> ignore_terminal_id_;
@@ -523,6 +551,10 @@ private:
 
     // Current GLR state: tokenizer_state_id -> LeveledGSS
     std::unordered_map<int, Leveled> state_;
+
+    // Caches
+    std::vector<std::unordered_set<int>> tokens_accessible_cache_;
+    std::vector<uint8_t> tokens_accessible_cache_built_;
 
     // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
     static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
@@ -760,10 +792,8 @@ private:
             auto na = std::make_shared<Acc>();
             na->llm_mask = acc->llm_mask;
             na->terminals_union = acc->terminals_union;
-            std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-            RangeSet to_add = RangeSet::from_indices(idx);
-            RangeSet rs_empty = RangeSet::empty();
-            const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
+            RangeSet to_add = RangeSet::from_singleton(static_cast<unsigned long long>(terminal_id));
+            const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : RangeSet::empty();
             na->terminals_union[state_id] = curr.union_with(to_add);
             return na;
         };
@@ -884,6 +914,25 @@ private:
             return na;
         };
         return g.apply_and_prune(mutator, acc_memo);
+    }
+
+    // Lazy cache for immediate token accessibility from a tokenizer state
+    bool is_terminal_accessible_from_state(int state_id, int terminal_id) {
+        if (state_id < 0) return false;
+        size_t idx = static_cast<size_t>(state_id);
+        if (idx >= tokens_accessible_cache_built_.size()) return false;
+        if (!tokens_accessible_cache_built_[idx]) {
+            py::object iterable = tokenizer_tokens_accessible_from_state_(state_id);
+            auto& s = tokens_accessible_cache_[idx];
+            // Heuristic reserve; typical sizes are small
+            if (s.empty()) s.reserve(32);
+            for (auto v : iterable) {
+                s.insert(py::cast<int>(v));
+            }
+            tokens_accessible_cache_built_[idx] = static_cast<uint8_t>(1);
+        }
+        const auto& s = tokens_accessible_cache_[idx];
+        return s.find(terminal_id) != s.end();
     }
 
 };
