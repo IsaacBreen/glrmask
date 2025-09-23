@@ -15,6 +15,7 @@ gss_bench_results/
 gss_bench_analysis/
 benchmark_results/
 benchmark_plots/
+.build/
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
