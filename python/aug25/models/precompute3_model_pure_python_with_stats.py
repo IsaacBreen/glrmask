@@ -551,7 +551,11 @@ class Model(GraphProvider):
                     # Traverse edges and propagate masks
                     edges = arena.get(node, {}).get("children") or []
                     stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
+                    if len(edges) > 10:
+                        print("len(edges)", len(edges))
                     stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
+                    if sum(len(dests) for _, dests in edges) > 10:
+                        print("sum(len(dests) for _, dests in edges)", sum(len(dests) for _, dests in edges))
                     for (pop, llm_bv), dests in edges:
                         llm_bv = llm_bv.difference(final_mask)
 
