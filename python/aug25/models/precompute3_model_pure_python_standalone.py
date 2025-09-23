@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import heapq
 import collections
-import time
-import os
 from dataclasses import dataclass, field
 from functools import reduce
 from itertools import chain
@@ -24,19 +22,10 @@ from typing import (
     Union,
     Protocol,
 )
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
-
-
-# Add a dummy profiler for when not running under kernprof
-try:
-    # This will be injected by the kernprof script.
-    profile
-except NameError:
-    # If not running under kernprof, create a dummy decorator.
-    def profile(func): return func
 
 
 # ------------------------------
@@ -134,226 +123,9 @@ class Lower(Generic[T]):
             yield from v_children.values()
 
 
-@dataclass(frozen=True)
-class LeveledGSSStats(Generic[T, Acc]):
-    # Stack-level statistics
-    top_values: Set[T]
-
-    # Structure-level statistics (unique nodes/edges in the DAG)
-    num_upperbranch_nodes: int
-    num_interface_nodes: int
-    num_lower_nodes: int
-    total_unique_nodes: int
-
-    upper_edges: int                      # UpperBranch -> (Upper | Interface)
-    interface_to_lower_edges: int         # Interface -> Lower
-    lower_edges: int                      # Lower -> Lower
-    total_edges: int
-
-    max_upper_depth: int                  # inner._max_depth at root (Upper tree)
-    max_lower_depth: int                  # max _max_depth across Lower nodes
-
-    # Value/accumulator coverage
-    distinct_values_count: int
-    distinct_values: Set[T]
-    unique_accumulators_count: int
-    unique_accumulators: Set[Acc]
-    total_accumulator_instances: int
-
-    # "Empty" flags / terminal interfaces
-    num_upper_with_empty: int
-    num_interfaces_with_empty: int
-    num_lower_terminal_nodes: int
-    num_interface_implicit_terminals: int  # Interface nodes that represent a terminal stack via acc (no children, empty=None)
-
-    # Multi-depth slot metrics
-    num_multi_depth_slots_upper: int       # Count of (UpperBranch node, value) pairs with >1 children at different depths
-    num_multi_depth_slots_lower: int       # Same for the lower layer (Interface and Lower children)
-    max_multiplicity_per_value_upper: int
-    max_multiplicity_per_value_lower: int
-
-    # Sharing/graph metrics
-    average_in_degree: float               # average incoming edges across nodes with at least one incoming edge
-    max_in_degree: int
-    structural_sharing_factor: float       # edges / max(1, nodes - 1) — >1 implies sharing
-
-    # Potential canonicalization insights (non-fatal)
-    promotable_upper_nodes: int            # UpperBranch nodes that could be promoted to Interface
-
-    def _fmt_subset(self, s: Set[Any], max_items: int = 10) -> str:
-        if not s:
-            return "{}"
-        items = list(s)
-        shown = ", ".join(repr(x) for x in items[:max_items])
-        suffix = "" if len(items) <= max_items else ", ..."
-        return "{" + shown + suffix + "}"
-
-    def _fmt_hist(self, h: Dict[int, int], max_items: int = 12) -> str:
-        if not h:
-            return "{}"
-        keys = sorted(h.keys())
-        shown_pairs = []
-        for k in keys[:max_items]:
-            shown_pairs.append(f"{k}:{h[k]}")
-        suffix = "" if len(keys) <= max_items else ", ..."
-        return "{" + ", ".join(shown_pairs) + suffix + "}"
-
-    def __str__(self) -> str:
-        lines: List[str] = []
-        lines.append("LeveledGSSStats")
-        lines.append(f"- top_values: {len(self.top_values)} distinct -> {self._fmt_subset(self.top_values)}")
-
-        lines.append("- structure:")
-        lines.append(f"  nodes: UpperBranch={self.num_upperbranch_nodes}, Interface={self.num_interface_nodes}, Lower={self.num_lower_nodes}, total={self.total_unique_nodes}")
-        lines.append(f"  edges: upper={self.upper_edges}, interface_to_lower={self.interface_to_lower_edges}, lower={self.lower_edges}, total={self.total_edges}")
-        lines.append(f"  depths: max_upper_depth={self.max_upper_depth}, max_lower_depth={self.max_lower_depth}")
-
-        lines.append("- values/accumulators:")
-        lines.append(f"  distinct_values_count={self.distinct_values_count}, sample={self._fmt_subset(self.distinct_values)}")
-        lines.append(f"  unique_accumulators_count={self.unique_accumulators_count} (physically stored)")
-        lines.append(f"  total_accumulator_instances={self.total_accumulator_instances} (storage slots used)")
-
-        lines.append("- empties/terminals:")
-        lines.append(f"  upper_with_empty={self.num_upper_with_empty} (nodes representing a true empty stack)")
-        lines.append(f"  interfaces_with_empty={self.num_interfaces_with_empty} (nodes representing a true empty stack)")
-        lines.append(f"  lower_terminal_nodes={self.num_lower_terminal_nodes} (nodes where a stack can end)")
-        lines.append(f"  interface_implicit_terminals={self.num_interface_implicit_terminals} (interfaces with no children)")
-
-        lines.append("- multi-depth slots:")
-        lines.append(f"  num_multi_depth_slots_upper={self.num_multi_depth_slots_upper}, max_multiplicity_per_value_upper={self.max_multiplicity_per_value_upper}")
-        lines.append(f"  num_multi_depth_slots_lower={self.num_multi_depth_slots_lower}, max_multiplicity_per_value_lower={self.max_multiplicity_per_value_lower}")
-
-        lines.append("- sharing/graph:")
-        lines.append(f"  average_in_degree={self.average_in_degree}, max_in_degree={self.max_in_degree}, structural_sharing_factor={self.structural_sharing_factor}")
-
-        lines.append("- canonicalization opportunities (non-fatal):")
-        lines.append(f"  promotable_upper_nodes={self.promotable_upper_nodes}")
-        return "\n".join(lines)
-
-
 @dataclass(frozen=True, eq=True)
 class LeveledGSS(Generic[T, Acc]):
     inner: Upper[T, Acc]
-
-    def __post_init__(self):
-        if os.environ.get("GSS_TESTER_VALIDATE"):
-            self._validate()
-
-    def _validate(self):
-        self._validate_max_depths()
-        self._validate_no_promotions()
-        self._validate_populated_nodes()
-
-    def _validate_max_depths(self) -> None:
-        """Recursively validates that the `_max_depth` of each node is correct."""
-        self._validate_depths_node(self.inner)
-
-    def _validate_depths_node(self, node: Upper[T, Acc]) -> None:
-        """Recursive helper for validating max_depth on Upper nodes."""
-        if isinstance(node, Interface):
-            # An Interface node has Lower children. We need to validate their depths recursively.
-            def _validate_lower_recursively(n: Interface[T, Acc] | Lower[T]):
-                for children_at_depth in n.children.values():
-                    for depth, child in children_at_depth.items():
-                        if depth != child._max_depth:
-                            raise ValueError(
-                                "LeveledGSS validation failed: incorrect max_depth for Lower child. "
-                                f"Expected {depth}, got {child._max_depth}. Node: {n}"
-                            )
-                        _validate_lower_recursively(child)
-
-            _validate_lower_recursively(node)
-            return  # Leaf of the upper tree
-
-        # It must be an UpperBranch
-        # Recurse on children and check their depths
-        for children_at_depth in node.children.values():
-            for depth, child in children_at_depth.items():
-                if depth != child._max_depth:
-                    raise ValueError(
-                        "LeveledGSS validation failed: incorrect max_depth for Upper child. "
-                        f"Expected {depth}, got {child._max_depth}. Node: {node}"
-                    )
-                self._validate_depths_node(child)
-
-    def _validate_no_promotions(self) -> None:
-        """
-        Recursively validates that no UpperBranch nodes can be promoted to an Interface.
-        An UpperBranch can be promoted if all its children are Interfaces and they all
-        (including the UpperBranch's own empty slot) represent the same single accumulator value.
-        """
-        if isinstance(self.inner, UpperBranch):
-            self._validate_promotion_node(self.inner)
-
-    def _validate_promotion_node(self, node: Upper[T, Acc]) -> None:
-        """Recursive helper for promotion validation."""
-        if isinstance(node, Interface):
-            return  # Leaf of the upper tree
-
-        # It must be an UpperBranch
-        # First, recurse on children
-        for children_at_depth in node.children.values():
-            for child in children_at_depth.values():
-                self._validate_promotion_node(child)
-
-        # Now, check for promotion condition on the current node
-        # All children are Interfaces. Gather all accumulators.
-        accs: Set[Acc] = set()
-        if node.empty is not None:
-            accs.add(node.empty)
-
-        for child in node._all_children():
-            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
-            accs.add(interface_child.acc)
-            if interface_child.empty is not None:
-                accs.add(interface_child.empty)
-
-        if len(accs) == 1:
-            raise ValueError(
-                "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
-                f"indicating a non-canonical structure. Node: {node}"
-            )
-
-    def _validate_populated_nodes(self) -> None:
-        """
-        Validates that every node represents at least one stack, with the
-        exception of the root UpperBranch for an empty GSS.
-        """
-        # The root can be an empty UpperBranch, which represents an empty GSS.
-        if isinstance(self.inner, UpperBranch) and not self.inner.children and self.inner.empty is None:
-            return
-
-        self._validate_node_is_populated(self.inner)
-
-    def _validate_node_is_populated(self, node: Upper[T, Acc] | Lower[T]) -> None:
-        """Recursive helper for validation."""
-        if isinstance(node, UpperBranch):
-            if not node.children and node.empty is None:
-                raise ValueError(
-                    "LeveledGSS validation failed: UpperBranch with no children and no empty accumulator "
-                    f"found in a non-root position. Node: {node}"
-                )
-            for children_at_depth in node.children.values():
-                for child in children_at_depth.values():
-                    self._validate_node_is_populated(child)
-        elif isinstance(node, Interface):
-            if not node.children and node.empty is None:
-                raise ValueError(
-                    "LeveledGSS validation failed: Interface with no children and no empty accumulator found. "
-                    f"Node: {node}"
-                )
-            for children_at_depth in node.children.values():
-                for child in children_at_depth.values():
-                    self._validate_node_is_populated(child)
-        elif isinstance(node, Lower):
-            if not node.children and not node.empty:
-                raise ValueError(
-                    "LeveledGSS validation failed: Lower node with no children and empty=False found. "
-                    f"Node: {node}"
-                )
-            for children_at_depth in node.children.values():
-                for child in children_at_depth.values():
-                    self._validate_node_is_populated(child)
 
     @classmethod
     def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> "LeveledGSS[T, Acc]":
@@ -871,199 +643,6 @@ class LeveledGSS(Generic[T, Acc]):
 
         return reduce(_merge_acc, accumulators)
 
-    def stats(self) -> LeveledGSSStats[T, Acc]:
-        """
-        Compute a comprehensive set of statistics for this LeveledGSS.
-        This operation is efficient and does not enumerate all stacks, focusing on structural properties.
-        """
-        top_values: Set[T] = set(self.inner.children.keys())
-
-        # --------------------
-        # Structural scan (unique nodes/edges, depths, values, accumulators, multi-depth slots, sharing)
-        # --------------------
-        visited_upperbranch: Set[int] = set()
-        visited_interface: Set[int] = set()
-        visited_lower: Set[int] = set()
-
-        num_upperbranch_nodes = 0
-        num_interface_nodes = 0
-        num_lower_nodes = 0
-
-        upper_edges = 0
-        interface_to_lower_edges = 0
-        lower_edges = 0
-
-        distinct_values: Set[T] = set()
-        unique_accumulators: Set[Acc] = set()
-        total_accumulator_instances = 0
-
-        num_upper_with_empty = 0
-        num_interfaces_with_empty = 0
-        num_lower_terminal_nodes = 0
-        num_interface_implicit_terminals = 0
-
-        num_multi_depth_slots_upper = 0
-        num_multi_depth_slots_lower = 0
-        max_multiplicity_per_value_upper = 1
-        max_multiplicity_per_value_lower = 1
-
-        max_lower_depth = 0
-
-        incoming_edges: Dict[int, int] = {}
-
-        def bump_incoming(child_obj: Any) -> None:
-            cid = id(child_obj)
-            incoming_edges[cid] = incoming_edges.get(cid, 0) + 1
-
-        # Promotable UpperBranch nodes
-        promotable_upper_nodes = 0
-
-        def is_promotable(node: UpperBranch[T, Acc]) -> bool:
-            all_children = list(node._all_children())
-            if not all_children:
-                return False
-            if not all(isinstance(c, Interface) for c in all_children):
-                return False
-            accs: Set[Acc] = set()
-            if node.empty is not None:
-                accs.add(node.empty)
-            for c in all_children:
-                ic: Interface[T, Acc] = c  # type: ignore[assignment]
-                accs.add(ic.acc)
-                if ic.empty is not None:
-                    accs.add(ic.empty)
-            return len(accs) == 1
-
-        # Traverse graph collecting the structural stats
-        # Use queues to ensure we visit each UNIQUE node once for node-level data,
-        # but we still count edges (which are properties of parents) when visiting each unique parent.
-        upper_queue: List[Upper[T, Acc]] = [self.inner]
-        lower_queue: List[Lower[T]] = []
-
-        while upper_queue:
-            node = upper_queue.pop()
-            if isinstance(node, UpperBranch):
-                nid = id(node)
-                if nid not in visited_upperbranch:
-                    visited_upperbranch.add(nid)
-                    num_upperbranch_nodes += 1
-                    if node.empty is not None:
-                        num_upper_with_empty += 1
-                        unique_accumulators.add(node.empty)
-                        total_accumulator_instances += 1
-                    # edges and values
-                    for v, kids in node.children.items():
-                        distinct_values.add(v)
-                        # multi-depth slot counting for upper layer
-                        if len(kids) > 1:
-                            num_multi_depth_slots_upper += 1
-                            if len(kids) > max_multiplicity_per_value_upper:
-                                max_multiplicity_per_value_upper = len(kids)
-                        for child in kids.values():
-                            upper_edges += 1
-                            bump_incoming(child)
-                            upper_queue.append(child)
-                    # promotable?
-                    if is_promotable(node):
-                        promotable_upper_nodes += 1
-            else:
-                # Interface
-                nid = id(node)
-                if nid not in visited_interface:
-                    visited_interface.add(nid)
-                    num_interface_nodes += 1
-                    unique_accumulators.add(node.acc)
-                    total_accumulator_instances += 1
-                    if node.empty is not None:
-                        num_interfaces_with_empty += 1
-                        unique_accumulators.add(node.empty)
-                        total_accumulator_instances += 1
-                    if not node.children and node.empty is None:
-                        num_interface_implicit_terminals += 1
-                    # edges to lower and values
-                    for v, kids in node.children.items():
-                        distinct_values.add(v)
-                        # multi-depth slot counting for lower layer at interface boundary
-                        if len(kids) > 1:
-                            num_multi_depth_slots_lower += 1
-                            if len(kids) > max_multiplicity_per_value_lower:
-                                max_multiplicity_per_value_lower = len(kids)
-                        for child in kids.values():
-                            interface_to_lower_edges += 1
-                            bump_incoming(child)
-                            lower_queue.append(child)
-
-        while lower_queue:
-            node = lower_queue.pop()
-            nid = id(node)
-            if nid in visited_lower:
-                continue
-            visited_lower.add(nid)
-            num_lower_nodes += 1
-            if node.empty:
-                num_lower_terminal_nodes += 1
-            if node._max_depth > max_lower_depth:
-                max_lower_depth = node._max_depth
-            # edges and values
-            for v, kids in node.children.items():
-                distinct_values.add(v)
-                # multi-depth at lower layer
-                if len(kids) > 1:
-                    num_multi_depth_slots_lower += 1
-                    if len(kids) > max_multiplicity_per_value_lower:
-                        max_multiplicity_per_value_lower = len(kids)
-                for child in kids.values():
-                    lower_edges += 1
-                    bump_incoming(child)
-                    lower_queue.append(child)
-
-        total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes
-        total_edges = upper_edges + interface_to_lower_edges + lower_edges
-        max_upper_depth = self.inner._max_depth
-        distinct_values_count = len(distinct_values)
-        unique_accumulators_count = len(unique_accumulators)
-
-        # Sharing metrics
-        if incoming_edges:
-            max_in_degree = max(incoming_edges.values())
-            # average over nodes that actually have an incoming edge
-            average_in_degree = sum(incoming_edges.values()) / len(incoming_edges)
-        else:
-            max_in_degree = 0
-            average_in_degree = 0.0
-        structural_sharing_factor = total_edges / float(max(1, total_unique_nodes - 1))
-
-        return LeveledGSSStats(
-            top_values=top_values,
-            num_upperbranch_nodes=num_upperbranch_nodes,
-            num_interface_nodes=num_interface_nodes,
-            num_lower_nodes=num_lower_nodes,
-            total_unique_nodes=total_unique_nodes,
-            upper_edges=upper_edges,
-            interface_to_lower_edges=interface_to_lower_edges,
-            lower_edges=lower_edges,
-            total_edges=total_edges,
-            max_upper_depth=max_upper_depth,
-            max_lower_depth=max_lower_depth,
-            distinct_values_count=distinct_values_count,
-            distinct_values=distinct_values,
-            unique_accumulators_count=unique_accumulators_count,
-            unique_accumulators=unique_accumulators,
-            total_accumulator_instances=total_accumulator_instances,
-            num_upper_with_empty=num_upper_with_empty,
-            num_interfaces_with_empty=num_interfaces_with_empty,
-            num_lower_terminal_nodes=num_lower_terminal_nodes,
-            num_interface_implicit_terminals=num_interface_implicit_terminals,
-            num_multi_depth_slots_upper=num_multi_depth_slots_upper,
-            num_multi_depth_slots_lower=num_multi_depth_slots_lower,
-            max_multiplicity_per_value_upper=max_multiplicity_per_value_upper,
-            max_multiplicity_per_value_lower=max_multiplicity_per_value_lower,
-            average_in_degree=average_in_degree,
-            max_in_degree=max_in_degree,
-            structural_sharing_factor=structural_sharing_factor,
-            promotable_upper_nodes=promotable_upper_nodes,
-        )
-
 
 Node = TypeVar("Node")
 AccPromote = TypeVar("AccPromote", bound=Mergeable)
@@ -1412,7 +991,6 @@ class Model(GraphProvider):
         model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
         return model
 
-    @profile
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             disallowed_terminals_map = acc.terminals_union
@@ -1423,7 +1001,6 @@ class Model(GraphProvider):
             return True
         return gss.prune(predicate)
 
-    @profile
     def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
             old_map = acc.terminals_union
@@ -1435,7 +1012,6 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
         return gss.apply(apply_map)
 
-    @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_map = acc.terminals_union.copy()
@@ -1467,9 +1043,7 @@ class Model(GraphProvider):
                             for sid in range(start, end + 1):
                                 yield (int(pop), sid, int(dest_idx))
 
-    @profile
     def commit(self, token_id: int):
-        t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
@@ -1537,10 +1111,6 @@ class Model(GraphProvider):
 
         self.state = merged_states
 
-        t1 = time.perf_counter()
-        print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-    @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
