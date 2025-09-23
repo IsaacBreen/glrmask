@@ -71,4 +71,5 @@ echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
 # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
 echo
 echo "Running benchmarks..."
-bash run_benchmarks.sh "aug25/models/rust_model.py" "aug25/models/precompute3_model_cpp.py"
+cd "$PROJECT_ROOT"
+bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
