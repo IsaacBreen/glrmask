@@ -260,7 +260,7 @@ public:
 
     py::object get_mask() {
         py::dict state_map = state_;
-        py::object final_mask = range_empty_()();
+        py::object final_mask = range_empty_();
 
         // values: node_id -> GSS
         std::unordered_map<int, py::object> values;
@@ -282,7 +282,7 @@ public:
             py::object terminals_union = acc.attr("terminals_union");
 
             // Build disallowed mask as RangeSet
-            py::object disallowed_llm_mask = range_empty_()();
+            py::object disallowed_llm_mask = range_empty_();
 
             for (auto item_handle : terminals_union.attr("items")()) {
                 py::tuple item = py::cast<py::tuple>(item_handle);
@@ -600,7 +600,7 @@ private:
         return py::cpp_function([&, terminals_map](py::handle acc_obj) -> bool {
             py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
             py::object disallowed_map = acc.attr("terminals_union");
-            py::object rs_empty = range_empty_()();
+            py::object rs_empty = range_empty_();
 
             for (auto item_handle : terminals_map.attr("items")()) {
                 py::tuple item = py::cast<py::tuple>(item_handle);
@@ -625,7 +625,7 @@ private:
             py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
             py::object old_map = acc.attr("terminals_union");
             py::dict new_bvs;
-            py::object rs_empty = range_empty_()();
+            py::object rs_empty = range_empty_();
 
             for (auto item_handle : state_map.attr("items")()) {
                 py::tuple item = py::cast<py::tuple>(item_handle);
@@ -653,7 +653,7 @@ private:
         py::function fn = py::cpp_function([&, state_id, terminal_id](py::handle acc_obj) -> py::object {
             py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
             py::dict current_map = py::cast<py::dict>(acc.attr("terminals_union"));
-            py::object rs_empty = range_empty_()();
+            py::object rs_empty = range_empty_();
             py::object curr_bv = current_map.contains(py::int_(state_id)) ? current_map[py::int_(state_id)] : rs_empty;
 
             std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
