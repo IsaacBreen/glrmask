@@ -439,6 +439,10 @@ class Model(GraphProvider):
                     enqueued_nodes.add(n)
                     hp(depth_heap, (-d, n))
 
+            def dequeue() -> Tuple[int, int]:
+                neg_d, n = hpop(depth_heap)
+                return -neg_d, n
+
             # --- Initial GSS Stats ---
             stats.start('get_mask.initial_stats')
             all_initial_accs = set()
@@ -518,8 +522,7 @@ class Model(GraphProvider):
             max_depth_reached = 0
             visited_nodes = set()
             while depth_heap:
-                neg_depth, node = hpop(depth_heap)
-                depth = -neg_depth
+                depth, node = dequeue()
                 max_depth_reached = max(max_depth_reached, depth)
                 stats.inc('get_mask.traversal.depth_heap.pops')
                 stats.inc('get_mask.traversal.nodes_processed')
