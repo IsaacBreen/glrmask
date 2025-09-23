@@ -362,10 +362,10 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
     if (a.get() == b.get()) return a;
 
-    // Prefer cheap pointer checks; defer expensive content equality to last.
+    // Prefer cheap pointer checks only. Avoid deep content equality on accumulators,
+    // which is expensive and leads to poor scaling compared to the Python version.
     if (a->acc.get() == b->acc.get() ||
-        a->_children.get() == b->_children.get() ||
-        (*(a->acc) == *(b->acc))) {
+        a->_children.get() == b->_children.get()) {
         auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
         auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
 
@@ -374,7 +374,6 @@ static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const In
             if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
             return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
         }
-
         auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
             *a->_children, *b->_children,
             [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
@@ -1195,19 +1194,29 @@ public:
         return LeveledGSS(res_inner);
     }
 
-    LeveledGSS merge(const LeveledGSS& other) const {
-        return LeveledGSS(merge_upper<T, Acc>(inner, other.inner));
-    }
-
     static LeveledGSS merge_many(const std::vector<LeveledGSS>& list) {
+        // Balanced pairwise merging to avoid long chains and improve sharing.
         if (list.empty()) {
             return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr)));
         }
-        UpperPtr<T, Acc> cur = list[0].inner;
-        for (size_t i = 1; i < list.size(); ++i) {
-            cur = merge_upper<T, Acc>(cur, list[i].inner);
+        if (list.size() == 1) {
+            return list[0];
         }
-        return LeveledGSS(cur);
+        std::vector<UpperPtr<T, Acc>> layer;
+        layer.reserve(list.size());
+        for (const auto& g : list) {
+            layer.push_back(g.inner);
+        }
+        while (layer.size() > 1) {
+            std::vector<UpperPtr<T, Acc>> next;
+            next.reserve((layer.size() + 1) / 2);
+            for (size_t i = 0; i < layer.size(); i += 2) {
+                if (i + 1 < layer.size()) next.push_back(merge_upper<T, Acc>(layer[i], layer[i + 1]));
+                else next.push_back(layer[i]);
+            }
+            layer.swap(next);
+        }
+        return LeveledGSS(layer[0]);
     }
 
     std::unordered_set<T> peek() const {

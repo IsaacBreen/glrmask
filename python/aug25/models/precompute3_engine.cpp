@@ -394,24 +394,26 @@ public:
                     Leveled popped = gss_node.popn(e.pop);
                     if (popped.is_empty()) continue;
 
-                    // Compute top states once per edge
-                    std::unordered_set<int> top = popped.peek();
+                    // Apply LLM limiter once per edge (not per destination) to avoid repeated
+                    // expensive apply_and_prune work. This mirrors the sharing-friendly structure
+                    // from the Python implementation.
+                    Leveled popped_limited = intersect_llm_mask(popped, e.llm_bv_rangeset);
+                    if (popped_limited.is_empty()) continue;
+
+                    // Compute top states after pruning/limiting.
+                    std::unordered_set<int> top_after = popped_limited.peek();
 
                     for (const DestEdge &de : e.dests) {
                         // Determine which top states to keep for this destination
                         std::unordered_set<int> keep;
-                        for (int top_sid : top) {
+                        for (int top_sid : top_after) {
                             if (contains_in_ranges(de.state_ranges, top_sid)) {
                                 keep.insert(top_sid);
                             }
                         }
                         if (keep.empty()) continue;
 
-                        Leveled child = popped.isolate_many(keep);
-                        if (child.is_empty()) continue;
-
-                        // intersect_and_prune with edge's llm_bv (as RangeSet)
-                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                        Leveled child2 = popped_limited.isolate_many(keep);
                         if (child2.is_empty()) continue;
 
                         int dnode = de.dest_idx;

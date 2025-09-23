@@ -2570,6 +2570,14 @@ local_system:
       static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
           if (a.get() == b.get()) return a;
           auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+          if (a->_children.get() == b->_children.get()) {
+              if (new_empty.get() == a->empty.get()) return a;
+              if (new_empty.get() == b->empty.get()) return b;
+              auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+              return try_promote<T, Acc>(ub);
+          }
+
           auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
               *a->_children, *b->_children,
               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
@@ -2588,12 +2596,19 @@ local_system:
           if (a->acc.get() == b->acc.get() ||
               a->_children.get() == b->_children.get() ||
               (*(a->acc) == *(b->acc))) {
+              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+              if (a->_children.get() == b->_children.get()) {
+                  if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+                  if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+                  return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+              }
+
               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
                   *a->_children, *b->_children,
                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
               );
-              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
               return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
           }
           auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -3875,24 +3890,26 @@ local_system:
                           Leveled popped = gss_node.popn(e.pop);
                           if (popped.is_empty()) continue;
 
-                          // Compute top states once per edge
-                          std::unordered_set<int> top = popped.peek();
+                          // Apply LLM limiter once per edge (not per destination) to avoid repeated
+                          // expensive apply_and_prune work. This mirrors the sharing-friendly structure
+                          // from the Python implementation.
+                          Leveled popped_limited = intersect_llm_mask(popped, e.llm_bv_rangeset);
+                          if (popped_limited.is_empty()) continue;
+
+                          // Compute top states after pruning/limiting.
+                          std::unordered_set<int> top_after = popped_limited.peek();
 
                           for (const DestEdge &de : e.dests) {
                               // Determine which top states to keep for this destination
                               std::unordered_set<int> keep;
-                              for (int top_sid : top) {
+                              for (int top_sid : top_after) {
                                   if (contains_in_ranges(de.state_ranges, top_sid)) {
                                       keep.insert(top_sid);
                                   }
                               }
                               if (keep.empty()) continue;
 
-                              Leveled child = popped.isolate_many(keep);
-                              if (child.is_empty()) continue;
-
-                              // intersect_and_prune with edge's llm_bv (as RangeSet)
-                              Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                              Leveled child2 = popped_limited.isolate_many(keep);
                               if (child2.is_empty()) continue;
 
                               int dnode = de.dest_idx;
@@ -6062,10 +6079,10 @@ local_system:
       static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
           if (a.get() == b.get()) return a;
 
-          // Prefer cheap pointer checks; defer expensive content equality to last.
+          // Prefer cheap pointer checks only. Avoid deep content equality on accumulators,
+          // which is expensive and leads to poor scaling compared to the Python version.
           if (a->acc.get() == b->acc.get() ||
-              a->_children.get() == b->_children.get() ||
-              (*(a->acc) == *(b->acc))) {
+              a->_children.get() == b->_children.get()) {
               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
 
@@ -6074,7 +6091,6 @@ local_system:
                   if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
                   return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
               }
-
               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
                   *a->_children, *b->_children,
                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
@@ -6895,19 +6911,29 @@ local_system:
               return LeveledGSS(res_inner);
           }
 
-          LeveledGSS merge(const LeveledGSS& other) const {
-              return LeveledGSS(merge_upper<T, Acc>(inner, other.inner));
-          }
-
           static LeveledGSS merge_many(const std::vector<LeveledGSS>& list) {
+              // Balanced pairwise merging to avoid long chains and improve sharing.
               if (list.empty()) {
                   return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr)));
               }
-              UpperPtr<T, Acc> cur = list[0].inner;
-              for (size_t i = 1; i < list.size(); ++i) {
-                  cur = merge_upper<T, Acc>(cur, list[i].inner);
+              if (list.size() == 1) {
+                  return list[0];
               }
-              return LeveledGSS(cur);
+              std::vector<UpperPtr<T, Acc>> layer;
+              layer.reserve(list.size());
+              for (const auto& g : list) {
+                  layer.push_back(g.inner);
+              }
+              while (layer.size() > 1) {
+                  std::vector<UpperPtr<T, Acc>> next;
+                  next.reserve((layer.size() + 1) / 2);
+                  for (size_t i = 0; i < layer.size(); i += 2) {
+                      if (i + 1 < layer.size()) next.push_back(merge_upper<T, Acc>(layer[i], layer[i + 1]));
+                      else next.push_back(layer[i]);
+                  }
+                  layer.swap(next);
+              }
+              return LeveledGSS(layer[0]);
           }
 
           std::unordered_set<T> peek() const {
@@ -6972,7 +6998,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -9589,6 +9615,14 @@ messages:
       static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
           if (a.get() == b.get()) return a;
           auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+          if (a->_children.get() == b->_children.get()) {
+              if (new_empty.get() == a->empty.get()) return a;
+              if (new_empty.get() == b->empty.get()) return b;
+              auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+              return try_promote<T, Acc>(ub);
+          }
+
           auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
               *a->_children, *b->_children,
               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
@@ -9607,12 +9641,19 @@ messages:
           if (a->acc.get() == b->acc.get() ||
               a->_children.get() == b->_children.get() ||
               (*(a->acc) == *(b->acc))) {
+              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+              if (a->_children.get() == b->_children.get()) {
+                  if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+                  if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+                  return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+              }
+
               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
                   *a->_children, *b->_children,
                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
               );
-              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
               return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
           }
           auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -10505,24 +10546,7 @@ messages:
       More specifically, the C++ version scales very poorly. The Python version scales well. Careful attention was paid in the Python version to ensure that everything scaled well.
       Fix it.
 
-      For example, the GSS code goes to great lengths to keep shared nodes shared and ensure operations touch as little of the GSS as possible.
 
-      I suspect it might be something to do with unnecessarily creating data leading to point check 'fast paths' not triggering when they should. ie having more copies of an object in memory than we necessarily should.
-      I'm not sure what causes this.
-      But there's a lot of places in the code where we check `is` on nodes, e.g.
-      ```python
-      def _merge_children_by_depth(
-          c1: Dict[T, Dict[int, Node]],
-          c2: Dict[T, Dict[int, Node]],
-          merge_func: Callable[[Node, Node], Node],
-      ) -> Dict[T, Dict[int, Node]]:
-          if c1 is c2:
-              return c1
-      ```
-      This takes advantage of the fact that if the subtree pointers are equal, the merge will be unchanged. And there are other such things.
-      But of course if `c1 is c2` isn't true because, say, we unnecessarily created a new node when we could reuse one, then obviously this wouldn't work.
-
-      But no. It it's not this because I've *done* all this kind of thing already.
       I dunno. It might be something really obvious. Or something subtle. But there IS a difference.
 
       Perhaps it's something to do with 'hidden' implementations. Equality?? Hash?
@@ -10544,150 +10568,192 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance discrepancy between the Python and C++ implementations of `LeveledGSS`, despite their apparent similarity, is a classic symptom of broken structural sharing. Your suspicion is correct: the C++ version was unnecessarily creating copies of data structures, which prevented pointer-equality fast paths from triggering, leading to poor scaling.
+      Below are concrete, surgical changes that address the two main causes of the slowdown:
 
-      The primary issue was in the `merge_upperbranches` and `merge_interfaces` functions. They were not correctly handling the case where two nodes being merged already shared the same children subtree. Instead of reusing the `shared_ptr` to the children map, they would proceed to the expensive `_merge_children_by_depth` function, which would return a new map object by value. This new map would then be used to construct a new node, breaking the chain of shared object identity.
+      1) We remove accidental deep equality checks on accumulator objects during interface merges. This single check caused O(N) work across many merges. The Python version effectively uses identity equality most of the time; we should mirror that in C++.
 
-      Here are the step-by-step instructions to fix the performance issues by restoring proper structural sharing.
+      2) We hoist the llm-mask intersection outside the per-destination loop in get_mask(). The previous implementation recomputed the same expensive apply_and_prune transform once per destination, multiplying costs by the number of dests. We now compute it once per edge, then isolate per destination.
 
-      ### Step-by-Step Instructions
+      3) We also optimize LeveledGSS::merge_many to perform balanced pairwise merging. This reduces degenerately long merge chains and helps maintain structural sharing.
 
-      #### **File: `python/aug25/models/leveled_gss.hpp`**
+      Step-by-step edits to apply
 
-      1.  **Optimize `merge_upperbranches` for Shared Children**
+      1) Edit python/aug25/models/leveled_gss.hpp: avoid deep equality on accumulators in merge_interfaces, and change merge_many to use a balanced merging strategy
+      - Locate the function merge_interfaces in leveled_gss.hpp. Remove the deep content equality check on accumulators (the (*(a->acc) == *(b->acc)) clause). Keep only pointer-identity checks for the fast path, which mirrors Python’s typical behavior and avoids O(n) work in hot loops.
+      - Locate LeveledGSS::merge_many and replace the simple linear reduce with an iterative balanced-pairwise merge. This improves scaling when merging many GSS fragments.
 
-          Locate the `merge_upperbranches` function (around line 400). Replace its implementation with the version below. This adds a crucial fast path: if the two `UpperBranch` nodes already share the same children (`_children` pointers are identical), it avoids the expensive merge operation entirely and reuses the existing `shared_ptr`.
+      2) Edit python/aug25/models/precompute3_engine.cpp: hoist the llm-mask intersection out of the per-destination loop in get_mask()
+      - In Engine::get_mask(), inside the main traversal of the arena, for each edge:
+        - pop the GSS once,
+        - apply intersect_llm_mask once for that edge’s limiter,
+        - compute the tops after pruning,
+        - then isolate per destination. This avoids recomputing the intersection N times for N destinations, eliminating a multiplicative cost.
 
-          ```cpp
-          template <typename T, typename Acc>
-          static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
-              if (a.get() == b.get()) return a;
-              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-          
-              if (a->_children.get() == b->_children.get()) {
-                  if (new_empty.get() == a->empty.get()) return a;
-                  if (new_empty.get() == b->empty.get()) return b;
-                  auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
-                  return try_promote<T, Acc>(ub);
-              }
-          
-              auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
-                  *a->_children, *b->_children,
-                  [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
-              );
-          
-              auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
-              return try_promote<T, Acc>(ub);
-          }
-          ```
-
-      2.  **Optimize `merge_interfaces` for Shared Children**
-
-          Next, locate the `merge_interfaces` function (around line 416). Replace its implementation. The change is similar: within the block that merges two `Interface` nodes, we add a check for shared `_children` pointers. If they are shared, we bypass the call to `_merge_children_by_depth` and construct the new `Interface` node using the existing `shared_ptr` to the children map. This prevents unnecessary map copies and preserves the structural sharing.
-
-          ```cpp
-          template <typename T, typename Acc>
-          static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
-              if (a.get() == b.get()) return a;
-          
-              // Prefer cheap pointer checks; defer expensive content equality to last.
-              if (a->acc.get() == b->acc.get() ||
-                  a->_children.get() == b->_children.get() ||
-                  (*(a->acc) == *(b->acc))) {
-                  auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-                  auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-          
-                  if (a->_children.get() == b->_children.get()) {
-                      if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
-                      if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
-                      return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
-                  }
-          
-                  auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
-                      *a->_children, *b->_children,
-                      [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
-                  );
-                  return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
-              }
-              auto ub1 = interface_to_upperbranch<T, Acc>(a);
-              auto ub2 = interface_to_upperbranch<T, Acc>(b);
-              return merge_upperbranches<T, Acc>(ub1, ub2);
-          }
-          ```
-
-      These changes are targeted at the core of the performance problem and should restore the excellent scaling characteristics of the original Python implementation.
-
-      ### Git Diffs
-
-      Here are the changes in `git diff` format for you to apply directly.
+      Git diffs
 
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 927a3c3..190c74b 100644
+      index 290a210..e00b692 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -397,29 +397,37 @@
-       template <typename T, typename Acc>
-       static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
-           if (a.get() == b.get()) return a;
-           auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-      +
-      +    if (a->_children.get() == b->_children.get()) {
-      +        if (new_empty.get() == a->empty.get()) return a;
-      +        if (new_empty.get() == b->empty.get()) return b;
-      +        auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
-      +        return try_promote<T, Acc>(ub);
-      +    }
-      +
-           auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
-               *a->_children, *b->_children,
-               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
-           );
-       
-           auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
-           return try_promote<T, Acc>(ub);
-       }
-       
-       // Merge interfaces; if same Acc pointer, merge Lower children only; otherwise convert and merge as branches
-       template <typename T, typename Acc>
-       static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
+      @@ -273,16 +273,14 @@ static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const In
            if (a.get() == b.get()) return a;
        
-           // Prefer cheap pointer checks; defer expensive content equality to last.
-           if (a->acc.get() == b->acc.get() ||
-               a->_children.get() == b->_children.get() ||
-               (*(a->acc) == *(b->acc))) {
-      +        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-      +        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-      +
+      -    // Prefer cheap pointer checks; defer expensive content equality to last.
+      -    if (a->acc.get() == b->acc.get() ||
+      -        a->_children.get() == b->_children.get() ||
+      -        (*(a->acc) == *(b->acc))) {
+      +    // Prefer cheap pointer checks only. Avoid deep content equality on accumulators,
+      +    // which is expensive and leads to poor scaling compared to the Python version.
+      +    if (a->acc.get() == b->acc.get() ||
+      +        a->_children.get() == b->_children.get()) {
+               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+       
+      -        if (a->_children.get() == b->_children.get()) {
       +        if (a->_children.get() == b->_children.get()) {
-      +            if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
-      +            if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
-      +            return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
-      +        }
-      +
+                   if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+                   if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+                   return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+               }
+      -
                auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
                    *a->_children, *b->_children,
                    [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
                );
-      -        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-      -        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
                return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
            }
            auto ub1 = interface_to_upperbranch<T, Acc>(a);
-
+           auto ub2 = interface_to_upperbranch<T, Acc>(b);
+           return merge_upperbranches<T, Acc>(ub1, ub2);
+       }
+      @@ -650,14 +648,28 @@ public:
+               return LeveledGSS(res_inner);
+           }
+       
+      -    static LeveledGSS merge_many(const std::vector<LeveledGSS>& list) {
+      -        if (list.empty()) {
+      -            return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr)));
+      -        }
+      -        UpperPtr<T, Acc> cur = list[0].inner;
+      -        for (size_t i = 1; i < list.size(); ++i) {
+      -            cur = merge_upper<T, Acc>(cur, list[i].inner);
+      -        }
+      -        return LeveledGSS(cur);
+      -    }
+      +    static LeveledGSS merge_many(const std::vector<LeveledGSS>& list) {
+      +        // Balanced pairwise merging to avoid long chains and improve sharing.
+      +        if (list.empty()) {
+      +            return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr)));
+      +        }
+      +        if (list.size() == 1) {
+      +            return list[0];
+      +        }
+      +        std::vector<UpperPtr<T, Acc>> layer;
+      +        layer.reserve(list.size());
+      +        for (const auto& g : list) {
+      +            layer.push_back(g.inner);
+      +        }
+      +        while (layer.size() > 1) {
+      +            std::vector<UpperPtr<T, Acc>> next;
+      +            next.reserve((layer.size() + 1) / 2);
+      +            for (size_t i = 0; i < layer.size(); i += 2) {
+      +                if (i + 1 < layer.size()) next.push_back(merge_upper<T, Acc>(layer[i], layer[i + 1]));
+      +                else next.push_back(layer[i]);
+      +            }
+      +            layer.swap(next);
+      +        }
+      +        return LeveledGSS(layer[0]);
+      +    }
+       
+           std::unordered_set<T> peek() const {
+               std::unordered_set<T> s;
       ```
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
+      index d375c92..f39cd72 100644
+      --- a/python/aug25/models/precompute3_engine.cpp
+      +++ b/python/aug25/models/precompute3_engine.cpp
+      @@ -334,33 +334,33 @@ public:
+       
+                       // Traverse edges
+                       for (const Edge &e : info.edges) {
+                           Leveled popped = gss_node.popn(e.pop);
+                           if (popped.is_empty()) continue;
+       
+      -                    // Compute top states once per edge
+      -                    std::unordered_set<int> top = popped.peek();
+      +                    // Apply LLM limiter once per edge (not per destination) to avoid repeated
+      +                    // expensive apply_and_prune work. This mirrors the sharing-friendly structure
+      +                    // from the Python implementation.
+      +                    Leveled popped_limited = intersect_llm_mask(popped, e.llm_bv_rangeset);
+      +                    if (popped_limited.is_empty()) continue;
+      +
+      +                    // Compute top states after pruning/limiting.
+      +                    std::unordered_set<int> top_after = popped_limited.peek();
+       
+                           for (const DestEdge &de : e.dests) {
+                               // Determine which top states to keep for this destination
+                               std::unordered_set<int> keep;
+      -                        for (int top_sid : top) {
+      +                        for (int top_sid : top_after) {
+                                   if (contains_in_ranges(de.state_ranges, top_sid)) {
+                                       keep.insert(top_sid);
+                                   }
+                               }
+                               if (keep.empty()) continue;
+       
+      -                        Leveled child = popped.isolate_many(keep);
+      -                        if (child.is_empty()) continue;
+      -
+      -                        // intersect_and_prune with edge's llm_bv (as RangeSet)
+      -                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+      -                        if (child2.is_empty()) continue;
+      +                        Leveled child2 = popped_limited.isolate_many(keep);
+      +                        if (child2.is_empty()) continue;
+       
+                               int dnode = de.dest_idx;
+                               auto it_child = values.find(dnode);
+                               if (it_child != values.end()) {
+                                   values[dnode] = values[dnode].merge(child2);
+                               } else {
+                                   values[dnode] = std::move(child2);
+                               }
+                               enqueue(arena_.at(dnode).max_depth, dnode);
+                           }
+                       }
+                   }
+                   // Clean up bucket
+                   todo.erase(depth);
+               }
+      ```
+
+      Why this fixes the scaling gap
+
+      - Removing deep accumulator equality from merge_interfaces eliminates a hidden O(n) cost in a very hot path. The Python implementation effectively uses identity checks (default object equality) for Mergeable accs; replicating that behavior in C++ aligns performance characteristics.
+
+      - Hoisting intersect_llm_mask outside the per-destination loop removes repeated apply_and_prune of the same limiter. Previously, each DestEdge repeated the same intersection work. Now we do it once per Edge and reuse the result, matching the sharing strategy of the Python code.
+
+      - Balanced merging in LeveledGSS::merge_many avoids long sequential merge chains, reducing intermediate DAG reconstructions and letting pointer-identity-based sharing work more effectively.
+
+      These changes keep semantics intact, mirror the Python design choices that enable scalability, and substantially reduce redundant work in the C++ hot paths.
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/leveled_gss.hpp
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/precompute3_engine.cpp
+      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "LeveledGSS: Optimize merges by preserving
-      structural sharing"'
+  - user: 'Changes committed with message: "perf: Optimize GSS by removing deep accumulator
+      equality, hoisting LLM mask intersection, and using balanced merge_many"'
     metadata:
 ...
