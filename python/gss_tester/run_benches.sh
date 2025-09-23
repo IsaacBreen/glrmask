@@ -211,9 +211,15 @@ else
     echo "${cmd[*]}"
     "${cmd[@]}"
 
+    if command -v realpath &> /dev/null; then
+        RELATIVE_RESULTS_DIR=$(realpath --relative-to=. "$RESULTS_DIR")
+    else
+        RELATIVE_RESULTS_DIR="$RESULTS_DIR"
+    fi
+
     echo
     echo "---"
     echo "Benchmark analysis complete."
-    echo "Summary printed above. Plots saved to: ${RESULTS_DIR}/analysis/plots"
-    echo "Full JSON results are in: $RESULTS_DIR"
+    echo "Summary printed above. Plots and analysis are in: ${RELATIVE_RESULTS_DIR}/analysis"
+    echo "Full JSON results are in: $RELATIVE_RESULTS_DIR"
 fi
