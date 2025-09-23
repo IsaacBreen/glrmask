@@ -230,9 +230,8 @@ class LeveledGSS(Generic[T, Acc]):
 
                 if not u.children:
                     # If there are no lower children, this interface represents the end of a stack
-                    # with accumulator u.acc, but only if a stack for `pref` wasn't already added via `u.empty`.
-                    if u.empty is None:
-                        res.append((list(reversed(pref)), u.acc))
+                    # with accumulator u.acc.
+                    res.append((list(reversed(pref)), u.acc))
                 else:
                     # The interface's `children` are for stacks extending `pref`.
                     # All these stacks share accumulator `u.acc`.
@@ -736,8 +735,10 @@ def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
         if v_map:
             children[v] = v_map
     new_empty = it.empty
-    if not it.children and new_empty is None:
-        new_empty = it.acc
+    if not it.children:
+        # An interface with no children represents a stack ending here with its own accumulator.
+        # This must be merged with any existing `empty` accumulator from a prefix stack.
+        new_empty = _merge_optional_acc(it.empty, it.acc)
     return UpperBranch(children=children, empty=new_empty)
 
 

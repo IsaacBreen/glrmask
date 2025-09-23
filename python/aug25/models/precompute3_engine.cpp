@@ -28,7 +28,7 @@ template <typename T, typename Acc>
 struct UpperBranch;
 
 template <typename T, typename Acc>
-std::shared_ptr<Acc> _merge_optional_acc(const std::shared_ptr<Acc>& a, const std::shared_ptr<Acc>& b) {
+std::shared_ptr<Acc> _merge_optional_acc_impl(const std::shared_ptr<Acc>& a, const std::shared_ptr<Acc>& b) {
     if (!a) return b;
     if (!b) return a;
     if (a == b) return a;
@@ -156,7 +156,7 @@ std::shared_ptr<UpperBranch<T, Acc>> interface_to_upperbranch(std::shared_ptr<In
     
     auto new_empty = it->empty;
     if (it->children.empty()) {
-        new_empty = _merge_optional_acc(it->empty, it->acc);
+        new_empty = _merge_optional_acc_impl<T, Acc>(it->empty, it->acc);
     }
 
     return std::make_shared<UpperBranch<T, Acc>>(children, new_empty);
@@ -209,7 +209,7 @@ std::unordered_map<K, std::unordered_map<int, V>> _merge_children_by_depth(
 template <typename T, typename Acc>
 std::shared_ptr<Upper<T, Acc>> merge_upperbranches(std::shared_ptr<UpperBranch<T, Acc>> a, std::shared_ptr<UpperBranch<T, Acc>> b) {
     if (a == b) return a;
-    auto new_empty = _merge_optional_acc(a->empty, b->empty);
+    auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
     auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_upper<T, Acc>);
     return try_promote(std::make_shared<UpperBranch<T, Acc>>(merged_children, new_empty));
 }
@@ -227,8 +227,8 @@ std::shared_ptr<Upper<T, Acc>> merge_interfaces(std::shared_ptr<Interface<T, Acc
     bool acc_equal = (a->acc == b->acc) || (a->acc && b->acc && *a->acc == *b->acc);
     if (acc_equal || a->children == b->children) {
         auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_lower<T, Acc>);
-        auto new_acc = _merge_optional_acc(a->acc, b->acc);
-        auto new_empty = _merge_optional_acc(a->empty, b->empty);
+        auto new_acc = _merge_optional_acc_impl<T, Acc>(a->acc, b->acc);
+        auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
         return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
     }
     return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b));
@@ -319,6 +319,8 @@ template <typename T, typename Acc>
 class LeveledGSS {
 public:
     std::shared_ptr<Upper<T, Acc>> inner;
+
+    LeveledGSS() : inner(create_empty().inner) {}
 
     LeveledGSS(std::shared_ptr<Upper<T, Acc>> in) : inner(std::move(in)) {}
 
