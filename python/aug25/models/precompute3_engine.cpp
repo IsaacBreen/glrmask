@@ -79,7 +79,19 @@ struct Acc : public std::enable_shared_from_this<Acc> {
     }
 };
 
+
 using leveled_gss::LeveledGSS;
+
+// Custom hash for std::pair<int, int> for use in unordered_map.
+struct pair_hash {
+    std::size_t operator () (const std::pair<int, int> &p) const {
+        auto h1 = std::hash<int>{}(p.first);
+        auto h2 = std::hash<int>{}(p.second);
+        // A common way to combine hashes, inspired by Boost's hash_combine.
+        return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+};
+
 
 class Engine {
 public:
@@ -186,17 +198,8 @@ public:
 
     void commit(py::bytes token_bytes) {
         // Caches for this commit() call.
-        // Key: (offset, tokenizer_sid)
-        struct pair_hash {
-            template <class T1, class T2>
-            std::size_t operator () (const std::pair<T1,T2> &p) const {
-                auto h1 = std::hash<T1>{}(p.first);
-                auto h2 = std::hash<T2>{}(p.second);
-                // A common way to combine hashes.
-                return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
-            }
-        };
         using ExecResult = py::tuple;
+        // Key: (offset, tokenizer_sid)
         std::unordered_map<std::pair<int, int>, ExecResult, pair_hash> exec_cache;
         accessible_cache_.clear();
 
