@@ -517,7 +517,6 @@ class Model(GraphProvider):
 
                 d: int = max_depth[r]
                 enqueue(d, r)
-            stats.inc('get_mask.seeding.apply_memo.size', len(apply_memo))
             stats.stop('get_mask.seeding')
 
             # Main loop
