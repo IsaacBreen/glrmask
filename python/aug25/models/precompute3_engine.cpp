@@ -204,14 +204,15 @@ public:
         accessible_cache_.clear();
 
         // Build terminals_map and state_map
-        std::string token = token_bytes; // implicit cast via pybind11
+        py::buffer_info token_buf = py::buffer(token_bytes).request();
+        const char* token_data = static_cast<const char*>(token_buf.ptr);
+        ssize_t token_len = token_buf.size;
         std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
         std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
-        // 1) Probe tokenizer from each active state
         for (const auto &kv : state_) {
             int tokenizer_sid = kv.first;
-            py::tuple result = tokenizer_execute_from_state_(py::bytes(token), tokenizer_sid);
+            py::tuple result = tokenizer_execute_from_state_(token_bytes, tokenizer_sid);
             py::object end_state_obj = result[0];
             py::object matches_obj = result[1];
 
@@ -294,14 +295,15 @@ public:
             if (visited_q_items.count(key)) continue;
             visited_q_items.insert(key);
 
-            std::string suffix = token.substr(static_cast<size_t>(cur.offset));
+            ssize_t suffix_len = token_len - cur.offset;
+            py::memoryview suffix_view = py::memoryview::from_memory(token_data + cur.offset, suffix_len, true /* readonly */);
             ExecResult cached_res;
             auto cache_key = std::make_pair(cur.offset, cur.tokenizer_sid);
             auto it = exec_cache.find(cache_key);
             if (it != exec_cache.end()) {
                 cached_res = it->second;
             } else {
-                cached_res = tokenizer_execute_from_state_(py::bytes(suffix), cur.tokenizer_sid);
+                cached_res = tokenizer_execute_from_state_(suffix_view, cur.tokenizer_sid);
                 exec_cache[cache_key] = cached_res;
             }
             py::tuple result = cached_res;
@@ -341,7 +343,7 @@ public:
                 if (!processed.is_empty()) {
                     int new_offset = cur.offset + width;
                     int next_tokenizer_sid = tokenizer_initial_state_;
-                    if (static_cast<size_t>(new_offset) == token.size()) {
+                    if (new_offset == token_len) {
                         new_states_vec[next_tokenizer_sid].push_back(std::move(processed));
                     } else {
                         q.push_back(Item{new_offset, next_tokenizer_sid, std::move(processed)});
@@ -494,12 +496,13 @@ public:
 
         // Convert internal mask indices to original
         std::vector<unsigned long long> original_indices;
-        // Optimization: iterate over the map instead of expanding the rangeset,
-        // as the map size is bounded by vocab size.
-        original_indices.reserve(internal_to_original_map_cpp_.size());
-        for (const auto& [internal_id, original_id] : internal_to_original_map_cpp_) {
-            if (final_mask.contains(internal_id)) {
-                original_indices.push_back(original_id);
+        // Iterate over the final mask (much smaller than vocab) and look up original IDs.
+        std::vector<unsigned long long> final_indices = final_mask.to_indices();
+        original_indices.reserve(final_indices.size());
+        for (unsigned long long internal_id : final_indices) {
+            auto it = internal_to_original_map_cpp_.find(internal_id);
+            if (it != internal_to_original_map_cpp_.end()) {
+                original_indices.push_back(it->second);
             }
         }
 
@@ -932,12 +935,14 @@ private:
                 if (it_ts == pmc_cpp_.end()) continue;
 
                 const auto &term_to_llm = it_ts->second;
-                // Optimization: iterate over the smaller set (terminals for this tokenizer state)
-                // and do fast lookups into the RangeSet of disallowed terminals, instead of
-                // expanding the RangeSet to a list of indices.
-                for (const auto& [term_id, llm_rangeset] : term_to_llm) {
-                    if (kv.second.contains(term_id)) {
-                        disallowed_llm_mask = disallowed_llm_mask.union_with(llm_rangeset);
+                // Correctly iterate over the (small) set of disallowed terminals and look up
+                // the corresponding LLM tokens, matching the Python implementation's logic.
+                std::vector<unsigned long long> disallowed_indices = kv.second.to_indices();
+                for (unsigned long long term_id_ull : disallowed_indices) {
+                    int term_id = static_cast<int>(term_id_ull);
+                    auto it_term = term_to_llm.find(term_id);
+                    if (it_term != term_to_llm.end()) {
+                        disallowed_llm_mask = disallowed_llm_mask.union_with(it_term->second);
                     }
                 }
             }
