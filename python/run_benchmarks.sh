@@ -104,6 +104,13 @@ if [ ! -d "$BOOST_DIR" ]; then
   tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
 fi
 
+JSON_HPP_URL="https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
+JSON_HPP_PATH="${PROJECT_ROOT}/.build/json.hpp"
+if [ ! -f "$JSON_HPP_PATH" ]; then
+  echo "Downloading nlohmann/json.hpp..."
+  curl -L -o "$JSON_HPP_PATH" "$JSON_HPP_URL"
+fi
+
 echo "Installing pybind11..."
 python3 -m pip install --quiet pybind11
 
@@ -139,7 +146,7 @@ ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
   "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
 
 ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-  "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+  -I"${PROJECT_ROOT}/.build" "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
 
 # Change back to original directory
 cd "$ORIGINAL_CWD"
